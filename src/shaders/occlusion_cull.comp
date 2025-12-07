@@ -1,0 +1,233 @@
+#version 450
+
+//! GPU Occlusion Culling Shader
+//!
+//! Tests object bounding boxes against the Hi-Z pyramid and frustum planes.
+//! Outputs visibility flags and indirect draw commands.
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+// ============================================================================
+// STRUCTURES
+// ============================================================================
+
+struct BoundingBox {
+    vec4 center;   // xyz = center, w = padding
+    vec4 extents;  // xyz = half-sizes, w = padding
+};
+
+struct ObjectData {
+    BoundingBox bounds;
+    mat4 model;
+    uint drawIndex;
+    float lodBias;
+    uint flags;
+    uint _padding;
+};
+
+struct DrawCommand {
+    uint indexCount;
+    uint instanceCount;
+    uint firstIndex;
+    int vertexOffset;
+    uint firstInstance;
+};
+
+// ============================================================================
+// BUFFERS
+// ============================================================================
+
+// Input: Object data
+layout(std430, set = 0, binding = 0) readonly buffer ObjectBuffer {
+    ObjectData objects[];
+};
+
+// Input: Hi-Z pyramid
+layout(set = 0, binding = 1) uniform sampler2D hizPyramid;
+
+// Input: Draw commands template
+layout(std430, set = 0, binding = 2) readonly buffer DrawCommandsIn {
+    DrawCommand drawCommandsIn[];
+};
+
+// Output: Visibility flags (1 = visible)
+layout(std430, set = 0, binding = 3) buffer VisibilityBuffer {
+    uint visibility[];
+};
+
+// Output: Draw commands (indirect)
+layout(std430, set = 0, binding = 4) buffer DrawCommandsOut {
+    DrawCommand drawCommandsOut[];
+};
+
+// Output: Visible count (atomic)
+layout(std430, set = 0, binding = 5) buffer VisibleCount {
+    uint visibleCount;
+};
+
+// Push constants
+layout(push_constant) uniform PushConstants {
+    mat4 viewProj;
+    vec4 screenParams;  // width, height, 1/width, 1/height
+    uint objectCount;
+    uint hizLevels;
+    uint _padding[2];
+} pc;
+
+// ============================================================================
+// FRUSTUM CULLING
+// ============================================================================
+
+// Extract frustum planes from view-projection matrix
+void extractFrustumPlanes(mat4 vp, out vec4 planes[6]) {
+    // Left
+    planes[0] = vp[3] + vp[0];
+    // Right
+    planes[1] = vp[3] - vp[0];
+    // Bottom
+    planes[2] = vp[3] + vp[1];
+    // Top
+    planes[3] = vp[3] - vp[1];
+    // Near
+    planes[4] = vp[3] + vp[2];
+    // Far
+    planes[5] = vp[3] - vp[2];
+    
+    // Normalize planes
+    for (int i = 0; i < 6; i++) {
+        planes[i] /= length(planes[i].xyz);
+    }
+}
+
+// Test AABB against frustum
+bool frustumCull(vec3 center, vec3 extents, vec4 planes[6]) {
+    for (int i = 0; i < 6; i++) {
+        vec3 normal = planes[i].xyz;
+        float dist = planes[i].w;
+        
+        // Find the point most in the direction of the plane normal
+        vec3 positiveVertex = center + extents * sign(normal);
+        
+        if (dot(normal, positiveVertex) + dist < 0.0) {
+            return true; // Outside this plane
+        }
+    }
+    return false;
+}
+
+// ============================================================================
+// OCCLUSION CULLING
+// ============================================================================
+
+// Project AABB to screen-space and test against Hi-Z
+bool occlusionCull(vec3 center, vec3 extents, mat4 vp) {
+    // Transform 8 corners to clip space
+    vec3 corners[8] = vec3[8](
+        center + vec3(-extents.x, -extents.y, -extents.z),
+        center + vec3( extents.x, -extents.y, -extents.z),
+        center + vec3( extents.x,  extents.y, -extents.z),
+        center + vec3(-extents.x,  extents.y, -extents.z),
+        center + vec3(-extents.x, -extents.y,  extents.z),
+        center + vec3( extents.x, -extents.y,  extents.z),
+        center + vec3( extents.x,  extents.y,  extents.z),
+        center + vec3(-extents.x,  extents.y,  extents.z)
+    );
+    
+    // Find screen-space bounds
+    vec2 minScreen = vec2(1.0);
+    vec2 maxScreen = vec2(0.0);
+    float minZ = 1.0;
+    
+    for (int i = 0; i < 8; i++) {
+        vec4 clip = vp * vec4(corners[i], 1.0);
+        
+        // Skip if behind camera
+        if (clip.w <= 0.0) {
+            return false; // Visible (conservative)
+        }
+        
+        vec3 ndc = clip.xyz / clip.w;
+        vec2 screen = ndc.xy * 0.5 + 0.5;
+        
+        minScreen = min(minScreen, screen);
+        maxScreen = max(maxScreen, screen);
+        minZ = min(minZ, ndc.z);
+    }
+    
+    // Clamp to screen
+    minScreen = clamp(minScreen, vec2(0.0), vec2(1.0));
+    maxScreen = clamp(maxScreen, vec2(0.0), vec2(1.0));
+    
+    // Calculate appropriate Hi-Z mip level based on projected size
+    vec2 screenSize = (maxScreen - minScreen) * pc.screenParams.xy;
+    float mipLevel = ceil(log2(max(screenSize.x, screenSize.y)));
+    mipLevel = clamp(mipLevel, 0.0, float(pc.hizLevels - 1));
+    
+    // Sample Hi-Z at corners of projected bounds
+    vec2 uvMin = minScreen;
+    vec2 uvMax = maxScreen;
+    
+    float hizDepth = textureLod(hizPyramid, (uvMin + uvMax) * 0.5, mipLevel).r;
+    
+    // Object is occluded if its closest point is behind the Hi-Z depth
+    if (minZ > hizDepth) {
+        return true; // Occluded
+    }
+    
+    return false;
+}
+
+// ============================================================================
+// MAIN
+// ============================================================================
+
+void main() {
+    uint objectIdx = gl_GlobalInvocationID.x;
+    
+    if (objectIdx >= pc.objectCount) {
+        return;
+    }
+    
+    ObjectData obj = objects[objectIdx];
+    
+    // Check if object is enabled
+    if ((obj.flags & 1u) == 0u) {
+        visibility[objectIdx] = 0u;
+        return;
+    }
+    
+    // Transform bounds to world space
+    vec3 worldCenter = (obj.model * vec4(obj.bounds.center.xyz, 1.0)).xyz;
+    // Approximate world-space extents (ignoring rotation for speed)
+    vec3 worldExtents = obj.bounds.extents.xyz * vec3(
+        length(obj.model[0].xyz),
+        length(obj.model[1].xyz),
+        length(obj.model[2].xyz)
+    );
+    
+    // Extract frustum planes
+    vec4 frustumPlanes[6];
+    extractFrustumPlanes(pc.viewProj, frustumPlanes);
+    
+    // Frustum culling
+    if (frustumCull(worldCenter, worldExtents, frustumPlanes)) {
+        visibility[objectIdx] = 0u;
+        return;
+    }
+    
+    // Occlusion culling (Hi-Z test)
+    if (occlusionCull(worldCenter, worldExtents, pc.viewProj)) {
+        visibility[objectIdx] = 0u;
+        return;
+    }
+    
+    // Object is visible!
+    visibility[objectIdx] = 1u;
+    
+    // Atomically add to visible count and get slot
+    uint slot = atomicAdd(visibleCount, 1u);
+    
+    // Copy draw command
+    DrawCommand cmd = drawCommandsIn[obj.drawIndex];
+    drawCommandsOut[slot] = cmd;
+}

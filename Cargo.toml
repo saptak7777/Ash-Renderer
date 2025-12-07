@@ -1,0 +1,95 @@
+[package]
+name = "ash_renderer"
+version = "0.1.0"
+edition = "2021"
+authors = ["Saptak Santra"]
+license = "Apache-2.0"
+description = "Production-quality Vulkan renderer in Rust using ASH - ECS-free, pure rendering engine"
+repository = "https://github.com/saptaksentra/ash_renderer"
+documentation = "https://docs.rs/ash_renderer"
+keywords = ["vulkan", "graphics", "rendering", "gpu", "ash"]
+categories = ["graphics", "rendering", "game-development"]
+readme = "README.md"
+
+[dependencies]
+# Vulkan
+ash = "0.37"
+vk-mem = "0.3"
+
+# Shader compilation
+shaderc = { version = "0.8", optional = true }
+spirv-reflect = { version = "0.2", optional = true }
+
+# Math
+glam = { version = "0.29", features = ["bytemuck"] }
+
+# Memory
+bytemuck = { version = "1.14", features = ["derive"] }
+
+# Concurrency
+parking_lot = "0.12"
+rayon = "1.10"
+crossbeam-channel = "0.5"
+
+# Window
+winit = "0.30"
+raw-window-handle = "0.6"
+
+# Asset loading
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+gltf = { version = "1.4", optional = true }
+archetype_asset = { version = "0.1", optional = true }
+
+# Logging
+log = "0.4"
+
+# Utils
+thiserror = "2.0"
+uuid = { version = "1.11", features = ["v4"] }
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+env_logger = "0.11"
+tempfile = "3.14"
+
+[features]
+default = ["validation", "gltf_loading"]
+validation = []                            # Enable Vulkan validation layers
+gltf_loading = ["gltf", "archetype_asset"] # GLTF model loading support
+shader_compilation = ["shaderc"]           # Runtime shader compilation
+shader_reflection = ["spirv-reflect"]      # SPIRV reflection support
+profiling = []                             # Enable GPU profiling
+parallel = []                              # Enable parallel command buffer recording
+full = ["validation", "gltf_loading", "shader_compilation", "shader_reflection", "profiling", "parallel"]
+
+[[example]]
+name = "01_triangle"
+path = "examples/01_triangle.rs"
+
+[[example]]
+name = "02_cube"
+path = "examples/02_cube.rs"
+
+[[example]]
+name = "03_model_loading"
+path = "examples/03_model_loading.rs"
+required-features = ["gltf_loading"]
+
+[[bench]]
+name = "frame_time"
+harness = false
+
+[profile.dev]
+opt-level = 0
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+
+[profile.bench]
+inherits = "release"
+
+[lib]
+name = "ash_renderer"
+path = "src/lib.rs"

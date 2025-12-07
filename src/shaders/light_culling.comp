@@ -1,0 +1,171 @@
+#version 450
+
+// GPU Light Culling Compute Shader
+// Implements tile-based deferred lighting (Forward+)
+// Each 16x16 pixel tile gets a list of affecting lights
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+// Maximum lights per tile
+#define MAX_LIGHTS_PER_TILE 256
+#define TILE_SIZE 16
+
+// Light structure
+struct Light {
+    vec4 position;   // xyz = position, w = radius
+    vec4 color;      // rgb = color, a = intensity
+    vec4 direction;  // xyz = direction (for spot), w = type (0=point, 1=spot, 2=directional)
+    vec4 params;     // x = innerConeAngle, y = outerConeAngle, z = falloff, w = enabled
+};
+
+// Push constants for screen info
+layout(push_constant) uniform PushConstants {
+    uvec2 screenSize;
+    uint lightCount;
+    uint _padding;
+} pc;
+
+// Input: All scene lights
+layout(set = 0, binding = 0, std430) readonly buffer LightBuffer {
+    Light lights[];
+};
+
+// Input: Depth buffer for frustum culling
+layout(set = 0, binding = 1) uniform sampler2D depthBuffer;
+
+// Output: Light indices per tile
+// Format: [tileCount][MAX_LIGHTS_PER_TILE + 1]
+// First element of each tile = light count for that tile
+layout(set = 0, binding = 2, std430) writeonly buffer TileLightIndices {
+    uint tileData[];
+};
+
+// View-projection matrix for frustum construction
+layout(set = 0, binding = 3) uniform CameraData {
+    mat4 view;
+    mat4 projection;
+    mat4 invProjection;
+    vec4 cameraPos;
+} camera;
+
+// Shared memory for light indices within workgroup
+shared uint sharedLightCount;
+shared uint sharedLightIndices[MAX_LIGHTS_PER_TILE];
+shared uint sharedMinDepthInt;
+shared uint sharedMaxDepthInt;
+
+// Convert screen UV to view-space position at given depth
+vec3 screenToView(vec2 uv, float depth) {
+    vec4 clip = vec4(uv * 2.0 - 1.0, depth, 1.0);
+    vec4 view = camera.invProjection * clip;
+    return view.xyz / view.w;
+}
+
+// Construct frustum planes for a tile
+void getTileFrustum(uvec2 tileId, float minDepth, float maxDepth, out vec4 planes[6]) {
+    // Tile corners in NDC
+    vec2 minNdc = (vec2(tileId) * TILE_SIZE) / vec2(pc.screenSize) * 2.0 - 1.0;
+    vec2 maxNdc = (vec2(tileId + 1) * TILE_SIZE) / vec2(pc.screenSize) * 2.0 - 1.0;
+
+    // View-space corners at near plane
+    vec3 corners[4];
+    corners[0] = screenToView(vec2(minNdc.x, minNdc.y) * 0.5 + 0.5, 0.0);
+    corners[1] = screenToView(vec2(maxNdc.x, minNdc.y) * 0.5 + 0.5, 0.0);
+    corners[2] = screenToView(vec2(maxNdc.x, maxNdc.y) * 0.5 + 0.5, 0.0);
+    corners[3] = screenToView(vec2(minNdc.x, maxNdc.y) * 0.5 + 0.5, 0.0);
+
+    // Frustum planes (in view space)
+    // Left, Right, Bottom, Top, Near, Far
+    planes[0] = vec4(normalize(cross(corners[3], corners[0])), 0.0); // Left
+    planes[1] = vec4(normalize(cross(corners[1], corners[2])), 0.0); // Right
+    planes[2] = vec4(normalize(cross(corners[0], corners[1])), 0.0); // Bottom
+    planes[3] = vec4(normalize(cross(corners[2], corners[3])), 0.0); // Top
+    planes[4] = vec4(0.0, 0.0, -1.0, -minDepth); // Near
+    planes[5] = vec4(0.0, 0.0, 1.0, maxDepth);   // Far
+}
+
+// Test if a sphere (light) intersects the frustum
+bool sphereInFrustum(vec3 center, float radius, vec4 planes[6]) {
+    for (int i = 0; i < 6; i++) {
+        float dist = dot(planes[i].xyz, center) + planes[i].w;
+        if (dist < -radius) {
+            return false;
+        }
+    }
+    return true;
+}
+
+void main() {
+    uvec2 tileId = gl_WorkGroupID.xy;
+    uvec2 localId = gl_LocalInvocationID.xy;
+    uint localIndex = localId.y * TILE_SIZE + localId.x;
+    
+    // Calculate tile index for output buffer
+    uvec2 numTiles = (pc.screenSize + TILE_SIZE - 1) / TILE_SIZE;
+    uint tileIndex = tileId.y * numTiles.x + tileId.x;
+    uint tileOffset = tileIndex * (MAX_LIGHTS_PER_TILE + 1);
+    
+    // Initialize shared memory
+    if (localIndex == 0) {
+        sharedLightCount = 0;
+        sharedMinDepthInt = 0xFFFFFFFFu; // Max uint for min comparison
+        sharedMaxDepthInt = 0u;           // 0 for max comparison
+    }
+    barrier();
+    
+    // Sample depth buffer to find min/max depth for this tile
+    uvec2 pixelCoord = tileId * TILE_SIZE + localId;
+    if (pixelCoord.x < pc.screenSize.x && pixelCoord.y < pc.screenSize.y) {
+        vec2 uv = (vec2(pixelCoord) + 0.5) / vec2(pc.screenSize);
+        float depth = texture(depthBuffer, uv).r;
+        uint depthInt = floatBitsToUint(depth);
+        
+        atomicMin(sharedMinDepthInt, depthInt);
+        atomicMax(sharedMaxDepthInt, depthInt);
+    }
+    barrier();
+    
+    // Convert back to float
+    float minDepth = uintBitsToFloat(sharedMinDepthInt);
+    float maxDepth = uintBitsToFloat(sharedMaxDepthInt);
+    
+    // Construct view-space frustum for this tile
+    vec4 frustumPlanes[6];
+    getTileFrustum(tileId, minDepth, maxDepth, frustumPlanes);
+    barrier();
+    
+    // Each thread tests some lights
+    uint lightsPerThread = (pc.lightCount + 255) / 256;
+    uint lightStart = localIndex * lightsPerThread;
+    uint lightEnd = min(lightStart + lightsPerThread, pc.lightCount);
+    
+    for (uint i = lightStart; i < lightEnd; i++) {
+        Light light = lights[i];
+        
+        // Skip disabled lights
+        if (light.params.w < 0.5) continue;
+        
+        // Transform light to view space
+        vec3 lightPosView = (camera.view * vec4(light.position.xyz, 1.0)).xyz;
+        float lightRadius = light.position.w;
+        
+        // Test against frustum
+        if (sphereInFrustum(lightPosView, lightRadius, frustumPlanes)) {
+            uint slot = atomicAdd(sharedLightCount, 1);
+            if (slot < MAX_LIGHTS_PER_TILE) {
+                sharedLightIndices[slot] = i;
+            }
+        }
+    }
+    barrier();
+    
+    // Write results to global buffer (only thread 0)
+    if (localIndex == 0) {
+        uint count = min(sharedLightCount, MAX_LIGHTS_PER_TILE);
+        tileData[tileOffset] = count;
+        
+        for (uint i = 0; i < count; i++) {
+            tileData[tileOffset + 1 + i] = sharedLightIndices[i];
+        }
+    }
+}

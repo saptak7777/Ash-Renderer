@@ -1,0 +1,53 @@
+# Rust
+/target/
+**/*.rs.bk
+*.pdb
+Cargo.lock
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Build artifacts
+*.o
+*.so
+*.dylib
+*.dll
+*.exe
+
+# Shader compilation artifacts
+*.spv.txt
+*.spv.d
+
+# Vulkan
+vk_layer_settings.txt
+VkLayer_screenshot/
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Temporary files
+*.tmp
+*.temp
+*.log
+
+# Test outputs
+*.profraw
+*.profdata
+
+# Documentation build
+/target/doc/
+
+# Benchmark results
+/target/criterion/
+
+# Reference directory (not part of the published crate)
+/rede reference/
+
+# Brain/artifacts directory
+/.gemini/

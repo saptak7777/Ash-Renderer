@@ -1,0 +1,41 @@
+#version 450
+
+//! Hi-Z Pyramid Generation Shader
+//!
+//! Generates a hierarchical depth buffer (Hi-Z pyramid) for occlusion culling.
+//! Each mip level contains the maximum depth of 2x2 texels from the previous level.
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+// Input: Previous mip level (or depth buffer for level 0)
+layout(set = 0, binding = 0) uniform sampler2D inputDepth;
+
+// Output: Current mip level
+layout(set = 0, binding = 1, r32f) uniform writeonly image2D outputMip;
+
+// Push constants
+layout(push_constant) uniform PushConstants {
+    uvec2 outputSize;  // Size of output mip level
+    uint mipLevel;     // Current mip level being generated
+    uint _padding;
+} pc;
+
+void main() {
+    uvec2 pos = gl_GlobalInvocationID.xy;
+    
+    if (pos.x >= pc.outputSize.x || pos.y >= pc.outputSize.y) {
+        return;
+    }
+    
+    // Calculate UV for sampling (center of 2x2 block in source)
+    vec2 uv = (vec2(pos) * 2.0 + 1.0) / vec2(textureSize(inputDepth, 0));
+    
+    // Sample 4 texels using gather (much faster than 4 texture calls)
+    // textureGather returns values in counter-clockwise order starting from bottom-left
+    vec4 depths = textureGather(inputDepth, uv, 0);
+    
+    // Take maximum depth (furthest from camera = most conservative)
+    float maxDepth = max(max(depths.x, depths.y), max(depths.z, depths.w));
+    
+    imageStore(outputMip, ivec2(pos), vec4(maxDepth, 0.0, 0.0, 0.0));
+}
