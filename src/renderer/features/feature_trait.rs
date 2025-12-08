@@ -4,14 +4,13 @@ use std::any::{Any, TypeId};
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use crate::renderer::Transform;
 use crate::vulkan::DescriptorManager;
-use crate::renderer::{Camera, Transform};
 
 pub struct FeatureFrameContext<'a> {
     pub device: &'a Device,
     pub descriptor_manager: Option<&'a DescriptorManager>,
     pub transform: &'a mut Transform,
-    pub camera: &'a mut Camera,
     pub auto_rotate: bool,
     pub elapsed_seconds: f32,
 }
@@ -21,7 +20,6 @@ pub struct FeatureRenderContext<'a> {
     pub descriptor_manager: Option<&'a DescriptorManager>,
     pub command_buffer: vk::CommandBuffer,
     pub transform: &'a Transform,
-    pub camera: &'a Camera,
 }
 
 pub trait RenderFeature: Send + Any {

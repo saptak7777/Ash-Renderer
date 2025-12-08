@@ -6,7 +6,7 @@
 
 A **production-quality Vulkan renderer** built with [ASH](https://github.com/ash-rs/ash) (Vulkan bindings) and [VMA](https://github.com/gwihlern-gp/vk-mem-rs) (GPU memory allocator).
 
-**ECS-free, pure rendering engine** - integrate with any game engine or ECS framework.
+**ECS-free, pure rendering engine** - decoupled camera and input handling, ready for any game engine.
 
 ## Features
 
@@ -28,67 +28,11 @@ Add to your `Cargo.toml`:
 ```toml
 [dependencies]
 ash_renderer = "0.1"
+glam = "0.24" # Required for math types
 ```
 
 ### Basic Usage
 
-```rust
-use ash_renderer::prelude::*;
-use winit::{
-    application::ApplicationHandler,
-    event::WindowEvent,
-    event_loop::{ActiveEventLoop, ControlFlow, EventLoop},
-    window::Window,
-};
-
-struct App {
-    window: Option<Window>,
-    renderer: Option<Renderer>,
-}
-
-impl ApplicationHandler for App {
-    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        let window = event_loop
-            .create_window(Window::default_attributes().with_title("My App"))
-            .unwrap();
-        
-        let renderer = Renderer::new(&window).expect("Failed to create renderer");
-        
-        self.renderer = Some(renderer);
-        self.window = Some(window);
-    }
-
-    fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
-        match event {
-            WindowEvent::CloseRequested => event_loop.exit(),
-            WindowEvent::RedrawRequested => {
-                if let Some(renderer) = &mut self.renderer {
-                    renderer.render_frame().expect("Render failed");
-                }
-                if let Some(window) = &self.window {
-                    window.request_redraw();
-                }
-            }
-            WindowEvent::Resized(size) => {
-                if let Some(renderer) = &mut self.renderer {
-                    renderer.request_swapchain_resize(ash::vk::Extent2D {
-                        width: size.width,
-                        height: size.height,
-                    });
-                }
-            }
-            _ => {}
-        }
-    }
-}
-
-fn main() -> Result<()> {
-    let event_loop = EventLoop::new().expect("Failed to create event loop");
-    event_loop.set_control_flow(ControlFlow::Poll);
-    let mut app = App { window: None, renderer: None };
-    event_loop.run_app(&mut app).expect("Event loop error");
-    Ok(())
-}
 ```
 
 ## Examples
@@ -121,8 +65,14 @@ renderer.set_mesh(Mesh::create_cube());
     ..Default::default()
 };
 
-// Enable auto-rotation
-renderer.auto_rotate = true;
+// Update camera (per frame)
+// You can use the helper Camera struct or your own math library
+let camera = Camera::default(aspect);
+renderer.update_camera(
+    camera.view_matrix(),
+    camera.projection_matrix(),
+    camera.position
+);
 
 // Render
 renderer.render_frame()?;

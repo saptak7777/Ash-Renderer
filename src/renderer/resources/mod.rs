@@ -1,6 +1,5 @@
 pub mod buffer;
 pub mod buffer_pool;
-pub mod camera_controller;
 pub mod depth_buffer;
 pub mod descriptor;
 pub mod image;
@@ -18,7 +17,6 @@ pub mod vertex_buffer;
 
 pub use buffer::BufferHandle;
 pub use buffer_pool::{BufferAllocation, BufferPool};
-pub use camera_controller::CameraController;
 pub use depth_buffer::DepthBuffer;
 pub use descriptor::DescriptorSetHandle;
 pub use image::ImageHandle;

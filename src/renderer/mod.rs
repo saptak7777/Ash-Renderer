@@ -38,7 +38,7 @@ pub use resource_registry::{ResourceId, ResourceRegistry};
 
 // Re-export from resources submodule
 pub use resources::{
-    BufferAllocation, BufferHandle, BufferPool, Camera, CameraController, CascadedShadowMap,
-    DepthBuffer, DescriptorSetHandle, ImageHandle, Material, Mesh, MvpMatrices, PipelineHandle,
-    Texture, TextureData, Transform, UniformBuffer, Vertex, VertexBuffer, MVP,
+    BufferAllocation, BufferHandle, BufferPool, Camera, CascadedShadowMap, DepthBuffer,
+    DescriptorSetHandle, ImageHandle, Material, Mesh, MvpMatrices, PipelineHandle, Texture,
+    TextureData, Transform, UniformBuffer, Vertex, VertexBuffer, MVP,
 };

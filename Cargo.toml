@@ -1,11 +1,11 @@
 [package]
 name = "ash_renderer"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 authors = ["Saptak Santra"]
 license = "Apache-2.0"
 description = "Production-quality Vulkan renderer in Rust using ASH - ECS-free, pure rendering engine"
-repository = "https://github.com/saptaksentra/ash_renderer"
+repository = "https://github.com/saptak7777/Ash-Renderer"
 documentation = "https://docs.rs/ash_renderer"
 keywords = ["vulkan", "graphics", "rendering", "gpu", "ash"]
 categories = ["graphics", "rendering", "game-development"]

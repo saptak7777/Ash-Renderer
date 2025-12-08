@@ -12,7 +12,7 @@ use crate::{
         resource_registry::{ResourceId, ResourceRegistry},
         resources,
         resources::uniform::{MaterialBuffer, UniformBuffer},
-        Camera, DepthBuffer, Material, Mesh, PipelineCache, Texture, TextureData, Transform,
+        DepthBuffer, Material, Mesh, PipelineCache, Texture, TextureData, Transform,
     },
     vulkan, AshError, Result,
 };
@@ -208,11 +208,13 @@ pub struct Renderer {
     framebuffers: Vec<vulkan::Framebuffer>,
     framebuffer_ids: Vec<ResourceId>,
     start_time: Instant,
-    pub auto_rotate: bool,
     pub mesh: Option<Mesh>,
     material: Material,
     transform: Transform,
-    camera: Camera,
+    // Camera data (set via update_camera)
+    view_matrix: Mat4,
+    projection_matrix: Mat4,
+    camera_position: glam::Vec3,
     mesh_registry: HashMap<u32, String>,
     mesh_texture_sets: HashMap<String, vk::DescriptorSet>,
     mesh_texture_flags: HashMap<String, TexturePresenceFlags>,
@@ -778,7 +780,14 @@ impl Renderer {
             let initial_flags = initial_binding.flags();
             mesh_texture_sets.insert(mesh.name.clone(), initial_texture_set);
             mesh_texture_flags.insert(mesh.name.clone(), initial_flags);
-            let camera = Camera::default(aspect);
+            // Default camera matrices
+            let default_camera_pos = glam::Vec3::new(0.0, 2.0, 5.0);
+            let default_target = glam::Vec3::ZERO;
+            let default_up = glam::Vec3::Y;
+            let view_matrix = Mat4::look_at_rh(default_camera_pos, default_target, default_up);
+            let mut projection_matrix =
+                Mat4::perspective_rh(45.0_f32.to_radians(), aspect, 0.5, 100.0);
+            projection_matrix.y_axis.y *= -1.0; // Vulkan Y-flip
             let start_time = Instant::now();
 
             log::info!("REDE renderer (Phase 5 - Stable) initialized successfully!");
@@ -812,7 +821,9 @@ impl Renderer {
                 mesh: Some(mesh),
                 material,
                 transform,
-                camera,
+                view_matrix,
+                projection_matrix,
+                camera_position: default_camera_pos,
                 uniform_buffers,
                 material_buffers,
                 pipeline_layout: Some(pipeline_layout),
@@ -820,7 +831,6 @@ impl Renderer {
                 framebuffers,
                 framebuffer_ids,
                 start_time,
-                auto_rotate: true,
                 allocator,
                 vulkan_device,
                 mesh_registry,
@@ -1414,12 +1424,6 @@ impl Renderer {
         }
         self.uniform_buffers.clear();
 
-        let aspect = self
-            .swapchain
-            .as_ref()
-            .map(|s| s.extent.width as f32 / s.extent.height as f32)
-            .unwrap_or(1.0);
-
         unsafe {
             for _ in 0..count {
                 let mut buffer = UniformBuffer::new(
@@ -1430,13 +1434,10 @@ impl Renderer {
                 {
                     let matrices = buffer.matrices_mut();
                     matrices.model = self.transform.model_matrix();
-                    matrices.set_view(self.camera.position, self.camera.target, self.camera.up);
-                    matrices.set_projection(
-                        self.camera.fov.to_radians(),
-                        aspect,
-                        self.camera.near,
-                        self.camera.far,
-                    );
+                    matrices.view = self.view_matrix;
+                    matrices.projection = self.projection_matrix;
+                    matrices.view_proj = self.projection_matrix * self.view_matrix;
+                    matrices.camera_pos = self.camera_position.extend(1.0);
                 }
                 buffer.update()?;
                 self.uniform_buffers.push(buffer);
@@ -1512,24 +1513,18 @@ impl Renderer {
                     device: self.vulkan_device.device.as_ref(),
                     descriptor_manager: self.descriptor_manager.as_ref(),
                     transform: &mut self.transform,
-                    camera: &mut self.camera,
-                    auto_rotate: self.auto_rotate,
+                    auto_rotate: false, // Auto-rotate now handled by examples
                     elapsed_seconds: elapsed,
                 };
                 self.feature_manager.before_frame(&mut feature_ctx);
 
-                let aspect = swapchain_extent.width as f32 / swapchain_extent.height as f32;
-                self.camera.aspect = aspect;
-
+                // Use stored matrices (set via update_camera)
                 let matrices = uniform_buffer.matrices_mut();
                 matrices.model = self.transform.model_matrix();
-                matrices.set_view(self.camera.position, self.camera.target, self.camera.up);
-                matrices.set_projection(
-                    self.camera.fov.to_radians(),
-                    self.camera.aspect,
-                    self.camera.near,
-                    self.camera.far,
-                );
+                matrices.view = self.view_matrix;
+                matrices.projection = self.projection_matrix;
+                matrices.view_proj = self.projection_matrix * self.view_matrix;
+                matrices.camera_pos = self.camera_position.extend(1.0);
                 let light_dir = glam::Vec3::new(-0.35, -1.0, -0.25).normalize();
 
                 matrices.set_lighting(light_dir, glam::Vec3::splat(1.5), glam::Vec3::splat(0.35));
@@ -1716,7 +1711,6 @@ impl Renderer {
                 descriptor_manager: self.descriptor_manager.as_ref(),
                 command_buffer,
                 transform: &self.transform,
-                camera: &self.camera,
             };
 
             self.feature_manager.render(&render_ctx);
@@ -1829,8 +1823,8 @@ impl Renderer {
                     }
 
                     let model_matrix = item.transform;
-                    let view_matrix = self.camera.view_matrix();
-                    let projection_matrix = self.camera.projection_matrix();
+                    let view_matrix = self.view_matrix;
+                    let projection_matrix = self.projection_matrix;
                     let base_color_binding = if item.texture_flags.base_color {
                         Some(0u32)
                     } else {
@@ -1924,12 +1918,11 @@ impl Renderer {
         &mut self.transform
     }
 
-    pub fn camera(&self) -> &Camera {
-        &self.camera
-    }
-
-    pub fn camera_mut(&mut self) -> &mut Camera {
-        &mut self.camera
+    /// Update camera matrices. Call this per frame with your camera's view and projection matrices.
+    pub fn update_camera(&mut self, view: Mat4, projection: Mat4, position: glam::Vec3) {
+        self.view_matrix = view;
+        self.projection_matrix = projection;
+        self.camera_position = position;
     }
 
     pub fn buffer_pool(&self) -> Arc<BufferPool> {

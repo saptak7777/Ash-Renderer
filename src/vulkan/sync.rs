@@ -17,15 +17,23 @@ impl FrameSync {
         let semaphore_info = vk::SemaphoreCreateInfo::default();
 
         let image_available = unsafe {
-            device.create_semaphore(&semaphore_info, None).map_err(|e| {
-                AshError::VulkanError(format!("Failed to create image-available semaphore: {e}"))
-            })?
+            device
+                .create_semaphore(&semaphore_info, None)
+                .map_err(|e| {
+                    AshError::VulkanError(format!(
+                        "Failed to create image-available semaphore: {e}"
+                    ))
+                })?
         };
 
         let render_finished = unsafe {
-            device.create_semaphore(&semaphore_info, None).map_err(|e| {
-                AshError::VulkanError(format!("Failed to create render-finished semaphore: {e}"))
-            })?
+            device
+                .create_semaphore(&semaphore_info, None)
+                .map_err(|e| {
+                    AshError::VulkanError(format!(
+                        "Failed to create render-finished semaphore: {e}"
+                    ))
+                })?
         };
 
         let fence_info = vk::FenceCreateInfo::builder()
@@ -33,9 +41,9 @@ impl FrameSync {
             .build();
 
         let in_flight = unsafe {
-            device.create_fence(&fence_info, None).map_err(|e| {
-                AshError::VulkanError(format!("Failed to create frame fence: {e}"))
-            })?
+            device
+                .create_fence(&fence_info, None)
+                .map_err(|e| AshError::VulkanError(format!("Failed to create frame fence: {e}")))?
         };
 
         Ok(Self {
@@ -51,20 +59,18 @@ impl FrameSync {
         unsafe {
             self.device
                 .wait_for_fences(&[self.in_flight], true, u64::MAX)
-                .map_err(|e| AshError::VulkanError(format!(
-                    "Failed to wait for in-flight fence: {e}"
-                )))?
+                .map_err(|e| {
+                    AshError::VulkanError(format!("Failed to wait for in-flight fence: {e}"))
+                })?
         }
         Ok(())
     }
 
     pub fn reset(&self) -> Result<()> {
         unsafe {
-            self.device
-                .reset_fences(&[self.in_flight])
-                .map_err(|e| AshError::VulkanError(format!(
-                    "Failed to reset in-flight fence: {e}"
-                )))?
+            self.device.reset_fences(&[self.in_flight]).map_err(|e| {
+                AshError::VulkanError(format!("Failed to reset in-flight fence: {e}"))
+            })?
         }
         Ok(())
     }
