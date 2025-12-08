@@ -1,10 +1,10 @@
-use ash::{extensions::khr, vk};
+use ash::{khr::swapchain, vk};
 use std::sync::Arc;
 
 use crate::{AshError, Result};
 
 pub struct SwapchainWrapper {
-    pub swapchain_loader: khr::Swapchain,
+    pub swapchain_loader: swapchain::Device,
     pub swapchain: vk::SwapchainKHR,
     pub images: Vec<vk::Image>,
     pub image_views: Vec<vk::ImageView>,
@@ -25,7 +25,7 @@ impl SwapchainWrapper {
     /// - Only one swapchain exists per window at a time
     pub unsafe fn new(vk_device: &crate::vulkan::VulkanDevice) -> Result<Self> {
         let swapchain_loader =
-            khr::Swapchain::new(vk_device.instance.instance(), &vk_device.device);
+            swapchain::Device::new(vk_device.instance.instance(), &vk_device.device);
         let (swapchain, images, image_views, format, extent) =
             Self::build_swapchain(vk_device, &swapchain_loader, vk::SwapchainKHR::null())?;
 
@@ -44,7 +44,7 @@ impl SwapchainWrapper {
     #[allow(clippy::type_complexity)]
     unsafe fn build_swapchain(
         vk_device: &crate::vulkan::VulkanDevice,
-        swapchain_loader: &khr::Swapchain,
+        swapchain_loader: &swapchain::Device,
         old_swapchain: vk::SwapchainKHR,
     ) -> Result<(
         vk::SwapchainKHR,
@@ -98,7 +98,7 @@ impl SwapchainWrapper {
 
         let extent = capabilities.current_extent;
 
-        let swapchain_create_info = vk::SwapchainCreateInfoKHR::builder()
+        let swapchain_create_info = vk::SwapchainCreateInfoKHR::default()
             .surface(surface)
             .min_image_count(image_count)
             .image_format(format)
@@ -125,7 +125,7 @@ impl SwapchainWrapper {
 
         let mut image_views = Vec::new();
         for &image in &images {
-            let create_info = vk::ImageViewCreateInfo::builder()
+            let create_info = vk::ImageViewCreateInfo::default()
                 .image(image)
                 .view_type(vk::ImageViewType::TYPE_2D)
                 .format(format)
@@ -162,7 +162,10 @@ impl SwapchainWrapper {
     /// - All rendering to the old swapchain images has completed
     /// - No frames are in-flight using the old swapchain
     /// - `vk_device` is the same device used to create this swapchain
-    pub unsafe fn recreate(&mut self, vk_device: &crate::vulkan::VulkanDevice) -> Result<vk::SwapchainKHR> {
+    pub unsafe fn recreate(
+        &mut self,
+        vk_device: &crate::vulkan::VulkanDevice,
+    ) -> Result<vk::SwapchainKHR> {
         let old_swapchain = self.swapchain;
         let (swapchain, images, image_views, format, extent) =
             Self::build_swapchain(vk_device, &self.swapchain_loader, self.swapchain)?;
@@ -218,7 +221,7 @@ impl SwapchainWrapper {
         let image_indices = [image_index];
         let wait_semaphores = [wait_semaphore];
 
-        let present_info = vk::PresentInfoKHR::builder()
+        let present_info = vk::PresentInfoKHR::default()
             .wait_semaphores(&wait_semaphores)
             .swapchains(&swapchains)
             .image_indices(&image_indices);

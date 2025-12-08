@@ -7,11 +7,14 @@ use crate::{AshError, Result};
 pub struct DescriptorSetLayout {
     device: Arc<ash::Device>,
     layout: vk::DescriptorSetLayout,
-    bindings: Vec<vk::DescriptorSetLayoutBinding>,
+    bindings: Vec<vk::DescriptorSetLayoutBinding<'static>>,
 }
 
 impl DescriptorSetLayout {
-    pub fn new(device: Arc<ash::Device>, bindings: &[vk::DescriptorSetLayoutBinding]) -> Result<Self> {
+    pub fn new(
+        device: Arc<ash::Device>,
+        bindings: &[vk::DescriptorSetLayoutBinding<'static>],
+    ) -> Result<Self> {
         let binding_flags: Vec<_> = bindings
             .iter()
             .map(|binding| {
@@ -25,10 +28,10 @@ impl DescriptorSetLayout {
             })
             .collect();
 
-        let mut flags_info = vk::DescriptorSetLayoutBindingFlagsCreateInfo::builder()
-            .binding_flags(&binding_flags);
+        let mut flags_info =
+            vk::DescriptorSetLayoutBindingFlagsCreateInfo::default().binding_flags(&binding_flags);
 
-        let mut create_info = vk::DescriptorSetLayoutCreateInfo::builder()
+        let mut create_info = vk::DescriptorSetLayoutCreateInfo::default()
             .bindings(bindings)
             .flags(vk::DescriptorSetLayoutCreateFlags::UPDATE_AFTER_BIND_POOL);
 
@@ -37,9 +40,9 @@ impl DescriptorSetLayout {
         let layout = unsafe {
             device
                 .create_descriptor_set_layout(&create_info, None)
-                .map_err(|e| AshError::VulkanError(format!(
-                    "Failed to create descriptor set layout: {e}"
-                )))?
+                .map_err(|e| {
+                    AshError::VulkanError(format!("Failed to create descriptor set layout: {e}"))
+                })?
         };
 
         Ok(Self {
@@ -53,7 +56,7 @@ impl DescriptorSetLayout {
         self.layout
     }
 
-    pub fn bindings(&self) -> &[vk::DescriptorSetLayoutBinding] {
+    pub fn bindings(&self) -> &[vk::DescriptorSetLayoutBinding<'static>] {
         &self.bindings
     }
 }
@@ -67,7 +70,7 @@ impl Drop for DescriptorSetLayout {
 }
 
 pub struct DescriptorSetLayoutBuilder {
-    bindings: Vec<vk::DescriptorSetLayoutBinding>,
+    bindings: Vec<vk::DescriptorSetLayoutBinding<'static>>,
 }
 
 impl Default for DescriptorSetLayoutBuilder {
@@ -78,7 +81,9 @@ impl Default for DescriptorSetLayoutBuilder {
 
 impl DescriptorSetLayoutBuilder {
     pub fn new() -> Self {
-        Self { bindings: Vec::new() }
+        Self {
+            bindings: Vec::new(),
+        }
     }
 
     pub fn add_binding(
@@ -88,14 +93,13 @@ impl DescriptorSetLayoutBuilder {
         stage_flags: vk::ShaderStageFlags,
         count: u32,
     ) -> Self {
-        self.bindings.push(
-            vk::DescriptorSetLayoutBinding::builder()
-                .binding(binding)
-                .descriptor_type(descriptor_type)
-                .descriptor_count(count)
-                .stage_flags(stage_flags)
-                .build(),
-        );
+        self.bindings.push(vk::DescriptorSetLayoutBinding {
+            binding,
+            descriptor_type,
+            descriptor_count: count,
+            stage_flags,
+            ..Default::default()
+        });
         self
     }
 
@@ -106,14 +110,13 @@ impl DescriptorSetLayoutBuilder {
         stage_flags: vk::ShaderStageFlags,
         max_count: u32,
     ) -> Self {
-        self.bindings.push(
-            vk::DescriptorSetLayoutBinding::builder()
-                .binding(binding)
-                .descriptor_type(descriptor_type)
-                .descriptor_count(max_count)
-                .stage_flags(stage_flags)
-                .build(),
-        );
+        self.bindings.push(vk::DescriptorSetLayoutBinding {
+            binding,
+            descriptor_type,
+            descriptor_count: max_count,
+            stage_flags,
+            ..Default::default()
+        });
         self
     }
 

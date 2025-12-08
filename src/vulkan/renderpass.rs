@@ -65,58 +65,56 @@ impl RenderPassBuilder {
 
     /// Adds a color attachment matching swapchain usage with clear/load defaults.
     pub fn with_swapchain_color(mut self, format: vk::Format) -> Self {
-        let attachment = vk::AttachmentDescription::builder()
-            .format(format)
-            .samples(self.sample_count)
-            .load_op(vk::AttachmentLoadOp::CLEAR)
-            .store_op(if self.sample_count == vk::SampleCountFlags::TYPE_1 {
+        let attachment = vk::AttachmentDescription {
+            format,
+            samples: self.sample_count,
+            load_op: vk::AttachmentLoadOp::CLEAR,
+            store_op: if self.sample_count == vk::SampleCountFlags::TYPE_1 {
                 vk::AttachmentStoreOp::STORE
             } else {
                 vk::AttachmentStoreOp::DONT_CARE // MSAA is resolved, not stored
-            })
-            .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
-            .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
-            .initial_layout(vk::ImageLayout::UNDEFINED)
-            .final_layout(if self.sample_count == vk::SampleCountFlags::TYPE_1 {
+            },
+            stencil_load_op: vk::AttachmentLoadOp::DONT_CARE,
+            stencil_store_op: vk::AttachmentStoreOp::DONT_CARE,
+            initial_layout: vk::ImageLayout::UNDEFINED,
+            final_layout: if self.sample_count == vk::SampleCountFlags::TYPE_1 {
                 vk::ImageLayout::PRESENT_SRC_KHR
             } else {
                 vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL
-            })
-            .build();
+            },
+            ..Default::default()
+        };
 
         self.push_color_attachment(attachment, vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL);
 
         // Add resolve attachment if MSAA is enabled
         if self.sample_count != vk::SampleCountFlags::TYPE_1 {
-            let resolve = vk::AttachmentDescription::builder()
-                .format(format)
-                .samples(vk::SampleCountFlags::TYPE_1)
-                .load_op(vk::AttachmentLoadOp::DONT_CARE)
-                .store_op(vk::AttachmentStoreOp::STORE)
-                .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
-                .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
-                .initial_layout(vk::ImageLayout::UNDEFINED)
-                .final_layout(vk::ImageLayout::PRESENT_SRC_KHR)
-                .build();
+            let resolve = vk::AttachmentDescription {
+                format,
+                samples: vk::SampleCountFlags::TYPE_1,
+                load_op: vk::AttachmentLoadOp::DONT_CARE,
+                store_op: vk::AttachmentStoreOp::STORE,
+                stencil_load_op: vk::AttachmentLoadOp::DONT_CARE,
+                stencil_store_op: vk::AttachmentStoreOp::DONT_CARE,
+                initial_layout: vk::ImageLayout::UNDEFINED,
+                final_layout: vk::ImageLayout::PRESENT_SRC_KHR,
+                ..Default::default()
+            };
             self.push_resolve_attachment(resolve, vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL);
         }
 
         // Ensure we have at least the external->color dependency
         if self.dependencies.is_empty() {
-            self.dependencies.push(
-                vk::SubpassDependency::builder()
-                    .src_subpass(vk::SUBPASS_EXTERNAL)
-                    .dst_subpass(0)
-                    .src_stage_mask(vk::PipelineStageFlags::BOTTOM_OF_PIPE)
-                    .src_access_mask(vk::AccessFlags::MEMORY_READ)
-                    .dst_stage_mask(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT)
-                    .dst_access_mask(
-                        vk::AccessFlags::COLOR_ATTACHMENT_READ
-                            | vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
-                    )
-                    .dependency_flags(vk::DependencyFlags::BY_REGION)
-                    .build(),
-            );
+            self.dependencies.push(vk::SubpassDependency {
+                src_subpass: vk::SUBPASS_EXTERNAL,
+                dst_subpass: 0,
+                src_stage_mask: vk::PipelineStageFlags::BOTTOM_OF_PIPE,
+                src_access_mask: vk::AccessFlags::MEMORY_READ,
+                dst_stage_mask: vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                dst_access_mask: vk::AccessFlags::COLOR_ATTACHMENT_READ
+                    | vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
+                dependency_flags: vk::DependencyFlags::BY_REGION,
+            });
         }
 
         self
@@ -130,25 +128,29 @@ impl RenderPassBuilder {
 
     /// Adds a depth attachment configured for optimal depth/stencil usage.
     pub fn with_depth_attachment(mut self, format: vk::Format) -> Self {
-        let mut attachment_builder = vk::AttachmentDescription::builder()
-            .format(format)
-            .samples(self.sample_count)
-            .load_op(vk::AttachmentLoadOp::CLEAR)
-            .store_op(vk::AttachmentStoreOp::DONT_CARE)
-            .initial_layout(vk::ImageLayout::UNDEFINED)
-            .final_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
-
-        if utils::has_stencil_component(format) {
-            attachment_builder = attachment_builder
-                .stencil_load_op(vk::AttachmentLoadOp::CLEAR)
-                .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE);
+        let (stencil_load_op, stencil_store_op) = if utils::has_stencil_component(format) {
+            (
+                vk::AttachmentLoadOp::CLEAR,
+                vk::AttachmentStoreOp::DONT_CARE,
+            )
         } else {
-            attachment_builder = attachment_builder
-                .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
-                .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE);
-        }
+            (
+                vk::AttachmentLoadOp::DONT_CARE,
+                vk::AttachmentStoreOp::DONT_CARE,
+            )
+        };
 
-        self.depth_attachment = Some(attachment_builder.build());
+        self.depth_attachment = Some(vk::AttachmentDescription {
+            format,
+            samples: self.sample_count,
+            load_op: vk::AttachmentLoadOp::CLEAR,
+            store_op: vk::AttachmentStoreOp::DONT_CARE,
+            stencil_load_op,
+            stencil_store_op,
+            initial_layout: vk::ImageLayout::UNDEFINED,
+            final_layout: vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+            ..Default::default()
+        });
 
         // Depth dependencies will be populated during build based on attachment presence.
         self
@@ -222,19 +224,19 @@ impl RenderPassBuilder {
 
         // Build subpass with or without resolve attachments
         let subpass = {
-            let mut builder = vk::SubpassDescription::builder()
+            let mut desc = vk::SubpassDescription::default()
                 .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
                 .color_attachments(&color_refs);
 
             if has_resolve {
-                builder = builder.resolve_attachments(&resolve_refs);
+                desc = desc.resolve_attachments(&resolve_refs);
             }
 
             if let Some(ref depth_ref) = depth_ref {
-                builder = builder.depth_stencil_attachment(depth_ref);
+                desc = desc.depth_stencil_attachment(depth_ref);
             }
 
-            builder.build()
+            desc
         };
 
         let dependencies = if self.dependencies.is_empty() {
@@ -252,25 +254,27 @@ impl RenderPassBuilder {
                     | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE;
             }
 
-            vec![vk::SubpassDependency::builder()
-                .src_subpass(vk::SUBPASS_EXTERNAL)
-                .dst_subpass(0)
-                .src_stage_mask(src_stage)
-                .dst_stage_mask(dst_stage)
-                .dst_access_mask(dst_access)
-                .dependency_flags(if depth_ref.is_some() {
+            vec![vk::SubpassDependency {
+                src_subpass: vk::SUBPASS_EXTERNAL,
+                dst_subpass: 0,
+                src_stage_mask: src_stage,
+                dst_stage_mask: dst_stage,
+                dst_access_mask: dst_access,
+                dependency_flags: if depth_ref.is_some() {
                     vk::DependencyFlags::BY_REGION
                 } else {
                     vk::DependencyFlags::empty()
-                })
-                .build()]
+                },
+                ..Default::default()
+            }]
         } else {
             self.dependencies
         };
 
-        let create_info = vk::RenderPassCreateInfo::builder()
+        let subpasses = [subpass];
+        let create_info = vk::RenderPassCreateInfo::default()
             .attachments(&attachments)
-            .subpasses(std::slice::from_ref(&subpass))
+            .subpasses(&subpasses)
             .dependencies(&dependencies);
 
         let render_pass = unsafe {

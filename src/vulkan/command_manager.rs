@@ -39,7 +39,7 @@ impl<'a> CommandBufferContext<'a> {
     }
 
     pub fn begin(&self, flags: vk::CommandBufferUsageFlags) -> Result<()> {
-        let info = vk::CommandBufferBeginInfo::builder().flags(flags);
+        let info = vk::CommandBufferBeginInfo::default().flags(flags);
         unsafe {
             self.device
                 .begin_command_buffer(self.command_buffer, &info)

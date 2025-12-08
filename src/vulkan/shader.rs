@@ -12,7 +12,7 @@ use crate::{AshError, Result};
 /// Reflection metadata extracted from a SPIR-V shader.
 pub struct ShaderReflection {
     pub push_constants: Vec<vk::PushConstantRange>,
-    pub descriptor_sets: HashMap<u32, vk::DescriptorSetLayoutCreateInfo>,
+    pub descriptor_sets: HashMap<u32, Vec<vk::DescriptorSetLayoutBinding<'static>>>,
     pub input_attributes: Vec<vk::VertexInputAttributeDescription>,
     pub output_attachment_formats: Vec<vk::Format>,
     pub stage: vk::ShaderStageFlags,
@@ -93,19 +93,17 @@ impl ShaderReflection {
                             binding.count,
                             binding.name
                         );
-                        vk::DescriptorSetLayoutBinding::builder()
-                            .binding(binding.binding)
-                            .descriptor_type(desc_type)
-                            .descriptor_count(binding.count)
-                            .stage_flags(stage)
-                            .build()
+                        vk::DescriptorSetLayoutBinding {
+                            binding: binding.binding,
+                            descriptor_type: desc_type,
+                            descriptor_count: binding.count,
+                            stage_flags: stage,
+                            ..Default::default()
+                        }
                     })
                     .collect();
 
-                let create_info = vk::DescriptorSetLayoutCreateInfo::builder()
-                    .bindings(&bindings)
-                    .build();
-                reflection.descriptor_sets.insert(set.set, create_info);
+                reflection.descriptor_sets.insert(set.set, bindings);
             }
         }
 
@@ -120,14 +118,14 @@ impl ShaderReflection {
                         format,
                         var.name
                     );
-                    reflection.input_attributes.push(
-                        vk::VertexInputAttributeDescription::builder()
-                            .location(var.location)
-                            .binding(var.location)
-                            .format(format)
-                            .offset(0)
-                            .build(),
-                    );
+                    reflection
+                        .input_attributes
+                        .push(vk::VertexInputAttributeDescription {
+                            location: var.location,
+                            binding: var.location,
+                            format,
+                            offset: 0,
+                        });
                 }
             }
         }
@@ -275,7 +273,7 @@ impl ShaderModule {
             unsafe { std::slice::from_raw_parts(code.as_ptr() as *const u32, code.len() / 4) };
 
         let module = unsafe {
-            let create_info = vk::ShaderModuleCreateInfo::builder().code(code_u32);
+            let create_info = vk::ShaderModuleCreateInfo::default().code(code_u32);
             device
                 .create_shader_module(&create_info, None)
                 .map_err(|e| {
@@ -291,12 +289,11 @@ impl ShaderModule {
         })
     }
 
-    pub fn stage_info(&self) -> vk::PipelineShaderStageCreateInfo {
-        vk::PipelineShaderStageCreateInfo::builder()
+    pub fn stage_info(&self) -> vk::PipelineShaderStageCreateInfo<'_> {
+        vk::PipelineShaderStageCreateInfo::default()
             .stage(self.stage)
             .module(self.module)
             .name(&self.entry_point)
-            .build()
     }
 }
 
@@ -307,12 +304,10 @@ impl Drop for ShaderModule {
     }
 }
 
-/// Convenience loader returning both the shader module and stage info without reflection.
-pub fn load_shader_module(
-    device: &ash::Device,
-    path: &str,
-    stage: vk::ShaderStageFlags,
-) -> Result<(vk::ShaderModule, vk::PipelineShaderStageCreateInfo)> {
+/// Convenience loader returning just the shader module handle.
+/// The caller should create the PipelineShaderStageCreateInfo themselves
+/// since it requires references that must outlive the usage.
+pub fn load_shader_module(device: &ash::Device, path: &str) -> Result<vk::ShaderModule> {
     let code = fs::read(path)
         .map_err(|e| AshError::VulkanError(format!("Failed to read shader {path}: {e}")))?;
 
@@ -326,18 +321,11 @@ pub fn load_shader_module(
         unsafe { std::slice::from_raw_parts(code.as_ptr() as *const u32, code.len() / 4) };
 
     let module = unsafe {
-        let create_info = vk::ShaderModuleCreateInfo::builder().code(code_u32);
+        let create_info = vk::ShaderModuleCreateInfo::default().code(code_u32);
         device
             .create_shader_module(&create_info, None)
             .map_err(|e| AshError::VulkanError(format!("Failed to create shader module: {e}")))?
     };
 
-    let entry_point = c"main";
-    let stage_info = vk::PipelineShaderStageCreateInfo::builder()
-        .stage(stage)
-        .module(module)
-        .name(entry_point)
-        .build();
-
-    Ok((module, stage_info))
+    Ok(module)
 }

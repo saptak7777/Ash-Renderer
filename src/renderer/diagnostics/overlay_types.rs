@@ -24,37 +24,37 @@ impl TextVertex {
 
     /// Vertex input binding description for Vulkan
     pub fn binding_description() -> ash::vk::VertexInputBindingDescription {
-        ash::vk::VertexInputBindingDescription::builder()
-            .binding(0)
-            .stride(std::mem::size_of::<Self>() as u32)
-            .input_rate(ash::vk::VertexInputRate::VERTEX)
-            .build()
+        ash::vk::VertexInputBindingDescription {
+            binding: 0,
+            stride: std::mem::size_of::<Self>() as u32,
+            input_rate: ash::vk::VertexInputRate::VERTEX,
+        }
     }
 
     /// Vertex attribute descriptions for Vulkan
     pub fn attribute_descriptions() -> [ash::vk::VertexInputAttributeDescription; 3] {
         [
             // Position
-            ash::vk::VertexInputAttributeDescription::builder()
-                .binding(0)
-                .location(0)
-                .format(ash::vk::Format::R32G32_SFLOAT)
-                .offset(0)
-                .build(),
+            ash::vk::VertexInputAttributeDescription {
+                binding: 0,
+                location: 0,
+                format: ash::vk::Format::R32G32_SFLOAT,
+                offset: 0,
+            },
             // UV
-            ash::vk::VertexInputAttributeDescription::builder()
-                .binding(0)
-                .location(1)
-                .format(ash::vk::Format::R32G32_SFLOAT)
-                .offset(8)
-                .build(),
+            ash::vk::VertexInputAttributeDescription {
+                binding: 0,
+                location: 1,
+                format: ash::vk::Format::R32G32_SFLOAT,
+                offset: 8,
+            },
             // Color
-            ash::vk::VertexInputAttributeDescription::builder()
-                .binding(0)
-                .location(2)
-                .format(ash::vk::Format::R32G32B32A32_SFLOAT)
-                .offset(16)
-                .build(),
+            ash::vk::VertexInputAttributeDescription {
+                binding: 0,
+                location: 2,
+                format: ash::vk::Format::R32G32B32A32_SFLOAT,
+                offset: 16,
+            },
         ]
     }
 }

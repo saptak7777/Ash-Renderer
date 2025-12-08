@@ -76,14 +76,14 @@ impl Texture {
         std::ptr::copy_nonoverlapping(data.pixels.as_ptr(), staging_ptr, data.pixels.len());
         allocator
             .vma
-            .flush_allocation(&staging_alloc, 0, image_size as usize)
+            .flush_allocation(&staging_alloc, 0, image_size)
             .map_err(|e| {
                 AshError::VulkanError(format!("Failed to flush texture staging buffer: {e}"))
             })?;
         allocator.vma.unmap_memory(&mut staging_alloc);
 
         // Create image with mipmaps and proper usage
-        let image_info = vk::ImageCreateInfo::builder()
+        let image_info = vk::ImageCreateInfo::default()
             .image_type(vk::ImageType::TYPE_2D)
             .format(format)
             .extent(vk::Extent3D {
@@ -109,7 +109,7 @@ impl Texture {
         // Execute upload and mipmap generation
         execute_single_use(device.as_ref(), command_pool, queue, |cmd| {
             // Transition Mip 0 to TRANSFER_DST_OPTIMAL
-            let barrier = vk::ImageMemoryBarrier::builder()
+            let barrier = vk::ImageMemoryBarrier::default()
                 .old_layout(vk::ImageLayout::UNDEFINED)
                 .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
                 .src_access_mask(vk::AccessFlags::empty())
@@ -121,8 +121,7 @@ impl Texture {
                     level_count: mip_levels, // Transition all initially
                     base_array_layer: 0,
                     layer_count: 1,
-                })
-                .build();
+                });
 
             device.cmd_pipeline_barrier(
                 cmd,
@@ -134,21 +133,23 @@ impl Texture {
                 &[barrier],
             );
 
-            let region = vk::BufferImageCopy::builder()
-                .image_subresource(
-                    vk::ImageSubresourceLayers::builder()
-                        .aspect_mask(vk::ImageAspectFlags::COLOR)
-                        .mip_level(0)
-                        .base_array_layer(0)
-                        .layer_count(1)
-                        .build(),
-                )
-                .image_extent(vk::Extent3D {
+            let region = vk::BufferImageCopy {
+                buffer_offset: 0,
+                buffer_row_length: 0,
+                buffer_image_height: 0,
+                image_subresource: vk::ImageSubresourceLayers {
+                    aspect_mask: vk::ImageAspectFlags::COLOR,
+                    mip_level: 0,
+                    base_array_layer: 0,
+                    layer_count: 1,
+                },
+                image_offset: vk::Offset3D { x: 0, y: 0, z: 0 },
+                image_extent: vk::Extent3D {
                     width: data.width,
                     height: data.height,
                     depth: 1,
-                })
-                .build();
+                },
+            };
 
             device.cmd_copy_buffer_to_image(
                 cmd,
@@ -167,7 +168,7 @@ impl Texture {
                 let next_height = if mip_height > 1 { mip_height / 2 } else { 1 };
 
                 // Transition i-1 to TRANSFER_SRC
-                let barrier_src = vk::ImageMemoryBarrier::builder()
+                let barrier_src = vk::ImageMemoryBarrier::default()
                     .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
                     .new_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
                     .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
@@ -179,8 +180,7 @@ impl Texture {
                         level_count: 1,
                         base_array_layer: 0,
                         layer_count: 1,
-                    })
-                    .build();
+                    });
 
                 device.cmd_pipeline_barrier(
                     cmd,
@@ -192,36 +192,36 @@ impl Texture {
                     &[barrier_src],
                 );
 
-                let blit = vk::ImageBlit::builder()
-                    .src_offsets([
+                let blit = vk::ImageBlit {
+                    src_offsets: [
                         vk::Offset3D { x: 0, y: 0, z: 0 },
                         vk::Offset3D {
                             x: mip_width,
                             y: mip_height,
                             z: 1,
                         },
-                    ])
-                    .src_subresource(vk::ImageSubresourceLayers {
+                    ],
+                    src_subresource: vk::ImageSubresourceLayers {
                         aspect_mask: vk::ImageAspectFlags::COLOR,
                         mip_level: i - 1,
                         base_array_layer: 0,
                         layer_count: 1,
-                    })
-                    .dst_offsets([
+                    },
+                    dst_offsets: [
                         vk::Offset3D { x: 0, y: 0, z: 0 },
                         vk::Offset3D {
                             x: next_width,
                             y: next_height,
                             z: 1,
                         },
-                    ])
-                    .dst_subresource(vk::ImageSubresourceLayers {
+                    ],
+                    dst_subresource: vk::ImageSubresourceLayers {
                         aspect_mask: vk::ImageAspectFlags::COLOR,
                         mip_level: i,
                         base_array_layer: 0,
                         layer_count: 1,
-                    })
-                    .build();
+                    },
+                };
 
                 device.cmd_blit_image(
                     cmd,
@@ -234,7 +234,7 @@ impl Texture {
                 );
 
                 // Transition i-1 to SHADER_READ_ONLY
-                let barrier_done = vk::ImageMemoryBarrier::builder()
+                let barrier_done = vk::ImageMemoryBarrier::default()
                     .old_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
                     .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
                     .src_access_mask(vk::AccessFlags::TRANSFER_READ)
@@ -246,8 +246,7 @@ impl Texture {
                         level_count: 1,
                         base_array_layer: 0,
                         layer_count: 1,
-                    })
-                    .build();
+                    });
 
                 device.cmd_pipeline_barrier(
                     cmd,
@@ -264,7 +263,7 @@ impl Texture {
             }
 
             // Transition last mip
-            let barrier_last = vk::ImageMemoryBarrier::builder()
+            let barrier_last = vk::ImageMemoryBarrier::default()
                 .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
                 .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
                 .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
@@ -276,8 +275,7 @@ impl Texture {
                     level_count: 1,
                     base_array_layer: 0,
                     layer_count: 1,
-                })
-                .build();
+                });
 
             device.cmd_pipeline_barrier(
                 cmd,
@@ -296,24 +294,22 @@ impl Texture {
             .destroy_buffer(staging_buffer, &mut staging_alloc);
 
         // Create image view
-        let view_info = vk::ImageViewCreateInfo::builder()
+        let view_info = vk::ImageViewCreateInfo::default()
             .image(image)
             .view_type(vk::ImageViewType::TYPE_2D)
             .format(format)
-            .subresource_range(
-                vk::ImageSubresourceRange::builder()
-                    .aspect_mask(vk::ImageAspectFlags::COLOR)
-                    .base_mip_level(0)
-                    .level_count(mip_levels)
-                    .base_array_layer(0)
-                    .layer_count(1)
-                    .build(),
-            );
+            .subresource_range(vk::ImageSubresourceRange {
+                aspect_mask: vk::ImageAspectFlags::COLOR,
+                base_mip_level: 0,
+                level_count: mip_levels,
+                base_array_layer: 0,
+                layer_count: 1,
+            });
 
         let image_view = device.create_image_view(&view_info, None)?;
 
         // Create sampler
-        let sampler_info = vk::SamplerCreateInfo::builder()
+        let sampler_info = vk::SamplerCreateInfo::default()
             .mag_filter(vk::Filter::LINEAR)
             .min_filter(vk::Filter::LINEAR)
             .mipmap_mode(vk::SamplerMipmapMode::LINEAR)
@@ -387,7 +383,7 @@ fn execute_single_use<F>(
 where
     F: FnOnce(vk::CommandBuffer),
 {
-    let alloc_info = vk::CommandBufferAllocateInfo::builder()
+    let alloc_info = vk::CommandBufferAllocateInfo::default()
         .command_pool(command_pool)
         .level(vk::CommandBufferLevel::PRIMARY)
         .command_buffer_count(1);
@@ -398,7 +394,7 @@ where
     unsafe {
         device.begin_command_buffer(
             command_buffer,
-            &vk::CommandBufferBeginInfo::builder()
+            &vk::CommandBufferBeginInfo::default()
                 .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
         )?;
 
@@ -407,9 +403,9 @@ where
         device.end_command_buffer(command_buffer)?;
 
         let submit_info =
-            vk::SubmitInfo::builder().command_buffers(std::slice::from_ref(&command_buffer));
+            vk::SubmitInfo::default().command_buffers(std::slice::from_ref(&command_buffer));
 
-        device.queue_submit(queue, &[submit_info.build()], vk::Fence::null())?;
+        device.queue_submit(queue, &[submit_info], vk::Fence::null())?;
         device.queue_wait_idle(queue)?;
         device.free_command_buffers(command_pool, &command_buffers);
     }

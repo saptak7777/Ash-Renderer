@@ -34,11 +34,9 @@ impl MsaaColorTarget {
         format: vk::Format,
         sample_count: vk::SampleCountFlags,
     ) -> Result<Self> {
-        log::info!(
-            "Creating MSAA color target ({width}x{height}, samples: {sample_count:?})"
-        );
+        log::info!("Creating MSAA color target ({width}x{height}, samples: {sample_count:?})");
 
-        let image_create_info = vk::ImageCreateInfo::builder()
+        let image_create_info = vk::ImageCreateInfo::default()
             .image_type(vk::ImageType::TYPE_2D)
             .format(format)
             .extent(vk::Extent3D {
@@ -59,7 +57,7 @@ impl MsaaColorTarget {
         let (image, allocation) =
             allocator.create_image(&image_create_info, vk_mem::MemoryUsage::AutoPreferDevice)?;
 
-        let view_create_info = vk::ImageViewCreateInfo::builder()
+        let view_create_info = vk::ImageViewCreateInfo::default()
             .image(image)
             .view_type(vk::ImageViewType::TYPE_2D)
             .format(format)
@@ -149,11 +147,9 @@ impl MsaaDepthTarget {
     ) -> Result<Self> {
         let format = vk::Format::D32_SFLOAT;
 
-        log::info!(
-            "Creating MSAA depth target ({width}x{height}, samples: {sample_count:?})"
-        );
+        log::info!("Creating MSAA depth target ({width}x{height}, samples: {sample_count:?})");
 
-        let image_create_info = vk::ImageCreateInfo::builder()
+        let image_create_info = vk::ImageCreateInfo::default()
             .image_type(vk::ImageType::TYPE_2D)
             .format(format)
             .extent(vk::Extent3D {
@@ -175,7 +171,7 @@ impl MsaaDepthTarget {
         let (image, allocation) =
             allocator.create_image(&image_create_info, vk_mem::MemoryUsage::AutoPreferDevice)?;
 
-        let view_create_info = vk::ImageViewCreateInfo::builder()
+        let view_create_info = vk::ImageViewCreateInfo::default()
             .image(image)
             .view_type(vk::ImageViewType::TYPE_2D)
             .format(format)
@@ -282,9 +278,7 @@ pub fn clamp_sample_count(
     if requested_val <= max_val {
         requested
     } else {
-        log::warn!(
-            "Requested MSAA {requested:?} exceeds device max {max:?}, clamping"
-        );
+        log::warn!("Requested MSAA {requested:?} exceeds device max {max:?}, clamping");
         max
     }
 }

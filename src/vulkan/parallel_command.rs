@@ -13,7 +13,7 @@ struct WorkerState {
 
 impl WorkerState {
     fn new(device: &ash::Device, queue_family_index: u32) -> Result<Self> {
-        let pool_info = vk::CommandPoolCreateInfo::builder()
+        let pool_info = vk::CommandPoolCreateInfo::default()
             .queue_family_index(queue_family_index)
             .flags(
                 vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER
@@ -43,8 +43,12 @@ pub struct ParallelCommandManager {
 }
 
 impl ParallelCommandManager {
-    pub fn new(device: Arc<ash::Device>, queue_family_index: u32, worker_count: usize) -> Result<Self> {
-        let pool_info = vk::CommandPoolCreateInfo::builder()
+    pub fn new(
+        device: Arc<ash::Device>,
+        queue_family_index: u32,
+        worker_count: usize,
+    ) -> Result<Self> {
+        let pool_info = vk::CommandPoolCreateInfo::default()
             .queue_family_index(queue_family_index)
             .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER);
 
@@ -77,7 +81,7 @@ impl ParallelCommandManager {
             return Ok(Vec::new());
         }
 
-        let alloc_info = vk::CommandBufferAllocateInfo::builder()
+        let alloc_info = vk::CommandBufferAllocateInfo::default()
             .command_pool(self.primary_pool)
             .level(vk::CommandBufferLevel::PRIMARY)
             .command_buffer_count(count);
@@ -85,7 +89,9 @@ impl ParallelCommandManager {
         let buffers = unsafe {
             self.device
                 .allocate_command_buffers(&alloc_info)
-                .map_err(|e| AshError::VulkanError(format!("Failed to allocate primary buffers: {e}")))?
+                .map_err(|e| {
+                    AshError::VulkanError(format!("Failed to allocate primary buffers: {e}"))
+                })?
         };
 
         self.tracked_primary.lock().extend_from_slice(&buffers);
@@ -131,7 +137,8 @@ impl ParallelCommandManager {
         unsafe {
             let buffers = self.tracked_primary.lock().drain(..).collect::<Vec<_>>();
             if !buffers.is_empty() {
-                self.device.free_command_buffers(self.primary_pool, &buffers);
+                self.device
+                    .free_command_buffers(self.primary_pool, &buffers);
             }
             self.device.destroy_command_pool(self.primary_pool, None);
         }
@@ -161,7 +168,7 @@ impl ParallelCommandManager {
             return Ok(Vec::new());
         }
 
-        let alloc_info = vk::CommandBufferAllocateInfo::builder()
+        let alloc_info = vk::CommandBufferAllocateInfo::default()
             .command_pool(state.command_pool)
             .level(vk::CommandBufferLevel::SECONDARY)
             .command_buffer_count(count);
@@ -169,9 +176,11 @@ impl ParallelCommandManager {
         unsafe {
             self.device
                 .allocate_command_buffers(&alloc_info)
-                .map_err(|e| AshError::VulkanError(format!(
-                    "Failed to allocate secondary command buffers: {e}"
-                )))
+                .map_err(|e| {
+                    AshError::VulkanError(format!(
+                        "Failed to allocate secondary command buffers: {e}"
+                    ))
+                })
         }
     }
 
@@ -179,9 +188,9 @@ impl ParallelCommandManager {
         unsafe {
             self.device
                 .reset_command_buffer(buffer, vk::CommandBufferResetFlags::empty())
-                .map_err(|e| AshError::VulkanError(format!(
-                    "Failed to reset secondary command buffer: {e}"
-                )))
+                .map_err(|e| {
+                    AshError::VulkanError(format!("Failed to reset secondary command buffer: {e}"))
+                })
         }
     }
 }

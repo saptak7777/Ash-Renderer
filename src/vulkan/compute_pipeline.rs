@@ -24,16 +24,14 @@ impl ComputePipeline {
         shader_module: vk::ShaderModule,
         entry_point: &std::ffi::CStr,
     ) -> Result<Self> {
-        let stage = vk::PipelineShaderStageCreateInfo::builder()
+        let stage = vk::PipelineShaderStageCreateInfo::default()
             .stage(vk::ShaderStageFlags::COMPUTE)
             .module(shader_module)
-            .name(entry_point)
-            .build();
+            .name(entry_point);
 
-        let create_info = vk::ComputePipelineCreateInfo::builder()
+        let create_info = vk::ComputePipelineCreateInfo::default()
             .stage(stage)
-            .layout(layout)
-            .build();
+            .layout(layout);
 
         let pipelines = device
             .create_compute_pipelines(vk::PipelineCache::null(), &[create_info], None)
@@ -141,10 +139,9 @@ impl ComputePipelineBuilder {
             (layout, false)
         } else {
             // Create layout from set layouts and push constants
-            let layout_info = vk::PipelineLayoutCreateInfo::builder()
+            let layout_info = vk::PipelineLayoutCreateInfo::default()
                 .set_layouts(&self.set_layouts)
-                .push_constant_ranges(&self.push_constant_ranges)
-                .build();
+                .push_constant_ranges(&self.push_constant_ranges);
 
             let layout = self
                 .device
@@ -155,16 +152,14 @@ impl ComputePipelineBuilder {
             (layout, true)
         };
 
-        let stage = vk::PipelineShaderStageCreateInfo::builder()
+        let stage = vk::PipelineShaderStageCreateInfo::default()
             .stage(vk::ShaderStageFlags::COMPUTE)
             .module(shader_module)
-            .name(&entry_point)
-            .build();
+            .name(&entry_point);
 
-        let create_info = vk::ComputePipelineCreateInfo::builder()
+        let create_info = vk::ComputePipelineCreateInfo::default()
             .stage(stage)
-            .layout(layout)
-            .build();
+            .layout(layout);
 
         let pipelines = self
             .device

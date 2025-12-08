@@ -57,38 +57,40 @@ impl LightCullingPipeline {
         // Create descriptor set layout
         let bindings = [
             // Binding 0: Light buffer (SSBO)
-            vk::DescriptorSetLayoutBinding::builder()
-                .binding(0)
-                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
-                .descriptor_count(1)
-                .stage_flags(vk::ShaderStageFlags::COMPUTE)
-                .build(),
+            vk::DescriptorSetLayoutBinding {
+                binding: 0,
+                descriptor_type: vk::DescriptorType::STORAGE_BUFFER,
+                descriptor_count: 1,
+                stage_flags: vk::ShaderStageFlags::COMPUTE,
+                ..Default::default()
+            },
             // Binding 1: Depth buffer (sampler)
-            vk::DescriptorSetLayoutBinding::builder()
-                .binding(1)
-                .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-                .descriptor_count(1)
-                .stage_flags(vk::ShaderStageFlags::COMPUTE)
-                .build(),
+            vk::DescriptorSetLayoutBinding {
+                binding: 1,
+                descriptor_type: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+                descriptor_count: 1,
+                stage_flags: vk::ShaderStageFlags::COMPUTE,
+                ..Default::default()
+            },
             // Binding 2: Tile light indices (SSBO, writeonly)
-            vk::DescriptorSetLayoutBinding::builder()
-                .binding(2)
-                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
-                .descriptor_count(1)
-                .stage_flags(vk::ShaderStageFlags::COMPUTE)
-                .build(),
+            vk::DescriptorSetLayoutBinding {
+                binding: 2,
+                descriptor_type: vk::DescriptorType::STORAGE_BUFFER,
+                descriptor_count: 1,
+                stage_flags: vk::ShaderStageFlags::COMPUTE,
+                ..Default::default()
+            },
             // Binding 3: Camera data (UBO)
-            vk::DescriptorSetLayoutBinding::builder()
-                .binding(3)
-                .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
-                .descriptor_count(1)
-                .stage_flags(vk::ShaderStageFlags::COMPUTE)
-                .build(),
+            vk::DescriptorSetLayoutBinding {
+                binding: 3,
+                descriptor_type: vk::DescriptorType::UNIFORM_BUFFER,
+                descriptor_count: 1,
+                stage_flags: vk::ShaderStageFlags::COMPUTE,
+                ..Default::default()
+            },
         ];
 
-        let layout_info = vk::DescriptorSetLayoutCreateInfo::builder()
-            .bindings(&bindings)
-            .build();
+        let layout_info = vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings);
 
         let descriptor_set_layout = device
             .create_descriptor_set_layout(&layout_info, None)
@@ -112,22 +114,18 @@ impl LightCullingPipeline {
             },
         ];
 
-        let pool_info = vk::DescriptorPoolCreateInfo::builder()
+        let pool_info = vk::DescriptorPoolCreateInfo::default()
             .pool_sizes(&pool_sizes)
-            .max_sets(1)
-            .build();
+            .max_sets(1);
 
         let descriptor_pool = device
             .create_descriptor_pool(&pool_info, None)
-            .map_err(|e| {
-                AshError::VulkanError(format!("Failed to create descriptor pool: {e}"))
-            })?;
+            .map_err(|e| AshError::VulkanError(format!("Failed to create descriptor pool: {e}")))?;
 
         // Allocate descriptor set
-        let alloc_info = vk::DescriptorSetAllocateInfo::builder()
+        let alloc_info = vk::DescriptorSetAllocateInfo::default()
             .descriptor_pool(descriptor_pool)
-            .set_layouts(std::slice::from_ref(&descriptor_set_layout))
-            .build();
+            .set_layouts(std::slice::from_ref(&descriptor_set_layout));
 
         let descriptor_sets = device.allocate_descriptor_sets(&alloc_info).map_err(|e| {
             AshError::VulkanError(format!("Failed to allocate descriptor sets: {e}"))
@@ -192,40 +190,36 @@ impl LightCullingPipeline {
         };
 
         let writes = [
-            vk::WriteDescriptorSet::builder()
+            vk::WriteDescriptorSet::default()
                 .dst_set(descriptor_set)
                 .dst_binding(0)
                 .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
-                .buffer_info(std::slice::from_ref(&light_buffer_info))
-                .build(),
-            vk::WriteDescriptorSet::builder()
+                .buffer_info(std::slice::from_ref(&light_buffer_info)),
+            vk::WriteDescriptorSet::default()
                 .dst_set(descriptor_set)
                 .dst_binding(1)
                 .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-                .image_info(std::slice::from_ref(&depth_image_info))
-                .build(),
-            vk::WriteDescriptorSet::builder()
+                .image_info(std::slice::from_ref(&depth_image_info)),
+            vk::WriteDescriptorSet::default()
                 .dst_set(descriptor_set)
                 .dst_binding(2)
                 .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
-                .buffer_info(std::slice::from_ref(&tile_buffer_info))
-                .build(),
-            vk::WriteDescriptorSet::builder()
+                .buffer_info(std::slice::from_ref(&tile_buffer_info)),
+            vk::WriteDescriptorSet::default()
                 .dst_set(descriptor_set)
                 .dst_binding(3)
                 .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
-                .buffer_info(std::slice::from_ref(&camera_buffer_info))
-                .build(),
+                .buffer_info(std::slice::from_ref(&camera_buffer_info)),
         ];
 
         device.update_descriptor_sets(&writes, &[]);
 
         // Create push constant range
-        let push_constant_range = vk::PushConstantRange::builder()
-            .stage_flags(vk::ShaderStageFlags::COMPUTE)
-            .offset(0)
-            .size(std::mem::size_of::<LightCullingPushConstants>() as u32)
-            .build();
+        let push_constant_range = vk::PushConstantRange {
+            stage_flags: vk::ShaderStageFlags::COMPUTE,
+            offset: 0,
+            size: std::mem::size_of::<LightCullingPushConstants>() as u32,
+        };
 
         // Create compute pipeline
         let pipeline = ComputePipeline::builder(Arc::clone(&device))
@@ -262,11 +256,10 @@ impl LightCullingPipeline {
         usage: vk::BufferUsageFlags,
         properties: vk::MemoryPropertyFlags,
     ) -> Result<(vk::Buffer, vk::DeviceMemory)> {
-        let buffer_info = vk::BufferCreateInfo::builder()
+        let buffer_info = vk::BufferCreateInfo::default()
             .size(size)
             .usage(usage)
-            .sharing_mode(vk::SharingMode::EXCLUSIVE)
-            .build();
+            .sharing_mode(vk::SharingMode::EXCLUSIVE);
 
         let buffer = device
             .create_buffer(&buffer_info, None)
@@ -282,10 +275,9 @@ impl LightCullingPipeline {
         )
         .ok_or_else(|| AshError::VulkanError("Failed to find suitable memory type".into()))?;
 
-        let alloc_info = vk::MemoryAllocateInfo::builder()
+        let alloc_info = vk::MemoryAllocateInfo::default()
             .allocation_size(mem_requirements.size)
-            .memory_type_index(memory_type_index)
-            .build();
+            .memory_type_index(memory_type_index);
 
         let memory = device
             .allocate_memory(&alloc_info, None)

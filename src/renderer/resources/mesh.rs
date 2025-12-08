@@ -520,11 +520,10 @@ impl Mesh {
         let (staging_buffer, mut staging_alloc) = allocator
             .vma
             .create_buffer(
-                &vk::BufferCreateInfo::builder()
+                &vk::BufferCreateInfo::default()
                     .size(vertex_size)
                     .usage(vk::BufferUsageFlags::TRANSFER_SRC)
-                    .sharing_mode(vk::SharingMode::EXCLUSIVE)
-                    .build(),
+                    .sharing_mode(vk::SharingMode::EXCLUSIVE),
                 &vk_mem::AllocationCreateInfo {
                     usage: vk_mem::MemoryUsage::AutoPreferHost,
                     flags: vk_mem::AllocationCreateFlags::HOST_ACCESS_SEQUENTIAL_WRITE,
@@ -550,11 +549,10 @@ impl Mesh {
         let (vertex_buffer, vertex_alloc) = allocator
             .vma
             .create_buffer(
-                &vk::BufferCreateInfo::builder()
+                &vk::BufferCreateInfo::default()
                     .size(vertex_size)
                     .usage(vk::BufferUsageFlags::VERTEX_BUFFER | vk::BufferUsageFlags::TRANSFER_DST)
-                    .sharing_mode(vk::SharingMode::EXCLUSIVE)
-                    .build(),
+                    .sharing_mode(vk::SharingMode::EXCLUSIVE),
                 &vk_mem::AllocationCreateInfo {
                     usage: vk_mem::MemoryUsage::AutoPreferDevice,
                     ..Default::default()
@@ -594,11 +592,10 @@ impl Mesh {
             let (staging_buffer, mut staging_alloc) = allocator
                 .vma
                 .create_buffer(
-                    &vk::BufferCreateInfo::builder()
+                    &vk::BufferCreateInfo::default()
                         .size(index_size)
                         .usage(vk::BufferUsageFlags::TRANSFER_SRC)
-                        .sharing_mode(vk::SharingMode::EXCLUSIVE)
-                        .build(),
+                        .sharing_mode(vk::SharingMode::EXCLUSIVE),
                     &vk_mem::AllocationCreateInfo {
                         usage: vk_mem::MemoryUsage::AutoPreferHost,
                         flags: vk_mem::AllocationCreateFlags::HOST_ACCESS_SEQUENTIAL_WRITE,
@@ -622,13 +619,12 @@ impl Mesh {
             let (index_buffer, index_alloc) = allocator
                 .vma
                 .create_buffer(
-                    &vk::BufferCreateInfo::builder()
+                    &vk::BufferCreateInfo::default()
                         .size(index_size)
                         .usage(
                             vk::BufferUsageFlags::INDEX_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
                         )
-                        .sharing_mode(vk::SharingMode::EXCLUSIVE)
-                        .build(),
+                        .sharing_mode(vk::SharingMode::EXCLUSIVE),
                     &vk_mem::AllocationCreateInfo {
                         usage: vk_mem::MemoryUsage::AutoPreferDevice,
                         ..Default::default()
@@ -794,7 +790,7 @@ impl Mesh {
         dst: vk::Buffer,
         size: u64,
     ) -> crate::Result<()> {
-        let alloc_info = vk::CommandBufferAllocateInfo::builder()
+        let alloc_info = vk::CommandBufferAllocateInfo::default()
             .command_pool(command_pool)
             .level(vk::CommandBufferLevel::PRIMARY)
             .command_buffer_count(1);
@@ -804,23 +800,21 @@ impl Mesh {
 
         device.begin_command_buffer(
             command_buffer,
-            &vk::CommandBufferBeginInfo::builder()
+            &vk::CommandBufferBeginInfo::default()
                 .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
         )?;
 
-        let copy_region = vk::BufferCopy::builder()
-            .src_offset(0)
-            .dst_offset(0)
-            .size(size)
-            .build();
+        let copy_region = vk::BufferCopy {
+            src_offset: 0,
+            dst_offset: 0,
+            size,
+        };
         device.cmd_copy_buffer(command_buffer, src, dst, &[copy_region]);
 
         device.end_command_buffer(command_buffer)?;
 
         let submit_buffers = [command_buffer];
-        let submit_info = vk::SubmitInfo::builder()
-            .command_buffers(&submit_buffers)
-            .build();
+        let submit_info = vk::SubmitInfo::default().command_buffers(&submit_buffers);
 
         device.queue_submit(queue, &[submit_info], vk::Fence::null())?;
         device.queue_wait_idle(queue)?;

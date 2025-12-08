@@ -11,7 +11,7 @@ pub struct PipelineCache {
 
 impl PipelineCache {
     pub fn new(device: Arc<Device>) -> Result<Self> {
-        let create_info = vk::PipelineCacheCreateInfo::builder().build();
+        let create_info = vk::PipelineCacheCreateInfo::default();
 
         let cache = unsafe {
             device
@@ -37,9 +37,7 @@ impl PipelineCache {
         unsafe {
             self.device
                 .merge_pipeline_caches(self.cache, caches)
-                .map_err(|e| {
-                    AshError::VulkanError(format!("Failed to merge pipeline caches: {e}"))
-                })
+                .map_err(|e| AshError::VulkanError(format!("Failed to merge pipeline caches: {e}")))
         }
     }
 

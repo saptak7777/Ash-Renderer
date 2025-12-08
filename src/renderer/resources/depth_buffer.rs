@@ -50,12 +50,10 @@ impl DepthBuffer {
     ) -> crate::Result<Self> {
         let format = vk::Format::D32_SFLOAT;
 
-        log::info!(
-            "Creating depth buffer ({width}x{height}, samples: {sample_count:?})"
-        );
+        log::info!("Creating depth buffer ({width}x{height}, samples: {sample_count:?})");
 
         // Create depth image
-        let image_create_info = vk::ImageCreateInfo::builder()
+        let image_create_info = vk::ImageCreateInfo::default()
             .image_type(vk::ImageType::TYPE_2D)
             .format(format)
             .extent(vk::Extent3D {
@@ -75,7 +73,7 @@ impl DepthBuffer {
             allocator.create_image(&image_create_info, vk_mem::MemoryUsage::AutoPreferDevice)?;
 
         // Create image view
-        let view_create_info = vk::ImageViewCreateInfo::builder()
+        let view_create_info = vk::ImageViewCreateInfo::default()
             .image(image)
             .view_type(vk::ImageViewType::TYPE_2D)
             .format(format)

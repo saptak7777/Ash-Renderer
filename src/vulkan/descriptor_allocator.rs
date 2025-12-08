@@ -89,7 +89,7 @@ impl DescriptorAllocator {
     }
 
     fn create_pool(&mut self) -> Result<&mut FramePool> {
-        let pool_info = vk::DescriptorPoolCreateInfo::builder()
+        let pool_info = vk::DescriptorPoolCreateInfo::default()
             .max_sets(self.sets_per_pool)
             .pool_sizes(&self.pool_sizes);
 
@@ -143,7 +143,7 @@ impl DescriptorAllocator {
     pub fn allocate_set(
         &mut self,
         layout: &vk::DescriptorSetLayout,
-        bindings: &[vk::DescriptorSetLayoutBinding],
+        bindings: &[vk::DescriptorSetLayoutBinding<'static>],
     ) -> Result<DescriptorSet> {
         let (set, pool) = self.allocate_raw_set(layout)?;
         self.descriptor_set_cache.insert(set, pool);
@@ -160,7 +160,7 @@ impl DescriptorAllocator {
             }
 
             let layouts = [*layout];
-            let alloc_info = vk::DescriptorSetAllocateInfo::builder()
+            let alloc_info = vk::DescriptorSetAllocateInfo::default()
                 .descriptor_pool(pool.pool)
                 .set_layouts(&layouts);
 
@@ -184,7 +184,7 @@ impl DescriptorAllocator {
         self.create_pool()?;
         if let Some(pool) = self.frame_pools.get_mut(pool_index) {
             let layouts = [*layout];
-            let alloc_info = vk::DescriptorSetAllocateInfo::builder()
+            let alloc_info = vk::DescriptorSetAllocateInfo::default()
                 .descriptor_pool(pool.pool)
                 .set_layouts(&layouts);
 
@@ -210,7 +210,7 @@ impl DescriptorAllocator {
     pub fn allocate_bindless_set(
         &mut self,
         layout: vk::DescriptorSetLayout,
-        bindings: &[vk::DescriptorSetLayoutBinding],
+        bindings: &[vk::DescriptorSetLayoutBinding<'static>],
         max_count: u32,
     ) -> Result<DescriptorSet> {
         if self.bindless_pool.is_none() {
@@ -222,11 +222,11 @@ impl DescriptorAllocator {
             .ok_or_else(|| AshError::VulkanError("Bindless pool not initialized".into()))?;
 
         let counts = [max_count];
-        let mut variable_info = vk::DescriptorSetVariableDescriptorCountAllocateInfo::builder()
+        let mut variable_info = vk::DescriptorSetVariableDescriptorCountAllocateInfo::default()
             .descriptor_counts(&counts);
 
         let layouts = [layout];
-        let mut alloc_info = vk::DescriptorSetAllocateInfo::builder()
+        let mut alloc_info = vk::DescriptorSetAllocateInfo::default()
             .descriptor_pool(pool)
             .set_layouts(&layouts);
         alloc_info = alloc_info.push_next(&mut variable_info);
@@ -265,7 +265,7 @@ impl DescriptorAllocator {
             },
         ];
 
-        let pool_info = vk::DescriptorPoolCreateInfo::builder()
+        let pool_info = vk::DescriptorPoolCreateInfo::default()
             .max_sets(1)
             .pool_sizes(&pool_sizes)
             .flags(

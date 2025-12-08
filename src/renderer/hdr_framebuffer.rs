@@ -35,7 +35,7 @@ impl HdrFramebuffer {
 
         log::info!("Creating HDR framebuffer ({width}x{height}, R16G16B16A16_SFLOAT)");
 
-        let image_create_info = vk::ImageCreateInfo::builder()
+        let image_create_info = vk::ImageCreateInfo::default()
             .image_type(vk::ImageType::TYPE_2D)
             .format(format)
             .extent(vk::Extent3D {
@@ -58,7 +58,7 @@ impl HdrFramebuffer {
         let (image, allocation) =
             allocator.create_image(&image_create_info, vk_mem::MemoryUsage::AutoPreferDevice)?;
 
-        let view_create_info = vk::ImageViewCreateInfo::builder()
+        let view_create_info = vk::ImageViewCreateInfo::default()
             .image(image)
             .view_type(vk::ImageViewType::TYPE_2D)
             .format(format)
@@ -75,7 +75,7 @@ impl HdrFramebuffer {
             .map_err(|e| AshError::VulkanError(format!("HDR view creation failed: {e}")))?;
 
         // Create sampler for reading HDR buffer in post-processing
-        let sampler_create_info = vk::SamplerCreateInfo::builder()
+        let sampler_create_info = vk::SamplerCreateInfo::default()
             .mag_filter(vk::Filter::LINEAR)
             .min_filter(vk::Filter::LINEAR)
             .address_mode_u(vk::SamplerAddressMode::CLAMP_TO_EDGE)

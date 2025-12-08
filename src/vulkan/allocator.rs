@@ -50,20 +50,17 @@ impl Allocator {
 
         self.vma
             .create_buffer(
-                &vk::BufferCreateInfo::builder()
+                &vk::BufferCreateInfo::default()
                     .size(size)
                     .usage(usage)
-                    .sharing_mode(vk::SharingMode::EXCLUSIVE)
-                    .build(),
+                    .sharing_mode(vk::SharingMode::EXCLUSIVE),
                 &vk_mem::AllocationCreateInfo {
                     usage: memory_usage,
                     flags,
                     ..Default::default()
                 },
             )
-            .map_err(|e| {
-                crate::AshError::VulkanError(format!("Buffer creation failed: {e:?}"))
-            })
+            .map_err(|e| crate::AshError::VulkanError(format!("Buffer creation failed: {e:?}")))
     }
 
     /// Creates an image with the specified parameters.
@@ -85,9 +82,7 @@ impl Allocator {
                     ..Default::default()
                 },
             )
-            .map_err(|e| {
-                crate::AshError::VulkanError(format!("Image creation failed: {e:?}"))
-            })
+            .map_err(|e| crate::AshError::VulkanError(format!("Image creation failed: {e:?}")))
     }
 
     /// Destroys a previously allocated buffer.

@@ -17,7 +17,7 @@ impl Framebuffer {
         attachments: &[vk::ImageView],
         extent: vk::Extent2D,
     ) -> Result<Self> {
-        let info = vk::FramebufferCreateInfo::builder()
+        let info = vk::FramebufferCreateInfo::default()
             .render_pass(render_pass)
             .attachments(attachments)
             .width(extent.width)

@@ -1,4 +1,4 @@
-use ash::{vk, Device};
+use ash::{khr::swapchain, vk, Device};
 use std::collections::HashSet;
 use std::ffi::CStr;
 use std::sync::Arc;
@@ -66,19 +66,16 @@ impl VulkanDevice {
             let queue_infos: Vec<_> = unique_families
                 .iter()
                 .map(|family| {
-                    vk::DeviceQueueCreateInfo::builder()
+                    vk::DeviceQueueCreateInfo::default()
                         .queue_family_index(*family)
                         .queue_priorities(&queue_priorities)
-                        .build()
                 })
                 .collect();
 
-            let device_extension_names = [ash::extensions::khr::Swapchain::name().as_ptr()];
-            let device_features = vk::PhysicalDeviceFeatures::builder()
-                .sampler_anisotropy(true)
-                .build();
+            let device_extension_names = [swapchain::NAME.as_ptr()];
+            let device_features = vk::PhysicalDeviceFeatures::default().sampler_anisotropy(true);
 
-            let device_create_info = vk::DeviceCreateInfo::builder()
+            let device_create_info = vk::DeviceCreateInfo::default()
                 .queue_create_infos(&queue_infos)
                 .enabled_extension_names(&device_extension_names)
                 .enabled_features(&device_features);

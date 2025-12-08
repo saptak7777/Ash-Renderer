@@ -67,14 +67,16 @@ impl PipelineLayoutBuilder {
     }
 
     pub fn build(self) -> Result<PipelineLayout> {
-        let info = vk::PipelineLayoutCreateInfo::builder()
+        let info = vk::PipelineLayoutCreateInfo::default()
             .set_layouts(&self.set_layouts)
             .push_constant_ranges(&self.push_constants);
 
         let layout = unsafe {
-            self.device.create_pipeline_layout(&info, None).map_err(|e| {
-                AshError::VulkanError(format!("Failed to create pipeline layout: {e}"))
-            })?
+            self.device
+                .create_pipeline_layout(&info, None)
+                .map_err(|e| {
+                    AshError::VulkanError(format!("Failed to create pipeline layout: {e}"))
+                })?
         };
 
         Ok(PipelineLayout {

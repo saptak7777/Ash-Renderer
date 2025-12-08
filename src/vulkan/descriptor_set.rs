@@ -8,7 +8,7 @@ pub struct DescriptorSet {
     device: Arc<ash::Device>,
     set: vk::DescriptorSet,
     layout: vk::DescriptorSetLayout,
-    bindings: Vec<vk::DescriptorSetLayoutBinding>,
+    bindings: Vec<vk::DescriptorSetLayoutBinding<'static>>,
 }
 
 impl DescriptorSet {
@@ -16,7 +16,7 @@ impl DescriptorSet {
         device: Arc<ash::Device>,
         set: vk::DescriptorSet,
         layout: vk::DescriptorSetLayout,
-        bindings: &[vk::DescriptorSetLayoutBinding],
+        bindings: &[vk::DescriptorSetLayoutBinding<'static>],
     ) -> Result<Self> {
         Ok(Self {
             device,
@@ -34,7 +34,7 @@ impl DescriptorSet {
         self.layout
     }
 
-    pub fn bindings(&self) -> &[vk::DescriptorSetLayoutBinding] {
+    pub fn bindings(&self) -> &[vk::DescriptorSetLayoutBinding<'static>] {
         &self.bindings
     }
 
@@ -52,14 +52,14 @@ impl DescriptorSet {
             range,
         };
 
-        let write = vk::WriteDescriptorSet::builder()
+        let write = vk::WriteDescriptorSet::default()
             .dst_set(self.set)
             .dst_binding(binding)
             .descriptor_type(descriptor_type)
             .buffer_info(std::slice::from_ref(&buffer_info));
 
         unsafe {
-            self.device.update_descriptor_sets(&[write.build()], &[]);
+            self.device.update_descriptor_sets(&[write], &[]);
         }
 
         Ok(())
@@ -80,7 +80,7 @@ impl DescriptorSet {
             range,
         };
 
-        let write = vk::WriteDescriptorSet::builder()
+        let write = vk::WriteDescriptorSet::default()
             .dst_set(self.set)
             .dst_binding(binding)
             .dst_array_element(array_index)
@@ -88,7 +88,7 @@ impl DescriptorSet {
             .buffer_info(std::slice::from_ref(&buffer_info));
 
         unsafe {
-            self.device.update_descriptor_sets(&[write.build()], &[]);
+            self.device.update_descriptor_sets(&[write], &[]);
         }
 
         Ok(())
@@ -108,14 +108,14 @@ impl DescriptorSet {
             image_layout,
         };
 
-        let write = vk::WriteDescriptorSet::builder()
+        let write = vk::WriteDescriptorSet::default()
             .dst_set(self.set)
             .dst_binding(binding)
             .descriptor_type(descriptor_type)
             .image_info(std::slice::from_ref(&image_info));
 
         unsafe {
-            self.device.update_descriptor_sets(&[write.build()], &[]);
+            self.device.update_descriptor_sets(&[write], &[]);
         }
 
         Ok(())
@@ -128,7 +128,7 @@ impl DescriptorSet {
         info: vk::DescriptorImageInfo,
         descriptor_type: vk::DescriptorType,
     ) -> Result<()> {
-        let write = vk::WriteDescriptorSet::builder()
+        let write = vk::WriteDescriptorSet::default()
             .dst_set(self.set)
             .dst_binding(binding)
             .dst_array_element(array_index)
@@ -136,7 +136,7 @@ impl DescriptorSet {
             .image_info(std::slice::from_ref(&info));
 
         unsafe {
-            self.device.update_descriptor_sets(&[write.build()], &[]);
+            self.device.update_descriptor_sets(&[write], &[]);
         }
 
         Ok(())

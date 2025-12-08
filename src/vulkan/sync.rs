@@ -36,9 +36,7 @@ impl FrameSync {
                 })?
         };
 
-        let fence_info = vk::FenceCreateInfo::builder()
-            .flags(vk::FenceCreateFlags::SIGNALED)
-            .build();
+        let fence_info = vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED);
 
         let in_flight = unsafe {
             device

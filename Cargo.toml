@@ -1,6 +1,6 @@
 [package]
 name = "ash_renderer"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 authors = ["Saptak Santra"]
 license = "Apache-2.0"
@@ -13,8 +13,8 @@ readme = "README.md"
 
 [dependencies]
 # Vulkan
-ash = "0.37"
-vk-mem = "0.3"
+ash = "0.38"
+vk-mem = "0.5"
 
 # Shader compilation
 shaderc = { version = "0.8", optional = true }

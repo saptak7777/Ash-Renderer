@@ -179,11 +179,10 @@ impl UniformBuffer {
         let (buffer, mut allocation) = allocator
             .vma
             .create_buffer(
-                &vk::BufferCreateInfo::builder()
+                &vk::BufferCreateInfo::default()
                     .size(size)
                     .usage(vk::BufferUsageFlags::UNIFORM_BUFFER)
-                    .sharing_mode(vk::SharingMode::EXCLUSIVE)
-                    .build(),
+                    .sharing_mode(vk::SharingMode::EXCLUSIVE),
                 &vk_mem::AllocationCreateInfo {
                     usage: vk_mem::MemoryUsage::AutoPreferHost,
                     flags: vk_mem::AllocationCreateFlags::HOST_ACCESS_SEQUENTIAL_WRITE,
@@ -209,7 +208,7 @@ impl UniformBuffer {
 
             allocator
                 .vma
-                .flush_allocation(&allocation, 0, size as usize)
+                .flush_allocation(&allocation, 0, size)
                 .map_err(|e| {
                     crate::AshError::VulkanError(format!("Failed to flush uniform buffer: {e}"))
                 })?;
@@ -250,7 +249,7 @@ impl UniformBuffer {
 
         self.allocator
             .vma
-            .flush_allocation(&self.allocation, 0, size as usize)
+            .flush_allocation(&self.allocation, 0, size)
             .map_err(|e| {
                 crate::AshError::VulkanError(format!("Failed to flush uniform buffer: {e}"))
             })?;
@@ -324,11 +323,10 @@ impl MaterialBuffer {
         let (buffer, mut allocation) = allocator
             .vma
             .create_buffer(
-                &vk::BufferCreateInfo::builder()
+                &vk::BufferCreateInfo::default()
                     .size(size)
                     .usage(vk::BufferUsageFlags::UNIFORM_BUFFER)
-                    .sharing_mode(vk::SharingMode::EXCLUSIVE)
-                    .build(),
+                    .sharing_mode(vk::SharingMode::EXCLUSIVE),
                 &vk_mem::AllocationCreateInfo {
                     usage: vk_mem::MemoryUsage::AutoPreferHost,
                     flags: vk_mem::AllocationCreateFlags::HOST_ACCESS_SEQUENTIAL_WRITE,
@@ -354,7 +352,7 @@ impl MaterialBuffer {
 
             allocator
                 .vma
-                .flush_allocation(&allocation, 0, size as usize)
+                .flush_allocation(&allocation, 0, size)
                 .map_err(|e| {
                     crate::AshError::VulkanError(format!("Failed to flush material buffer: {e}"))
                 })?;
@@ -395,7 +393,7 @@ impl MaterialBuffer {
 
         self.allocator
             .vma
-            .flush_allocation(&self.allocation, 0, size as usize)
+            .flush_allocation(&self.allocation, 0, size)
             .map_err(|e| {
                 crate::AshError::VulkanError(format!("Failed to flush material buffer: {e}"))
             })?;

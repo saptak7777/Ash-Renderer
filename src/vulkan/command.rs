@@ -16,7 +16,7 @@ pub struct CommandPool {
 
 impl CommandPool {
     pub fn new(device: Arc<ash::Device>, queue_family_index: u32) -> Result<Self> {
-        let pool_info = vk::CommandPoolCreateInfo::builder()
+        let pool_info = vk::CommandPoolCreateInfo::default()
             .queue_family_index(queue_family_index)
             .flags(
                 vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER
@@ -24,9 +24,9 @@ impl CommandPool {
             );
 
         let pool = unsafe {
-            device.create_command_pool(&pool_info, None).map_err(|e| {
-                AshError::VulkanError(format!("Failed to create command pool: {e}"))
-            })?
+            device
+                .create_command_pool(&pool_info, None)
+                .map_err(|e| AshError::VulkanError(format!("Failed to create command pool: {e}")))?
         };
 
         Ok(Self {
@@ -44,7 +44,7 @@ impl CommandPool {
             return Ok(Vec::new());
         }
 
-        let alloc_info = vk::CommandBufferAllocateInfo::builder()
+        let alloc_info = vk::CommandBufferAllocateInfo::default()
             .command_pool(self.pool)
             .level(vk::CommandBufferLevel::PRIMARY)
             .command_buffer_count(count);
@@ -52,9 +52,9 @@ impl CommandPool {
         let buffers = unsafe {
             self.device
                 .allocate_command_buffers(&alloc_info)
-                .map_err(|e| AshError::VulkanError(format!(
-                    "Failed to allocate command buffers: {e}"
-                )))?
+                .map_err(|e| {
+                    AshError::VulkanError(format!("Failed to allocate command buffers: {e}"))
+                })?
         };
 
         if self.manage_buffers {
@@ -69,7 +69,7 @@ impl CommandPool {
             return Ok(Vec::new());
         }
 
-        let alloc_info = vk::CommandBufferAllocateInfo::builder()
+        let alloc_info = vk::CommandBufferAllocateInfo::default()
             .command_pool(self.pool)
             .level(vk::CommandBufferLevel::SECONDARY)
             .command_buffer_count(count);
@@ -77,9 +77,11 @@ impl CommandPool {
         let buffers = unsafe {
             self.device
                 .allocate_command_buffers(&alloc_info)
-                .map_err(|e| AshError::VulkanError(format!(
-                    "Failed to allocate secondary command buffers: {e}"
-                )))?
+                .map_err(|e| {
+                    AshError::VulkanError(format!(
+                        "Failed to allocate secondary command buffers: {e}"
+                    ))
+                })?
         };
 
         Ok(buffers)
@@ -90,13 +92,13 @@ impl CommandPool {
         command_buffer: vk::CommandBuffer,
         flags: vk::CommandBufferUsageFlags,
     ) -> Result<()> {
-        let begin_info = vk::CommandBufferBeginInfo::builder().flags(flags);
+        let begin_info = vk::CommandBufferBeginInfo::default().flags(flags);
         unsafe {
             self.device
                 .begin_command_buffer(command_buffer, &begin_info)
-                .map_err(|e| AshError::VulkanError(format!(
-                    "Failed to begin command buffer: {e}"
-                )))?
+                .map_err(|e| {
+                    AshError::VulkanError(format!("Failed to begin command buffer: {e}"))
+                })?
         }
         Ok(())
     }
@@ -105,9 +107,7 @@ impl CommandPool {
         unsafe {
             self.device
                 .end_command_buffer(command_buffer)
-                .map_err(|e| AshError::VulkanError(format!(
-                    "Failed to end command buffer: {e}"
-                )))?
+                .map_err(|e| AshError::VulkanError(format!("Failed to end command buffer: {e}")))?
         }
         Ok(())
     }
@@ -116,9 +116,7 @@ impl CommandPool {
         unsafe {
             self.device
                 .reset_command_pool(self.pool, flags)
-                .map_err(|e| AshError::VulkanError(format!(
-                    "Failed to reset command pool: {e}"
-                )))?;
+                .map_err(|e| AshError::VulkanError(format!("Failed to reset command pool: {e}")))?;
         }
 
         if flags.contains(vk::CommandPoolResetFlags::RELEASE_RESOURCES) {

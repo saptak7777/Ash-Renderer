@@ -66,14 +66,12 @@ impl ShadowMap {
         config: ShadowConfig,
     ) -> Result<Self> {
         let resolution = config.resolution;
-        log::info!(
-            "[ShadowMap] Creating {resolution}x{resolution} shadow map"
-        );
+        log::info!("[ShadowMap] Creating {resolution}x{resolution} shadow map");
 
         // Create depth image
         let depth_format = vk::Format::D32_SFLOAT;
 
-        let image_info = vk::ImageCreateInfo::builder()
+        let image_info = vk::ImageCreateInfo::default()
             .image_type(vk::ImageType::TYPE_2D)
             .extent(vk::Extent3D {
                 width: resolution,
@@ -102,7 +100,7 @@ impl ShadowMap {
         )
         .ok_or_else(|| AshError::VulkanError("No suitable memory type".to_string()))?;
 
-        let alloc_info = vk::MemoryAllocateInfo::builder()
+        let alloc_info = vk::MemoryAllocateInfo::default()
             .allocation_size(mem_requirements.size)
             .memory_type_index(memory_type_index);
 
@@ -115,7 +113,7 @@ impl ShadowMap {
             .map_err(|e| AshError::VulkanError(format!("Bind shadow memory failed: {e}")))?;
 
         // Create depth image view
-        let view_info = vk::ImageViewCreateInfo::builder()
+        let view_info = vk::ImageViewCreateInfo::default()
             .image(depth_image)
             .view_type(vk::ImageViewType::TYPE_2D)
             .format(depth_format)
@@ -132,41 +130,42 @@ impl ShadowMap {
             .map_err(|e| AshError::VulkanError(format!("Shadow image view failed: {e}")))?;
 
         // Create render pass (depth-only)
-        let depth_attachment = vk::AttachmentDescription::builder()
-            .format(depth_format)
-            .samples(vk::SampleCountFlags::TYPE_1)
-            .load_op(vk::AttachmentLoadOp::CLEAR)
-            .store_op(vk::AttachmentStoreOp::STORE)
-            .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
-            .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
-            .initial_layout(vk::ImageLayout::UNDEFINED)
-            .final_layout(vk::ImageLayout::DEPTH_STENCIL_READ_ONLY_OPTIMAL)
-            .build();
+        let depth_attachment = vk::AttachmentDescription {
+            format: depth_format,
+            samples: vk::SampleCountFlags::TYPE_1,
+            load_op: vk::AttachmentLoadOp::CLEAR,
+            store_op: vk::AttachmentStoreOp::STORE,
+            stencil_load_op: vk::AttachmentLoadOp::DONT_CARE,
+            stencil_store_op: vk::AttachmentStoreOp::DONT_CARE,
+            initial_layout: vk::ImageLayout::UNDEFINED,
+            final_layout: vk::ImageLayout::DEPTH_STENCIL_READ_ONLY_OPTIMAL,
+            ..Default::default()
+        };
 
-        let depth_ref = vk::AttachmentReference::builder()
-            .attachment(0)
-            .layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
-            .build();
+        let depth_ref = vk::AttachmentReference {
+            attachment: 0,
+            layout: vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+        };
 
-        let subpass = vk::SubpassDescription::builder()
+        let subpass = vk::SubpassDescription::default()
             .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
-            .depth_stencil_attachment(&depth_ref)
-            .build();
+            .depth_stencil_attachment(&depth_ref);
 
-        let dependency = vk::SubpassDependency::builder()
-            .src_subpass(vk::SUBPASS_EXTERNAL)
-            .dst_subpass(0)
-            .src_stage_mask(vk::PipelineStageFlags::FRAGMENT_SHADER)
-            .dst_stage_mask(vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS)
-            .src_access_mask(vk::AccessFlags::SHADER_READ)
-            .dst_access_mask(vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE)
-            .build();
+        let dependency = vk::SubpassDependency {
+            src_subpass: vk::SUBPASS_EXTERNAL,
+            dst_subpass: 0,
+            src_stage_mask: vk::PipelineStageFlags::FRAGMENT_SHADER,
+            dst_stage_mask: vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS,
+            src_access_mask: vk::AccessFlags::SHADER_READ,
+            dst_access_mask: vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
+            ..Default::default()
+        };
 
         let attachments = [depth_attachment];
         let subpasses = [subpass];
         let dependencies = [dependency];
 
-        let render_pass_info = vk::RenderPassCreateInfo::builder()
+        let render_pass_info = vk::RenderPassCreateInfo::default()
             .attachments(&attachments)
             .subpasses(&subpasses)
             .dependencies(&dependencies);
@@ -177,7 +176,7 @@ impl ShadowMap {
 
         // Create framebuffer
         let attachments = [depth_image_view];
-        let framebuffer_info = vk::FramebufferCreateInfo::builder()
+        let framebuffer_info = vk::FramebufferCreateInfo::default()
             .render_pass(render_pass)
             .attachments(&attachments)
             .width(resolution)
@@ -189,7 +188,7 @@ impl ShadowMap {
             .map_err(|e| AshError::VulkanError(format!("Shadow framebuffer failed: {e}")))?;
 
         // Create sampler for shadow map sampling (manual PCF)
-        let sampler_info = vk::SamplerCreateInfo::builder()
+        let sampler_info = vk::SamplerCreateInfo::default()
             .mag_filter(vk::Filter::LINEAR)
             .min_filter(vk::Filter::LINEAR)
             .mipmap_mode(vk::SamplerMipmapMode::NEAREST)

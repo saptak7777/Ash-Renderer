@@ -152,7 +152,7 @@ impl GpuProfiler {
         let mut query_pools = [vk::QueryPool::null(); QUERY_POOL_COUNT];
 
         if timestamps_supported && timestamp_period_ns > 0.0 {
-            let create_info = vk::QueryPoolCreateInfo::builder()
+            let create_info = vk::QueryPoolCreateInfo::default()
                 .query_type(vk::QueryType::TIMESTAMP)
                 .query_count(MAX_TIMESTAMPS);
 
@@ -248,7 +248,6 @@ impl GpuProfiler {
             self.device.get_query_pool_results(
                 pool,
                 0,
-                TimingScope::FrameEnd.index() + 1,
                 &mut timestamps[..=TimingScope::FrameEnd.index() as usize],
                 vk::QueryResultFlags::TYPE_64, // No WAIT flag = non-blocking
             )

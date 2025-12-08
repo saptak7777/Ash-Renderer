@@ -19,7 +19,7 @@ impl DescriptorPool {
         max_sets: u32,
         pool_sizes: &[vk::DescriptorPoolSize],
     ) -> crate::Result<Self> {
-        let pool_info = vk::DescriptorPoolCreateInfo::builder()
+        let pool_info = vk::DescriptorPoolCreateInfo::default()
             .pool_sizes(pool_sizes)
             .max_sets(max_sets)
             .flags(vk::DescriptorPoolCreateFlags::FREE_DESCRIPTOR_SET);
@@ -27,9 +27,7 @@ impl DescriptorPool {
         let pool = device
             .create_descriptor_pool(&pool_info, None)
             .map_err(|e| {
-                crate::AshError::VulkanError(format!(
-                    "Failed to create descriptor pool: {e:?}"
-                ))
+                crate::AshError::VulkanError(format!("Failed to create descriptor pool: {e:?}"))
             })?;
 
         log::info!("Created descriptor pool with max {max_sets} sets");
@@ -69,16 +67,14 @@ impl DescriptorPool {
         &self,
         layouts: &[vk::DescriptorSetLayout],
     ) -> crate::Result<Vec<vk::DescriptorSet>> {
-        let alloc_info = vk::DescriptorSetAllocateInfo::builder()
+        let alloc_info = vk::DescriptorSetAllocateInfo::default()
             .descriptor_pool(self.pool)
             .set_layouts(layouts);
 
         self.device
             .allocate_descriptor_sets(&alloc_info)
             .map_err(|e| {
-                crate::AshError::VulkanError(format!(
-                    "Failed to allocate descriptor sets: {e:?}"
-                ))
+                crate::AshError::VulkanError(format!("Failed to allocate descriptor sets: {e:?}"))
             })
     }
 
@@ -97,9 +93,7 @@ impl DescriptorPool {
         self.device
             .reset_descriptor_pool(self.pool, vk::DescriptorPoolResetFlags::empty())
             .map_err(|e| {
-                crate::AshError::VulkanError(format!(
-                    "Failed to reset descriptor pool: {e:?}"
-                ))
+                crate::AshError::VulkanError(format!("Failed to reset descriptor pool: {e:?}"))
             })
     }
 }
@@ -154,11 +148,8 @@ impl DescriptorSetLayoutBuilder {
     /// # Safety
     ///
     /// The caller must ensure the returned layout is destroyed before the associated device.
-    pub unsafe fn build(
-        self,
-        device: Arc<ash::Device>,
-    ) -> crate::Result<DescriptorSetLayout> {
-        let layout_info = vk::DescriptorSetLayoutCreateInfo::builder().bindings(&self.bindings);
+    pub unsafe fn build(self, device: Arc<ash::Device>) -> crate::Result<DescriptorSetLayout> {
+        let layout_info = vk::DescriptorSetLayoutCreateInfo::default().bindings(&self.bindings);
 
         let layout = device
             .create_descriptor_set_layout(&layout_info, None)

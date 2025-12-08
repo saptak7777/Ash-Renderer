@@ -1584,7 +1584,7 @@ impl Renderer {
                         },
                     }];
 
-                    let render_pass_begin = vk::RenderPassBeginInfo::builder()
+                    let render_pass_begin = vk::RenderPassBeginInfo::default()
                         .render_pass(shadow_map.render_pass)
                         .framebuffer(shadow_map.framebuffer)
                         .render_area(shadow_map.scissor())
@@ -1679,7 +1679,7 @@ impl Renderer {
                 .get(image_index as usize)
                 .ok_or_else(|| AshError::VulkanError("Framebuffer index out of range".into()))?;
 
-            let render_pass_begin = vk::RenderPassBeginInfo::builder()
+            let render_pass_begin = vk::RenderPassBeginInfo::default()
                 .render_pass(render_pass.handle())
                 .framebuffer(framebuffer.handle())
                 .render_area(vk::Rect2D {
@@ -1867,7 +1867,7 @@ impl Renderer {
             let signal_semaphores = [frame_sync.render_finished];
             let command_buffers_submit = [command_buffer];
 
-            let submit_info = vk::SubmitInfo::builder()
+            let submit_info = vk::SubmitInfo::default()
                 .wait_semaphores(&wait_semaphores)
                 .wait_dst_stage_mask(&wait_stages)
                 .command_buffers(&command_buffers_submit)
@@ -1875,7 +1875,7 @@ impl Renderer {
 
             self.command_manager.submit(
                 self.vulkan_device.graphics_queue,
-                &[submit_info.build()],
+                &[submit_info],
                 frame_sync.in_flight,
             )?;
 

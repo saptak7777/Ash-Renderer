@@ -120,10 +120,10 @@ pub struct PipelineBuilder {
     specialization: HashMap<vk::ShaderStageFlags, SpecializationData>,
     vertex_binding_descriptions: Vec<vk::VertexInputBindingDescription>,
     vertex_attribute_descriptions: Vec<vk::VertexInputAttributeDescription>,
-    input_assembly: vk::PipelineInputAssemblyStateCreateInfo,
-    rasterization: vk::PipelineRasterizationStateCreateInfo,
+    input_assembly: vk::PipelineInputAssemblyStateCreateInfo<'static>,
+    rasterization: vk::PipelineRasterizationStateCreateInfo<'static>,
     multisample_cfg: MultisampleConfig,
-    depth_stencil: Option<vk::PipelineDepthStencilStateCreateInfo>,
+    depth_stencil: Option<vk::PipelineDepthStencilStateCreateInfo<'static>>,
     color_blend_attachments: Vec<vk::PipelineColorBlendAttachmentState>,
     dynamic_states: Vec<vk::DynamicState>,
 }
@@ -145,19 +145,17 @@ impl PipelineBuilder {
             specialization: HashMap::new(),
             vertex_binding_descriptions: vec![binding],
             vertex_attribute_descriptions: attributes.to_vec(),
-            input_assembly: vk::PipelineInputAssemblyStateCreateInfo::builder()
+            input_assembly: vk::PipelineInputAssemblyStateCreateInfo::default()
                 .topology(vk::PrimitiveTopology::TRIANGLE_LIST)
-                .primitive_restart_enable(false)
-                .build(),
-            rasterization: vk::PipelineRasterizationStateCreateInfo::builder()
+                .primitive_restart_enable(false),
+            rasterization: vk::PipelineRasterizationStateCreateInfo::default()
                 .depth_clamp_enable(false)
                 .rasterizer_discard_enable(false)
                 .polygon_mode(vk::PolygonMode::FILL)
                 .cull_mode(vk::CullModeFlags::NONE)
                 .front_face(vk::FrontFace::COUNTER_CLOCKWISE)
                 .line_width(1.0)
-                .depth_bias_enable(false)
-                .build(),
+                .depth_bias_enable(false),
             multisample_cfg: MultisampleConfig::default(),
             depth_stencil: None,
             color_blend_attachments: vec![vk::PipelineColorBlendAttachmentState {
@@ -206,15 +204,14 @@ impl PipelineBuilder {
 
     pub fn with_depth_format(mut self, format: vk::Format) -> Self {
         self.depth_stencil = Some(
-            vk::PipelineDepthStencilStateCreateInfo::builder()
+            vk::PipelineDepthStencilStateCreateInfo::default()
                 .depth_test_enable(true)
                 .depth_write_enable(true)
                 .depth_compare_op(vk::CompareOp::LESS)
                 .depth_bounds_test_enable(false)
                 .stencil_test_enable(false)
                 .min_depth_bounds(0.0)
-                .max_depth_bounds(1.0)
-                .build(),
+                .max_depth_bounds(1.0),
         );
 
         // If the format includes stencil, enable read/write masks.
@@ -226,15 +223,15 @@ impl PipelineBuilder {
         ) {
             if let Some(ref mut state) = self.depth_stencil {
                 state.stencil_test_enable = vk::TRUE;
-                let stencil = vk::StencilOpState::builder()
-                    .fail_op(vk::StencilOp::KEEP)
-                    .pass_op(vk::StencilOp::KEEP)
-                    .depth_fail_op(vk::StencilOp::KEEP)
-                    .compare_op(vk::CompareOp::ALWAYS)
-                    .compare_mask(0xff)
-                    .write_mask(0xff)
-                    .reference(0)
-                    .build();
+                let stencil = vk::StencilOpState {
+                    fail_op: vk::StencilOp::KEEP,
+                    pass_op: vk::StencilOp::KEEP,
+                    depth_fail_op: vk::StencilOp::KEEP,
+                    compare_op: vk::CompareOp::ALWAYS,
+                    compare_mask: 0xff,
+                    write_mask: 0xff,
+                    reference: 0,
+                };
                 state.front = stencil;
                 state.back = stencil;
             }
@@ -266,7 +263,7 @@ impl PipelineBuilder {
             unsafe { std::slice::from_raw_parts(code.as_ptr() as *const u32, code.len() / 4) };
 
         let module = unsafe {
-            let create_info = vk::ShaderModuleCreateInfo::builder().code(code_u32);
+            let create_info = vk::ShaderModuleCreateInfo::default().code(code_u32);
             self.device
                 .create_shader_module(&create_info, None)
                 .map_err(|e| {
@@ -336,13 +333,11 @@ impl PipelineBuilder {
         let entry = self.specialization.entry(stage).or_default();
         let offset = entry.data.len() as u32;
         entry.data.extend_from_slice(data);
-        entry.entries.push(
-            vk::SpecializationMapEntry::builder()
-                .constant_id(constant_id)
-                .offset(offset)
-                .size(data.len())
-                .build(),
-        );
+        entry.entries.push(vk::SpecializationMapEntry {
+            constant_id,
+            offset,
+            size: data.len(),
+        });
         self
     }
 
@@ -363,28 +358,35 @@ impl PipelineBuilder {
             ));
         }
 
-        let mut specialization_infos = Vec::new();
-        let stage_infos: Vec<_> = self
+        // Pre-create specialization infos to ensure they have a stable address
+        // when referenced by the pipeline stage create infos.
+        let specialization_infos: Vec<Option<vk::SpecializationInfo>> = self
             .shader_stages
             .iter()
             .map(|stage| {
-                let mut builder = vk::PipelineShaderStageCreateInfo::builder()
+                self.specialization.get(&stage.stage).map(|spec| {
+                    vk::SpecializationInfo::default()
+                        .map_entries(&spec.entries)
+                        .data(&spec.data)
+                })
+            })
+            .collect();
+
+        let stage_infos: Vec<_> = self
+            .shader_stages
+            .iter()
+            .zip(specialization_infos.iter())
+            .map(|(stage, spec_opt)| {
+                let mut info = vk::PipelineShaderStageCreateInfo::default()
                     .module(stage.module)
                     .stage(stage.stage)
                     .name(&stage.entry_point);
 
-                if let Some(spec) = self.specialization.get(&stage.stage) {
-                    specialization_infos.push(
-                        vk::SpecializationInfo::builder()
-                            .map_entries(&spec.entries)
-                            .data(&spec.data)
-                            .build(),
-                    );
-                    let info = specialization_infos.last().unwrap();
-                    builder = builder.specialization_info(info);
+                if let Some(spec) = spec_opt {
+                    info = info.specialization_info(spec);
                 }
 
-                builder.build()
+                info
             })
             .collect();
 
@@ -403,39 +405,32 @@ impl PipelineBuilder {
 
         let viewports = [viewport];
         let scissors = [scissor];
-        let viewport_state = vk::PipelineViewportStateCreateInfo::builder()
+        let viewport_state = vk::PipelineViewportStateCreateInfo::default()
             .viewports(&viewports)
-            .scissors(&scissors)
-            .build();
+            .scissors(&scissors);
 
-        let vertex_input_state = vk::PipelineVertexInputStateCreateInfo::builder()
+        let vertex_input_state = vk::PipelineVertexInputStateCreateInfo::default()
             .vertex_binding_descriptions(&self.vertex_binding_descriptions)
             .vertex_attribute_descriptions(&self.vertex_attribute_descriptions);
 
         let dynamic_state_info = if self.dynamic_states.is_empty() {
             None
         } else {
-            Some(
-                vk::PipelineDynamicStateCreateInfo::builder()
-                    .dynamic_states(&self.dynamic_states)
-                    .build(),
-            )
+            Some(vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&self.dynamic_states))
         };
 
-        let color_blend_state = vk::PipelineColorBlendStateCreateInfo::builder()
+        let color_blend_state = vk::PipelineColorBlendStateCreateInfo::default()
             .logic_op_enable(false)
             .logic_op(vk::LogicOp::COPY)
             .attachments(&self.color_blend_attachments)
-            .blend_constants([0.0, 0.0, 0.0, 0.0])
-            .build();
+            .blend_constants([0.0, 0.0, 0.0, 0.0]);
 
-        let multisample_state = vk::PipelineMultisampleStateCreateInfo::builder()
+        let multisample_state = vk::PipelineMultisampleStateCreateInfo::default()
             .rasterization_samples(self.multisample_cfg.sample_count)
             .sample_shading_enable(self.multisample_cfg.enable_sample_shading)
-            .min_sample_shading(self.multisample_cfg.min_sample_shading)
-            .build();
+            .min_sample_shading(self.multisample_cfg.min_sample_shading);
 
-        let mut pipeline_info = vk::GraphicsPipelineCreateInfo::builder()
+        let mut pipeline_info = vk::GraphicsPipelineCreateInfo::default()
             .stages(&stage_infos)
             .vertex_input_state(&vertex_input_state)
             .input_assembly_state(&self.input_assembly)
@@ -461,7 +456,7 @@ impl PipelineBuilder {
         let pipeline = unsafe {
             match self
                 .device
-                .create_graphics_pipelines(cache, &[pipeline_info.build()], None)
+                .create_graphics_pipelines(cache, &[pipeline_info], None)
             {
                 Ok(pipelines) => pipelines[0],
                 Err((_, e)) => {
