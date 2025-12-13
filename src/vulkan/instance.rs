@@ -1,4 +1,8 @@
-use ash::{ext::debug_utils, khr::surface, vk, Entry, Instance};
+use ash::{
+    ext::{debug_utils, validation_features},
+    khr::surface,
+    vk, Entry, Instance,
+};
 use log::{debug, warn};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use std::ffi::CStr;
@@ -31,12 +35,12 @@ impl VulkanInstance {
                 Vec::new()
             };
 
-            let extensions = Self::required_extensions(enable_validation);
+            let extensions = Self::required_extensions(&entry, enable_validation)?;
 
             let app_info = vk::ApplicationInfo::default()
-                .application_name(c"Ash Renderer")
+                .application_name(c"REDE")
                 .application_version(vk::make_api_version(0, 0, 1, 0))
-                .engine_name(c"Ash Renderer")
+                .engine_name(c"REDE")
                 .engine_version(vk::make_api_version(0, 0, 1, 0))
                 .api_version(vk::API_VERSION_1_3);
 
@@ -49,6 +53,22 @@ impl VulkanInstance {
                 enable_validation.then_some(Self::debug_messenger_create_info());
             if let Some(ref mut info) = debug_create_info {
                 create_info = create_info.push_next(info);
+            }
+
+            // Enable GPU-Assisted Validation and Best Practices if validation is requested
+            // AND the extension was successfully enabled
+            let mut validation_features = vk::ValidationFeaturesEXT::default()
+                .enabled_validation_features(&[
+                    vk::ValidationFeatureEnableEXT::GPU_ASSISTED,
+                    vk::ValidationFeatureEnableEXT::BEST_PRACTICES,
+                ]);
+
+            let validation_features_enabled = extensions.iter().any(|&ext| {
+                CStr::from_ptr(ext) == CStr::from_ptr(validation_features::NAME.as_ptr())
+            });
+
+            if enable_validation && validation_features_enabled {
+                create_info = create_info.push_next(&mut validation_features);
             }
 
             let instance = entry.create_instance(&create_info, None).map_err(|e| {
@@ -88,87 +108,6 @@ impl VulkanInstance {
         }
     }
 
-    /// Create a new Vulkan instance using a SurfaceProvider.
-    /// This is the preferred method for new code as it decouples windowing.
-    pub fn from_surface<S: super::surface::SurfaceProvider>(
-        surface_provider: &S,
-        enable_validation: bool,
-    ) -> Result<Self> {
-        unsafe {
-            let entry = Entry::load().map_err(|e| {
-                AshError::DeviceInitFailed(format!("Failed to load Vulkan entry: {e:?}"))
-            })?;
-
-            let validation_layers = if enable_validation {
-                Self::query_validation_layers(&entry)?
-            } else {
-                Vec::new()
-            };
-
-            // Combine standard extensions with surface provider's requirements
-            let mut extensions = Self::required_extensions(enable_validation);
-            for ext in surface_provider.required_extensions() {
-                if !extensions.contains(&ext) {
-                    extensions.push(ext);
-                }
-            }
-
-            let app_info = vk::ApplicationInfo::default()
-                .application_name(c"Ash Renderer")
-                .application_version(vk::make_api_version(0, 0, 1, 0))
-                .engine_name(c"Ash Renderer")
-                .engine_version(vk::make_api_version(0, 0, 1, 0))
-                .api_version(vk::API_VERSION_1_3);
-
-            let mut create_info = vk::InstanceCreateInfo::default()
-                .application_info(&app_info)
-                .enabled_extension_names(&extensions)
-                .enabled_layer_names(&validation_layers);
-
-            let mut debug_create_info =
-                enable_validation.then_some(Self::debug_messenger_create_info());
-            if let Some(ref mut info) = debug_create_info {
-                create_info = create_info.push_next(info);
-            }
-
-            let instance = entry.create_instance(&create_info, None).map_err(|e| {
-                AshError::DeviceInitFailed(format!("Failed to create Vulkan instance: {e:?}"))
-            })?;
-
-            let debug_utils_loader =
-                enable_validation.then(|| debug_utils::Instance::new(&entry, &instance));
-
-            let debug_messenger = if let Some(ref utils) = debug_utils_loader {
-                let create_info = Self::debug_messenger_create_info();
-                Some(
-                    utils
-                        .create_debug_utils_messenger(&create_info, None)
-                        .map_err(|e| {
-                            AshError::DeviceInitFailed(format!(
-                                "Failed to create debug messenger: {e:?}"
-                            ))
-                        })?,
-                )
-            } else {
-                None
-            };
-
-            // Create surface using the provider
-            let surface = surface_provider.create_surface(&entry, &instance)?;
-
-            let surface_loader = surface::Instance::new(&entry, &instance);
-
-            Ok(Self {
-                entry,
-                instance,
-                surface_loader,
-                surface,
-                debug_utils: debug_utils_loader,
-                debug_messenger,
-            })
-        }
-    }
-
     pub fn entry(&self) -> &Entry {
         &self.entry
     }
@@ -185,7 +124,7 @@ impl VulkanInstance {
         self.surface
     }
 
-    fn required_extensions(enable_validation: bool) -> Vec<*const i8> {
+    fn required_extensions(entry: &Entry, enable_validation: bool) -> Result<Vec<*const i8>> {
         let mut extensions = vec![surface::NAME.as_ptr()];
 
         #[cfg(target_os = "windows")]
@@ -205,9 +144,29 @@ impl VulkanInstance {
 
         if enable_validation {
             extensions.push(debug_utils::NAME.as_ptr());
+
+            // Check if validation features extension is supported
+            let available_extensions =
+                unsafe { entry.enumerate_instance_extension_properties(None) }.map_err(|e| {
+                    AshError::DeviceInitFailed(format!(
+                        "Failed to enumerate instance extensions: {e:?}"
+                    ))
+                })?;
+
+            let validation_features_name =
+                unsafe { CStr::from_ptr(validation_features::NAME.as_ptr()) };
+            let has_validation_features = available_extensions.iter().any(|ext| unsafe {
+                CStr::from_ptr(ext.extension_name.as_ptr()) == validation_features_name
+            });
+
+            if has_validation_features {
+                extensions.push(validation_features::NAME.as_ptr());
+            } else {
+                warn!("VK_EXT_validation_features not supported, GPU-assisted validation disabled");
+            }
         }
 
-        extensions
+        Ok(extensions)
     }
 
     fn query_validation_layers(entry: &Entry) -> Result<Vec<*const i8>> {

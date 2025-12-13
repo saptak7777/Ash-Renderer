@@ -201,6 +201,6 @@ mod tests {
         // Should have background vertices
         assert!(!bg.is_empty(), "Background should have vertices");
         // Text vertices depend on content
-        assert!(!text.is_empty() || !bg.is_empty());
+        assert!(text.len() > 0 || bg.len() > 0);
     }
 }

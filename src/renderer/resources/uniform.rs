@@ -21,7 +21,7 @@ pub struct MvpMatrices {
     pub ambient_color: Vec4,
 }
 
-/// Material parameters exposed to the GPU (Phase 6 Bindless)
+/// Material parameters exposed to the GPU
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct MaterialUniform {
@@ -29,12 +29,9 @@ pub struct MaterialUniform {
     pub emissive_factor: Vec4,
     /// x: metallic, y: roughness, z: occlusion strength, w: normal scale
     pub parameters: Vec4,
-    /// Bindless texture indices (-1 means no texture)
-    pub base_color_index: i32,
-    pub normal_map_index: i32,
-    pub metallic_roughness_index: i32,
-    pub occlusion_index: i32,
-    pub emissive_index: i32,
+    /// x: base color map, y: normal map, z: metallic-roughness map, w: ambient occlusion map (1.0 = present)
+    pub texture_flags: Vec4,
+    pub emissive_texture_flag: f32,
     pub alpha_cutoff: f32,
     pub _padding: [f32; 2],
 }
@@ -45,12 +42,8 @@ impl Default for MaterialUniform {
             base_color_factor: Vec4::splat(1.0),
             emissive_factor: Vec4::ZERO,
             parameters: Vec4::new(0.0, 0.5, 1.0, 1.0),
-            // -1 means no texture (bindless)
-            base_color_index: -1,
-            normal_map_index: -1,
-            metallic_roughness_index: -1,
-            occlusion_index: -1,
-            emissive_index: -1,
+            texture_flags: Vec4::ZERO,
+            emissive_texture_flag: 0.0,
             alpha_cutoff: 0.1,
             _padding: [0.0; 2],
         }
@@ -79,21 +72,21 @@ impl MaterialUniform {
         self.parameters.w = normal_scale;
     }
 
-    /// Set bindless texture indices (Phase 6)
-    /// Pass -1 for textures that are not present
-    pub fn set_texture_indices(
+    pub fn set_texture_flags(
         &mut self,
-        base_color: i32,
-        normal: i32,
-        metallic_roughness: i32,
-        occlusion: i32,
-        emissive: i32,
+        base_color: bool,
+        normal: bool,
+        metallic_roughness: bool,
+        occlusion: bool,
+        emissive: bool,
     ) {
-        self.base_color_index = base_color;
-        self.normal_map_index = normal;
-        self.metallic_roughness_index = metallic_roughness;
-        self.occlusion_index = occlusion;
-        self.emissive_index = emissive;
+        self.texture_flags = Vec4::new(
+            if base_color { 1.0 } else { 0.0 },
+            if normal { 1.0 } else { 0.0 },
+            if metallic_roughness { 1.0 } else { 0.0 },
+            if occlusion { 1.0 } else { 0.0 },
+        );
+        self.emissive_texture_flag = if emissive { 1.0 } else { 0.0 };
     }
 
     pub fn set_alpha_cutoff(&mut self, cutoff: f32) {

@@ -328,10 +328,9 @@ mod tests {
         let mut history = StatsHistory::new(3);
 
         for fps in [60.0, 62.0, 58.0] {
-            history.push(RenderStats {
-                fps,
-                ..Default::default()
-            });
+            let mut stats = RenderStats::default();
+            stats.fps = fps;
+            history.push(stats);
         }
 
         assert!((history.average_fps() - 60.0).abs() < 0.01);

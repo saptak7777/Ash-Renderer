@@ -3,114 +3,162 @@
 [![Crates.io](https://img.shields.io/crates/v/ash_renderer.svg)](https://crates.io/crates/ash_renderer)
 [![Documentation](https://docs.rs/ash_renderer/badge.svg)](https://docs.rs/ash_renderer)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
-[![CI](https://github.com/saptak7777/Ash-Renderer/actions/workflows/ci.yml/badge.svg)](https://github.com/saptak7777/Ash-Renderer/actions)
 
-A **production-read Vulkan renderer** built with [ASH](https://github.com/ash-rs/ash) and [VMA](https://github.com/gwihlern-gp/vk-mem-rs).
-Designed for high-performance games and graphics applications, featuring ECS-independence and deep GPU optimization.
+A **production-quality Vulkan renderer** built with [ASH](https://github.com/ash-rs/ash) (Vulkan bindings) and [VMA](https://github.com/gwihlern-gp/vk-mem-rs) (GPU memory allocator).
 
-## ✨ Features (v0.2.6)
+**ECS-free, pure rendering engine** - decoupled camera and input handling, ready for any game engine.
 
-> [!IMPORTANT]
-> **Release 0.2.6** fixes a critical regression in **v0.2.5** where resizing the window caused a panic due to resource dependency tracking. It is highly recommended to update.
+## Features
 
-### Check out what's new!
-- **🐛 Fixed Resize Crash**: Resolved a "Render Pass Dependency" panic by correctly managing pipeline dependencies.
-- **🔒 Safer Shader Loading**: (From v0.2.5) Fixed memory alignment issues for embedded shaders.
+- 🎨 **PBR Materials** - Physically-based rendering with metallic/roughness workflow
+- 🌑 **Shadow Mapping** - Cascaded shadow maps with PCF filtering
+- ✨ **Post-Processing** - Bloom, tonemapping, and temporal anti-aliasing
+- 📊 **GPU Profiling** - Built-in timing queries and performance diagnostics
+- 🔌 **Feature System** - Extensible plugin architecture for rendering features
+- 🚀 **High Performance** - 60+ FPS @ 1080p with 1000+ objects
+- 🔧 **LOD System** - Automatic level-of-detail management
+- ⚡ **GPU Instancing** - Efficient batch rendering
+- 👁️ **Occlusion Culling** - GPU-accelerated visibility testing
+- 🔄 **Hot Reloading** - Automatic shader recompilation and pipeline recreation on file change
+- 🛡️ **Robust Validation** - GPU-assisted validation with automatic fallback (VK_EXT_validation_features)
+- 🍃 **Alpha Testing** - Support for transparent shadows (e.g. foliage)
+- 💡 **Light Culling** - Tiled/clustered forward rendering
 
-
-- **🎨 Bindless Texturing**: Fully dynamic texture access using `descriptor_indexing`. Supports thousands of textures with zero binding overhead.
-- **🖥️ Headless Support**: Run heavy rendering workloads or benchmarks on CI without a window (virtual swapchain).
-- **🌑 Advanced Shadows**: Cascaded Shadow Maps (CSM) with PCF filtering and light culling.
-
-### Core Capabilities
-- **PBR Materials**: Metallic/Roughness workflow with texture mapping.
-- **Post-Processing**: Integrated Bloom, Tonemapping (ACES), and TAA.
-- **GPU Profiling**: Built-in Diagnostics Overlay and timestamp queries.
-- **Hot-Reloading**: Detects shader changes at runtime (experimental).
-- **Cross-Platform**: Runs on **Windows** (Win32), **Linux** (X11/Wayland), and **macOS** (Metal) via a unified `SurfaceProvider`.
-
-## 🚀 Quick Start
+## Quick Start
 
 Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-ash_renderer = "0.2.6"
-winit = "0.30"
-glam = "0.30"
+ash_renderer = "0.1.2"
+glam = "0.30" # Required for math types
 ```
 
-### Initialization
+### Basic Usage
+
+```
+
+## Examples
+
+```bash
+# Simple triangle
+cargo run --example 01_triangle
+
+# Textured cube with materials
+cargo run --example 02_cube
+
+# GLTF model loading
+cargo run --example 03_model_loading --features gltf_loading
+```
+
+## API Overview
+
+### Renderer
 
 ```rust
-use ash_renderer::{Renderer, WindowSurfaceProvider};
-use winit::event_loop::EventLoop;
+// Create renderer
+// Note: We now pass the &Window directly.
+// Windows, Linux (X11/Wayland), and macOS are supported.
+let mut renderer = Renderer::new(&window)?;
 
-fn main() -> anyhow::Result<()> {
-    let event_loop = EventLoop::new()?;
-    let window = winit::window::Window::builder().build(&event_loop)?;
-    
-    // Create Renderer with cross-platform SurfaceProvider
-    let surface_provider = WindowSurfaceProvider::new(&window, 800, 600);
-    let mut renderer = Renderer::new(surface_provider)?;
+// Set mesh and material
+renderer.set_mesh(Mesh::create_cube());
+*renderer.material_mut() = Material {
+    color: [1.0, 0.5, 0.2, 1.0],
+    metallic: 0.5,
+    roughness: 0.3,
+    ..Default::default()
+};
 
-    // Load assets...
-    let mesh = Mesh::create_cube();
-    renderer.set_mesh(mesh);
+// Per-frame: compute camera matrices (your game engine controls this)
+let camera_pos = Vec3::new(0.0, 2.0, 5.0);
+let view = Mat4::look_at_rh(camera_pos, Vec3::ZERO, Vec3::Y);
+let mut proj = Mat4::perspective_rh(fov, aspect, 0.5, 100.0);
+proj.y_axis.y *= -1.0; // Vulkan Y-flip
 
-    // Render loop
-    event_loop.run(move |event, _, control_flow| {
-        // ... handling logic ...
-        if let Event::MainEventsCleared = event {
-            renderer.render_frame(view, projection, camera_pos).unwrap();
-        }
-    })?;
-    Ok(())
-}
+// Render with explicit camera data (stateless API)
+renderer.render_frame(view, proj, camera_pos)?;
+
+// Handle resize
+renderer.request_swapchain_resize(ash::vk::Extent2D { width, height });
 ```
 
-## 🔌 Headless Benchmarking
-
-Run graphics benchmarks in purely headless mode (no window required):
+### Mesh Creation
 
 ```rust
-use ash_renderer::{Renderer, HeadlessSurfaceProvider};
+// Built-in primitives
+let cube = Mesh::create_cube();
+let sphere = Mesh::create_sphere(32, 16);
+let plane = Mesh::create_plane();
 
-// Initialize without winit/window
-let provider = HeadlessSurfaceProvider::new(1920, 1080);
-let mut renderer = Renderer::new(provider)?;
-
-// Loop as fast as GPU allows (no VSync)
-for _ in 0..1000 {
-    renderer.render_frame(view, proj, cam_pos)?;
-}
+// Custom mesh
+let mesh = Mesh::new(vertices, indices);
 ```
 
-## 🛠️ Performance
+### Materials
 
-| Metric | Target | Achieved (v0.2.6) |
-|--------|--------|-------------------|
-| Draw Calls (Bindless) | 10k+ | ✅ |
-| Headless FPS | Unlocked | ✅ |
-| Texture Switches | Zero Cost | ✅ |
+```rust
+let material = Material {
+    color: [1.0, 1.0, 1.0, 1.0],      // Base color (RGBA)
+    metallic: 0.0,                     // 0.0 = dielectric, 1.0 = metal
+    roughness: 0.5,                    // 0.0 = smooth, 1.0 = rough
+    emissive: [0.0, 0.0, 0.0],        // Emission color
+    ..Default::default()
+};
+```
 
-## 📦 Feature Flags
+## Architecture
+
+```
+ash_renderer/
+├── src/
+│   ├── vulkan/          # Low-level Vulkan abstractions
+│   │   ├── device.rs    # Logical device management
+│   │   ├── pipeline.rs  # Graphics/compute pipelines
+│   │   ├── shader.rs    # Shader loading & reflection
+│   │   └── ...
+│   ├── renderer/        # High-level rendering API
+│   │   ├── renderer.rs  # Main Renderer struct
+│   │   ├── resources/   # GPU resources (mesh, texture, material)
+│   │   ├── features/    # Extensible feature system
+│   │   └── diagnostics/ # Profiling & debugging
+│   └── shaders/         # GLSL shader sources
+└── examples/            # Usage examples
+```
+
+## Performance
+
+| Metric | Target | Achieved |
+|--------|--------|----------|
+| FPS @ 1080p | 60+ | ✅ |
+| Objects | 1000+ | ✅ |
+| Memory (idle) | < 200MB | ✅ |
+| Frame time | < 16.6ms | ✅ |
+
+## Feature Flags
 
 | Feature | Description | Default |
 |---------|-------------|---------|
-| `validation` | Enables Vulkan Validation Layers | ✅ |
-| `gltf_loading` | Support for loading .gltf/.glb models | ✅ |
-| `profiling` | Enables GPU timestamp queries | ❌ |
+| `validation` | Vulkan validation layers | ✅ |
+| `gltf_loading` | GLTF model loading | ✅ |
+| `shader_compilation` | Runtime shader compilation | ❌ |
+| `profiling` | GPU profiling queries | ❌ |
+| `parallel` | Parallel command recording | ❌ |
 
-## 📜 License
+## Requirements
 
-Licensed under Apache-2.0.
+- **Rust**: 1.70+
+- **Vulkan**: 1.2+ capable GPU
+- **Vulkan SDK**: For validation layers (optional)
 
-### Troubleshooting (Windows)
-> [!WARNING]
-> If you encounter `exit code: 0xc000041d` on Windows, this is a **Fatal User Callback Exception**.
-> 
-> Possible causes and fixes:
-> 1. **Overlay interference**: Disable Discord/Steam/NVIDIA overlays.
-> 2. **Driver Hooks**: Update GPU drivers or verify no other software hooks `vulkan-1.dll`.
-> 3. **Validation Layers**: The application enables validation layers by default. If the crash persists, use `--no-default-features` (requires `gltf_loading`).
+## Author
+
+**Saptak Santra**
+
+## License
+
+Licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE) for details.
+
+---
+
+Made with ❤️ and Vulkan

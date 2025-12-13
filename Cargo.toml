@@ -1,6 +1,6 @@
 [package]
 name = "ash_renderer"
-version = "0.2.6"
+version = "0.2.7"
 edition = "2021"
 authors = ["Saptak Santra"]
 license = "Apache-2.0"
@@ -10,16 +10,6 @@ documentation = "https://docs.rs/ash_renderer"
 keywords = ["vulkan", "graphics", "rendering", "gpu", "ash"]
 categories = ["graphics", "rendering", "game-development"]
 readme = "README.md"
-include = [
-    "src/**/*",
-    "examples/**/*",
-    "benches/**/*",
-    "shaders/**/*",
-    "build.rs",
-    "Cargo.toml",
-    "README.md",
-    "LICENSE"
-]
 
 [dependencies]
 # Vulkan
@@ -57,13 +47,14 @@ log = "0.4"
 thiserror = "2.0"
 uuid = { version = "1.11", features = ["v4"] }
 
+[build-dependencies]
+shaderc = "0.8"
+walkdir = "2"
+
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
 env_logger = "0.11"
 tempfile = "3.14"
-
-[build-dependencies]
-shaderc = "0.8"
 
 [features]
 default = ["validation", "gltf_loading"]
@@ -88,9 +79,7 @@ name = "03_model_loading"
 path = "examples/03_model_loading.rs"
 required-features = ["gltf_loading"]
 
-[[bench]]
-name = "frame_time"
-harness = false
+
 
 [profile.dev]
 opt-level = 0

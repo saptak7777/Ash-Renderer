@@ -48,8 +48,6 @@ pub use error::{AshError, Result};
 
 // Backwards compatibility alias
 #[doc(hidden)]
-/// Legacy alias for backward compatibility
-#[deprecated(note = "Use AshError directly")]
 pub type RedeError = AshError;
 
 pub use renderer::{
@@ -58,9 +56,6 @@ pub use renderer::{
 };
 
 pub use renderer::features::{AutoRotateFeature, FeatureManager, RenderFeature};
-
-// Surface providers for decoupled windowing (Phase 5.5)
-pub use vulkan::{HeadlessSurfaceProvider, SurfaceProvider, WindowSurfaceProvider};
 
 /// Prelude module for convenient imports
 pub mod prelude {

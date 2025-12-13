@@ -1,4 +1,4 @@
-//! Diagnostics and profiling system for the Ash renderer.
+//! Diagnostics and profiling system for the REDE renderer.
 //!
 //! Provides runtime stats collection, GPU timing queries, and display options
 //! for performance monitoring and debugging.
@@ -246,7 +246,7 @@ impl DiagnosticsState {
 
     /// Print stats to console
     pub fn print_console(&self) {
-        println!("┌─ Ash Diagnostics ─────────────────────────────────────");
+        println!("┌─ REDE Diagnostics ─────────────────────────────────────");
         println!("│ {}", self.frame_stats.format_line());
         println!("│ {}", self.gpu_timings.format_line());
         println!("│ {}", self.memory_stats.format_line());
@@ -256,7 +256,7 @@ impl DiagnosticsState {
     /// Format all stats for overlay
     pub fn format_overlay(&self) -> Vec<String> {
         vec![
-            format!("Ash v{}", env!("CARGO_PKG_VERSION")),
+            format!("REDE v{}", env!("CARGO_PKG_VERSION")),
             self.frame_stats.format_line(),
             self.gpu_timings.format_line(),
             self.memory_stats.format_line(),

@@ -2,7 +2,7 @@
 //!
 //! Demonstrates minimal renderer setup and rendering a simple triangle.
 
-use ash_renderer::{prelude::*, WindowSurfaceProvider};
+use ash_renderer::prelude::*;
 use winit::{
     application::ApplicationHandler,
     event::WindowEvent,
@@ -16,7 +16,6 @@ struct App {
     renderer: Option<Renderer>,
 }
 
-
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         let window_attrs = Window::default_attributes()
@@ -25,9 +24,7 @@ impl ApplicationHandler for App {
 
         let window = event_loop.create_window(window_attrs).unwrap();
         let size = window.inner_size();
-        let surface_provider = WindowSurfaceProvider::new(&window, size.width, size.height);
-
-        match Renderer::new(&surface_provider) {
+        match Renderer::new(&window) {
             Ok(renderer) => {
                 self.renderer = Some(renderer);
                 self.window = Some(window);
