@@ -15,6 +15,7 @@ include = [
     "examples/**/*",
     "benches/**/*",
     "shaders/**/*",
+    "build.rs",
     "Cargo.toml",
     "README.md",
     "LICENSE"
