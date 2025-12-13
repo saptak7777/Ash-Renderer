@@ -30,62 +30,58 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-ash_renderer = "0.2.7"
+ash_renderer = "0.2.8"
 glam = "0.30" # Required for math types
 ```
 
 ### Basic Usage
-
-```
-
-## Examples
-
-```bash
-# Simple triangle
-cargo run --example 01_triangle
-
-# Textured cube with materials
-cargo run --example 02_cube
-
-# GLTF model loading
-cargo run --example 03_model_loading --features gltf_loading
-```
-
-## API Overview
-
-### Renderer
 
 ```rust
 use ash_renderer::prelude::*;
 use glam::{Mat4, Vec3};
 use winit::window::Window;
 
-// initialization inside your winit loop
+// 1. Initialization (inside your winit event loop)
+// Renderer::new handles Vulkan instance, device, and swapchain creation.
 let mut renderer = Renderer::new(&window)?;
 
-// Set mesh and material
+// 2. Resource Setup
+// Create a built-in primitive mesh
 let cube = Mesh::create_cube();
+
+// Define PBR material properties
 let material = Material {
-    color: [1.0, 0.5, 0.2, 1.0],
+    color: [1.0, 0.5, 0.2, 1.0], // RGBA
     metallic: 0.5,
     roughness: 0.3,
     ..Default::default()
 };
 
+// Assign resources to the renderer
 renderer.set_mesh(cube);
 *renderer.material_mut() = material;
 
-// In your event loop's RedrawRequested:
-let camera_pos = Vec3::new(0.0, 2.0, 5.0);
-let view = Mat4::look_at_rh(camera_pos, Vec3::ZERO, Vec3::Y);
-let mut proj = Mat4::perspective_rh(1.0, aspect_ratio, 0.1, 100.0);
-proj.y_axis.y *= -1.0; // Vulkan Y-flip
+// 3. Render Loop (e.g., inside RedrawRequested)
+let aspect_ratio = width as f32 / height as f32;
 
-// Render frame (stateless API)
+// Camera Setup
+let camera_pos = Vec3::new(0.0, 2.0, 5.0);
+let target = Vec3::ZERO;
+let view = Mat4::look_at_rh(camera_pos, target, Vec3::Y);
+
+// Projection Setup (Note: Vulkan requires Y-flip)
+let mut proj = Mat4::perspective_rh(45.0_f32.to_radians(), aspect_ratio, 0.1, 100.0);
+proj.y_axis.y *= -1.0; 
+
+// Render the frame with the current camera state
 renderer.render_frame(view, proj, camera_pos)?;
 
-// Handle resize event
-renderer.request_swapchain_resize(window_inner_size);
+// 4. Resize Handling
+// Call this when the window is resized to recreate the swapchain
+renderer.request_swapchain_resize(ash::vk::Extent2D {
+    width: new_size.width,
+    height: new_size.height,
+});
 ```
 
 ### Mesh Creation
@@ -110,6 +106,21 @@ let material = Material {
     emissive: [0.0, 0.0, 0.0],        // Emission color
     ..Default::default()
 };
+```
+
+## Examples
+
+Run the provided examples to see the renderer in action:
+
+```bash
+# Simple triangle
+cargo run --example 01_triangle
+
+# Textured cube with materials (Basic Usage)
+cargo run --example 02_cube
+
+# GLTF model loading
+cargo run --example 03_model_loading --features gltf_loading
 ```
 
 ## Architecture
