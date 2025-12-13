@@ -23,7 +23,7 @@ impl ApplicationHandler for App {
             .with_inner_size(winit::dpi::LogicalSize::new(800, 600));
 
         let window = event_loop.create_window(window_attrs).unwrap();
-        let size = window.inner_size();
+        let _size = window.inner_size();
         match Renderer::new(&window) {
             Ok(renderer) => {
                 self.renderer = Some(renderer);

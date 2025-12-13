@@ -27,6 +27,9 @@ pub struct DescriptorAllocator {
     frame_pools: Vec<FramePool>,
     current_frame: u64,
     bindless_pool: Option<vk::DescriptorPool>,
+    /// Static pool for long-lived descriptors (textures) that should never be reset
+    static_pool: vk::DescriptorPool,
+    static_pool_used: u32,
     descriptor_set_cache: HashMap<vk::DescriptorSet, vk::DescriptorPool>,
     resource_registry: Option<Arc<ResourceRegistry>>,
     managed_pools: HashMap<vk::DescriptorPool, bool>,
@@ -39,6 +42,19 @@ impl DescriptorAllocator {
         resource_registry: Option<Arc<ResourceRegistry>>,
     ) -> Result<Self> {
         let pool_sizes = Self::default_pool_sizes(sets_per_pool);
+
+        // Create static pool for long-lived descriptors (textures)
+        let static_pool_info = vk::DescriptorPoolCreateInfo::default()
+            .max_sets(sets_per_pool * 8) // Larger capacity for textures
+            .pool_sizes(&pool_sizes);
+        let static_pool = unsafe {
+            device
+                .create_descriptor_pool(&static_pool_info, None)
+                .map_err(|e| {
+                    AshError::VulkanError(format!("Failed to create static descriptor pool: {e}"))
+                })?
+        };
+
         let mut allocator = Self {
             device,
             pool_sizes,
@@ -46,6 +62,8 @@ impl DescriptorAllocator {
             frame_pools: Vec::with_capacity(FRAMES_IN_FLIGHT * 2),
             current_frame: 0,
             bindless_pool: None,
+            static_pool,
+            static_pool_used: 0,
             descriptor_set_cache: HashMap::new(),
             resource_registry,
             managed_pools: HashMap::new(),
@@ -147,6 +165,30 @@ impl DescriptorAllocator {
     ) -> Result<DescriptorSet> {
         let (set, pool) = self.allocate_raw_set(layout)?;
         self.descriptor_set_cache.insert(set, pool);
+        DescriptorSet::new(Arc::clone(&self.device), set, *layout, bindings)
+    }
+
+    /// Allocate a descriptor set from the static pool (for long-lived resources like textures).
+    /// These sets are NEVER reset by `next_frame()`.
+    pub fn allocate_static_set(
+        &mut self,
+        layout: &vk::DescriptorSetLayout,
+        bindings: &[vk::DescriptorSetLayoutBinding<'static>],
+    ) -> Result<DescriptorSet> {
+        let layouts = [*layout];
+        let alloc_info = vk::DescriptorSetAllocateInfo::default()
+            .descriptor_pool(self.static_pool)
+            .set_layouts(&layouts);
+
+        let set = unsafe {
+            self.device
+                .allocate_descriptor_sets(&alloc_info)
+                .map_err(|e| {
+                    AshError::VulkanError(format!("Failed to allocate static descriptor set: {e}"))
+                })?
+        }[0];
+
+        self.static_pool_used += 1;
         DescriptorSet::new(Arc::clone(&self.device), set, *layout, bindings)
     }
 
@@ -294,6 +336,9 @@ impl DescriptorAllocator {
 impl Drop for DescriptorAllocator {
     fn drop(&mut self) {
         unsafe {
+            // Destroy static pool (never managed by registry)
+            self.device.destroy_descriptor_pool(self.static_pool, None);
+
             if let Some(pool) = self.bindless_pool {
                 if !self.managed_pools.contains_key(&pool) {
                     self.device.destroy_descriptor_pool(pool, None);

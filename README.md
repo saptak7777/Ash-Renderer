@@ -30,7 +30,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-ash_renderer = "0.1.2"
+ash_renderer = "0.2.7"
 glam = "0.30" # Required for math types
 ```
 
@@ -56,31 +56,36 @@ cargo run --example 03_model_loading --features gltf_loading
 ### Renderer
 
 ```rust
-// Create renderer
-// Note: We now pass the &Window directly.
-// Windows, Linux (X11/Wayland), and macOS are supported.
+use ash_renderer::prelude::*;
+use glam::{Mat4, Vec3};
+use winit::window::Window;
+
+// initialization inside your winit loop
 let mut renderer = Renderer::new(&window)?;
 
 // Set mesh and material
-renderer.set_mesh(Mesh::create_cube());
-*renderer.material_mut() = Material {
+let cube = Mesh::create_cube();
+let material = Material {
     color: [1.0, 0.5, 0.2, 1.0],
     metallic: 0.5,
     roughness: 0.3,
     ..Default::default()
 };
 
-// Per-frame: compute camera matrices (your game engine controls this)
+renderer.set_mesh(cube);
+*renderer.material_mut() = material;
+
+// In your event loop's RedrawRequested:
 let camera_pos = Vec3::new(0.0, 2.0, 5.0);
 let view = Mat4::look_at_rh(camera_pos, Vec3::ZERO, Vec3::Y);
-let mut proj = Mat4::perspective_rh(fov, aspect, 0.5, 100.0);
+let mut proj = Mat4::perspective_rh(1.0, aspect_ratio, 0.1, 100.0);
 proj.y_axis.y *= -1.0; // Vulkan Y-flip
 
-// Render with explicit camera data (stateless API)
+// Render frame (stateless API)
 renderer.render_frame(view, proj, camera_pos)?;
 
-// Handle resize
-renderer.request_swapchain_resize(ash::vk::Extent2D { width, height });
+// Handle resize event
+renderer.request_swapchain_resize(window_inner_size);
 ```
 
 ### Mesh Creation

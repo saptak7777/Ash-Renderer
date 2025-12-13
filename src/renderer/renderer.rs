@@ -685,12 +685,12 @@ impl Renderer {
 
             pipeline_builder = pipeline_builder
                 .add_shader_with_options(
-                    "shaders/vert.spv",
+                    "shaders/vert.vert.spv",
                     vk::ShaderStageFlags::VERTEX,
                     pipeline_cfg.watch_shaders,
                 )?
                 .add_shader_with_options(
-                    "shaders/frag.spv",
+                    "shaders/frag.frag.spv",
                     vk::ShaderStageFlags::FRAGMENT,
                     pipeline_cfg.watch_shaders,
                 )?;
@@ -1512,6 +1512,11 @@ impl Renderer {
         camera_pos: glam::Vec3,
     ) -> Result<()> {
         self.flush_old_swapchains();
+
+        // Recycle per-frame descriptor pools (static pools are unaffected)
+        if let Some(dm) = self.descriptor_manager.as_mut() {
+            dm.next_frame();
+        }
 
         // Hot-reload shaders if changed
 

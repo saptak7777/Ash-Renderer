@@ -9,24 +9,26 @@ use std::sync::Arc;
 use crate::renderer::features::light_culling::{
     CullingCameraData, GpuLight, LightCullingPushConstants, MAX_LIGHTS, MAX_LIGHTS_PER_TILE,
 };
-use crate::vulkan::{ComputePipeline, VulkanDevice};
+use crate::vulkan::{Allocator, ComputePipeline, VulkanDevice};
 use crate::{AshError, Result};
 
 /// Light culling compute pipeline and resources
 pub struct LightCullingPipeline {
     device: Arc<ash::Device>,
+    allocator: Arc<Allocator>,
     pipeline: ComputePipeline,
     descriptor_set_layout: vk::DescriptorSetLayout,
     descriptor_pool: vk::DescriptorPool,
     descriptor_set: vk::DescriptorSet,
-    // Buffers
+    // Buffers (managed by VMA)
     light_buffer: vk::Buffer,
-    light_buffer_memory: vk::DeviceMemory,
+    light_buffer_alloc: vk_mem::Allocation,
     tile_buffer: vk::Buffer,
-    tile_buffer_memory: vk::DeviceMemory,
+    tile_buffer_alloc: vk_mem::Allocation,
     camera_buffer: vk::Buffer,
-    camera_buffer_memory: vk::DeviceMemory,
+    camera_buffer_alloc: vk_mem::Allocation,
     // State
+    #[allow(dead_code)]
     light_buffer_size: usize,
     tile_buffer_size: usize,
 }
@@ -38,6 +40,7 @@ impl LightCullingPipeline {
     /// Device must be valid and shader must be loaded.
     pub unsafe fn new(
         vulkan_device: &VulkanDevice,
+        allocator: Arc<Allocator>,
         shader_module: vk::ShaderModule,
         depth_sampler: vk::Sampler,
         depth_image_view: vk::ImageView,
@@ -133,35 +136,26 @@ impl LightCullingPipeline {
 
         let descriptor_set = descriptor_sets[0];
 
-        // Create buffers using VMA would be better, but for now use direct Vulkan
-        // Light buffer
-        let (light_buffer, light_buffer_memory) = Self::create_buffer(
-            &device,
-            vulkan_device.physical_device,
-            vulkan_device.instance.instance(),
+        // Create buffers using VMA (consistent with rest of engine)
+        // Light buffer (host-visible for CPU uploads)
+        let (light_buffer, light_buffer_alloc) = allocator.create_buffer(
             light_buffer_size as u64,
             vk::BufferUsageFlags::STORAGE_BUFFER,
-            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+            vk_mem::MemoryUsage::AutoPreferHost,
         )?;
 
-        // Tile buffer
-        let (tile_buffer, tile_buffer_memory) = Self::create_buffer(
-            &device,
-            vulkan_device.physical_device,
-            vulkan_device.instance.instance(),
+        // Tile buffer (device-local for GPU-only access)
+        let (tile_buffer, tile_buffer_alloc) = allocator.create_buffer(
             tile_buffer_size as u64,
             vk::BufferUsageFlags::STORAGE_BUFFER,
-            vk::MemoryPropertyFlags::DEVICE_LOCAL,
+            vk_mem::MemoryUsage::AutoPreferDevice,
         )?;
 
-        // Camera buffer
-        let (camera_buffer, camera_buffer_memory) = Self::create_buffer(
-            &device,
-            vulkan_device.physical_device,
-            vulkan_device.instance.instance(),
+        // Camera buffer (host-visible for CPU uploads)
+        let (camera_buffer, camera_buffer_alloc) = allocator.create_buffer(
             camera_buffer_size as u64,
             vk::BufferUsageFlags::UNIFORM_BUFFER,
-            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+            vk_mem::MemoryUsage::AutoPreferHost,
         )?;
 
         // Update descriptor set
@@ -232,117 +226,57 @@ impl LightCullingPipeline {
 
         Ok(Self {
             device,
+            allocator,
             pipeline,
             descriptor_set_layout,
             descriptor_pool,
             descriptor_set,
             light_buffer,
-            light_buffer_memory,
+            light_buffer_alloc,
             tile_buffer,
-            tile_buffer_memory,
+            tile_buffer_alloc,
             camera_buffer,
-            camera_buffer_memory,
+            camera_buffer_alloc,
             light_buffer_size,
             tile_buffer_size,
-        })
-    }
-
-    /// Create a buffer with memory
-    unsafe fn create_buffer(
-        device: &ash::Device,
-        physical_device: vk::PhysicalDevice,
-        instance: &ash::Instance,
-        size: u64,
-        usage: vk::BufferUsageFlags,
-        properties: vk::MemoryPropertyFlags,
-    ) -> Result<(vk::Buffer, vk::DeviceMemory)> {
-        let buffer_info = vk::BufferCreateInfo::default()
-            .size(size)
-            .usage(usage)
-            .sharing_mode(vk::SharingMode::EXCLUSIVE);
-
-        let buffer = device
-            .create_buffer(&buffer_info, None)
-            .map_err(|e| AshError::VulkanError(format!("Failed to create buffer: {e}")))?;
-
-        let mem_requirements = device.get_buffer_memory_requirements(buffer);
-        let mem_properties = instance.get_physical_device_memory_properties(physical_device);
-
-        let memory_type_index = Self::find_memory_type(
-            mem_requirements.memory_type_bits,
-            properties,
-            &mem_properties,
-        )
-        .ok_or_else(|| AshError::VulkanError("Failed to find suitable memory type".into()))?;
-
-        let alloc_info = vk::MemoryAllocateInfo::default()
-            .allocation_size(mem_requirements.size)
-            .memory_type_index(memory_type_index);
-
-        let memory = device
-            .allocate_memory(&alloc_info, None)
-            .map_err(|e| AshError::VulkanError(format!("Failed to allocate memory: {e}")))?;
-
-        device
-            .bind_buffer_memory(buffer, memory, 0)
-            .map_err(|e| AshError::VulkanError(format!("Failed to bind buffer memory: {e}")))?;
-
-        Ok((buffer, memory))
-    }
-
-    fn find_memory_type(
-        type_filter: u32,
-        properties: vk::MemoryPropertyFlags,
-        mem_properties: &vk::PhysicalDeviceMemoryProperties,
-    ) -> Option<u32> {
-        (0..mem_properties.memory_type_count).find(|&i| {
-            (type_filter & (1 << i)) != 0
-                && mem_properties.memory_types[i as usize]
-                    .property_flags
-                    .contains(properties)
         })
     }
 
     /// Upload lights to GPU buffer
     /// # Safety
     /// Memory mapping requires external synchronization and valid buffer.
-    pub unsafe fn upload_lights(&self, lights: &[GpuLight]) -> Result<()> {
+    pub unsafe fn upload_lights(&mut self, lights: &[GpuLight]) -> Result<()> {
         let data_ptr = self
-            .device
-            .map_memory(
-                self.light_buffer_memory,
-                0,
-                self.light_buffer_size as u64,
-                vk::MemoryMapFlags::empty(),
-            )
-            .map_err(|e| AshError::VulkanError(format!("Failed to map memory: {e}")))?;
+            .allocator
+            .vma
+            .map_memory(&mut self.light_buffer_alloc)
+            .map_err(|e| AshError::VulkanError(format!("Failed to map memory: {e:?}")))?;
 
         let slice =
             std::slice::from_raw_parts_mut(data_ptr as *mut GpuLight, lights.len().min(MAX_LIGHTS));
         slice.copy_from_slice(&lights[..slice.len()]);
 
-        self.device.unmap_memory(self.light_buffer_memory);
+        self.allocator
+            .vma
+            .unmap_memory(&mut self.light_buffer_alloc);
         Ok(())
     }
 
     /// Upload camera data
     /// # Safety
     /// Memory mapping requires external synchronization and valid buffer.
-    pub unsafe fn upload_camera(&self, camera: &CullingCameraData) -> Result<()> {
-        let size = std::mem::size_of::<CullingCameraData>();
+    pub unsafe fn upload_camera(&mut self, camera: &CullingCameraData) -> Result<()> {
         let data_ptr = self
-            .device
-            .map_memory(
-                self.camera_buffer_memory,
-                0,
-                size as u64,
-                vk::MemoryMapFlags::empty(),
-            )
-            .map_err(|e| AshError::VulkanError(format!("Failed to map memory: {e}")))?;
+            .allocator
+            .vma
+            .map_memory(&mut self.camera_buffer_alloc)
+            .map_err(|e| AshError::VulkanError(format!("Failed to map memory: {e:?}")))?;
 
         std::ptr::copy_nonoverlapping(camera as *const _, data_ptr as *mut CullingCameraData, 1);
 
-        self.device.unmap_memory(self.camera_buffer_memory);
+        self.allocator
+            .vma
+            .unmap_memory(&mut self.camera_buffer_alloc);
         Ok(())
     }
 
@@ -398,12 +332,15 @@ impl LightCullingPipeline {
 impl Drop for LightCullingPipeline {
     fn drop(&mut self) {
         unsafe {
-            self.device.destroy_buffer(self.light_buffer, None);
-            self.device.free_memory(self.light_buffer_memory, None);
-            self.device.destroy_buffer(self.tile_buffer, None);
-            self.device.free_memory(self.tile_buffer_memory, None);
-            self.device.destroy_buffer(self.camera_buffer, None);
-            self.device.free_memory(self.camera_buffer_memory, None);
+            // Destroy buffers using VMA
+            self.allocator
+                .destroy_buffer(self.light_buffer, &mut self.light_buffer_alloc);
+            self.allocator
+                .destroy_buffer(self.tile_buffer, &mut self.tile_buffer_alloc);
+            self.allocator
+                .destroy_buffer(self.camera_buffer, &mut self.camera_buffer_alloc);
+
+            // Cleanup descriptor resources
             self.device
                 .destroy_descriptor_pool(self.descriptor_pool, None);
             self.device

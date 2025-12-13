@@ -116,8 +116,8 @@ impl DescriptorManager {
         let shadow_sets =
             Self::create_descriptor_sets(frame_count, &shadow_layout, &mut allocator)?;
         let default_texture_set =
-            allocator.allocate_set(&texture_layout.handle(), texture_layout.bindings())?;
-        let default_texture_array_set = allocator.allocate_set(
+            allocator.allocate_static_set(&texture_layout.handle(), texture_layout.bindings())?;
+        let default_texture_array_set = allocator.allocate_static_set(
             &material_texture_layout.handle(),
             material_texture_layout.bindings(),
         )?;
@@ -145,8 +145,8 @@ impl DescriptorManager {
 
     pub fn next_frame(&mut self) {
         self.allocator.next_frame();
-        // Vital: Clear dynamic sets as their backing pools might have been reset!
-        self.dynamic_sets.clear();
+        // NOTE: We no longer clear dynamic_sets here because texture descriptors
+        // are now allocated from the static pool and should persist.
     }
 
     pub fn bind_frame_uniform(
@@ -218,7 +218,8 @@ impl DescriptorManager {
     }
 
     pub fn allocate_texture_set(&mut self) -> Result<vk::DescriptorSet> {
-        let descriptor = self.allocator.allocate_set(
+        // Use static pool - textures live for mesh lifetime
+        let descriptor = self.allocator.allocate_static_set(
             &self.texture_layout.handle(),
             self.texture_layout.bindings(),
         )?;
@@ -228,7 +229,8 @@ impl DescriptorManager {
     }
 
     pub fn allocate_material_texture_set(&mut self) -> Result<vk::DescriptorSet> {
-        let descriptor = self.allocator.allocate_set(
+        // Use static pool - material textures live for mesh lifetime
+        let descriptor = self.allocator.allocate_static_set(
             &self.material_texture_layout.handle(),
             self.material_texture_layout.bindings(),
         )?;
@@ -321,7 +323,8 @@ impl DescriptorManager {
     ) -> Result<Vec<DescriptorSet>> {
         let mut sets = Vec::with_capacity(count as usize);
         for _ in 0..count {
-            sets.push(allocator.allocate_set(&layout.handle(), layout.bindings())?);
+            // Use static pool - these sets persist for renderer lifetime
+            sets.push(allocator.allocate_static_set(&layout.handle(), layout.bindings())?);
         }
         Ok(sets)
     }

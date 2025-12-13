@@ -41,7 +41,8 @@ impl BindlessManager {
             )
             .build(Arc::clone(&device))?;
 
-        let descriptor_set = allocator.allocate_set(&layout.handle(), layout.bindings())?;
+        // Bindless descriptors are long-lived and should be allocated from the static pool
+        let descriptor_set = allocator.allocate_static_set(&layout.handle(), layout.bindings())?;
 
         Ok(Self {
             descriptor_set,
@@ -69,8 +70,12 @@ impl BindlessManager {
             image_view,
             image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
         };
-        self.descriptor_set
-            .update_image_at(0, index, info, vk::DescriptorType::COMBINED_IMAGE_SAMPLER)?;
+        self.descriptor_set.update_image_at(
+            0,
+            index,
+            info,
+            vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+        )?;
         Ok(index)
     }
 
