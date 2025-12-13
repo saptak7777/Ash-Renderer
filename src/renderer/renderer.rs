@@ -792,15 +792,16 @@ impl Renderer {
             }
 
             pipeline_builder = pipeline_builder
-                .add_shader_with_options(
-                    "shaders/vert.spv",
+                // Use embedded shaders for production build
+                .add_shader_from_bytes(
+                    include_bytes!(concat!(env!("OUT_DIR"), "/vert.glsl.spv")),
                     vk::ShaderStageFlags::VERTEX,
-                    pipeline_cfg.watch_shaders,
+                    "main",
                 )?
-                .add_shader_with_options(
-                    "shaders/frag.spv",
+                .add_shader_from_bytes(
+                    include_bytes!(concat!(env!("OUT_DIR"), "/frag.glsl.spv")),
                     vk::ShaderStageFlags::FRAGMENT,
-                    pipeline_cfg.watch_shaders,
+                    "main",
                 )?;
 
             let mut pipeline = pipeline_builder.build()?;
@@ -834,15 +835,16 @@ impl Renderer {
                     .with_pipeline_cache(pipeline_cache.handle())
                     .with_depth_format(vk::Format::D32_SFLOAT)
                     .with_cull_mode(vk::CullModeFlags::FRONT)
-                    .add_shader_with_options(
-                        "shaders/shadow.vert.spv",
+                    // Use embedded shaders for shadow map
+                    .add_shader_from_bytes(
+                        include_bytes!(concat!(env!("OUT_DIR"), "/shadow.vert.spv")),
                         vk::ShaderStageFlags::VERTEX,
-                        false,
+                        "main",
                     )?
-                    .add_shader_with_options(
-                        "shaders/shadow.frag.spv",
+                    .add_shader_from_bytes(
+                        include_bytes!(concat!(env!("OUT_DIR"), "/shadow.frag.spv")),
                         vk::ShaderStageFlags::FRAGMENT,
-                        false,
+                        "main",
                     )?;
 
                 let shadow_pipeline = shadow_builder.build()?;

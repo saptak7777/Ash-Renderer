@@ -1,6 +1,6 @@
 [package]
 name = "ash_renderer"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 authors = ["Saptak Santra"]
 license = "Apache-2.0"
@@ -10,17 +10,14 @@ documentation = "https://docs.rs/ash_renderer"
 keywords = ["vulkan", "graphics", "rendering", "gpu", "ash"]
 categories = ["graphics", "rendering", "game-development"]
 readme = "README.md"
-exclude = [
-    "assets/*", 
-    ".vscode/*", 
-    ".idea/*", 
-    "scripts/*", 
-    ".github/*",
-    "*.png", 
-    "*.jpg",
-    ".gitignore",
-    "task.md",
-    "walkthrough.md"
+include = [
+    "src/**/*",
+    "examples/**/*",
+    "benches/**/*",
+    "shaders/**/*",
+    "Cargo.toml",
+    "README.md",
+    "LICENSE"
 ]
 
 [dependencies]
@@ -30,6 +27,9 @@ vk-mem = "0.5"
 
 # Shader compilation
 shaderc = { version = "0.8", optional = true }
+
+[build-dependencies]
+shaderc = "0.8"
 spirv-reflect = { version = "0.2", optional = true }
 
 # Math

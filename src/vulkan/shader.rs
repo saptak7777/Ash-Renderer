@@ -281,6 +281,36 @@ impl ShaderModule {
                 })?
         };
 
+            reflection,
+        })
+    }
+
+    /// Load shader module from embedded byte array (compiled spirv).
+    pub fn load_from_bytes(
+        device: &Arc<ash::Device>,
+        code: &[u8],
+        stage: vk::ShaderStageFlags,
+    ) -> Result<Self> {
+        if code.len() % 4 != 0 {
+            return Err(AshError::VulkanError(
+                "Shader size must be multiple of 4".to_string(),
+            ));
+        }
+
+        let reflection = ShaderReflection::reflect(code, stage)?;
+
+        let code_u32 =
+            unsafe { std::slice::from_raw_parts(code.as_ptr() as *const u32, code.len() / 4) };
+
+        let module = unsafe {
+            let create_info = vk::ShaderModuleCreateInfo::default().code(code_u32);
+            device
+                .create_shader_module(&create_info, None)
+                .map_err(|e| {
+                    AshError::VulkanError(format!("Failed to create shader module: {e}"))
+                })?
+        };
+
         Ok(Self {
             module,
             stage,
