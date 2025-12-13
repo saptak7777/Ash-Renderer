@@ -792,15 +792,13 @@ impl Renderer {
             }
 
             pipeline_builder = pipeline_builder
-                .add_shader_with_options(
-                    "shaders/vert.vert.spv",
+                .add_shader_from_bytes(
+                    include_bytes!("../../shaders/vert.vert.spv"),
                     vk::ShaderStageFlags::VERTEX,
-                    pipeline_cfg.watch_shaders,
                 )?
-                .add_shader_with_options(
-                    "shaders/frag.frag.spv",
+                .add_shader_from_bytes(
+                    include_bytes!("../../shaders/frag.frag.spv"),
                     vk::ShaderStageFlags::FRAGMENT,
-                    pipeline_cfg.watch_shaders,
                 )?;
 
             let mut pipeline = pipeline_builder.build()?;
@@ -834,15 +832,13 @@ impl Renderer {
                     .with_pipeline_cache(pipeline_cache.handle())
                     .with_depth_format(vk::Format::D32_SFLOAT)
                     .with_cull_mode(vk::CullModeFlags::FRONT)
-                    .add_shader_with_options(
-                        "shaders/shadow.vert.spv",
+                    .add_shader_from_bytes(
+                        include_bytes!("../../shaders/shadow.vert.spv"),
                         vk::ShaderStageFlags::VERTEX,
-                        false,
                     )?
-                    .add_shader_with_options(
-                        "shaders/shadow.frag.spv",
+                    .add_shader_from_bytes(
+                        include_bytes!("../../shaders/shadow.frag.spv"),
                         vk::ShaderStageFlags::FRAGMENT,
-                        false,
                     )?;
 
                 let shadow_pipeline = shadow_builder.build()?;
@@ -1633,12 +1629,17 @@ impl Renderer {
                 .get(frame_index)
                 .ok_or_else(|| AshError::VulkanError("Frame sync index out of range".into()))?;
 
+            log::trace!("Frame {frame_index}: Waiting for fences");
             self.vulkan_device
                 .device
                 .wait_for_fences(&[frame_sync.in_flight], true, u64::MAX)?;
+
+            log::trace!("Frame {frame_index}: Resetting fences");
             self.vulkan_device
                 .device
                 .reset_fences(&[frame_sync.in_flight])?;
+
+            log::trace!("Frame {frame_index}: Fences reset");
 
             // CRITICAL FIX: Advance descriptor manager frame to clear stale dynamic sets
             if let Some(ref mut dm) = self.descriptor_manager {

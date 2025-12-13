@@ -240,6 +240,41 @@ impl PipelineBuilder {
         self
     }
 
+    pub fn add_shader_from_bytes(
+        mut self,
+        code: &[u8],
+        stage: vk::ShaderStageFlags,
+    ) -> Result<Self> {
+        if code.len() % 4 != 0 {
+            return Err(AshError::VulkanError(
+                "Shader size must be multiple of 4".to_string(),
+            ));
+        }
+
+        // Fix alignment issues by copying to a Vec<u32>
+        // include_bytes! is not guaranteed to be 4-byte aligned
+        let mut cursor = std::io::Cursor::new(code);
+        let code_u32 = ash::util::read_spv(&mut cursor)
+            .map_err(|e| AshError::VulkanError(format!("Failed to read shader code: {e}")))?;
+
+        let module = unsafe {
+            let create_info = vk::ShaderModuleCreateInfo::default().code(&code_u32);
+            self.device
+                .create_shader_module(&create_info, None)
+                .map_err(|e| {
+                    AshError::VulkanError(format!("Failed to create shader module: {e}"))
+                })?
+        };
+
+        self.shader_stages.push(ShaderStage {
+            module,
+            stage,
+            entry_point: CString::new("main").unwrap(),
+        });
+
+        Ok(self)
+    }
+
     pub fn add_shader_from_path(self, path: &str, stage: vk::ShaderStageFlags) -> Result<Self> {
         self.add_shader_with_options(path, stage, false)
     }

@@ -8,12 +8,18 @@
 A **production-read Vulkan renderer** built with [ASH](https://github.com/ash-rs/ash) and [VMA](https://github.com/gwihlern-gp/vk-mem-rs).
 Designed for high-performance games and graphics applications, featuring ECS-independence and deep GPU optimization.
 
-## ✨ Features (v0.2.3)
+## ✨ Features (v0.2.5)
 
-> [!NOTE] 
-> **Release 0.2.0 was broken** due to a missing build script for shader compilation. **v0.2.3** fixes this and is the recommended version. I apologize for the inconvenience!
+> [!IMPORTANT]
+> **Release 0.2.5** improves shader loading safety by fixing memory alignment issues that could cause crashes on some platforms. It also includes troubleshooting steps for common runtime errors.
 
 ### Check out what's new!
+- **🔒 Safer Shader Loading**: Fixed potential undefined behavior when loading embedded SPIR-V shaders.
+- **🛠️ Troubleshooting Guide**: Added documentation for resolving common runtime crashes (`0xc000041d`).
+
+### Check out what's new!
+- **🔒 Safer Shader Loading**: Fixed potential undefined behavior when loading embedded SPIR-V shaders.
+- **🛠️ Troubleshooting Guide**: Added documentation for resolving common runtime crashes (`0xc000041d`).
 - **🎨 Bindless Texturing**: Fully dynamic texture access using `descriptor_indexing`. Supports thousands of textures with zero binding overhead.
 - **🖥️ Headless Support**: Run heavy rendering workloads or benchmarks on CI without a window (virtual swapchain).
 - **🌑 Advanced Shadows**: Cascaded Shadow Maps (CSM) with PCF filtering and light culling.
@@ -31,7 +37,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-ash_renderer = "0.2.3"
+ash_renderer = "0.2.5"
 winit = "0.30"
 glam = "0.30"
 ```
@@ -84,7 +90,7 @@ for _ in 0..1000 {
 
 ## 🛠️ Performance
 
-| Metric | Target | Achieved (v0.2.3) |
+| Metric | Target | Achieved (v0.2.5) |
 |--------|--------|-------------------|
 | Draw Calls (Bindless) | 10k+ | ✅ |
 | Headless FPS | Unlocked | ✅ |
@@ -101,3 +107,12 @@ for _ in 0..1000 {
 ## 📜 License
 
 Licensed under Apache-2.0.
+
+### Troubleshooting (Windows)
+> [!WARNING]
+> If you encounter `exit code: 0xc000041d` on Windows, this is a **Fatal User Callback Exception**.
+> 
+> Possible causes and fixes:
+> 1. **Overlay interference**: Disable Discord/Steam/NVIDIA overlays.
+> 2. **Driver Hooks**: Update GPU drivers or verify no other software hooks `vulkan-1.dll`.
+> 3. **Validation Layers**: The application enables validation layers by default. If the crash persists, use `--no-default-features` (requires `gltf_loading`).

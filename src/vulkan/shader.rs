@@ -251,6 +251,39 @@ pub struct ShaderModule {
 }
 
 impl ShaderModule {
+    pub fn from_bytes(
+        device: &Arc<ash::Device>,
+        code: &[u8],
+        stage: vk::ShaderStageFlags,
+    ) -> Result<Self> {
+        if code.len() % 4 != 0 {
+            return Err(AshError::VulkanError(
+                "Shader size must be multiple of 4".to_string(),
+            ));
+        }
+
+        let reflection = ShaderReflection::reflect(code, stage)?;
+
+        let code_u32 =
+            unsafe { std::slice::from_raw_parts(code.as_ptr() as *const u32, code.len() / 4) };
+
+        let module = unsafe {
+            let create_info = vk::ShaderModuleCreateInfo::default().code(&code_u32);
+            device
+                .create_shader_module(&create_info, None)
+                .map_err(|e| {
+                    AshError::VulkanError(format!("Failed to create shader module: {e}"))
+                })?
+        };
+
+        Ok(Self {
+            module,
+            stage,
+            entry_point: CString::new("main").unwrap(),
+            reflection,
+        })
+    }
+
     pub fn load(
         device: &Arc<ash::Device>,
         path: impl AsRef<Path>,
@@ -317,11 +350,12 @@ pub fn load_shader_module(device: &ash::Device, path: &str) -> Result<vk::Shader
         )));
     }
 
-    let code_u32 =
-        unsafe { std::slice::from_raw_parts(code.as_ptr() as *const u32, code.len() / 4) };
+    let mut cursor = std::io::Cursor::new(code);
+    let code_u32 = ash::util::read_spv(&mut cursor)
+        .map_err(|e| AshError::VulkanError(format!("Failed to read shader code: {e}")))?;
 
     let module = unsafe {
-        let create_info = vk::ShaderModuleCreateInfo::default().code(code_u32);
+        let create_info = vk::ShaderModuleCreateInfo::default().code(&code_u32);
         device
             .create_shader_module(&create_info, None)
             .map_err(|e| AshError::VulkanError(format!("Failed to create shader module: {e}")))?
