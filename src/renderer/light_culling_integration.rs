@@ -16,16 +16,14 @@
 //! // The tile buffer is now ready for fragment shader binding
 //! ```
 
-use ash::vk;
-use glam::{Mat4, Vec3};
-// use std::path::Path; // No longer needed for runtime loading
-
 use crate::renderer::features::light_culling::{
     CullingCameraData, GpuLight, LightCullingPass, LightCullingPushConstants,
 };
 use crate::renderer::features::{DirectionalLight, LightingConfig, PointLight};
-use crate::vulkan::{ShaderModule, VulkanDevice};
+use crate::vulkan::VulkanDevice;
 use crate::Result;
+use ash::vk;
+use glam::{Mat4, Vec3};
 
 /// Light culling integration for the main renderer
 ///
@@ -50,20 +48,12 @@ impl LightCullingIntegration {
     ///
     /// Call this during renderer initialization.
     pub fn load_shader(&mut self, device: &VulkanDevice) -> Result<()> {
-        // let shader_path = Path::new("shaders/light_culling.spv");
-
-        // Use embedded shader from build script output
         let shader_code = include_bytes!(concat!(env!("OUT_DIR"), "/light_culling.comp.spv"));
+        let module =
+            crate::vulkan::shader::load_shader_module_from_bytes(&device.device, shader_code)?;
 
-        let shader = ShaderModule::load_from_bytes(
-            &device.device,
-            shader_code,
-            vk::ShaderStageFlags::COMPUTE,
-        )?;
-
-        self.shader_module = Some(shader.module);
-        // Note: shader will be dropped, but module handle is Copy
-        log::info!("Light culling shader loaded");
+        self.shader_module = Some(module);
+        log::info!("Light culling shader loaded (embedded)");
         Ok(())
     }
 

@@ -281,36 +281,6 @@ impl ShaderModule {
                 })?
         };
 
-            reflection,
-        })
-    }
-
-    /// Load shader module from embedded byte array (compiled spirv).
-    pub fn load_from_bytes(
-        device: &Arc<ash::Device>,
-        code: &[u8],
-        stage: vk::ShaderStageFlags,
-    ) -> Result<Self> {
-        if code.len() % 4 != 0 {
-            return Err(AshError::VulkanError(
-                "Shader size must be multiple of 4".to_string(),
-            ));
-        }
-
-        let reflection = ShaderReflection::reflect(code, stage)?;
-
-        let code_u32 =
-            unsafe { std::slice::from_raw_parts(code.as_ptr() as *const u32, code.len() / 4) };
-
-        let module = unsafe {
-            let create_info = vk::ShaderModuleCreateInfo::default().code(code_u32);
-            device
-                .create_shader_module(&create_info, None)
-                .map_err(|e| {
-                    AshError::VulkanError(format!("Failed to create shader module: {e}"))
-                })?
-        };
-
         Ok(Self {
             module,
             stage,
@@ -345,6 +315,30 @@ pub fn load_shader_module(device: &ash::Device, path: &str) -> Result<vk::Shader
         return Err(AshError::VulkanError(format!(
             "Shader {path} size must be multiple of 4"
         )));
+    }
+
+    let code_u32 =
+        unsafe { std::slice::from_raw_parts(code.as_ptr() as *const u32, code.len() / 4) };
+
+    let module = unsafe {
+        let create_info = vk::ShaderModuleCreateInfo::default().code(code_u32);
+        device
+            .create_shader_module(&create_info, None)
+            .map_err(|e| AshError::VulkanError(format!("Failed to create shader module: {e}")))?
+    };
+
+    Ok(module)
+}
+
+/// Helper to load a shader module directly from bytes (e.g. include_bytes!).
+pub fn load_shader_module_from_bytes(
+    device: &ash::Device,
+    code: &[u8],
+) -> Result<vk::ShaderModule> {
+    if code.len() % 4 != 0 {
+        return Err(AshError::VulkanError(
+            "Shader bytes size must be multiple of 4".to_string(),
+        ));
     }
 
     let code_u32 =

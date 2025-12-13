@@ -24,6 +24,7 @@ Cargo.lock
 *.spv.txt
 *.spv.d
 pipeline.cache
+shaders/*.spv
 
 # Vulkan
 vk_layer_settings.txt
