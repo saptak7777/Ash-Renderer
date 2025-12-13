@@ -803,7 +803,7 @@ impl Renderer {
 
             let mut pipeline = pipeline_builder.build()?;
             resource_registry
-                .register_pipeline(pipeline.pipeline, &[pipeline_layout_id, render_pass_id])
+                .register_pipeline(pipeline.pipeline, &[pipeline_layout_id])
                 .map_err(|e| AshError::VulkanError(format!("Failed to register pipeline: {e}")))?;
             pipeline.mark_managed_by_registry();
 

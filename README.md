@@ -8,18 +8,16 @@
 A **production-read Vulkan renderer** built with [ASH](https://github.com/ash-rs/ash) and [VMA](https://github.com/gwihlern-gp/vk-mem-rs).
 Designed for high-performance games and graphics applications, featuring ECS-independence and deep GPU optimization.
 
-## ✨ Features (v0.2.5)
+## ✨ Features (v0.2.6)
 
 > [!IMPORTANT]
-> **Release 0.2.5** improves shader loading safety by fixing memory alignment issues that could cause crashes on some platforms. It also includes troubleshooting steps for common runtime errors.
+> **Release 0.2.6** fixes a critical regression in **v0.2.5** where resizing the window caused a panic due to resource dependency tracking. It is highly recommended to update.
 
 ### Check out what's new!
-- **🔒 Safer Shader Loading**: Fixed potential undefined behavior when loading embedded SPIR-V shaders.
-- **🛠️ Troubleshooting Guide**: Added documentation for resolving common runtime crashes (`0xc000041d`).
+- **🐛 Fixed Resize Crash**: Resolved a "Render Pass Dependency" panic by correctly managing pipeline dependencies.
+- **🔒 Safer Shader Loading**: (From v0.2.5) Fixed memory alignment issues for embedded shaders.
 
-### Check out what's new!
-- **🔒 Safer Shader Loading**: Fixed potential undefined behavior when loading embedded SPIR-V shaders.
-- **🛠️ Troubleshooting Guide**: Added documentation for resolving common runtime crashes (`0xc000041d`).
+
 - **🎨 Bindless Texturing**: Fully dynamic texture access using `descriptor_indexing`. Supports thousands of textures with zero binding overhead.
 - **🖥️ Headless Support**: Run heavy rendering workloads or benchmarks on CI without a window (virtual swapchain).
 - **🌑 Advanced Shadows**: Cascaded Shadow Maps (CSM) with PCF filtering and light culling.
@@ -37,7 +35,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-ash_renderer = "0.2.5"
+ash_renderer = "0.2.6"
 winit = "0.30"
 glam = "0.30"
 ```
@@ -90,7 +88,7 @@ for _ in 0..1000 {
 
 ## 🛠️ Performance
 
-| Metric | Target | Achieved (v0.2.5) |
+| Metric | Target | Achieved (v0.2.6) |
 |--------|--------|-------------------|
 | Draw Calls (Bindless) | 10k+ | ✅ |
 | Headless FPS | Unlocked | ✅ |
