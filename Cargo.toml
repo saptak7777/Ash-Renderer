@@ -1,6 +1,6 @@
 [package]
 name = "ash_renderer"
-version = "0.2.2"
+version = "0.2.3"
 edition = "2021"
 authors = ["Saptak Santra"]
 license = "Apache-2.0"
@@ -10,15 +10,15 @@ documentation = "https://docs.rs/ash_renderer"
 keywords = ["vulkan", "graphics", "rendering", "gpu", "ash"]
 categories = ["graphics", "rendering", "game-development"]
 readme = "README.md"
-# Files are now handled standardly via .gitignore, no manual include/exclude needed usually, 
-# but we ensures shaders source is included if user wants to build themselves.
-exclude = [".vscode/*", ".idea/*", ".github/*", "task.md", "walkthrough.md", "audit_report.md"]
-
-[build-dependencies]
-shaderc = "0.8"
-anyhow = "1.0"
-glob = "0.3"
-
+include = [
+    "src/**/*",
+    "examples/**/*",
+    "benches/**/*",
+    "shaders/**/*",
+    "Cargo.toml",
+    "README.md",
+    "LICENSE"
+]
 
 [dependencies]
 # Vulkan
@@ -60,6 +60,9 @@ uuid = { version = "1.11", features = ["v4"] }
 criterion = { version = "0.5", features = ["html_reports"] }
 env_logger = "0.11"
 tempfile = "3.14"
+
+[build-dependencies]
+shaderc = "0.8"
 
 [features]
 default = ["validation", "gltf_loading"]

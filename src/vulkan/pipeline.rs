@@ -290,19 +290,6 @@ impl PipelineBuilder {
         Ok(self)
     }
 
-    pub fn add_shader_module(
-        mut self,
-        module: vk::ShaderModule,
-        stage: vk::ShaderStageFlags,
-    ) -> Self {
-        self.shader_stages.push(ShaderStage {
-            module,
-            stage,
-            entry_point: CString::new("main").unwrap(),
-        });
-        self
-    }
-
     pub fn with_vertex_input(
         mut self,
         bindings: Vec<vk::VertexInputBindingDescription>,

@@ -8,7 +8,10 @@
 A **production-read Vulkan renderer** built with [ASH](https://github.com/ash-rs/ash) and [VMA](https://github.com/gwihlern-gp/vk-mem-rs).
 Designed for high-performance games and graphics applications, featuring ECS-independence and deep GPU optimization.
 
-## ✨ Features (v0.2.0)
+## ✨ Features (v0.2.3)
+
+> [!NOTE] 
+> **Release 0.2.0 was broken** due to a missing build script for shader compilation. **v0.2.3** fixes this and is the recommended version. I apologize for the inconvenience!
 
 ### Check out what's new!
 - **🎨 Bindless Texturing**: Fully dynamic texture access using `descriptor_indexing`. Supports thousands of textures with zero binding overhead.
@@ -28,7 +31,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-ash_renderer = "0.2.0"
+ash_renderer = "0.2.3"
 winit = "0.30"
 glam = "0.30"
 ```
@@ -81,7 +84,7 @@ for _ in 0..1000 {
 
 ## 🛠️ Performance
 
-| Metric | Target | Achieved (v0.2.0) |
+| Metric | Target | Achieved (v0.2.3) |
 |--------|--------|-------------------|
 | Draw Calls (Bindless) | 10k+ | ✅ |
 | Headless FPS | Unlocked | ✅ |

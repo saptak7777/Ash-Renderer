@@ -792,20 +792,16 @@ impl Renderer {
             }
 
             pipeline_builder = pipeline_builder
-                .add_shader_module(
-                    crate::vulkan::shader::load_shader_module_from_bytes(
-                        &vulkan_device.device,
-                        include_bytes!(concat!(env!("OUT_DIR"), "/vert.spv")),
-                    )?,
+                .add_shader_with_options(
+                    "shaders/vert.vert.spv",
                     vk::ShaderStageFlags::VERTEX,
-                )
-                .add_shader_module(
-                    crate::vulkan::shader::load_shader_module_from_bytes(
-                        &vulkan_device.device,
-                        include_bytes!(concat!(env!("OUT_DIR"), "/frag.spv")),
-                    )?,
+                    pipeline_cfg.watch_shaders,
+                )?
+                .add_shader_with_options(
+                    "shaders/frag.frag.spv",
                     vk::ShaderStageFlags::FRAGMENT,
-                );
+                    pipeline_cfg.watch_shaders,
+                )?;
 
             let mut pipeline = pipeline_builder.build()?;
             resource_registry
@@ -838,20 +834,16 @@ impl Renderer {
                     .with_pipeline_cache(pipeline_cache.handle())
                     .with_depth_format(vk::Format::D32_SFLOAT)
                     .with_cull_mode(vk::CullModeFlags::FRONT)
-                    .add_shader_module(
-                        crate::vulkan::shader::load_shader_module_from_bytes(
-                            &vulkan_device.device,
-                            include_bytes!(concat!(env!("OUT_DIR"), "/shadow.vert.spv")),
-                        )?,
+                    .add_shader_with_options(
+                        "shaders/shadow.vert.spv",
                         vk::ShaderStageFlags::VERTEX,
-                    )
-                    .add_shader_module(
-                        crate::vulkan::shader::load_shader_module_from_bytes(
-                            &vulkan_device.device,
-                            include_bytes!(concat!(env!("OUT_DIR"), "/shadow.frag.spv")),
-                        )?,
+                        false,
+                    )?
+                    .add_shader_with_options(
+                        "shaders/shadow.frag.spv",
                         vk::ShaderStageFlags::FRAGMENT,
-                    );
+                        false,
+                    )?;
 
                 let shadow_pipeline = shadow_builder.build()?;
                 (Some(shadow_pipeline), Some(shadow_pipeline_layout))

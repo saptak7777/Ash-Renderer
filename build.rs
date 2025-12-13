@@ -1,66 +1,82 @@
-use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 fn main() {
-    // Tell Cargo to re-run this script if shaders change
     println!("cargo:rerun-if-changed=shaders");
 
-    let out_dir = env::var("OUT_DIR").unwrap();
+    // Create shader compiler
     let compiler = shaderc::Compiler::new().unwrap();
+    let mut options = shaderc::CompileOptions::new().unwrap();
+    options.set_target_env(
+        shaderc::TargetEnv::Vulkan,
+        shaderc::EnvVersion::Vulkan1_2 as u32,
+    );
+    options.set_optimization_level(shaderc::OptimizationLevel::Performance);
 
     let shader_dir = Path::new("shaders");
-    if !shader_dir.exists() {
-        return; // Skip if no shaders (e.g. published crate without sources, though we included them)
-    }
 
-    for entry in fs::read_dir(shader_dir).unwrap() {
-        let entry = entry.unwrap();
+    // We will output .spv files alongside the source files in the shaders directory
+    // This allows runtime loading to work as expected by the application
+
+    visit_dirs(shader_dir, &|entry| {
         let path = entry.path();
-
-        if let Some(filename_os) = path.file_name() {
-            let file_name = filename_os.to_str().unwrap();
-
-            // Handle extensions
-            let (kind, output_name) = if file_name.ends_with(".vert") {
-                (shaderc::ShaderKind::Vertex, format!("{file_name}.spv"))
-            } else if file_name.ends_with(".frag") {
-                (shaderc::ShaderKind::Fragment, format!("{file_name}.spv"))
-            } else if file_name.ends_with(".comp") {
-                (shaderc::ShaderKind::Compute, format!("{file_name}.spv"))
-            } else if file_name.ends_with(".glsl") {
-                if file_name.contains("vert") {
-                    (
-                        shaderc::ShaderKind::Vertex,
-                        file_name.replace(".glsl", ".spv"),
-                    )
-                } else if file_name.contains("frag") {
-                    (
-                        shaderc::ShaderKind::Fragment,
-                        file_name.replace(".glsl", ".spv"),
-                    )
-                } else {
-                    continue;
-                }
-            } else {
-                continue;
+        if let Some(extension) = path.extension() {
+            let extension = extension.to_string_lossy();
+            let kind = match extension.as_ref() {
+                "vert" => Some(shaderc::ShaderKind::Vertex),
+                "frag" => Some(shaderc::ShaderKind::Fragment),
+                "comp" => Some(shaderc::ShaderKind::Compute),
+                _ => None,
             };
 
-            let source = fs::read_to_string(&path).unwrap();
-
-            // Compile
-            let binary_result = compiler.compile_into_spirv(&source, kind, file_name, "main", None);
-
-            match binary_result {
-                Ok(binary) => {
-                    let out_path = PathBuf::from(&out_dir).join(&output_name);
-                    fs::write(&out_path, binary.as_binary_u8()).unwrap();
-                }
-                Err(e) => {
-                    // Panic to fail build if shader error
-                    panic!("Failed to compile shader {file_name}: {e}");
-                }
+            if let Some(kind) = kind {
+                println!("cargo:rerun-if-changed={}", path.display());
+                compile_shader(&compiler, &options, &path, kind);
             }
+        }
+    })
+    .expect("Failed to process shader directory");
+}
+
+fn visit_dirs(dir: &Path, cb: &dyn Fn(&fs::DirEntry)) -> std::io::Result<()> {
+    if dir.is_dir() {
+        for entry in fs::read_dir(dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.is_dir() {
+                visit_dirs(&path, cb)?;
+            } else {
+                cb(&entry);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn compile_shader(
+    compiler: &shaderc::Compiler,
+    options: &shaderc::CompileOptions,
+    path: &Path,
+    kind: shaderc::ShaderKind,
+) {
+    let source = fs::read_to_string(path).expect("Failed to read shader source");
+    let file_name = path.file_name().unwrap().to_string_lossy();
+
+    let binary_result =
+        compiler.compile_into_spirv(&source, kind, &file_name, "main", Some(options));
+
+    match binary_result {
+        Ok(binary) => {
+            let mut out_path = PathBuf::from(path);
+            // Append .spv extension (e.g. shader.vert -> shader.vert.spv)
+            let mut name = out_path.file_name().unwrap().to_os_string();
+            name.push(".spv");
+            out_path.set_file_name(name);
+
+            fs::write(&out_path, binary.as_binary_u8()).expect("Failed to write SPIR-V binary");
+        }
+        Err(e) => {
+            panic!("Shader compilation failed for {}: {}", path.display(), e);
         }
     }
 }
