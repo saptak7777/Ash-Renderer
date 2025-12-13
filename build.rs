@@ -7,7 +7,7 @@ fn main() {
     println!("cargo:rerun-if-changed=shaders");
 
     let out_dir = env::var("OUT_DIR").unwrap();
-    let mut compiler = shaderc::Compiler::new().unwrap();
+    let compiler = shaderc::Compiler::new().unwrap();
 
     let shader_dir = Path::new("shaders");
     if !shader_dir.exists() {
@@ -23,11 +23,11 @@ fn main() {
 
             // Handle extensions
             let (kind, output_name) = if file_name.ends_with(".vert") {
-                (shaderc::ShaderKind::Vertex, format!("{}.spv", file_name))
+                (shaderc::ShaderKind::Vertex, format!("{file_name}.spv"))
             } else if file_name.ends_with(".frag") {
-                (shaderc::ShaderKind::Fragment, format!("{}.spv", file_name))
+                (shaderc::ShaderKind::Fragment, format!("{file_name}.spv"))
             } else if file_name.ends_with(".comp") {
-                (shaderc::ShaderKind::Compute, format!("{}.spv", file_name))
+                (shaderc::ShaderKind::Compute, format!("{file_name}.spv"))
             } else if file_name.ends_with(".glsl") {
                 if file_name.contains("vert") {
                     (
@@ -58,7 +58,7 @@ fn main() {
                 }
                 Err(e) => {
                     // Panic to fail build if shader error
-                    panic!("Failed to compile shader {}: {}", file_name, e);
+                    panic!("Failed to compile shader {file_name}: {e}");
                 }
             }
         }
