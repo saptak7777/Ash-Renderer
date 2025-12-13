@@ -2,13 +2,17 @@
 
 // GPU Light Culling Compute Shader
 // Implements tile-based deferred lighting (Forward+)
-// Each 16x16 pixel tile gets a list of affecting lights
+// Each tile gets a list of affecting lights
 
-layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+// ISSUE 20 FIX: Specialization constants for adaptive workgroup sizing
+// Default 16x16, can be overridden at pipeline creation based on light count
+layout(constant_id = 0) const uint WORKGROUP_SIZE_X = 16;
+layout(constant_id = 1) const uint WORKGROUP_SIZE_Y = 16;
+
+layout(local_size_x_id = 0, local_size_y_id = 1, local_size_z = 1) in;
 
 // Maximum lights per tile
 #define MAX_LIGHTS_PER_TILE 256
-#define TILE_SIZE 16
 
 // Light structure
 struct Light {
@@ -53,6 +57,8 @@ shared uint sharedLightCount;
 shared uint sharedLightIndices[MAX_LIGHTS_PER_TILE];
 shared uint sharedMinDepthInt;
 shared uint sharedMaxDepthInt;
+// OPTIMIZATION: Store frustum in shared memory so only thread 0 computes it
+shared vec4 sharedFrustumPlanes[6];
 
 // Convert screen UV to view-space position at given depth
 vec3 screenToView(vec2 uv, float depth) {
@@ -63,9 +69,10 @@ vec3 screenToView(vec2 uv, float depth) {
 
 // Construct frustum planes for a tile
 void getTileFrustum(uvec2 tileId, float minDepth, float maxDepth, out vec4 planes[6]) {
-    // Tile corners in NDC
-    vec2 minNdc = (vec2(tileId) * TILE_SIZE) / vec2(pc.screenSize) * 2.0 - 1.0;
-    vec2 maxNdc = (vec2(tileId + 1) * TILE_SIZE) / vec2(pc.screenSize) * 2.0 - 1.0;
+    // Tile corners in NDC (using specialization constants)
+    vec2 tileSize = vec2(float(WORKGROUP_SIZE_X), float(WORKGROUP_SIZE_Y));
+    vec2 minNdc = (vec2(tileId) * tileSize) / vec2(pc.screenSize) * 2.0 - 1.0;
+    vec2 maxNdc = (vec2(tileId + 1) * tileSize) / vec2(pc.screenSize) * 2.0 - 1.0;
 
     // View-space corners at near plane
     vec3 corners[4];
@@ -98,10 +105,10 @@ bool sphereInFrustum(vec3 center, float radius, vec4 planes[6]) {
 void main() {
     uvec2 tileId = gl_WorkGroupID.xy;
     uvec2 localId = gl_LocalInvocationID.xy;
-    uint localIndex = localId.y * TILE_SIZE + localId.x;
+    uint localIndex = localId.y * WORKGROUP_SIZE_X + localId.x;
     
     // Calculate tile index for output buffer
-    uvec2 numTiles = (pc.screenSize + TILE_SIZE - 1) / TILE_SIZE;
+    uvec2 numTiles = (pc.screenSize + uvec2(WORKGROUP_SIZE_X, WORKGROUP_SIZE_Y) - 1) / uvec2(WORKGROUP_SIZE_X, WORKGROUP_SIZE_Y);
     uint tileIndex = tileId.y * numTiles.x + tileId.x;
     uint tileOffset = tileIndex * (MAX_LIGHTS_PER_TILE + 1);
     
@@ -114,7 +121,7 @@ void main() {
     barrier();
     
     // Sample depth buffer to find min/max depth for this tile
-    uvec2 pixelCoord = tileId * TILE_SIZE + localId;
+    uvec2 pixelCoord = tileId * uvec2(WORKGROUP_SIZE_X, WORKGROUP_SIZE_Y) + localId;
     if (pixelCoord.x < pc.screenSize.x && pixelCoord.y < pc.screenSize.y) {
         vec2 uv = (vec2(pixelCoord) + 0.5) / vec2(pc.screenSize);
         float depth = texture(depthBuffer, uv).r;
@@ -129,13 +136,32 @@ void main() {
     float minDepth = uintBitsToFloat(sharedMinDepthInt);
     float maxDepth = uintBitsToFloat(sharedMaxDepthInt);
     
-    // Construct view-space frustum for this tile
-    vec4 frustumPlanes[6];
-    getTileFrustum(tileId, minDepth, maxDepth, frustumPlanes);
+    // OPTIMIZATION: Only thread 0 computes frustum, others read from shared memory
+    // This reduces frustum calculations from 256 per tile to 1 per tile
+    if (localIndex == 0) {
+        vec4 frustumPlanes[6];
+        getTileFrustum(tileId, minDepth, maxDepth, frustumPlanes);
+        // Copy to shared memory
+        for (int i = 0; i < 6; i++) {
+            sharedFrustumPlanes[i] = frustumPlanes[i];
+        }
+    }
     barrier();
     
+    // OPTIMIZATION (Issue 20 partial): Early-exit if no lights to cull
+    // Full adaptive workgroup sizing would require specialization constants
+    // TODO: Host-side should skip dispatch entirely if lightCount == 0
+    if (pc.lightCount == 0) {
+        if (localIndex == 0) {
+            tileData[tileOffset] = 0;
+        }
+        return;
+    }
+    
     // Each thread tests some lights
-    uint lightsPerThread = (pc.lightCount + 255) / 256;
+    // Use actual workgroup size from specialization constants
+    uint workgroupSize = WORKGROUP_SIZE_X * WORKGROUP_SIZE_Y;
+    uint lightsPerThread = (pc.lightCount + workgroupSize - 1) / workgroupSize;
     uint lightStart = localIndex * lightsPerThread;
     uint lightEnd = min(lightStart + lightsPerThread, pc.lightCount);
     
@@ -149,8 +175,8 @@ void main() {
         vec3 lightPosView = (camera.view * vec4(light.position.xyz, 1.0)).xyz;
         float lightRadius = light.position.w;
         
-        // Test against frustum
-        if (sphereInFrustum(lightPosView, lightRadius, frustumPlanes)) {
+        // Test against frustum (using shared memory)
+        if (sphereInFrustum(lightPosView, lightRadius, sharedFrustumPlanes)) {
             uint slot = atomicAdd(sharedLightCount, 1);
             if (slot < MAX_LIGHTS_PER_TILE) {
                 sharedLightIndices[slot] = i;

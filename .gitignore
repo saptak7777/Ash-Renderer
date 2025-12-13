@@ -20,12 +20,15 @@ Cargo.lock
 *.exe
 
 # Shader compilation artifacts
+*.spv
 *.spv.txt
 *.spv.d
+pipeline.cache
 
 # Vulkan
 vk_layer_settings.txt
 VkLayer_screenshot/
+*.trace
 
 # OS
 Thumbs.db
@@ -39,6 +42,7 @@ Thumbs.db
 # Test outputs
 *.profraw
 *.profdata
+*.dump
 
 # Documentation build
 /target/doc/

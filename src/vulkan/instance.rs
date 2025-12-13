@@ -34,9 +34,9 @@ impl VulkanInstance {
             let extensions = Self::required_extensions(enable_validation);
 
             let app_info = vk::ApplicationInfo::default()
-                .application_name(c"REDE")
+                .application_name(c"Ash Renderer")
                 .application_version(vk::make_api_version(0, 0, 1, 0))
-                .engine_name(c"REDE")
+                .engine_name(c"Ash Renderer")
                 .engine_version(vk::make_api_version(0, 0, 1, 0))
                 .api_version(vk::API_VERSION_1_3);
 
@@ -74,6 +74,87 @@ impl VulkanInstance {
             };
 
             let surface = create_surface(&entry, &instance, window)?;
+
+            let surface_loader = surface::Instance::new(&entry, &instance);
+
+            Ok(Self {
+                entry,
+                instance,
+                surface_loader,
+                surface,
+                debug_utils: debug_utils_loader,
+                debug_messenger,
+            })
+        }
+    }
+
+    /// Create a new Vulkan instance using a SurfaceProvider.
+    /// This is the preferred method for new code as it decouples windowing.
+    pub fn from_surface<S: super::surface::SurfaceProvider>(
+        surface_provider: &S,
+        enable_validation: bool,
+    ) -> Result<Self> {
+        unsafe {
+            let entry = Entry::load().map_err(|e| {
+                AshError::DeviceInitFailed(format!("Failed to load Vulkan entry: {e:?}"))
+            })?;
+
+            let validation_layers = if enable_validation {
+                Self::query_validation_layers(&entry)?
+            } else {
+                Vec::new()
+            };
+
+            // Combine standard extensions with surface provider's requirements
+            let mut extensions = Self::required_extensions(enable_validation);
+            for ext in surface_provider.required_extensions() {
+                if !extensions.contains(&ext) {
+                    extensions.push(ext);
+                }
+            }
+
+            let app_info = vk::ApplicationInfo::default()
+                .application_name(c"Ash Renderer")
+                .application_version(vk::make_api_version(0, 0, 1, 0))
+                .engine_name(c"Ash Renderer")
+                .engine_version(vk::make_api_version(0, 0, 1, 0))
+                .api_version(vk::API_VERSION_1_3);
+
+            let mut create_info = vk::InstanceCreateInfo::default()
+                .application_info(&app_info)
+                .enabled_extension_names(&extensions)
+                .enabled_layer_names(&validation_layers);
+
+            let mut debug_create_info =
+                enable_validation.then_some(Self::debug_messenger_create_info());
+            if let Some(ref mut info) = debug_create_info {
+                create_info = create_info.push_next(info);
+            }
+
+            let instance = entry.create_instance(&create_info, None).map_err(|e| {
+                AshError::DeviceInitFailed(format!("Failed to create Vulkan instance: {e:?}"))
+            })?;
+
+            let debug_utils_loader =
+                enable_validation.then(|| debug_utils::Instance::new(&entry, &instance));
+
+            let debug_messenger = if let Some(ref utils) = debug_utils_loader {
+                let create_info = Self::debug_messenger_create_info();
+                Some(
+                    utils
+                        .create_debug_utils_messenger(&create_info, None)
+                        .map_err(|e| {
+                            AshError::DeviceInitFailed(format!(
+                                "Failed to create debug messenger: {e:?}"
+                            ))
+                        })?,
+                )
+            } else {
+                None
+            };
+
+            // Create surface using the provider
+            let surface = surface_provider.create_surface(&entry, &instance)?;
 
             let surface_loader = surface::Instance::new(&entry, &instance);
 

@@ -123,7 +123,14 @@ impl DescriptorAllocator {
         self.current_frame += 1;
         let threshold = self.current_frame.saturating_sub(FRAMES_IN_FLIGHT as u64);
 
-        for pool in &mut self.frame_pools {
+        // Track pools to remove (those unused for too long)
+        let prune_threshold = self
+            .current_frame
+            .saturating_sub(FRAMES_IN_FLIGHT as u64 * 10);
+        let mut pools_to_remove = Vec::new();
+        let pool_count = self.frame_pools.len(); // Cache before mutable borrow
+
+        for (idx, pool) in self.frame_pools.iter_mut().enumerate() {
             if pool.frame_number < threshold {
                 unsafe {
                     let _ = self
@@ -133,6 +140,26 @@ impl DescriptorAllocator {
                 pool.used_sets = 0;
                 pool.frame_number = self.current_frame;
                 pool.sets.clear();
+            } else if pool.frame_number < prune_threshold && pool_count > FRAMES_IN_FLIGHT {
+                // Pool hasn't been used in 10 frames worth of cycles, mark for removal
+                // Keep at least FRAMES_IN_FLIGHT pools
+                pools_to_remove.push(idx);
+            }
+        }
+
+        // Remove unused pools (in reverse order to maintain indices)
+        for idx in pools_to_remove.into_iter().rev() {
+            if self.frame_pools.len() > FRAMES_IN_FLIGHT {
+                let pool = self.frame_pools.remove(idx);
+                // Remove from managed pools tracking
+                self.managed_pools.remove(&pool.pool);
+                unsafe {
+                    self.device.destroy_descriptor_pool(pool.pool, None);
+                }
+                log::debug!(
+                    "Pruned unused descriptor pool (frame {})",
+                    pool.frame_number
+                );
             }
         }
 

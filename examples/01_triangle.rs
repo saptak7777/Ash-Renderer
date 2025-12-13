@@ -2,7 +2,7 @@
 //!
 //! Demonstrates minimal renderer setup and rendering a simple triangle.
 
-use ash_renderer::prelude::*;
+use ash_renderer::{prelude::*, WindowSurfaceProvider};
 use winit::{
     application::ApplicationHandler,
     event::WindowEvent,
@@ -31,8 +31,10 @@ impl ApplicationHandler for App {
             .with_inner_size(winit::dpi::LogicalSize::new(800, 600));
 
         let window = event_loop.create_window(window_attrs).unwrap();
+        let size = window.inner_size();
+        let surface_provider = WindowSurfaceProvider::new(&window, size.width, size.height);
 
-        match Renderer::new(&window) {
+        match Renderer::new(&surface_provider) {
             Ok(renderer) => {
                 self.renderer = Some(renderer);
                 self.window = Some(window);
@@ -49,8 +51,18 @@ impl ApplicationHandler for App {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::RedrawRequested => {
-                if let Some(renderer) = &mut self.renderer {
-                    if let Err(e) = renderer.render_frame() {
+                if let (Some(renderer), Some(window)) = (&mut self.renderer, &self.window) {
+                    let size = window.inner_size();
+                    let aspect = size.width as f32 / size.height.max(1) as f32;
+
+                    // Simple static camera
+                    let camera_pos = glam::Vec3::new(0.0, 0.0, 3.0);
+                    let view = glam::Mat4::look_at_rh(camera_pos, glam::Vec3::ZERO, glam::Vec3::Y);
+                    let mut proj =
+                        glam::Mat4::perspective_rh(45.0_f32.to_radians(), aspect, 0.5, 100.0);
+                    proj.y_axis.y *= -1.0; // Vulkan Y-flip
+
+                    if let Err(e) = renderer.render_frame(view, proj, camera_pos) {
                         log::error!("Render error: {e}");
                     }
                 }

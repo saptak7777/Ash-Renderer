@@ -3,7 +3,7 @@
 //! Demonstrates textured cube rendering with materials.
 //! Shows how to control the camera from the application.
 
-use ash_renderer::prelude::*;
+use ash_renderer::{prelude::*, WindowSurfaceProvider};
 use glam::{Mat4, Vec3};
 use std::time::Instant;
 use winit::{
@@ -36,8 +36,10 @@ impl ApplicationHandler for App {
             .with_inner_size(winit::dpi::LogicalSize::new(1280, 720));
 
         let window = event_loop.create_window(window_attrs).unwrap();
+        let size = window.inner_size();
+        let surface_provider = WindowSurfaceProvider::new(&window, size.width, size.height);
 
-        match Renderer::new(&window) {
+        match Renderer::new(&surface_provider) {
             Ok(mut renderer) => {
                 // Create a cube mesh
                 let cube = Mesh::create_cube();
@@ -87,9 +89,7 @@ impl ApplicationHandler for App {
                     let mut proj = Mat4::perspective_rh(45.0_f32.to_radians(), aspect, 0.5, 100.0);
                     proj.y_axis.y *= -1.0; // Vulkan Y-flip
 
-                    renderer.update_camera(view, proj, camera_pos);
-
-                    if let Err(e) = renderer.render_frame() {
+                    if let Err(e) = renderer.render_frame(view, proj, camera_pos) {
                         log::error!("Render error: {e}");
                     }
                 }

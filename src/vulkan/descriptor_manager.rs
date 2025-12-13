@@ -298,6 +298,15 @@ impl DescriptorManager {
         Ok(())
     }
 
+    /// Advance to next frame - MUST be called once per frame before allocating new descriptor sets.
+    /// This resets the allocator's ring buffer and clears stale dynamic set handles.
+    pub fn next_frame(&mut self) {
+        // Clear dynamic sets that reference potentially invalidated descriptor pools
+        self.dynamic_sets.clear();
+        // Advance the allocator's frame counter (resets old pools)
+        self.allocator.next_frame();
+    }
+
     fn material_texture_descriptor(&self, set: vk::DescriptorSet) -> Result<&DescriptorSet> {
         if set == self.default_texture_array_set.handle() {
             return Ok(&self.default_texture_array_set);

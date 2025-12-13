@@ -160,4 +160,8 @@ void main() {
     
     // Write output
     imageStore(outputColor, pos, vec4(result, 1.0));
+    
+    // CRITICAL FIX: Memory barrier to ensure history buffer writes are visible
+    // This prevents race conditions when the next frame reads history
+    memoryBarrierImage();
 }

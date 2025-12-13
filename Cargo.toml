@@ -1,6 +1,6 @@
 [package]
 name = "ash_renderer"
-version = "0.1.2"
+version = "0.2.0"
 edition = "2021"
 authors = ["Saptak Santra"]
 license = "Apache-2.0"
@@ -10,6 +10,18 @@ documentation = "https://docs.rs/ash_renderer"
 keywords = ["vulkan", "graphics", "rendering", "gpu", "ash"]
 categories = ["graphics", "rendering", "game-development"]
 readme = "README.md"
+exclude = [
+    "assets/*", 
+    ".vscode/*", 
+    ".idea/*", 
+    "scripts/*", 
+    ".github/*",
+    "*.png", 
+    "*.jpg",
+    ".gitignore",
+    "task.md",
+    "walkthrough.md"
+]
 
 [dependencies]
 # Vulkan
@@ -21,7 +33,7 @@ shaderc = { version = "0.8", optional = true }
 spirv-reflect = { version = "0.2", optional = true }
 
 # Math
-glam = { version = "0.29", features = ["bytemuck"] }
+glam = { version = "0.30", features = ["bytemuck"] }
 
 # Memory
 bytemuck = { version = "1.14", features = ["derive"] }
