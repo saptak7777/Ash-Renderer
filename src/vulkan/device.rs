@@ -75,10 +75,23 @@ impl VulkanDevice {
             let device_extension_names = [swapchain::NAME.as_ptr()];
             let device_features = vk::PhysicalDeviceFeatures::default().sampler_anisotropy(true);
 
+            let mut vulnerability_features = vk::PhysicalDeviceVulkan12Features::default()
+                .buffer_device_address(true)
+                .descriptor_indexing(true)
+                .shader_sampled_image_array_non_uniform_indexing(true)
+                .runtime_descriptor_array(true)
+                .descriptor_binding_variable_descriptor_count(true)
+                .descriptor_binding_partially_bound(true)
+                .descriptor_binding_sampled_image_update_after_bind(true);
+
+            let mut features2 = vk::PhysicalDeviceFeatures2::default()
+                .features(device_features)
+                .push_next(&mut vulnerability_features);
+
             let device_create_info = vk::DeviceCreateInfo::default()
                 .queue_create_infos(&queue_infos)
                 .enabled_extension_names(&device_extension_names)
-                .enabled_features(&device_features);
+                .push_next(&mut features2);
 
             let logical_device = vk_instance
                 .create_device(physical_device, &device_create_info, None)
