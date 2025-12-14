@@ -15,15 +15,12 @@ impl Allocator {
     /// - The device is not being destroyed while this allocator is in use
     /// - All buffers allocated from this allocator are destroyed before dropping the allocator
     pub unsafe fn new(device: &crate::vulkan::VulkanDevice) -> crate::Result<Self> {
-        let mut create_info = vk_mem::AllocatorCreateInfo::new(
+        let vma = vk_mem::Allocator::new(vk_mem::AllocatorCreateInfo::new(
             device.instance.instance(),
             &device.device,
             device.physical_device,
-        );
-        create_info.flags = vk_mem::AllocatorCreateFlags::BUFFER_DEVICE_ADDRESS;
-
-        let vma = vk_mem::Allocator::new(create_info)
-            .map_err(|e| crate::AshError::VulkanError(format!("VMA init failed: {e:?}")))?;
+        ))
+        .map_err(|e| crate::AshError::VulkanError(format!("VMA init failed: {e:?}")))?;
 
         log::info!("VMA allocator created");
 

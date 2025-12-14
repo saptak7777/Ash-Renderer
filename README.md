@@ -32,15 +32,13 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-ash_renderer = "0.3.3"
+ash_renderer = "0.3.4"
 glam = "0.30" # Required for math types
 ```
 
 ### Basic Usage
 
 ```rust
-use ash_renderer::prelude::*;
-use glam::{Mat4, Vec3};
 use ash_renderer::prelude::*;
 use glam::{Mat4, Vec3};
 // use winit::window::Window; // Assumed available from context

@@ -76,7 +76,7 @@ impl VulkanDevice {
             let device_features = vk::PhysicalDeviceFeatures::default().sampler_anisotropy(true);
 
             let mut vulnerability_features = vk::PhysicalDeviceVulkan12Features::default()
-                .buffer_device_address(true)
+                .buffer_device_address(false)
                 .descriptor_indexing(true)
                 .shader_sampled_image_array_non_uniform_indexing(true)
                 .runtime_descriptor_array(true)
