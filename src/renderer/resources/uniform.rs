@@ -13,6 +13,7 @@ pub struct MvpMatrices {
     pub view: Mat4,
     pub projection: Mat4,
     pub view_proj: Mat4,
+    pub prev_view_proj: Mat4, // For TAA motion vectors
     pub light_space_matrix: Mat4,
     pub normal_matrix: Mat4,
     pub camera_pos: Vec4,
@@ -98,6 +99,7 @@ impl Default for MvpMatrices {
             view: Mat4::IDENTITY,
             projection: Mat4::IDENTITY,
             view_proj: Mat4::IDENTITY,
+            prev_view_proj: Mat4::IDENTITY,
             light_space_matrix: Mat4::IDENTITY,
             normal_matrix: Mat4::IDENTITY,
             camera_pos: Vec4::ZERO,
@@ -110,6 +112,8 @@ impl Default for MvpMatrices {
 
 impl MvpMatrices {
     fn recalc_view_proj(&mut self) {
+        // Save previous view_proj for TAA motion vectors
+        self.prev_view_proj = self.view_proj;
         self.view_proj = self.projection * self.view;
     }
 

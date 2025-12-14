@@ -4,6 +4,15 @@
 [![Documentation](https://docs.rs/ash_renderer/badge.svg)](https://docs.rs/ash_renderer)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
+> [!IMPORTANT]
+> **Version Stability Notice**
+> The following versions are strictly verified as **STABLE and USABLE**:
+> - **v0.3.9** (Current, Recommended)
+> - **v0.3.8**
+> - **v0.1.2**
+>
+> All other versions/variants may contain critical bugs or instability. I deeply apologize for any inconvenience caused by the instability of intermediate versions. Please stay on the recommended versions for a production-ready experience.
+
 A **production-quality Vulkan renderer** built with [ASH](https://github.com/ash-rs/ash) (Vulkan bindings) and [VMA](https://github.com/gwihlern-gp/vk-mem-rs) (GPU memory allocator).
 
 **ECS-free, pure rendering engine** - decoupled camera and input handling, ready for any game engine.
@@ -25,6 +34,10 @@ A **production-quality Vulkan renderer** built with [ASH](https://github.com/ash
 - 💡 **Light Culling** - Tiled/clustered forward rendering
 - 📦 **Bindless Textures** - Efficient bindless texture management (1024+ textures)
 - 🖥️ **Headless Support** - Decoupled rendering via `SurfaceProvider` trait (CI/Benchmark ready)
+- 🎞️ **Physics-Based TAA** - Improved temporal stability with correct per-vertex motion vectors
+- 💡 **Correct Specular** - Physically accurate energy preservation for metallic surfaces
+- 🔆 **Forward+ Lighting** - (Experimental) Infrastructure for efficient many-light rendering
+- ✨ **Bloom Prefilter** - (Experimental) Advanced firefly suppression for bloom
 
 ## Quick Start
 
@@ -32,7 +45,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-ash-renderer = "0.3.8"
+ash-renderer = "0.3.9"
 glam = "0.30" # Required for math types
 ```
 

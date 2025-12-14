@@ -11,6 +11,9 @@ use super::descriptor_set::DescriptorSet;
 pub const MAX_BINDLESS_RESOURCES: u32 = 1024 * 128; // 128k entries per type by default
 
 const FRAMES_IN_FLIGHT: usize = 3;
+/// Maximum number of frame pools to prevent unbounded memory growth.
+/// Beyond this limit, the oldest (already-recycled) pool is reused.
+const MAX_FRAME_POOLS: usize = 16;
 
 struct FramePool {
     pool: vk::DescriptorPool,
@@ -154,8 +157,11 @@ impl DescriptorAllocator {
             }
         }
 
+        // O(N) cleanup using HashSet instead of O(N*M) nested loop
+        let active_pools: std::collections::HashSet<_> =
+            self.frame_pools.iter().map(|p| p.pool).collect();
         self.descriptor_set_cache
-            .retain(|_, pool| self.frame_pools.iter().any(|p| p.pool == *pool));
+            .retain(|_, pool| active_pools.contains(pool));
     }
 
     pub fn allocate_set(
@@ -196,6 +202,7 @@ impl DescriptorAllocator {
         &mut self,
         layout: &vk::DescriptorSetLayout,
     ) -> Result<(vk::DescriptorSet, vk::DescriptorPool)> {
+        // First try existing pools with available capacity
         for pool in &mut self.frame_pools {
             if pool.used_sets >= self.sets_per_pool {
                 continue;
@@ -222,6 +229,41 @@ impl DescriptorAllocator {
             }
         }
 
+        // If at max pool limit, force-reset and reuse the oldest pool
+        if self.frame_pools.len() >= MAX_FRAME_POOLS {
+            log::warn!("Descriptor pool limit reached ({MAX_FRAME_POOLS}), recycling oldest pool");
+            // Find oldest pool (lowest frame_number)
+            if let Some(oldest) = self.frame_pools.iter_mut().min_by_key(|p| p.frame_number) {
+                unsafe {
+                    let _ = self
+                        .device
+                        .reset_descriptor_pool(oldest.pool, vk::DescriptorPoolResetFlags::empty());
+                }
+                oldest.used_sets = 0;
+                oldest.frame_number = self.current_frame;
+                oldest.sets.clear();
+
+                let layouts = [*layout];
+                let alloc_info = vk::DescriptorSetAllocateInfo::default()
+                    .descriptor_pool(oldest.pool)
+                    .set_layouts(&layouts);
+
+                let sets = unsafe {
+                    self.device
+                        .allocate_descriptor_sets(&alloc_info)
+                        .map_err(|e| {
+                            AshError::VulkanError(format!("Failed to allocate descriptor set: {e}"))
+                        })?
+                };
+
+                let set = sets[0];
+                oldest.used_sets += 1;
+                oldest.sets.push(set);
+                return Ok((set, oldest.pool));
+            }
+        }
+
+        // Create new pool (under limit)
         let pool_index = self.frame_pools.len();
         self.create_pool()?;
         if let Some(pool) = self.frame_pools.get_mut(pool_index) {

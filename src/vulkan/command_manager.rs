@@ -191,7 +191,7 @@ impl CommandBufferManager {
     pub fn allocate_primary_buffers(&self, count: u32) -> Result<Vec<vk::CommandBuffer>> {
         #[cfg(feature = "parallel")]
         {
-            return self.parallel_manager.allocate_primary_buffers(count);
+            self.parallel_manager.allocate_primary_buffers(count)
         }
 
         #[cfg(not(feature = "parallel"))]
@@ -282,9 +282,8 @@ impl CommandBufferManager {
 
         #[cfg(feature = "parallel")]
         {
-            return self
-                .parallel_manager
-                .recycle_secondary(worker_index, buffer);
+            self.parallel_manager
+                .recycle_secondary(worker_index, buffer)
         }
 
         #[cfg(not(feature = "parallel"))]

@@ -1563,16 +1563,21 @@ impl Renderer {
             dm.next_frame();
         }
 
-        // Hot-reload shaders if changed
+        // Hot-reload shaders if changed (throttled to every ~1 second)
+        const SHADER_CHECK_INTERVAL: usize = 60;
 
         // We use a small scope to ensure mutable borrow of pipeline ends before we call recreate_pipeline
-        let shaders_changed = if let Some(pipeline) = &mut self.pipeline {
-            match pipeline.detect_shader_changes() {
-                Ok(changed) => changed,
-                Err(e) => {
-                    log::warn!("Failed to check shader changes: {e}");
-                    false
+        let shaders_changed = if self.current_frame % SHADER_CHECK_INTERVAL == 0 {
+            if let Some(pipeline) = &mut self.pipeline {
+                match pipeline.detect_shader_changes() {
+                    Ok(changed) => changed,
+                    Err(e) => {
+                        log::warn!("Failed to check shader changes: {e}");
+                        false
+                    }
                 }
+            } else {
+                false
             }
         } else {
             false

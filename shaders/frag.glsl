@@ -14,6 +14,7 @@ layout(set = 0, binding = 0) uniform MVP {
     mat4 view;
     mat4 projection;
     mat4 view_proj;
+    mat4 prev_view_proj;  // TAA (unused in fragment but must match vertex UBO)
     mat4 light_space_matrix;
     mat4 normal_matrix;
     vec4 camera_pos;
@@ -196,8 +197,11 @@ void main() {
     float denom = 4.0 * NdotV * NdotL + 0.001;
     vec3 specular = numerator / denom;
     
-    // Clamp excessive specular to prevent fireflies (Conservative Specular Cap)
-    specular = min(specular, vec3(10.0) / max(vec3(0.04), F0));
+    // Firefly suppression via max component clamping (preserves hue unlike hard clamp)
+    float specularMax = max(max(specular.r, specular.g), specular.b);
+    if (specularMax > 100.0) {
+        specular *= 100.0 / specularMax;  // Scale down while preserving color ratios
+    }
 
     vec3 kD = (1.0 - F) * (1.0 - metallic);
     vec3 diffuse = kD * baseColor / PI;

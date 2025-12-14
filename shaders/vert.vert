@@ -13,12 +13,14 @@ layout(location = 2) out vec3 fragNormal;
 layout(location = 3) out vec3 fragWorldPos;
 layout(location = 4) out vec4 fragPosLightSpace;
 layout(location = 5) out vec4 fragTangent;
+layout(location = 6) out vec2 motionVector;
 
 layout(set = 0, binding = 0) uniform MVP {
     mat4 model;
     mat4 view;
     mat4 projection;
     mat4 view_proj;
+    mat4 prev_view_proj;  // For TAA motion vectors
     mat4 light_space_matrix;
     mat4 normal_matrix;
     vec4 camera_pos;
@@ -40,4 +42,15 @@ void main() {
     fragTangent = vec4(normalize(normalMatrix * inTangent.xyz), inTangent.w);
     fragWorldPos = worldPosition.xyz;
     fragPosLightSpace = mvp.light_space_matrix * worldPosition;
+
+    // Calculate motion vector for TAA
+    vec4 currentClip = mvp.view_proj * worldPosition;
+    vec4 prevClip = mvp.prev_view_proj * worldPosition;
+    
+    // Convert to NDC and calculate velocity
+    vec2 currentNdc = currentClip.xy / currentClip.w;
+    vec2 prevNdc = prevClip.xy / prevClip.w;
+    
+    // Motion vector in UV space (multiply by 0.5 to convert from NDC [-1,1] to [0,1])
+    motionVector = (currentNdc - prevNdc) * 0.5;
 }

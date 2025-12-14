@@ -174,16 +174,23 @@ impl RenderPassBuilder {
         attachment: vk::AttachmentDescription,
         layout: vk::ImageLayout,
     ) {
-        // Resolve attachment index comes after color attachments
-        let base_index = self.color_attachments.len() as u32;
-        let resolve_index = base_index + self.resolve_attachments.len() as u32;
+        // Store with placeholder index; actual index computed in build()
         self.resolve_attachments.push(attachment);
         self.resolve_attachment_refs.push(vk::AttachmentReference {
-            attachment: resolve_index,
+            attachment: u32::MAX, // Placeholder - computed in build()
             layout,
         });
     }
 
+    /// Builds the render pass.
+    ///
+    /// # Attachment Ordering (Internal Contract)
+    /// Attachments are ordered as follows in the final `vk::RenderPass`:
+    /// 1. **Color Attachments** (indices 0..color_count)
+    /// 2. **Resolve Attachments** (indices color_count..color_count+resolve_count)
+    /// 3. **Depth Attachment** (index at end, if present)
+    ///
+    /// Indices are computed centrally here to avoid fragile manual calculations.
     pub fn build(mut self) -> Result<RenderPass> {
         if self.color_attachments.is_empty() {
             return Err(AshError::VulkanError(

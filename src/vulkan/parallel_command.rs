@@ -9,6 +9,8 @@ const SECONDARY_BATCH_SIZE: u32 = 4;
 struct WorkerState {
     command_pool: vk::CommandPool,
     available_secondary: Vec<vk::CommandBuffer>,
+    /// Buffers queued for reset on next acquire (avoids blocking GPU)
+    pending_reset: Vec<vk::CommandBuffer>,
 }
 
 impl WorkerState {
@@ -29,6 +31,7 @@ impl WorkerState {
         Ok(Self {
             command_pool,
             available_secondary: Vec::new(),
+            pending_reset: Vec::new(),
         })
     }
 }
@@ -36,6 +39,7 @@ impl WorkerState {
 /// Manages per-worker command pools and cached secondary command buffers for parallel recording.
 pub struct ParallelCommandManager {
     device: Arc<ash::Device>,
+    #[allow(dead_code)] // Reserved for future use (e.g., transfer queue)
     queue_family_index: u32,
     primary_pool: vk::CommandPool,
     tracked_primary: Mutex<Vec<vk::CommandBuffer>>,
@@ -103,21 +107,48 @@ impl ParallelCommandManager {
             .workers
             .get(worker_index)
             .ok_or_else(|| AshError::VulkanError("Worker index out of range".into()))?;
-        let mut state = worker.lock();
 
-        if let Some(buffer) = state.available_secondary.pop() {
+        // Phase 1: Process pending resets (GPU guaranteed done with these)
+        // Phase 2: Try to get a buffer
+        // Phase 3: If none, allocate new batch
+
+        let (buffer_to_reset, need_alloc) = {
+            let mut state = worker.lock();
+
+            // Process any pending resets first (these were recycled last frame)
+            let pending: Vec<_> = state.pending_reset.drain(..).collect();
+            state.available_secondary.extend(pending);
+
+            if let Some(buffer) = state.available_secondary.pop() {
+                (Some(buffer), false)
+            } else {
+                (None, true)
+            }
+        }; // Lock released here
+
+        if let Some(buffer) = buffer_to_reset {
+            // Reset outside of lock to avoid contention
             self.reset_command_buffer(buffer)?;
             return Ok(buffer);
         }
 
-        let buffers = self.allocate_secondary_batch(&mut state, SECONDARY_BATCH_SIZE)?;
-        let mut iter = buffers.into_iter();
-        let next = iter
-            .next()
-            .ok_or_else(|| AshError::VulkanError("Failed to allocate secondary buffer".into()))?;
-        state.available_secondary.extend(iter);
-        self.reset_command_buffer(next)?;
-        Ok(next)
+        if need_alloc {
+            // Re-acquire lock for allocation
+            let mut state = worker.lock();
+            let buffers = self.allocate_secondary_batch(&mut state, SECONDARY_BATCH_SIZE)?;
+            let mut iter = buffers.into_iter();
+            let next = iter.next().ok_or_else(|| {
+                AshError::VulkanError("Failed to allocate secondary buffer".into())
+            })?;
+            state.available_secondary.extend(iter);
+            drop(state); // Release lock before reset
+            self.reset_command_buffer(next)?;
+            return Ok(next);
+        }
+
+        Err(AshError::VulkanError(
+            "Failed to acquire secondary buffer".into(),
+        ))
     }
 
     pub fn recycle_secondary(&self, worker_index: usize, buffer: vk::CommandBuffer) -> Result<()> {
@@ -129,7 +160,8 @@ impl ParallelCommandManager {
             .workers
             .get(worker_index)
             .ok_or_else(|| AshError::VulkanError("Worker index out of range".into()))?;
-        worker.lock().available_secondary.push(buffer);
+        // Queue for deferred reset (GPU may still be using it this frame)
+        worker.lock().pending_reset.push(buffer);
         Ok(())
     }
 

@@ -316,6 +316,24 @@ impl LightCullingPipeline {
 
         self.device
             .cmd_dispatch(command_buffer, tiles_x, tiles_y, 1);
+
+        // Memory barrier to ensure tile buffer writes are visible to fragment shader
+        let barrier = vk::BufferMemoryBarrier::default()
+            .src_access_mask(vk::AccessFlags::SHADER_WRITE)
+            .dst_access_mask(vk::AccessFlags::SHADER_READ)
+            .buffer(self.tile_buffer)
+            .offset(0)
+            .size(vk::WHOLE_SIZE);
+
+        self.device.cmd_pipeline_barrier(
+            command_buffer,
+            vk::PipelineStageFlags::COMPUTE_SHADER,
+            vk::PipelineStageFlags::FRAGMENT_SHADER,
+            vk::DependencyFlags::empty(),
+            &[],
+            &[barrier],
+            &[],
+        );
     }
 
     /// Get tile buffer for fragment shader binding

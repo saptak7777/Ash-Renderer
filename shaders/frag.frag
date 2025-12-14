@@ -14,6 +14,7 @@ layout(set = 0, binding = 0) uniform MVP {
     mat4 view;
     mat4 projection;
     mat4 view_proj;
+    mat4 prev_view_proj;  // TAA (unused in fragment but must match vertex UBO)
     mat4 light_space_matrix;
     mat4 normal_matrix;
     vec4 camera_pos;
@@ -42,6 +43,39 @@ layout(set = 1, binding = 0) uniform Material {
 layout(set = 2, binding = 0) uniform sampler2D textures[];
 
 layout(set = 3, binding = 0) uniform sampler2D shadowMap;
+
+// ============================================================================
+// FORWARD+ POINT LIGHTS (Enable by defining ENABLE_POINT_LIGHTS and binding Set 4)
+// ============================================================================
+#ifdef ENABLE_POINT_LIGHTS
+
+#define MAX_LIGHTS_PER_TILE 256
+#define MAX_LIGHTS_PER_PIXEL 32  // Performance cap per fragment
+
+// Light structure (must match light_culling.comp)
+struct Light {
+    vec4 position;   // xyz = position, w = radius
+    vec4 color;      // rgb = color, a = intensity
+    vec4 direction;  // xyz = direction (for spot), w = type
+    vec4 params;     // x = innerCone, y = outerCone, z = falloff, w = enabled
+};
+
+// Forward+ bindings (Set 4)
+layout(set = 4, binding = 0, std430) readonly buffer LightBuffer {
+    Light lights[];
+};
+
+layout(set = 4, binding = 1, std430) readonly buffer TileLightIndices {
+    uint tileData[];
+};
+
+layout(set = 4, binding = 2) uniform ForwardPlusInfo {
+    uvec2 numTiles;
+    uint tileSize;
+    uint _padding;
+} fpInfo;
+
+#endif // ENABLE_POINT_LIGHTS
 
 const float PI = 3.14159265359;
 
@@ -198,8 +232,11 @@ void main() {
     float denom = 4.0 * NdotV * NdotL + 0.001;
     vec3 specular = numerator / denom;
     
-    // Clamp excessive specular to prevent fireflies (Conservative Specular Cap)
-    specular = min(specular, vec3(10.0) / max(vec3(0.04), F0));
+    // Firefly suppression via max component clamping (preserves hue unlike hard clamp)
+    float specularMax = max(max(specular.r, specular.g), specular.b);
+    if (specularMax > 100.0) {
+        specular *= 100.0 / specularMax;  // Scale down while preserving color ratios
+    }
 
     vec3 kD = (1.0 - F) * (1.0 - metallic);
     vec3 diffuse = kD * baseColor / PI;
@@ -209,8 +246,71 @@ void main() {
     // Use geometric normal (N) for shadow bias to avoid self-shadowing on flat surfaces
     float shadow = ShadowCalculation(fragPosLightSpace, N, lightDir);
 
-    // Direct lighting with shadow
+    // Direct lighting with shadow (Directional Sun Light)
     vec3 Lo = (diffuse + specular) * lightColor * NdotL * (1.0 - shadow);
+    
+#ifdef ENABLE_POINT_LIGHTS
+    // ========================================================================
+    // Forward+ Point Light Accumulation
+    // ========================================================================
+    
+    // Calculate which tile this fragment belongs to
+    uint tileX = uint(gl_FragCoord.x) / fpInfo.tileSize;
+    uint tileY = uint(gl_FragCoord.y) / fpInfo.tileSize;
+    uint tileIndex = tileY * fpInfo.numTiles.x + tileX;
+    uint tileOffset = tileIndex * (MAX_LIGHTS_PER_TILE + 1);
+    
+    // First element is light count for this tile
+    uint tileLightCount = min(tileData[tileOffset], MAX_LIGHTS_PER_PIXEL);
+    
+    // Accumulate contributions from all point lights affecting this tile
+    for (uint i = 0; i < tileLightCount; i++) {
+        uint lightIdx = tileData[tileOffset + 1 + i];
+        Light light = lights[lightIdx];
+        
+        // Skip disabled lights
+        if (light.params.w < 0.5) continue;
+        
+        vec3 toLight = light.position.xyz - fragWorldPos;
+        float distSq = dot(toLight, toLight);
+        float radius = light.position.w;
+        float radiusSq = radius * radius;
+        
+        // Skip if outside radius
+        if (distSq > radiusSq) continue;
+        
+        // Distance attenuation (inverse square with smooth falloff at radius edge)
+        float att = max(0.0, 1.0 - (distSq / radiusSq));
+        att *= att;  // Quadratic falloff for softer edges
+        
+        vec3 L = normalize(toLight);
+        float NdotL_local = max(dot(normal, L), 0.0);
+        
+        if (NdotL_local <= 0.0) continue;  // Early-out for back-facing
+        
+        // Recompute PBR terms for this light direction
+        vec3 H_local = normalize(viewDir + L);
+        float NdotH_local = max(dot(normal, H_local), 0.0);
+        float VdotH_local = max(dot(viewDir, H_local), 0.0);
+        
+        float D_local = distribution_ggx(NdotH_local, roughness);
+        float G_local = geometry_smith(NdotV, NdotL_local, roughness);
+        vec3 F_local = fresnel_schlick_fast(VdotH_local, F0);
+        
+        vec3 spec_local = (D_local * G_local * F_local) / max(4.0 * NdotV * NdotL_local, 0.001);
+        
+        // Firefly clamp for point lights too
+        float specMax_local = max(max(spec_local.r, spec_local.g), spec_local.b);
+        if (specMax_local > 100.0) {
+            spec_local *= 100.0 / specMax_local;
+        }
+        
+        vec3 diff_local = kD * baseColor / PI;
+        
+        // Accumulate with light color and intensity
+        Lo += (diff_local + spec_local) * light.color.rgb * light.color.a * NdotL_local * att;
+    }
+#endif // ENABLE_POINT_LIGHTS
     
     // Ambient
     vec3 ambient = ambientColor * baseColor * occlusion;
