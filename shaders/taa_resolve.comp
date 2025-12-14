@@ -99,7 +99,7 @@ void main() {
     }
     
     // Reproject to find history position
-    vec2 historyUV = uv - velocity;
+    vec2 historyUV = clamp(uv - velocity, 0.0, 1.0);
     
     // Sample current color (at current position, unjittered)
     vec3 current = texture(currentColor, uv).rgb;

@@ -819,15 +819,6 @@ impl Renderer {
     pub fn set_mesh(&mut self, mut mesh: Mesh) {
         unsafe {
             let upload_pool = self.command_manager.upload_command_pool_handle();
-            if let Err(e) = mesh.ensure_texture(
-                Arc::clone(&self.allocator),
-                Arc::clone(&self.vulkan_device.device),
-                upload_pool,
-                self.vulkan_device.graphics_queue,
-            ) {
-                log::error!("Failed to ensure mesh texture: {e}");
-            }
-
             let key = mesh.name.clone();
             if let Err(e) = self.model_renderer.ensure_mesh(
                 &key,
@@ -837,6 +828,15 @@ impl Renderer {
             ) {
                 log::error!("Failed to upload mesh via ModelRenderer: {e}");
                 return;
+            }
+
+            if let Err(e) = mesh.ensure_texture(
+                Arc::clone(&self.allocator),
+                Arc::clone(&self.vulkan_device.device),
+                upload_pool,
+                self.vulkan_device.graphics_queue,
+            ) {
+                log::error!("Failed to ensure mesh texture: {e}");
             }
 
             // Register textures with bindless manager

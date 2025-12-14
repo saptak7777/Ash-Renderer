@@ -15,13 +15,19 @@ impl DescriptorSetLayout {
         device: Arc<ash::Device>,
         bindings: &[vk::DescriptorSetLayoutBinding<'static>],
     ) -> Result<Self> {
+        let binding_count = bindings.len();
         let binding_flags: Vec<_> = bindings
             .iter()
-            .map(|binding| {
+            .enumerate()
+            .map(|(i, binding)| {
                 if binding.descriptor_count > 1 {
-                    vk::DescriptorBindingFlags::UPDATE_AFTER_BIND
-                        | vk::DescriptorBindingFlags::PARTIALLY_BOUND
-                        | vk::DescriptorBindingFlags::VARIABLE_DESCRIPTOR_COUNT
+                    let mut flags = vk::DescriptorBindingFlags::UPDATE_AFTER_BIND
+                        | vk::DescriptorBindingFlags::PARTIALLY_BOUND;
+                    // Variable descriptor count must only be applied to the last binding
+                    if i == binding_count - 1 {
+                        flags |= vk::DescriptorBindingFlags::VARIABLE_DESCRIPTOR_COUNT;
+                    }
+                    flags
                 } else {
                     vk::DescriptorBindingFlags::empty()
                 }

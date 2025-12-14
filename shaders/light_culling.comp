@@ -83,10 +83,16 @@ void getTileFrustum(uvec2 tileId, float minDepth, float maxDepth, out vec4 plane
 
     // Frustum planes (in view space)
     // Left, Right, Bottom, Top, Near, Far
-    planes[0] = vec4(normalize(cross(corners[3], corners[0])), 0.0); // Left
-    planes[1] = vec4(normalize(cross(corners[1], corners[2])), 0.0); // Right
-    planes[2] = vec4(normalize(cross(corners[0], corners[1])), 0.0); // Bottom
-    planes[3] = vec4(normalize(cross(corners[2], corners[3])), 0.0); // Top
+    // Safe normalization helper
+    vec3 v0 = cross(corners[3], corners[0]);
+    vec3 v1 = cross(corners[1], corners[2]);
+    vec3 v2 = cross(corners[0], corners[1]);
+    vec3 v3 = cross(corners[2], corners[3]);
+
+    planes[0] = vec4(length(v0) > 0.0001 ? normalize(v0) : vec3(0.0), 0.0); // Left
+    planes[1] = vec4(length(v1) > 0.0001 ? normalize(v1) : vec3(0.0), 0.0); // Right
+    planes[2] = vec4(length(v2) > 0.0001 ? normalize(v2) : vec3(0.0), 0.0); // Bottom
+    planes[3] = vec4(length(v3) > 0.0001 ? normalize(v3) : vec3(0.0), 0.0); // Top
     planes[4] = vec4(0.0, 0.0, -1.0, -minDepth); // Near
     planes[5] = vec4(0.0, 0.0, 1.0, maxDepth);   // Far
 }

@@ -4,11 +4,12 @@ use std::sync::Arc;
 use crate::{AshError, Result};
 
 use super::descriptor_allocator::DescriptorAllocator;
-use super::descriptor_layout::DescriptorSetLayoutBuilder;
+use super::descriptor_layout::{DescriptorSetLayout, DescriptorSetLayoutBuilder};
 use super::descriptor_set::DescriptorSet;
 
 /// Manages bindless descriptor resources (images/buffers) with variable descriptor counts.
 pub struct BindlessManager {
+    layout: DescriptorSetLayout,
     descriptor_set: DescriptorSet,
     max_resources: u32,
     next_index: u32,
@@ -41,10 +42,12 @@ impl BindlessManager {
             )
             .build(Arc::clone(&device))?;
 
-        // Bindless descriptors are long-lived and should be allocated from the static pool
-        let descriptor_set = allocator.allocate_static_set(&layout.handle(), layout.bindings())?;
+        // Bindless descriptors must be allocated from a pool with UPDATE_AFTER_BIND bit
+        let descriptor_set =
+            allocator.allocate_bindless_set(layout.handle(), layout.bindings(), max_resources)?;
 
         Ok(Self {
+            layout,
             descriptor_set,
             max_resources,
             next_index: 0,
@@ -56,7 +59,7 @@ impl BindlessManager {
     }
 
     pub fn layout(&self) -> vk::DescriptorSetLayout {
-        self.descriptor_set.layout()
+        self.layout.handle()
     }
 
     pub fn add_sampled_image(
