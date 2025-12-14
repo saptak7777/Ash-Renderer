@@ -36,8 +36,9 @@ impl ApplicationHandler for App {
             .with_inner_size(winit::dpi::LogicalSize::new(1920, 1080));
 
         let window = event_loop.create_window(window_attrs).unwrap();
+        let surface_provider = ash_renderer::vulkan::WindowSurfaceProvider::new(&window);
 
-        match Renderer::new(&window) {
+        match Renderer::new(&surface_provider) {
             Ok(renderer) => {
                 // Load GLTF model
                 // TODO: Implement GLTF loading via renderer.load_gltf("path/to/model.gltf")

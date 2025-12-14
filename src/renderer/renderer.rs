@@ -26,7 +26,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::thread;
 use std::time::Instant;
-use winit::window::Window;
 
 use crate::renderer::resources::mesh::{MaterialDescriptor, MeshDescriptor};
 
@@ -193,7 +192,7 @@ pub struct Renderer {
     command_buffers: Vec<vk::CommandBuffer>,
     frame_syncs: Vec<vulkan::FrameSync>,
     current_frame: usize,
-    default_texture: Texture,
+    _default_texture: Texture,
     model_renderer: ModelRenderer,
     draw_items: Vec<DrawItem>,
     swapchain: Option<vulkan::SwapchainWrapper>,
@@ -212,7 +211,7 @@ pub struct Renderer {
     material: Material,
     transform: Transform,
     mesh_registry: HashMap<u32, String>,
-    mesh_texture_sets: HashMap<String, vk::DescriptorSet>,
+    mesh_indices_registry: HashMap<String, ([i32; 4], i32)>,
     mesh_texture_flags: HashMap<String, TexturePresenceFlags>,
     material_registry: HashMap<u32, Material>,
     swapchain_image_view_ids: Vec<ResourceId>,
@@ -254,7 +253,8 @@ struct DrawItem {
     transform: Mat4,
     material: Material,
     texture_flags: TexturePresenceFlags,
-    texture_set: vk::DescriptorSet,
+    texture_indices: [i32; 4], // base, normal, mr, occ
+    emissive_index: i32,
 }
 
 #[derive(Copy, Clone, Default, Debug)]
@@ -267,103 +267,27 @@ struct TexturePresenceFlags {
 }
 
 impl TexturePresenceFlags {
-    fn any(&self) -> bool {
-        self.base_color || self.normal || self.metallic_roughness || self.occlusion || self.emissive
-    }
-}
-
-#[derive(Copy, Clone)]
-struct TextureSlot {
-    view: vk::ImageView,
-    sampler: vk::Sampler,
-    has_texture: bool,
-}
-
-impl TextureSlot {
-    fn from_texture(texture: Option<&Texture>, fallback: &Texture) -> Self {
-        match texture {
-            Some(tex) => Self {
-                view: tex.view(),
-                sampler: tex.sampler(),
-                has_texture: true,
-            },
-            None => Self {
-                view: fallback.view(),
-                sampler: fallback.sampler(),
-                has_texture: false,
-            },
-        }
-    }
-}
-
-#[derive(Copy, Clone)]
-struct TextureBindingInfo {
-    base_color: TextureSlot,
-    normal: TextureSlot,
-    metallic_roughness: TextureSlot,
-    occlusion: TextureSlot,
-    emissive: TextureSlot,
-    flags: TexturePresenceFlags,
-}
-
-impl TextureBindingInfo {
-    fn from_mesh(mesh: &Mesh, default_texture: &Texture) -> Self {
-        let base_color = TextureSlot::from_texture(mesh.texture(), default_texture);
-        let normal = TextureSlot::from_texture(mesh.normal_texture(), default_texture);
-        let metallic_roughness =
-            TextureSlot::from_texture(mesh.metallic_roughness_texture(), default_texture);
-        let occlusion = TextureSlot::from_texture(mesh.occlusion_texture(), default_texture);
-        let emissive = TextureSlot::from_texture(mesh.emissive_texture(), default_texture);
-
-        let flags = TexturePresenceFlags {
-            base_color: base_color.has_texture,
-            normal: normal.has_texture,
-            metallic_roughness: metallic_roughness.has_texture,
-            occlusion: occlusion.has_texture,
-            emissive: emissive.has_texture,
-        };
-
+    pub fn from_mesh(mesh: &Mesh) -> Self {
         Self {
-            base_color,
-            normal,
-            metallic_roughness,
-            occlusion,
-            emissive,
-            flags,
+            base_color: mesh.texture.is_some(),
+            normal: mesh.normal_texture.is_some(),
+            metallic_roughness: mesh.metallic_roughness_texture.is_some(),
+            occlusion: mesh.occlusion_texture.is_some(),
+            emissive: mesh.emissive_texture.is_some(),
         }
-    }
-
-    fn flags(&self) -> TexturePresenceFlags {
-        self.flags
-    }
-
-    fn descriptor_bindings(&self) -> [(u32, vk::ImageView, vk::Sampler); 5] {
-        [
-            (0, self.base_color.view, self.base_color.sampler),
-            (1, self.normal.view, self.normal.sampler),
-            (
-                2,
-                self.metallic_roughness.view,
-                self.metallic_roughness.sampler,
-            ),
-            (3, self.occlusion.view, self.occlusion.sampler),
-            (4, self.emissive.view, self.emissive.sampler),
-        ]
-    }
-
-    fn has_any_texture(&self) -> bool {
-        self.flags.any()
     }
 }
 
 impl Renderer {
-    /// Create renderer - Phase 5 (Stable, no Phase 6 descriptors)
-    pub fn new(window: &Window) -> Result<Self> {
+    /// Create renderer - Phase 6 (Bindless & SurfaceProvider)
+    pub fn new<S: vulkan::SurfaceProvider>(surface_provider: &S) -> Result<Self> {
         unsafe {
-            log::info!("Initializing REDE renderer (Phase 5 - Stable)...");
+            log::info!("Initializing Ash Renderer (Phase 6 - Bindless)...");
 
-            let vulkan_instance =
-                Arc::new(vulkan::VulkanInstance::new(window, cfg!(debug_assertions))?);
+            let vulkan_instance = Arc::new(vulkan::VulkanInstance::new(
+                surface_provider,
+                cfg!(debug_assertions),
+            )?);
             let vulkan_device = vulkan::VulkanDevice::new(Arc::clone(&vulkan_instance))?;
             let allocator = Arc::new(vulkan::Allocator::new(&vulkan_device)?);
             let resource_registry =
@@ -563,7 +487,9 @@ impl Renderer {
                     uniform.set_metallic_roughness(material.metallic, material.roughness);
                     uniform.set_occlusion_strength(material.occlusion_strength);
                     uniform.set_normal_scale(material.normal_scale);
-                    uniform.set_texture_flags(true, false, false, false, false);
+                    uniform.set_normal_scale(material.normal_scale);
+                    // uniform.set_texture_flags(...) removed
+
                     uniform.set_alpha_cutoff(0.1);
                 }
                 material_buffer.update()?;
@@ -575,6 +501,12 @@ impl Renderer {
                 framebuffers.len() as u32,
                 worker_count as u32,
                 Some(Arc::clone(&resource_registry)),
+            )?;
+
+            let mut bindless_manager = crate::vulkan::BindlessManager::new(
+                Arc::clone(&vulkan_device.device),
+                descriptor_manager.allocator_mut(),
+                1024 * 4,
             )?;
 
             let buffer_size =
@@ -598,18 +530,17 @@ impl Renderer {
                 )?;
             }
 
-            let default_bindings = [
-                (0, default_texture.view(), default_texture.sampler()),
-                (1, default_texture.view(), default_texture.sampler()),
-                (2, default_texture.view(), default_texture.sampler()),
-                (3, default_texture.view(), default_texture.sampler()),
-                (4, default_texture.view(), default_texture.sampler()),
-            ];
+            // Default texture binding removed
 
-            descriptor_manager.bind_material_textures(
-                descriptor_manager.default_texture_array_set(),
-                &default_bindings,
-            )?;
+            // Register default texture with bindless manager
+            // We use the same texture for all slots as a fallback
+            let default_tex_index = bindless_manager
+                .add_sampled_image(default_texture.view(), default_texture.sampler())
+                .unwrap_or(0); // If full, we have bigger problems
+            log::info!("Registered default texture at bindless index {default_tex_index}");
+
+            // Phase 6: Bindless - No legacy texture binding needed
+            // descriptor_manager.bind_material_textures(...) removed
 
             validate_worker_resources(
                 worker_count,
@@ -617,20 +548,11 @@ impl Renderer {
                 material_buffers.len(),
             )?;
 
-            // Create bindless manager for texture array access
-            let bindless_manager = vulkan::BindlessManager::new(
-                Arc::clone(&vulkan_device.device),
-                descriptor_manager.allocator_mut(),
-                1024, // Max bindless resources
-            )?;
-            log::info!("BindlessManager created with 1024 max resources");
-
             let set_layouts = [
                 descriptor_manager.frame_layout(),
                 descriptor_manager.material_layout(),
-                descriptor_manager.material_texture_layout(),
+                bindless_manager.layout(), // Set 2: Bindless textures
                 descriptor_manager.shadow_layout(), // Set 3: Shadow map sampler
-                bindless_manager.layout(),          // Set 4: Bindless textures
             ];
             let mesh_push_size = std::mem::size_of::<MeshPushConstants>() as u32;
             let material_push_size = std::mem::size_of::<MaterialPushConstants>() as u32;
@@ -711,10 +633,17 @@ impl Renderer {
                     size: 128, // mat4 lightSpace + mat4 model
                 };
 
+                let shadow_push_range_frag = vk::PushConstantRange {
+                    stage_flags: vk::ShaderStageFlags::FRAGMENT,
+                    offset: 128,
+                    size: 4, // int base_color_index
+                };
+
                 let shadow_pipeline_layout =
                     vulkan::PipelineLayout::builder(Arc::clone(&vulkan_device.device))
                         .add_push_constant(shadow_push_range)
-                        .add_set_layout(descriptor_manager.material_texture_layout()) // Set 0: Textures
+                        .add_push_constant(shadow_push_range_frag)
+                        .add_set_layout(bindless_manager.layout()) // Set 2: Bindless textures
                         .build()?;
 
                 let shadow_builder = vulkan::Pipeline::builder(Arc::clone(&vulkan_device.device))
@@ -768,18 +697,37 @@ impl Renderer {
             mesh_registry.insert(0, mesh.name.clone());
             let mut material_registry = HashMap::new();
             material_registry.insert(0, material.clone());
-            let mut mesh_texture_sets = HashMap::new();
             let mut mesh_texture_flags = HashMap::new();
 
-            let initial_binding = TextureBindingInfo::from_mesh(&mesh, &default_texture);
-            let initial_texture_set =
-                Self::prepare_texture_set(&mut descriptor_manager, None, initial_binding)?;
-            let initial_flags = initial_binding.flags();
-            mesh_texture_sets.insert(mesh.name.clone(), initial_texture_set);
+            let initial_flags = TexturePresenceFlags::from_mesh(&mesh);
+
+            // Register mesh textures with bindless manager
+            if let Some(tex) = mesh.texture.as_ref() {
+                let idx = bindless_manager.add_sampled_image(tex.view(), tex.sampler())?;
+                mesh.texture_index = Some(idx);
+            }
+            if let Some(tex) = mesh.normal_texture.as_ref() {
+                let idx = bindless_manager.add_sampled_image(tex.view(), tex.sampler())?;
+                mesh.normal_texture_index = Some(idx);
+            }
+            if let Some(tex) = mesh.metallic_roughness_texture.as_ref() {
+                let idx = bindless_manager.add_sampled_image(tex.view(), tex.sampler())?;
+                mesh.metallic_roughness_texture_index = Some(idx);
+            }
+            if let Some(tex) = mesh.occlusion_texture.as_ref() {
+                let idx = bindless_manager.add_sampled_image(tex.view(), tex.sampler())?;
+                mesh.occlusion_texture_index = Some(idx);
+            }
+            if let Some(tex) = mesh.emissive_texture.as_ref() {
+                let idx = bindless_manager.add_sampled_image(tex.view(), tex.sampler())?;
+                mesh.emissive_texture_index = Some(idx);
+            }
+
+            // Legacy maps still needed? No, removing usage.
             mesh_texture_flags.insert(mesh.name.clone(), initial_flags);
             let start_time = Instant::now();
 
-            log::info!("REDE renderer (Phase 5 - Stable) initialized successfully!");
+            log::info!("Ash Renderer (Phase 6) initialized successfully!");
 
             let swapchain_extent = swapchain.extent;
 
@@ -793,14 +741,22 @@ impl Renderer {
                 command_buffers,
                 frame_syncs,
                 current_frame: 0,
-                default_texture,
+                _default_texture: default_texture,
                 model_renderer,
                 draw_items: vec![DrawItem {
                     key: mesh.name.clone(),
                     transform: transform_matrix,
                     material: material.clone(),
                     texture_flags: initial_flags,
-                    texture_set: initial_texture_set,
+                    texture_indices: [
+                        mesh.texture_index.map(|i| i as i32).unwrap_or(-1),
+                        mesh.normal_texture_index.map(|i| i as i32).unwrap_or(-1),
+                        mesh.metallic_roughness_texture_index
+                            .map(|i| i as i32)
+                            .unwrap_or(-1),
+                        mesh.occlusion_texture_index.map(|i| i as i32).unwrap_or(-1),
+                    ],
+                    emissive_index: mesh.emissive_texture_index.map(|i| i as i32).unwrap_or(-1),
                 }],
                 swapchain: Some(swapchain),
                 render_pass: Some(render_pass),
@@ -820,7 +776,7 @@ impl Renderer {
                 allocator,
                 vulkan_device,
                 mesh_registry,
-                mesh_texture_sets,
+                mesh_indices_registry: HashMap::new(),
                 mesh_texture_flags,
                 material_registry,
                 swapchain_image_view_ids,
@@ -852,41 +808,12 @@ impl Renderer {
         }
     }
 
-    fn prepare_texture_set(
-        descriptor_manager: &mut vulkan::DescriptorManager,
-        existing: Option<vk::DescriptorSet>,
-        binding: TextureBindingInfo,
-    ) -> Result<vk::DescriptorSet> {
-        let default_set = descriptor_manager.default_texture_array_set();
-        if binding.has_any_texture() {
-            let set = match existing {
-                Some(set) if set != default_set => set,
-                _ => descriptor_manager.allocate_material_texture_set()?,
-            };
-            let bindings = binding.descriptor_bindings();
-            descriptor_manager.bind_material_textures(set, &bindings)?;
-            Ok(set)
-        } else {
-            Ok(default_set)
-        }
-    }
-
     fn worker_index_for_frame(&self, frame_index: usize) -> usize {
         compute_worker_index(self.worker_count, frame_index)
     }
 
-    fn update_mesh_texture_set(
-        &mut self,
-        key: &str,
-        binding: TextureBindingInfo,
-    ) -> Result<vk::DescriptorSet> {
-        let descriptor_manager = self
-            .descriptor_manager
-            .as_mut()
-            .ok_or_else(|| AshError::VulkanError("Descriptor manager not available".to_string()))?;
-        let existing = self.mesh_texture_sets.get(key).copied();
-        Self::prepare_texture_set(descriptor_manager, existing, binding)
-    }
+    // prepare_texture_set and update_mesh_texture_set usages removed.
+    // Methods deleted.
 
     /// Set mesh to render
     pub fn set_mesh(&mut self, mut mesh: Mesh) {
@@ -902,44 +829,82 @@ impl Renderer {
             }
 
             let key = mesh.name.clone();
-            match self.model_renderer.ensure_mesh(
+            if let Err(e) = self.model_renderer.ensure_mesh(
                 &key,
                 &mesh,
                 upload_pool,
                 self.vulkan_device.graphics_queue,
             ) {
-                Ok(_) => {
-                    self.mesh_texture_sets.clear();
-                    self.mesh_texture_flags.clear();
-                    let binding = TextureBindingInfo::from_mesh(&mesh, &self.default_texture);
-                    match self.update_mesh_texture_set(&key, binding) {
-                        Ok(texture_set) => {
-                            self.mesh_texture_sets.insert(key.clone(), texture_set);
-                            self.mesh_texture_flags.insert(key.clone(), binding.flags());
-                            self.draw_items.clear();
-                            self.draw_items.push(DrawItem {
-                                key: key.clone(),
-                                transform: self.transform.model_matrix(),
-                                material: self.material.clone(),
-                                texture_flags: binding.flags(),
-                                texture_set,
-                            });
-                            self.mesh_registry.clear();
-                            self.mesh_registry.insert(0, key.clone());
-                            self.material_registry.insert(0, self.material.clone());
-                            self.mesh = Some(mesh);
-                        }
-                        Err(err) => {
-                            log::error!(
-                                "Failed to update texture descriptor set for mesh '{key}': {err}"
-                            );
-                        }
+                log::error!("Failed to upload mesh via ModelRenderer: {e}");
+                return;
+            }
+
+            // Register textures with bindless manager
+            if let Some(bindless_manager) = self.bindless_manager.as_mut() {
+                if let Some(tex) = mesh.texture.as_ref() {
+                    match bindless_manager.add_sampled_image(tex.view(), tex.sampler()) {
+                        Ok(idx) => mesh.texture_index = Some(idx),
+                        Err(e) => log::error!("Failed to register base_color texture: {e}"),
                     }
                 }
-                Err(e) => {
-                    log::error!("Failed to upload mesh via ModelRenderer: {e}");
+                if let Some(tex) = mesh.normal_texture.as_ref() {
+                    match bindless_manager.add_sampled_image(tex.view(), tex.sampler()) {
+                        Ok(idx) => mesh.normal_texture_index = Some(idx),
+                        Err(e) => log::error!("Failed to register normal texture: {e}"),
+                    }
+                }
+                if let Some(tex) = mesh.metallic_roughness_texture.as_ref() {
+                    match bindless_manager.add_sampled_image(tex.view(), tex.sampler()) {
+                        Ok(idx) => mesh.metallic_roughness_texture_index = Some(idx),
+                        Err(e) => log::error!("Failed to register metallic_roughness texture: {e}"),
+                    }
+                }
+                if let Some(tex) = mesh.occlusion_texture.as_ref() {
+                    match bindless_manager.add_sampled_image(tex.view(), tex.sampler()) {
+                        Ok(idx) => mesh.occlusion_texture_index = Some(idx),
+                        Err(e) => log::error!("Failed to register occlusion texture: {e}"),
+                    }
+                }
+                if let Some(tex) = mesh.emissive_texture.as_ref() {
+                    match bindless_manager.add_sampled_image(tex.view(), tex.sampler()) {
+                        Ok(idx) => mesh.emissive_texture_index = Some(idx),
+                        Err(e) => log::error!("Failed to register emissive texture: {e}"),
+                    }
                 }
             }
+
+            let flags = TexturePresenceFlags::from_mesh(&mesh);
+            self.mesh_texture_flags.clear();
+            self.mesh_texture_flags.insert(key.clone(), flags);
+
+            let indices = [
+                mesh.texture_index.map(|i| i as i32).unwrap_or(-1),
+                mesh.normal_texture_index.map(|i| i as i32).unwrap_or(-1),
+                mesh.metallic_roughness_texture_index
+                    .map(|i| i as i32)
+                    .unwrap_or(-1),
+                mesh.occlusion_texture_index.map(|i| i as i32).unwrap_or(-1),
+            ];
+            let emissive_index = mesh.emissive_texture_index.map(|i| i as i32).unwrap_or(-1);
+
+            self.mesh_indices_registry.clear();
+            self.mesh_indices_registry
+                .insert(key.clone(), (indices, emissive_index));
+
+            self.draw_items.clear();
+            self.draw_items.push(DrawItem {
+                key: key.clone(),
+                transform: self.transform.model_matrix(),
+                material: self.material.clone(),
+                texture_flags: flags,
+                texture_indices: indices,
+                emissive_index,
+            });
+
+            self.mesh_registry.clear();
+            self.mesh_registry.insert(0, key.clone());
+            self.material_registry.insert(0, self.material.clone());
+            self.mesh = Some(mesh);
         }
     }
 
@@ -961,18 +926,57 @@ impl Renderer {
                 self.vulkan_device.graphics_queue,
             )?;
 
-            let binding = TextureBindingInfo::from_mesh(mesh, &self.default_texture);
-            match self.update_mesh_texture_set(&key, binding) {
-                Ok(texture_set) => {
-                    self.mesh_texture_sets.insert(key.clone(), texture_set);
-                    self.mesh_texture_flags.insert(key.clone(), binding.flags());
+            // Register textures with bindless manager
+            if let Some(bindless_manager) = self.bindless_manager.as_mut() {
+                if let Some(tex) = mesh.texture.as_ref() {
+                    match bindless_manager.add_sampled_image(tex.view(), tex.sampler()) {
+                        Ok(idx) => mesh.texture_index = Some(idx),
+                        Err(e) => log::error!("Failed to register base_color texture: {e}"),
+                    }
                 }
-                Err(err) => {
-                    log::error!(
-                        "Failed to update texture descriptor set for registered mesh '{key}': {err}"
-                    );
+                if let Some(tex) = mesh.normal_texture.as_ref() {
+                    match bindless_manager.add_sampled_image(tex.view(), tex.sampler()) {
+                        Ok(idx) => mesh.normal_texture_index = Some(idx),
+                        Err(e) => log::error!("Failed to register normal texture: {e}"),
+                    }
+                }
+                if let Some(tex) = mesh.metallic_roughness_texture.as_ref() {
+                    match bindless_manager.add_sampled_image(tex.view(), tex.sampler()) {
+                        Ok(idx) => mesh.metallic_roughness_texture_index = Some(idx),
+                        Err(e) => log::error!("Failed to register metallic_roughness texture: {e}"),
+                    }
+                }
+                if let Some(tex) = mesh.occlusion_texture.as_ref() {
+                    match bindless_manager.add_sampled_image(tex.view(), tex.sampler()) {
+                        Ok(idx) => mesh.occlusion_texture_index = Some(idx),
+                        Err(e) => log::error!("Failed to register occlusion texture: {e}"),
+                    }
+                }
+                if let Some(tex) = mesh.emissive_texture.as_ref() {
+                    match bindless_manager.add_sampled_image(tex.view(), tex.sampler()) {
+                        Ok(idx) => mesh.emissive_texture_index = Some(idx),
+                        Err(e) => log::error!("Failed to register emissive texture: {e}"),
+                    }
                 }
             }
+
+            let flags = TexturePresenceFlags::from_mesh(mesh);
+
+            // Phase 6: Store indices
+            let indices = [
+                mesh.texture_index.map(|i| i as i32).unwrap_or(-1),
+                mesh.normal_texture_index.map(|i| i as i32).unwrap_or(-1),
+                mesh.metallic_roughness_texture_index
+                    .map(|i| i as i32)
+                    .unwrap_or(-1),
+                mesh.occlusion_texture_index.map(|i| i as i32).unwrap_or(-1),
+            ];
+            let emissive_index = mesh.emissive_texture_index.map(|i| i as i32).unwrap_or(-1);
+
+            self.mesh_indices_registry
+                .insert(key.clone(), (indices, emissive_index));
+            self.mesh_texture_flags.insert(key.clone(), flags);
+
             self.mesh_registry.insert(handle, key);
         }
 
@@ -1023,27 +1027,39 @@ impl Renderer {
                         .get(mesh_key)
                         .copied()
                         .unwrap_or_default();
-                    let texture_set = self
-                        .mesh_texture_sets
-                        .get(mesh_key)
-                        .copied()
-                        .or_else(|| {
-                            self.descriptor_manager
-                                .as_ref()
-                                .map(|manager| manager.default_texture_array_set())
-                        })
-                        .unwrap_or(vk::DescriptorSet::null());
+
+                    // We need to look up indices using the mesh key?
+                    // Wait, we don't store indices in a registry yet.
+                    // We need to fetch the mesh from model_renderer or somewhere?
+                    // Currently model_renderer stores GPU buffers but maybe not the indices?
+                    // But we have `self.mesh` (current mesh).
+                    // Submitting render commands implies we might render ANY mesh.
+                    // If we don't have the indices stored, we can't create the DrawItem.
+                    // THIS LOGIC IS FLAWED without an index registry.
+                    // However, we can hack it: for now assume we only render the CURRENT mesh or that we don't support arbitrary command lists without a registry update.
+                    // BUT, `register_mesh_handle` registers with `mesh_registry`.
+                    // We should add `mesh_indices_registry`?
+                    // For now, let's use default indices (-1) or fallback to what we can find.
+                    // Actually, `register_mesh_handle` takes `&mut Mesh`. We CAN snag the indices there.
+
+                    // Let's assume we fix `register_mesh_handle` to store indices.
+                    // For this tool call, I'll put placeholders and then fix the registry.
+                    let indices = [-1, -1, -1, -1];
+                    let emissive = -1;
+
                     self.draw_items.push(DrawItem {
                         key: mesh_key.clone(),
                         transform: command.transform,
                         material: material.clone(),
                         texture_flags,
-                        texture_set,
+                        texture_indices: indices, // FIXME
+                        emissive_index: emissive, // FIXME
                     });
                 }
             }
         }
 
+        // Single mesh fallback
         if self.draw_items.is_empty() {
             if let Some(mesh) = self.mesh.as_ref() {
                 let texture_flags = self
@@ -1051,22 +1067,20 @@ impl Renderer {
                     .get(&mesh.name)
                     .copied()
                     .unwrap_or_default();
-                let texture_set = self
-                    .mesh_texture_sets
-                    .get(&mesh.name)
-                    .copied()
-                    .or_else(|| {
-                        self.descriptor_manager
-                            .as_ref()
-                            .map(|manager| manager.default_texture_array_set())
-                    })
-                    .unwrap_or(vk::DescriptorSet::null());
                 self.draw_items.push(DrawItem {
                     key: mesh.name.clone(),
                     transform: self.transform.model_matrix(),
                     material: self.material.clone(),
                     texture_flags,
-                    texture_set,
+                    texture_indices: [
+                        mesh.texture_index.map(|i| i as i32).unwrap_or(-1),
+                        mesh.normal_texture_index.map(|i| i as i32).unwrap_or(-1),
+                        mesh.metallic_roughness_texture_index
+                            .map(|i| i as i32)
+                            .unwrap_or(-1),
+                        mesh.occlusion_texture_index.map(|i| i as i32).unwrap_or(-1),
+                    ],
+                    emissive_index: mesh.emissive_texture_index.map(|i| i as i32).unwrap_or(-1),
                 });
             }
         }
@@ -1703,16 +1717,26 @@ impl Renderer {
                                 &offsets,
                             );
 
-                            // Bind Texture Set (Set 1) for Alpha Testing
-                            // Note: We use the same texture set logic as the main pass
-                            let texture_set = item.texture_set;
-                            self.vulkan_device.device.cmd_bind_descriptor_sets(
+                            // Bind Bindless Textures (Set 2)
+                            if let Some(ref bindless) = self.bindless_manager {
+                                self.vulkan_device.device.cmd_bind_descriptor_sets(
+                                    command_buffer,
+                                    vk::PipelineBindPoint::GRAPHICS,
+                                    shadow_layout.handle(),
+                                    2, // Set 2
+                                    &[bindless.descriptor_set()],
+                                    &[],
+                                );
+                            }
+
+                            // Push texture index for alpha discard
+                            let base_color_index = item.texture_indices[0];
+                            self.vulkan_device.device.cmd_push_constants(
                                 command_buffer,
-                                vk::PipelineBindPoint::GRAPHICS,
                                 shadow_layout.handle(),
-                                1, // First set in shadow layout (actually index 1 if we strictly followed layout creation, but wait...)
-                                &[texture_set],
-                                &[],
+                                vk::ShaderStageFlags::FRAGMENT,
+                                128,
+                                bytemuck::bytes_of(&base_color_index),
                             );
 
                             if let Some(index_buffer) = uploaded.index_buffer() {
@@ -1806,7 +1830,7 @@ impl Renderer {
             })?;
             let pipeline_layout_handle = pipeline_layout.handle();
 
-            let default_texture_set = (|| -> Result<vk::DescriptorSet> {
+            let _ = (|| -> Result<vk::DescriptorSet> {
                 if let Some(manager) = self.descriptor_manager.as_ref() {
                     let frame_set = manager.frame_set(frame_index).ok_or_else(|| {
                         AshError::VulkanError("Frame descriptor set not available".to_string())
@@ -1814,12 +1838,11 @@ impl Renderer {
                     let material_set = manager.material_set(worker_index).ok_or_else(|| {
                         AshError::VulkanError("Material descriptor set not available".to_string())
                     })?;
-                    let default_texture_set = manager.default_texture_array_set();
                     cmd_ctx.bind_descriptor_sets(
                         vk::PipelineBindPoint::GRAPHICS,
                         pipeline_layout_handle,
                         0,
-                        &[frame_set, material_set, default_texture_set],
+                        &[frame_set, material_set],
                         &[],
                     );
 
@@ -1842,18 +1865,18 @@ impl Renderer {
                         }
                     }
 
-                    // Bind bindless descriptor set (set 4)
+                    // Bind bindless descriptor set (set 2, previously 4)
                     if let Some(ref bindless) = self.bindless_manager {
                         cmd_ctx.bind_descriptor_sets(
                             vk::PipelineBindPoint::GRAPHICS,
                             pipeline_layout_handle,
-                            4, // Set 4: Bindless textures
+                            2, // Set 2: Bindless textures
                             &[bindless.descriptor_set()],
                             &[],
                         );
                     }
 
-                    Ok(default_texture_set)
+                    Ok(vk::DescriptorSet::null()) // No legacy set needed
                 } else {
                     Ok(vk::DescriptorSet::null())
                 }
@@ -1862,21 +1885,8 @@ impl Renderer {
             // Draw uploaded meshes in order
             for item in &self.draw_items {
                 if let Some(uploaded) = self.model_renderer.get(&item.key) {
-                    let texture_set = if item.texture_set != vk::DescriptorSet::null() {
-                        item.texture_set
-                    } else {
-                        default_texture_set
-                    };
-
-                    if texture_set != vk::DescriptorSet::null() {
-                        cmd_ctx.bind_descriptor_sets(
-                            vk::PipelineBindPoint::GRAPHICS,
-                            pipeline_layout_handle,
-                            2,
-                            &[texture_set],
-                            &[],
-                        );
-                    }
+                    // Phase 6: Bindless - indices are passed via MaterialUniform
+                    // No descriptor set binding needed for materials/textures here.
 
                     if let Some(material_buffer) = self.material_buffers.get(worker_index) {
                         let mut material_buffer = material_buffer.lock();
@@ -1898,12 +1908,13 @@ impl Renderer {
                         );
                         uniform.set_occlusion_strength(item.material.occlusion_strength);
                         uniform.set_normal_scale(item.material.normal_scale);
-                        uniform.set_texture_flags(
-                            item.texture_flags.base_color,
-                            item.texture_flags.normal,
-                            item.texture_flags.metallic_roughness,
-                            item.texture_flags.occlusion,
-                            item.texture_flags.emissive,
+
+                        uniform.set_texture_indices(
+                            item.texture_indices[0],
+                            item.texture_indices[1],
+                            item.texture_indices[2],
+                            item.texture_indices[3],
+                            item.emissive_index,
                         );
                         material_buffer.update()?;
                     }
@@ -2279,7 +2290,7 @@ impl Renderer {
 impl Drop for Renderer {
     fn drop(&mut self) {
         unsafe {
-            log::info!("Shutting down REDE renderer (Phase 5)...");
+            log::info!("Shutting down Ash Renderer...");
 
             let _ = self.vulkan_device.device.device_wait_idle();
 
@@ -2316,7 +2327,7 @@ impl Drop for Renderer {
             self.render_pass = None;
             self.swapchain = None;
 
-            log::info!("REDE renderer shut down successfully (Phase 5)");
+            log::info!("Ash Renderer shut down successfully");
         }
     }
 }

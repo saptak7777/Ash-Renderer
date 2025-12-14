@@ -4,9 +4,7 @@ use ash::{
     vk, Entry, Instance,
 };
 use log::{debug, warn};
-use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use std::ffi::CStr;
-use winit::window::Window;
 
 use crate::{AshError, Result};
 
@@ -22,8 +20,11 @@ pub struct VulkanInstance {
 }
 
 impl VulkanInstance {
-    /// Create a new Vulkan instance configured for the provided window.
-    pub fn new(window: &Window, enable_validation: bool) -> Result<Self> {
+    /// Create a new Vulkan instance configured for the provided surface provider.
+    pub fn new<S: crate::vulkan::SurfaceProvider>(
+        surface_provider: &S,
+        enable_validation: bool,
+    ) -> Result<Self> {
         unsafe {
             let entry = Entry::load().map_err(|e| {
                 AshError::DeviceInitFailed(format!("Failed to load Vulkan entry: {e:?}"))
@@ -35,12 +36,35 @@ impl VulkanInstance {
                 Vec::new()
             };
 
-            let extensions = Self::required_extensions(&entry, enable_validation)?;
+            let mut extensions = surface_provider.required_extensions();
+            if enable_validation {
+                extensions.push(debug_utils::NAME.as_ptr());
+
+                // Check if validation features extension is supported
+                let available_extensions = entry
+                    .enumerate_instance_extension_properties(None)
+                    .map_err(|e| {
+                        AshError::DeviceInitFailed(format!(
+                            "Failed to enumerate instance extensions: {e:?}"
+                        ))
+                    })?;
+
+                let validation_features_name = CStr::from_ptr(validation_features::NAME.as_ptr());
+                let has_validation_features = available_extensions.iter().any(|ext| {
+                    CStr::from_ptr(ext.extension_name.as_ptr()) == validation_features_name
+                });
+
+                if has_validation_features {
+                    extensions.push(validation_features::NAME.as_ptr());
+                } else {
+                    warn!("VK_EXT_validation_features not supported, GPU-assisted validation disabled");
+                }
+            }
 
             let app_info = vk::ApplicationInfo::default()
-                .application_name(c"REDE")
-                .application_version(vk::make_api_version(0, 0, 1, 0))
-                .engine_name(c"REDE")
+                .application_name(c"Ash Renderer")
+                .application_version(vk::make_api_version(0, 1, 0, 0))
+                .engine_name(c"Ash Renderer")
                 .engine_version(vk::make_api_version(0, 0, 1, 0))
                 .api_version(vk::API_VERSION_1_3);
 
@@ -93,7 +117,7 @@ impl VulkanInstance {
                 None
             };
 
-            let surface = create_surface(&entry, &instance, window)?;
+            let surface = surface_provider.create_surface(&entry, &instance)?;
 
             let surface_loader = surface::Instance::new(&entry, &instance);
 
@@ -122,51 +146,6 @@ impl VulkanInstance {
 
     pub fn surface(&self) -> vk::SurfaceKHR {
         self.surface
-    }
-
-    fn required_extensions(entry: &Entry, enable_validation: bool) -> Result<Vec<*const i8>> {
-        let mut extensions = vec![surface::NAME.as_ptr()];
-
-        #[cfg(target_os = "windows")]
-        {
-            extensions.push(ash::khr::win32_surface::NAME.as_ptr());
-        }
-
-        #[cfg(target_os = "linux")]
-        {
-            extensions.push(ash::khr::xlib_surface::NAME.as_ptr());
-        }
-
-        #[cfg(target_os = "macos")]
-        {
-            extensions.push(ash::ext::metal_surface::NAME.as_ptr());
-        }
-
-        if enable_validation {
-            extensions.push(debug_utils::NAME.as_ptr());
-
-            // Check if validation features extension is supported
-            let available_extensions =
-                unsafe { entry.enumerate_instance_extension_properties(None) }.map_err(|e| {
-                    AshError::DeviceInitFailed(format!(
-                        "Failed to enumerate instance extensions: {e:?}"
-                    ))
-                })?;
-
-            let validation_features_name =
-                unsafe { CStr::from_ptr(validation_features::NAME.as_ptr()) };
-            let has_validation_features = available_extensions.iter().any(|ext| unsafe {
-                CStr::from_ptr(ext.extension_name.as_ptr()) == validation_features_name
-            });
-
-            if has_validation_features {
-                extensions.push(validation_features::NAME.as_ptr());
-            } else {
-                warn!("VK_EXT_validation_features not supported, GPU-assisted validation disabled");
-            }
-        }
-
-        Ok(extensions)
     }
 
     fn query_validation_layers(entry: &Entry) -> Result<Vec<*const i8>> {
@@ -211,104 +190,6 @@ impl VulkanInstance {
                     | vk::DebugUtilsMessageTypeFlagsEXT::PERFORMANCE,
             )
             .pfn_user_callback(Some(debug_callback))
-    }
-}
-
-#[cfg(target_os = "windows")]
-unsafe fn create_surface(
-    entry: &Entry,
-    instance: &Instance,
-    window: &Window,
-) -> Result<vk::SurfaceKHR> {
-    use ash::khr::win32_surface;
-
-    let win32_surface_loader = win32_surface::Instance::new(entry, instance);
-
-    match window.window_handle().map(|h| h.as_raw()) {
-        Ok(RawWindowHandle::Win32(handle)) => {
-            let hwnd = handle.hwnd.get();
-            let hinstance = handle.hinstance.map(|h| h.get()).unwrap_or(0);
-
-            let create_info = vk::Win32SurfaceCreateInfoKHR::default()
-                .hwnd(hwnd as vk::HWND)
-                .hinstance(hinstance as vk::HINSTANCE);
-
-            win32_surface_loader
-                .create_win32_surface(&create_info, None)
-                .map_err(|e| AshError::VulkanError(format!("{e:?}")))
-        }
-        _ => Err(AshError::DeviceInitFailed(
-            "Invalid window handle".to_string(),
-        )),
-    }
-}
-
-#[cfg(target_os = "linux")]
-unsafe fn create_surface(
-    entry: &Entry,
-    instance: &Instance,
-    window: &Window,
-) -> Result<vk::SurfaceKHR> {
-    use ash::khr::{wayland_surface, xlib_surface};
-
-    match window.window_handle().map(|h| h.as_raw()) {
-        Ok(RawWindowHandle::Wayland(handle)) => {
-            let wayland_surface_loader = wayland_surface::Instance::new(entry, instance);
-            let create_info = vk::WaylandSurfaceCreateInfoKHR::default()
-                .display(handle.display.as_ptr())
-                .surface(handle.surface.as_ptr());
-            wayland_surface_loader
-                .create_wayland_surface(&create_info, None)
-                .map_err(|e| AshError::VulkanError(format!("{e:?}")))
-        }
-        Ok(RawWindowHandle::Xlib(handle)) => {
-            let xlib_surface_loader = xlib_surface::Instance::new(entry, instance);
-            let create_info = vk::XlibSurfaceCreateInfoKHR::default()
-                .dpy(
-                    handle
-                        .display
-                        .map(|d| d.as_ptr())
-                        .unwrap_or(std::ptr::null_mut()) as *mut _,
-                )
-                .window(handle.window);
-            xlib_surface_loader
-                .create_xlib_surface(&create_info, None)
-                .map_err(|e| AshError::VulkanError(format!("{e:?}")))
-        }
-        _ => Err(AshError::DeviceInitFailed(
-            "Invalid window handle".to_string(),
-        )),
-    }
-}
-
-#[cfg(target_os = "macos")]
-unsafe fn create_surface(
-    entry: &Entry,
-    instance: &Instance,
-    window: &Window,
-) -> Result<vk::SurfaceKHR> {
-    use ash::ext::metal_surface;
-    use raw_window_handle::RawDisplayHandle;
-
-    let metal_surface_loader = metal_surface::Instance::new(entry, instance);
-
-    match (
-        window.window_handle().map(|h| h.as_raw()),
-        window.display_handle().map(|h| h.as_raw()),
-    ) {
-        (Ok(RawWindowHandle::AppKit(handle)), Ok(RawDisplayHandle::AppKit(_display))) => {
-            let view = handle.ns_view.as_ptr() as *mut objc::runtime::Object;
-            let layer: *mut objc::runtime::Object = objc::msg_send![view, layer];
-            let layer_ptr = layer as *const vk::CAMetalLayer;
-
-            let create_info = vk::MetalSurfaceCreateInfoEXT::default().layer(layer_ptr);
-            metal_surface_loader
-                .create_metal_surface(&create_info, None)
-                .map_err(|e| AshError::VulkanError(format!("{e:?}")))
-        }
-        _ => Err(AshError::DeviceInitFailed(
-            "Invalid window handle".to_string(),
-        )),
     }
 }
 

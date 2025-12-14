@@ -48,8 +48,6 @@ pub use error::{AshError, Result};
 
 // Backwards compatibility alias
 #[doc(hidden)]
-pub type RedeError = AshError;
-
 pub use renderer::{
     Camera, DepthBuffer, Material, Mesh, PipelineCache, RenderStats, Renderer, ResourceId,
     ResourceRegistry, StatsCollector, Texture, TextureData, Transform, Vertex, MVP,

@@ -24,7 +24,8 @@ impl ApplicationHandler for App {
 
         let window = event_loop.create_window(window_attrs).unwrap();
         let _size = window.inner_size();
-        match Renderer::new(&window) {
+        let surface_provider = ash_renderer::vulkan::WindowSurfaceProvider::new(&window);
+        match Renderer::new(&surface_provider) {
             Ok(renderer) => {
                 self.renderer = Some(renderer);
                 self.window = Some(window);

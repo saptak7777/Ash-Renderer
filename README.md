@@ -23,6 +23,8 @@ A **production-quality Vulkan renderer** built with [ASH](https://github.com/ash
 - 🛡️ **Robust Validation** - GPU-assisted validation with automatic fallback (VK_EXT_validation_features)
 - 🍃 **Alpha Testing** - Support for transparent shadows (e.g. foliage)
 - 💡 **Light Culling** - Tiled/clustered forward rendering
+- 📦 **Bindless Textures** - Efficient bindless texture management (1024+ textures)
+- 🖥️ **Headless Support** - Decoupled rendering via `SurfaceProvider` trait (CI/Benchmark ready)
 
 ## Quick Start
 
@@ -30,7 +32,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-ash_renderer = "0.2.8"
+ash_renderer = "0.2.9"
 glam = "0.30" # Required for math types
 ```
 
@@ -39,11 +41,16 @@ glam = "0.30" # Required for math types
 ```rust
 use ash_renderer::prelude::*;
 use glam::{Mat4, Vec3};
-use winit::window::Window;
+use ash_renderer::prelude::*;
+use glam::{Mat4, Vec3};
+// use winit::window::Window; // Assumed available from context
 
 // 1. Initialization (inside your winit event loop)
+// Wraps the window to provide a Vulkan surface
+let surface_provider = ash_renderer::vulkan::WindowSurfaceProvider::new(&window);
+
 // Renderer::new handles Vulkan instance, device, and swapchain creation.
-let mut renderer = Renderer::new(&window)?;
+let mut renderer = Renderer::new(&surface_provider)?;
 
 // 2. Resource Setup
 // Create a built-in primitive mesh

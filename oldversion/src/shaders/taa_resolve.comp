@@ -1,0 +1,163 @@
+#version 450
+
+//! Temporal Anti-Aliasing Resolve Shader
+//!
+//! Blends current frame with history using motion vectors and color clamping.
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+// Input: Current frame color
+layout(set = 0, binding = 0) uniform sampler2D currentColor;
+// Input: History color
+layout(set = 0, binding = 1) uniform sampler2D historyColor;
+// Input: Velocity buffer (motion vectors)
+layout(set = 0, binding = 2) uniform sampler2D velocityBuffer;
+// Input: Depth buffer
+layout(set = 0, binding = 3) uniform sampler2D depthBuffer;
+
+// Output: Resolved color
+layout(set = 0, binding = 4, rgba16f) uniform writeonly image2D outputColor;
+
+// Push constants
+layout(push_constant) uniform PushConstants {
+    vec4 screenParams;  // width, height, 1/width, 1/height
+    vec4 params;        // blendFactor, colorClamp, velocityRejection, padding
+    vec2 jitter;        // Current frame jitter
+    vec2 prevJitter;    // Previous frame jitter
+} pc;
+
+// ============================================================================
+// UTILITY FUNCTIONS
+// ============================================================================
+
+// Convert RGB to YCoCg color space
+vec3 rgbToYCoCg(vec3 rgb) {
+    return vec3(
+        0.25 * rgb.r + 0.5 * rgb.g + 0.25 * rgb.b,
+        0.5 * rgb.r - 0.5 * rgb.b,
+        -0.25 * rgb.r + 0.5 * rgb.g - 0.25 * rgb.b
+    );
+}
+
+// Convert YCoCg to RGB color space
+vec3 yCoCgToRgb(vec3 ycocg) {
+    float y = ycocg.x;
+    float co = ycocg.y;
+    float cg = ycocg.z;
+    return vec3(
+        y + co - cg,
+        y + cg,
+        y - co - cg
+    );
+}
+
+// Apply tone mapping for better clamping
+vec3 tonemap(vec3 color) {
+    return color / (1.0 + color);
+}
+
+vec3 untonemap(vec3 color) {
+    return color / (1.0 - color + 0.0001);
+}
+
+// Clamp to neighborhood AABB in YCoCg space
+vec3 clipAABB(vec3 aabbMin, vec3 aabbMax, vec3 color, vec3 historyColor) {
+    vec3 center = 0.5 * (aabbMax + aabbMin);
+    vec3 halfSize = 0.5 * (aabbMax - aabbMin) + 0.001;
+    
+    vec3 delta = historyColor - center;
+    vec3 v = delta / halfSize;
+    
+    float maxV = max(max(abs(v.x), abs(v.y)), abs(v.z));
+    
+    if (maxV > 1.0) {
+        return center + delta / maxV;
+    }
+    return historyColor;
+}
+
+// ============================================================================
+// MAIN
+// ============================================================================
+
+void main() {
+    ivec2 pos = ivec2(gl_GlobalInvocationID.xy);
+    vec2 screenSize = pc.screenParams.xy;
+    
+    if (pos.x >= int(screenSize.x) || pos.y >= int(screenSize.y)) {
+        return;
+    }
+    
+    vec2 uv = (vec2(pos) + 0.5) / screenSize;
+    
+    // Sample velocity (motion vector)
+    vec2 velocity = texture(velocityBuffer, uv).xy;
+    
+    // If no velocity buffer, use jitter difference
+    if (length(velocity) < 0.0001) {
+        velocity = (pc.jitter - pc.prevJitter) / screenSize;
+    }
+    
+    // Reproject to find history position
+    vec2 historyUV = uv - velocity;
+    
+    // Sample current color (at current position, unjittered)
+    vec3 current = texture(currentColor, uv).rgb;
+    
+    // Sample history color (at reprojected position)
+    vec3 history = texture(historyColor, historyUV).rgb;
+    
+    // Color clamping in YCoCg space
+    vec3 result;
+    if (pc.params.y > 0.5) {
+        // Sample 3x3 neighborhood
+        vec3 samples[9];
+        int idx = 0;
+        for (int y = -1; y <= 1; y++) {
+            for (int x = -1; x <= 1; x++) {
+                vec2 sampleUV = uv + vec2(x, y) * pc.screenParams.zw;
+                samples[idx++] = rgbToYCoCg(tonemap(texture(currentColor, sampleUV).rgb));
+            }
+        }
+        
+        // Find AABB in YCoCg space
+        vec3 aabbMin = samples[0];
+        vec3 aabbMax = samples[0];
+        for (int i = 1; i < 9; i++) {
+            aabbMin = min(aabbMin, samples[i]);
+            aabbMax = max(aabbMax, samples[i]);
+        }
+        
+        // Expand AABB slightly to reduce flicker
+        vec3 aabbCenter = (aabbMin + aabbMax) * 0.5;
+        vec3 aabbExtent = (aabbMax - aabbMin) * 0.5;
+        aabbMin = aabbCenter - aabbExtent * 1.25;
+        aabbMax = aabbCenter + aabbExtent * 1.25;
+        
+        // Clamp history to neighborhood
+        vec3 currentYCoCg = rgbToYCoCg(tonemap(current));
+        vec3 historyYCoCg = rgbToYCoCg(tonemap(history));
+        vec3 clampedHistory = clipAABB(aabbMin, aabbMax, currentYCoCg, historyYCoCg);
+        history = untonemap(yCoCgToRgb(clampedHistory));
+    }
+    
+    // Velocity rejection - reduce blend factor for fast-moving objects
+    float blendFactor = pc.params.x;
+    if (pc.params.z > 0.5) {
+        float velocityLength = length(velocity * screenSize);
+        float velocityWeight = clamp(1.0 - velocityLength * 0.1, 0.0, 1.0);
+        blendFactor *= velocityWeight;
+    }
+    
+    // Check if history is valid (within screen bounds)
+    if (historyUV.x < 0.0 || historyUV.x > 1.0 || 
+        historyUV.y < 0.0 || historyUV.y > 1.0) {
+        blendFactor = 0.0; // Use current frame only
+    }
+    
+    // Blend current and history
+    result = mix(current, history, blendFactor);
+    
+    // Write output
+    imageStore(outputColor, pos, vec4(result, 1.0));
+}

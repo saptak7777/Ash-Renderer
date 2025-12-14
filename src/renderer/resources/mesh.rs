@@ -134,6 +134,13 @@ pub struct Mesh {
     pub index_buffer: Option<vk::Buffer>,
     pub index_allocation: Option<vk_mem::Allocation>,
 
+    // Phase 6: Bindless indices
+    pub texture_index: Option<u32>,
+    pub normal_texture_index: Option<u32>,
+    pub metallic_roughness_texture_index: Option<u32>,
+    pub occlusion_texture_index: Option<u32>,
+    pub emissive_texture_index: Option<u32>,
+
     allocator: Option<Arc<crate::vulkan::Allocator>>,
 }
 
@@ -356,6 +363,11 @@ impl Mesh {
             vertex_allocation: None,
             index_buffer: None,
             index_allocation: None,
+            texture_index: None,
+            normal_texture_index: None,
+            metallic_roughness_texture_index: None,
+            occlusion_texture_index: None,
+            emissive_texture_index: None,
             allocator: None,
         }
     }
@@ -468,6 +480,11 @@ impl Mesh {
             vertex_allocation: None,
             index_buffer: None,
             index_allocation: None,
+            texture_index: None,
+            normal_texture_index: None,
+            metallic_roughness_texture_index: None,
+            occlusion_texture_index: None,
+            emissive_texture_index: None,
             allocator: None,
         })
     }
@@ -493,6 +510,11 @@ impl Mesh {
             vertex_allocation: None,
             index_buffer: None,
             index_allocation: None,
+            texture_index: None,
+            normal_texture_index: None,
+            metallic_roughness_texture_index: None,
+            occlusion_texture_index: None,
+            emissive_texture_index: None,
             allocator: None,
         }
     }

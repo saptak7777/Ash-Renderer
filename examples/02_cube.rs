@@ -36,8 +36,9 @@ impl ApplicationHandler for App {
             .with_inner_size(winit::dpi::LogicalSize::new(1280, 720));
 
         let window = event_loop.create_window(window_attrs).unwrap();
+        let surface_provider = ash_renderer::vulkan::WindowSurfaceProvider::new(&window);
 
-        match Renderer::new(&window) {
+        match Renderer::new(&surface_provider) {
             Ok(mut renderer) => {
                 // Create a cube mesh
                 let cube = Mesh::create_cube();

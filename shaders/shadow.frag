@@ -6,13 +6,18 @@
 
 layout(location = 0) in vec2 inUV;
 
-// Binding 0 in Set 1 (matches material_texture_layout binding 0)
-// We need to match the descriptor set layout index used in the pipeline
-layout(set = 1, binding = 0) uniform sampler2D textureSampler;
+layout(push_constant) uniform PushConstants {
+    layout(offset = 128) int base_color_index; // Offset 128 to skip Vertex push constants
+} pc;
+
+#extension GL_EXT_nonuniform_qualifier : require
+layout(set = 2, binding = 0) uniform sampler2D textures[];
 
 void main() {
-    float alpha = texture(textureSampler, inUV).a;
-    if (alpha < 0.1) {
-        discard;
+    if (pc.base_color_index >= 0) {
+        float alpha = texture(textures[nonuniformEXT(pc.base_color_index)], inUV).a;
+        if (alpha < 0.1) {
+            discard;
+        }
     }
 }
