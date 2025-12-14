@@ -607,12 +607,12 @@ impl Renderer {
 
             pipeline_builder = pipeline_builder
                 .add_shader_with_options(
-                    "shaders/vert.vert.spv",
+                    "shaders/vert.spv",
                     vk::ShaderStageFlags::VERTEX,
                     pipeline_cfg.watch_shaders,
                 )?
                 .add_shader_with_options(
-                    "shaders/frag.frag.spv",
+                    "shaders/frag.spv",
                     vk::ShaderStageFlags::FRAGMENT,
                     pipeline_cfg.watch_shaders,
                 )?;

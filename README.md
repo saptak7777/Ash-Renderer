@@ -32,7 +32,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-ash_renderer = "0.2.9"
+ash_renderer = "0.3.0"
 glam = "0.30" # Required for math types
 ```
 

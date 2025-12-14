@@ -51,8 +51,14 @@ fn compile_shaders(dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
         match binary_result {
             Ok(binary) => {
                 let mut out_path = path.clone();
-                // append .spv to the filename
-                let new_name = format!("{file_name}.spv");
+                // Special case for backward compatibility (v0.2.7 style)
+                let new_name = if file_name == "vert.vert" {
+                    "vert.spv".to_string()
+                } else if file_name == "frag.frag" {
+                    "frag.spv".to_string()
+                } else {
+                    format!("{file_name}.spv")
+                };
                 out_path.set_file_name(new_name);
 
                 fs::write(&out_path, binary.as_binary_u8())?;
