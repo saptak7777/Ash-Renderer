@@ -4,6 +4,7 @@ use spirv_reflect::ShaderModule as ReflectShaderModule;
 use std::collections::HashMap;
 use std::ffi::CString;
 use std::fs;
+use std::io::Cursor;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -276,11 +277,11 @@ impl ShaderModule {
 
         let reflection = ShaderReflection::reflect(code, stage)?;
 
-        let code_u32 =
-            unsafe { std::slice::from_raw_parts(code.as_ptr() as *const u32, code.len() / 4) };
+        let code_u32 = ash::util::read_spv(&mut Cursor::new(code))
+            .map_err(|e| AshError::VulkanError(format!("Failed to parse SPIR-V: {e}")))?;
 
         let module = unsafe {
-            let create_info = vk::ShaderModuleCreateInfo::default().code(code_u32);
+            let create_info = vk::ShaderModuleCreateInfo::default().code(&code_u32);
             device
                 .create_shader_module(&create_info, None)
                 .map_err(|e| {

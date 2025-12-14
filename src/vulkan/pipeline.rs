@@ -1,5 +1,6 @@
 use ash::vk;
 use bytemuck::Pod;
+use std::io::Cursor;
 use std::{collections::HashMap, ffi::CString, fs, path::PathBuf, sync::Arc, time::SystemTime};
 
 use crate::renderer::resources::mesh::Vertex;
@@ -256,11 +257,11 @@ impl PipelineBuilder {
             ));
         }
 
-        let code_u32 =
-            unsafe { std::slice::from_raw_parts(code.as_ptr() as *const u32, code.len() / 4) };
+        let code_u32 = ash::util::read_spv(&mut Cursor::new(code))
+            .map_err(|e| AshError::VulkanError(format!("Failed to parse SPIR-V: {e}")))?;
 
         let module = unsafe {
-            let create_info = vk::ShaderModuleCreateInfo::default().code(code_u32);
+            let create_info = vk::ShaderModuleCreateInfo::default().code(&code_u32);
             self.device
                 .create_shader_module(&create_info, None)
                 .map_err(|e| {
@@ -292,11 +293,11 @@ impl PipelineBuilder {
             )));
         }
 
-        let code_u32 =
-            unsafe { std::slice::from_raw_parts(code.as_ptr() as *const u32, code.len() / 4) };
+        let code_u32 = ash::util::read_spv(&mut Cursor::new(&code))
+            .map_err(|e| AshError::VulkanError(format!("Failed to parse SPIR-V: {e}")))?;
 
         let module = unsafe {
-            let create_info = vk::ShaderModuleCreateInfo::default().code(code_u32);
+            let create_info = vk::ShaderModuleCreateInfo::default().code(&code_u32);
             self.device
                 .create_shader_module(&create_info, None)
                 .map_err(|e| {
