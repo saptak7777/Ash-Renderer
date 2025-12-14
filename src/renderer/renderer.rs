@@ -199,10 +199,12 @@ pub struct Renderer {
     render_pass: Option<vulkan::RenderPass>,
     render_pass_id: Option<ResourceId>,
     pipeline: Option<vulkan::Pipeline>,
+    pipeline_id: Option<ResourceId>,
     depth_buffer: Option<DepthBuffer>,
     uniform_buffers: Vec<UniformBuffer>,
     material_buffers: Vec<Mutex<MaterialBuffer>>,
     pipeline_layout: Option<vulkan::PipelineLayout>,
+    pipeline_layout_id: Option<ResourceId>,
     descriptor_manager: Option<vulkan::DescriptorManager>,
     framebuffers: Vec<vulkan::Framebuffer>,
     framebuffer_ids: Vec<ResourceId>,
@@ -618,7 +620,7 @@ impl Renderer {
                 )?;
 
             let mut pipeline = pipeline_builder.build()?;
-            resource_registry
+            let pipeline_id = resource_registry
                 .register_pipeline(pipeline.pipeline, &[pipeline_layout_id, render_pass_id])
                 .map_err(|e| AshError::VulkanError(format!("Failed to register pipeline: {e}")))?;
             pipeline.mark_managed_by_registry();
@@ -762,6 +764,7 @@ impl Renderer {
                 render_pass: Some(render_pass),
                 render_pass_id: Some(render_pass_id),
                 pipeline: Some(pipeline),
+                pipeline_id: Some(pipeline_id),
                 depth_buffer: Some(depth_buffer),
                 mesh: Some(mesh),
                 material,
@@ -769,6 +772,7 @@ impl Renderer {
                 uniform_buffers,
                 material_buffers,
                 pipeline_layout: Some(pipeline_layout),
+                pipeline_layout_id: Some(pipeline_layout_id),
                 descriptor_manager: Some(descriptor_manager),
                 framebuffers,
                 framebuffer_ids,
@@ -1189,11 +1193,13 @@ impl Renderer {
         };
 
         // CRITICAL: Cleanup in correct order (dependents first)
-        // 1. First destroy framebuffers (they reference render pass + depth buffer + image views)
+        // 1. Destroy pipeline (depends on render pass)
+        self.cleanup_pipeline();
+        // 2. Destroy framebuffers (depend on render pass)
         self.cleanup_framebuffers();
-        // 2. Then destroy render pass
+        // 3. Then destroy render pass
         self.cleanup_render_pass();
-        // 3. Then update image views (destroys old ones)
+        // 4. Then update image views (destroys old ones)
         self.update_image_views(&image_views)?;
         // 4. Then recreate depth buffer (can now safely destroy old one)
         self.recreate_depth_buffer(swapchain_extent)?;
@@ -1204,6 +1210,8 @@ impl Renderer {
         self.recreate_command_buffers()?;
         self.recreate_uniform_buffers(self.framebuffers.len())?;
         self.recreate_descriptor_sets()?;
+        // 6. Finally recreate pipeline against new render pass
+        self.recreate_pipeline()?;
 
         log::info!("Swapchain recreation complete ({image_count} images)");
         Ok(())
@@ -1228,6 +1236,15 @@ impl Renderer {
                 log::warn!("Failed to cleanup render pass: {e}");
             }
         }
+    }
+
+    fn cleanup_pipeline(&mut self) {
+        if let Some(pipeline_id) = self.pipeline_id.take() {
+            if let Err(e) = self.resource_registry.cleanup_resource(pipeline_id) {
+                log::warn!("Failed to cleanup pipeline: {e}");
+            }
+        }
+        self.pipeline = None;
     }
 
     fn recreate_pipeline(&mut self) -> Result<()> {
@@ -1272,8 +1289,22 @@ impl Renderer {
             "main",
         )?;
 
-        let new_pipeline = builder.build()?;
+        let mut new_pipeline = builder.build()?;
+        let pipeline_layout_id = self.pipeline_layout_id.ok_or_else(|| {
+            AshError::VulkanError("Pipeline layout ID missing during recreation".into())
+        })?;
+        let render_pass_id = self.render_pass_id.ok_or_else(|| {
+            AshError::VulkanError("Render pass ID missing during recreation".into())
+        })?;
+
+        let pipeline_id = self
+            .resource_registry
+            .register_pipeline(new_pipeline.pipeline, &[pipeline_layout_id, render_pass_id])
+            .map_err(|e| AshError::VulkanError(format!("Failed to register pipeline: {e}")))?;
+
+        new_pipeline.mark_managed_by_registry();
         self.pipeline = Some(new_pipeline);
+        self.pipeline_id = Some(pipeline_id);
 
         log::info!("Pipeline recompiled successfully!");
         Ok(())
