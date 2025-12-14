@@ -606,15 +606,15 @@ impl Renderer {
             }
 
             pipeline_builder = pipeline_builder
-                .add_shader_with_options(
-                    "shaders/vert.spv",
+                .add_shader_from_bytes(
+                    include_bytes!("../../shaders/vert.spv"),
                     vk::ShaderStageFlags::VERTEX,
-                    pipeline_cfg.watch_shaders,
+                    "main",
                 )?
-                .add_shader_with_options(
-                    "shaders/frag.spv",
+                .add_shader_from_bytes(
+                    include_bytes!("../../shaders/frag.spv"),
                     vk::ShaderStageFlags::FRAGMENT,
-                    pipeline_cfg.watch_shaders,
+                    "main",
                 )?;
 
             let mut pipeline = pipeline_builder.build()?;
@@ -656,15 +656,15 @@ impl Renderer {
                     .with_pipeline_cache(pipeline_cache.handle())
                     .with_depth_format(vk::Format::D32_SFLOAT)
                     .with_cull_mode(vk::CullModeFlags::FRONT)
-                    .add_shader_with_options(
-                        "shaders/shadow.vert.spv",
+                    .add_shader_from_bytes(
+                        include_bytes!("../../shaders/shadow.vert.spv"),
                         vk::ShaderStageFlags::VERTEX,
-                        false,
+                        "main",
                     )?
-                    .add_shader_with_options(
-                        "shaders/shadow.frag.spv",
+                    .add_shader_from_bytes(
+                        include_bytes!("../../shaders/shadow.frag.spv"),
                         vk::ShaderStageFlags::FRAGMENT,
-                        false,
+                        "main",
                     )?;
 
                 let shadow_pipeline = shadow_builder.build()?;
@@ -1261,15 +1261,15 @@ impl Renderer {
             .with_cull_mode(vk::CullModeFlags::BACK)
             .with_multisampling(multisample_config);
 
-        builder = builder.add_shader_with_options(
-            "shaders/vert.spv",
+        builder = builder.add_shader_from_bytes(
+            include_bytes!("../../shaders/vert.spv"),
             vk::ShaderStageFlags::VERTEX,
-            true,
+            "main",
         )?;
-        builder = builder.add_shader_with_options(
-            "shaders/frag.spv",
+        builder = builder.add_shader_from_bytes(
+            include_bytes!("../../shaders/frag.spv"),
             vk::ShaderStageFlags::FRAGMENT,
-            true,
+            "main",
         )?;
 
         let new_pipeline = builder.build()?;

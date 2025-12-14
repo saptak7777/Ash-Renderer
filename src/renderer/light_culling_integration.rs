@@ -18,7 +18,6 @@
 
 use ash::vk;
 use glam::{Mat4, Vec3};
-use std::path::Path;
 
 use crate::renderer::features::light_culling::{
     CullingCameraData, GpuLight, LightCullingPass, LightCullingPushConstants,
@@ -50,19 +49,13 @@ impl LightCullingIntegration {
     ///
     /// Call this during renderer initialization.
     pub fn load_shader(&mut self, device: &VulkanDevice) -> Result<()> {
-        let shader_path = Path::new("shaders/light_culling.spv");
-
-        if !shader_path.exists() {
-            log::warn!("Light culling shader not found at {shader_path:?}, feature disabled");
-            return Ok(());
-        }
-
+        let code = include_bytes!("../../shaders/light_culling.spv");
         let shader =
-            ShaderModule::load(&device.device, shader_path, vk::ShaderStageFlags::COMPUTE)?;
+            ShaderModule::load_from_bytes(&device.device, code, vk::ShaderStageFlags::COMPUTE)?;
 
         self.shader_module = Some(shader.module);
         // Note: shader will be dropped, but module handle is Copy
-        log::info!("Light culling shader loaded");
+        log::info!("Light culling shader loaded (embedded)");
         Ok(())
     }
 

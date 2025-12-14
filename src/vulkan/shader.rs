@@ -260,14 +260,21 @@ impl ShaderModule {
             AshError::VulkanError(format!("Failed to read shader {:?}: {e}", path.as_ref()))
         })?;
 
+        Self::load_from_bytes(device, &code, stage)
+    }
+
+    pub fn load_from_bytes(
+        device: &Arc<ash::Device>,
+        code: &[u8],
+        stage: vk::ShaderStageFlags,
+    ) -> Result<Self> {
         if code.len() % 4 != 0 {
-            return Err(AshError::VulkanError(format!(
-                "Shader {:?} size must be multiple of 4",
-                path.as_ref()
-            )));
+            return Err(AshError::VulkanError(
+                "Shader size must be multiple of 4".to_string(),
+            ));
         }
 
-        let reflection = ShaderReflection::reflect(&code, stage)?;
+        let reflection = ShaderReflection::reflect(code, stage)?;
 
         let code_u32 =
             unsafe { std::slice::from_raw_parts(code.as_ptr() as *const u32, code.len() / 4) };
