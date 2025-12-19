@@ -1,6 +1,6 @@
 # Contributing to ASH Renderer
 
-Thank you for your interest in contributing! I welcome all contributions, from bug fixes and documentation improvements to new features.
+Thank you for your interest in contributing! All contributions, including bug fixes, documentation improvements, and new features, are welcome.
 
 ## Getting Started
 
@@ -22,7 +22,7 @@ Thank you for your interest in contributing! I welcome all contributions, from b
 
 ## Coding Standards
 
-I follow standard Rust community guidelines.
+Development follows standard Rust community guidelines.
 
 1.  **Formatting**: Run `cargo fmt` before committing.
 2.  **Linting**: Ensure `cargo clippy` passes without warnings.

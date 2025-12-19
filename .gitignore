@@ -20,6 +20,7 @@ Cargo.lock
 *.exe
 
 # Shader compilation artifacts
+*.spv
 *.spv.txt
 *.spv.d
 
@@ -29,12 +30,12 @@ VkLayer_screenshot/
 
 # OS
 Thumbs.db
-.DS_Store
 
-# Temporary files
+# Temporary files & Logs
 *.tmp
 *.temp
 *.log
+test_results.txt
 
 # Test outputs
 *.profraw

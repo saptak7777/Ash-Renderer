@@ -156,7 +156,7 @@ void main() {
     
     // OPTIMIZATION (Issue 20 partial): Early-exit if no lights to cull
     // Full adaptive workgroup sizing would require specialization constants
-    // TODO: Host-side should skip dispatch entirely if lightCount == 0
+    // Dispatch should be bypassed on the host if lightCount is zero.
     if (pc.lightCount == 0) {
         if (localIndex == 0) {
             tileData[tileOffset] = 0;

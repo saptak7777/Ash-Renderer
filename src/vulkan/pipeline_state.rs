@@ -34,7 +34,10 @@ impl Default for PipelineState {
             },
             scissor: vk::Rect2D {
                 offset: vk::Offset2D { x: 0, y: 0 },
-                extent: vk::Extent2D { width: 0, height: 0 },
+                extent: vk::Extent2D {
+                    width: 0,
+                    height: 0,
+                },
             },
             blend_constants: [0.0; 4],
             line_width: 1.0,

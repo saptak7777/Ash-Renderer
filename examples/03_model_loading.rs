@@ -41,7 +41,7 @@ impl ApplicationHandler for App {
         match Renderer::new(&surface_provider) {
             Ok(renderer) => {
                 // Load GLTF model
-                // TODO: Implement GLTF loading via renderer.load_gltf("path/to/model.gltf")
+                // Loader implementation for GLTF files via `renderer.load_gltf` is pending.
                 log::info!("GLTF loading example - model loading not yet implemented");
 
                 self.renderer = Some(renderer);

@@ -94,8 +94,8 @@ impl RenderFeature for ShadowFeature {
 
     fn on_added(&mut self, device: &Device) {
         log::info!("[ShadowFeature] Shadow feature added");
-        // Store device for later initialization
-        // Note: We can't safely initialize here without memory properties
+        // Store device for subsequent initialization.
+        // Initialization requires validated memory properties.
         // Shadow map will be created on first frame if needed
         let _ = device; // Acknowledge device
     }

@@ -285,17 +285,21 @@ impl ResourceRegistry {
 
     fn detect_cycle(&self, new_id: ResourceId, deps: &[ResourceId]) -> Option<String> {
         let mut visited = HashSet::new();
-        let mut stack = vec![new_id];
+        let mut stack: Vec<ResourceId> = deps.to_vec();
 
         while let Some(current) = stack.pop() {
-            if !visited.insert(current) {
-                return Some(format!("Cycle detected involving {current}"));
+            if current == new_id {
+                return Some(format!(
+                    "Cycle detected: {new_id} depends on itself through a dependency chain"
+                ));
             }
 
-            if deps.contains(&current) {
-                if let Some(child_deps) = self.dependencies.read().unwrap().get(&current) {
-                    stack.extend(child_deps.iter().copied());
-                }
+            if !visited.insert(current) {
+                continue;
+            }
+
+            if let Some(child_deps) = self.dependencies.read().unwrap().get(&current) {
+                stack.extend(child_deps.iter().copied());
             }
         }
 

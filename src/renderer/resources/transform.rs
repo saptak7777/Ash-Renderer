@@ -104,7 +104,7 @@ impl Camera {
     }
 
     /// Calculates projection matrix (perspective)
-    /// Note: Vulkan has Y pointing down in NDC, so we flip Y
+    /// Note: Vulkan NDC has the Y-axis pointing down; flip Y to compensate.
     pub fn projection_matrix(&self) -> Mat4 {
         let mut proj =
             Mat4::perspective_rh(self.fov.to_radians(), self.aspect, self.near, self.far);

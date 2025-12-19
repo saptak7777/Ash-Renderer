@@ -103,7 +103,7 @@ impl RenderPassBuilder {
             self.push_resolve_attachment(resolve, vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL);
         }
 
-        // Ensure we have at least the external->color dependency
+        // Confirm external-to-color subpass dependency exists.
         if self.dependencies.is_empty() {
             self.dependencies.push(vk::SubpassDependency {
                 src_subpass: vk::SUBPASS_EXTERNAL,
@@ -174,10 +174,10 @@ impl RenderPassBuilder {
         attachment: vk::AttachmentDescription,
         layout: vk::ImageLayout,
     ) {
-        // Store with placeholder index; actual index computed in build()
+        // Stores with a placeholder index (u32::MAX); actual indices are computed during the build phase.
         self.resolve_attachments.push(attachment);
         self.resolve_attachment_refs.push(vk::AttachmentReference {
-            attachment: u32::MAX, // Placeholder - computed in build()
+            attachment: u32::MAX,
             layout,
         });
     }
@@ -190,7 +190,7 @@ impl RenderPassBuilder {
     /// 2. **Resolve Attachments** (indices color_count..color_count+resolve_count)
     /// 3. **Depth Attachment** (index at end, if present)
     ///
-    /// Indices are computed centrally here to avoid fragile manual calculations.
+    /// Indices are computed centrally to ensure consistency across subpasses and attachments.
     pub fn build(mut self) -> Result<RenderPass> {
         if self.color_attachments.is_empty() {
             return Err(AshError::VulkanError(
@@ -198,7 +198,7 @@ impl RenderPassBuilder {
             ));
         }
 
-        // Build attachment list: color attachments, then resolve attachments, then depth
+        // Constructs attachment list in sequence: color, resolve, and depth.
         let mut attachments = self.color_attachments.clone();
 
         // Fix resolve attachment indices (they reference positions after color attachments)
@@ -229,7 +229,7 @@ impl RenderPassBuilder {
         let color_refs = self.color_attachment_refs;
         let has_resolve = !resolve_refs.is_empty();
 
-        // Build subpass with or without resolve attachments
+        // Configures subpass description, including optional resolve and depth attachments.
         let subpass = {
             let mut desc = vk::SubpassDescription::default()
                 .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)

@@ -7,11 +7,16 @@ use crate::{
             AutoRotateFeature, FeatureFrameContext, FeatureManager, FeatureRenderContext,
             ShadowFeature,
         },
+        forward_plus_integration::ForwardPlusIntegration,
         fullscreen_pass, hdr_framebuffer,
+        hiz_pass::HiZPass,
+        indirect_draw::IndirectDrawPass,
         model_renderer::{MaterialPushConstants, MeshPushConstants, ModelRenderer},
         resource_registry::{ResourceId, ResourceRegistry},
         resources,
         resources::uniform::{MaterialBuffer, UniformBuffer},
+        ssgi_pass::{SsgiPass, SsgiQuality},
+        temporal_upscaling::{VsrPass, VsrQuality},
         DepthBuffer, Material, Mesh, PipelineCache, Texture, TextureData, Transform,
     },
     vulkan, AshError, Result,
@@ -180,9 +185,9 @@ pub struct RendererConfig {
     pub pipeline: PipelineConfig,
 }
 
-/// Main renderer - Phase 5 (Stable)
+/// Main rendering system.
 pub struct Renderer {
-    // Resources that depend on allocator/device - dropped first
+    // Resources dependent on allocator/device - dropped in reverse order.
     buffer_pool: Arc<BufferPool>,
     resource_registry: Arc<ResourceRegistry>,
     feature_manager: FeatureManager,
@@ -243,8 +248,16 @@ pub struct Renderer {
     shadow_pipeline_layout: Option<vulkan::PipelineLayout>,
     // Bindless textures
     bindless_manager: Option<vulkan::BindlessManager>,
-    // IMPORTANT: These must be at the end so they drop LAST
-    // All resources above depend on allocator, which depends on device
+    // Forward+ lighting
+    forward_plus: Option<ForwardPlusIntegration>,
+    // GPU-driven occlusion culling (Hi-Z + Indirect Draw)
+    hiz_pass: Option<HiZPass>,
+    indirect_draw_pass: Option<IndirectDrawPass>,
+    // Temporal Super-Resolution
+    vsr_pass: Option<VsrPass>,
+    // Screen-Space Global Illumination
+    ssgi_pass: Option<SsgiPass>,
+    // Allocator and device are dropped last as they are the foundation for the resources above.
     allocator: Arc<vulkan::Allocator>,
     vulkan_device: vulkan::VulkanDevice,
 }
@@ -281,10 +294,10 @@ impl TexturePresenceFlags {
 }
 
 impl Renderer {
-    /// Create renderer - Phase 6 (Bindless & SurfaceProvider)
+    /// Initializes the renderer.
     pub fn new<S: vulkan::SurfaceProvider>(surface_provider: &S) -> Result<Self> {
         unsafe {
-            log::info!("Initializing Ash Renderer (Phase 6 - Bindless)...");
+            log::info!("Initializing Ash Renderer...");
 
             let vulkan_instance = Arc::new(vulkan::VulkanInstance::new(
                 surface_provider,
@@ -438,7 +451,7 @@ impl Renderer {
             let mut model_renderer =
                 ModelRenderer::new(Arc::clone(&allocator), Arc::clone(&vulkan_device.device));
 
-            // Phase 5: Create uniform buffers (Double Buffering)
+            // Initialize uniform buffers with double buffering.
             let mut uniform_buffers = Vec::with_capacity(framebuffers.len());
             let aspect = swapchain.extent.width as f32 / swapchain.extent.height as f32;
 
@@ -460,7 +473,7 @@ impl Renderer {
                 uniform_buffers.push(buffer);
             }
             log::info!(
-                "Phase 5: Uniform buffers (count: {}) initialized",
+                "Uniform buffers (count: {}) initialized",
                 uniform_buffers.len()
             );
 
@@ -534,14 +547,13 @@ impl Renderer {
 
             // Default texture binding removed
 
-            // Register default texture with bindless manager
-            // We use the same texture for all slots as a fallback
+            // Register default texture as a fallback for all slots.
             let default_tex_index = bindless_manager
                 .add_sampled_image(default_texture.view(), default_texture.sampler())
-                .unwrap_or(0); // If full, we have bigger problems
+                .unwrap_or(0); // Fallback to index 0 if registration fails.
             log::info!("Registered default texture at bindless index {default_tex_index}");
 
-            // Phase 6: Bindless - No legacy texture binding needed
+            // Bindless architecture - legacy texture binding is bypassed.
             // descriptor_manager.bind_material_textures(...) removed
 
             validate_worker_resources(
@@ -550,11 +562,19 @@ impl Renderer {
                 material_buffers.len(),
             )?;
 
+            // Forward+ lighting integration
+            let mut forward_plus =
+                ForwardPlusIntegration::new(Arc::clone(&vulkan_device.device), &allocator.vma)?;
+            forward_plus.initialize(&allocator.vma)?;
+            forward_plus.on_resize(swapchain.extent.width, swapchain.extent.height);
+            log::info!("Forward+ lighting integration initialized");
+
             let set_layouts = [
                 descriptor_manager.frame_layout(),
                 descriptor_manager.material_layout(),
                 bindless_manager.layout(), // Set 2: Bindless textures
                 descriptor_manager.shadow_layout(), // Set 3: Shadow map sampler
+                forward_plus.layout(),     // Set 4: Forward+ lights
             ];
             let mesh_push_size = std::mem::size_of::<MeshPushConstants>() as u32;
             let material_push_size = std::mem::size_of::<MaterialPushConstants>() as u32;
@@ -589,7 +609,7 @@ impl Renderer {
 
             log::info!("Pipeline layout created with descriptor set layout");
 
-            // NOW create pipeline
+            // Create graphics pipeline.
             let mut pipeline_builder = vulkan::Pipeline::builder(Arc::clone(&vulkan_device.device))
                 .with_layout(pipeline_layout.handle())
                 .with_render_pass(render_pass.handle())
@@ -725,11 +745,11 @@ impl Renderer {
                 mesh.emissive_texture_index = Some(idx);
             }
 
-            // Legacy maps still needed? No, removing usage.
+            // Legacy map usage is removed in favor of bindless.
             mesh_texture_flags.insert(mesh.name.clone(), initial_flags);
             let start_time = Instant::now();
 
-            log::info!("Ash Renderer (Phase 6) initialized successfully!");
+            log::info!("Ash Renderer initialized successfully.");
 
             let swapchain_extent = swapchain.extent;
 
@@ -802,12 +822,17 @@ impl Renderer {
                 // Diagnostics
                 diagnostics: DiagnosticsState::default(),
                 frame_profiler: FrameProfiler::new(),
-                gpu_profiler: None, // Initialized lazily when diagnostics enabled
+                gpu_profiler: None, // Initialized when diagnostics are enabled.
                 diagnostics_overlay: DiagnosticsOverlay::new(),
                 shadow_feature,
                 shadow_pipeline,
                 shadow_pipeline_layout,
                 bindless_manager: Some(bindless_manager),
+                forward_plus: Some(forward_plus),
+                hiz_pass: None,
+                indirect_draw_pass: None,
+                vsr_pass: None,
+                ssgi_pass: None,
             })
         }
     }
@@ -816,8 +841,7 @@ impl Renderer {
         compute_worker_index(self.worker_count, frame_index)
     }
 
-    // prepare_texture_set and update_mesh_texture_set usages removed.
-    // Methods deleted.
+    // Legacy texture set management methods removed.
 
     /// Set mesh to render
     pub fn set_mesh(&mut self, mut mesh: Mesh) {
@@ -843,7 +867,7 @@ impl Renderer {
                 log::error!("Failed to ensure mesh texture: {e}");
             }
 
-            // Register textures with bindless manager
+            // Register textures with the bindless manager.
             if let Some(bindless_manager) = self.bindless_manager.as_mut() {
                 if let Some(tex) = mesh.texture.as_ref() {
                     match bindless_manager.add_sampled_image(tex.view(), tex.sampler()) {
@@ -966,7 +990,7 @@ impl Renderer {
 
             let flags = TexturePresenceFlags::from_mesh(mesh);
 
-            // Phase 6: Store indices
+            // Store indices for bindless texture mapping.
             let indices = [
                 mesh.texture_index.map(|i| i as i32).unwrap_or(-1),
                 mesh.normal_texture_index.map(|i| i as i32).unwrap_or(-1),
@@ -1032,32 +1056,19 @@ impl Renderer {
                         .copied()
                         .unwrap_or_default();
 
-                    // We need to look up indices using the mesh key?
-                    // Wait, we don't store indices in a registry yet.
-                    // We need to fetch the mesh from model_renderer or somewhere?
-                    // Currently model_renderer stores GPU buffers but maybe not the indices?
-                    // But we have `self.mesh` (current mesh).
-                    // Submitting render commands implies we might render ANY mesh.
-                    // If we don't have the indices stored, we can't create the DrawItem.
-                    // THIS LOGIC IS FLAWED without an index registry.
-                    // However, we can hack it: for now assume we only render the CURRENT mesh or that we don't support arbitrary command lists without a registry update.
-                    // BUT, `register_mesh_handle` registers with `mesh_registry`.
-                    // We should add `mesh_indices_registry`?
-                    // For now, let's use default indices (-1) or fallback to what we can find.
-                    // Actually, `register_mesh_handle` takes `&mut Mesh`. We CAN snag the indices there.
-
-                    // Let's assume we fix `register_mesh_handle` to store indices.
-                    // For this tool call, I'll put placeholders and then fix the registry.
-                    let indices = [-1, -1, -1, -1];
-                    let emissive = -1;
+                    let (indices, emissive) = self
+                        .mesh_indices_registry
+                        .get(mesh_key)
+                        .cloned()
+                        .unwrap_or(([-1, -1, -1, -1], -1));
 
                     self.draw_items.push(DrawItem {
                         key: mesh_key.clone(),
                         transform: command.transform,
                         material: material.clone(),
                         texture_flags,
-                        texture_indices: indices, // FIXME
-                        emissive_index: emissive, // FIXME
+                        texture_indices: indices,
+                        emissive_index: emissive,
                     });
                 }
             }
@@ -1098,7 +1109,7 @@ impl Renderer {
                 new_extent.width,
                 new_extent.height
             );
-            // Wait for idle to prevent using old resources while resizing
+            // Synchronize with device to prevent resource conflicts during resize.
             unsafe {
                 let _ = self.vulkan_device.device.device_wait_idle();
             }
@@ -1113,7 +1124,7 @@ impl Renderer {
 
         if let Some(extent) = self.pending_extent {
             if extent.width == 0 || extent.height == 0 {
-                // Window minimized; skip until we get a valid extent.
+                // Window minimized; await valid swapchain extent.
                 return Ok(());
             }
         }
@@ -1192,25 +1203,25 @@ impl Renderer {
             )
         };
 
-        // CRITICAL: Cleanup in correct order (dependents first)
-        // 1. Destroy pipeline (depends on render pass)
+        // Cleanup resources in dependency order (dependents first).
+        // 1. Destroy pipeline.
         self.cleanup_pipeline();
-        // 2. Destroy framebuffers (depend on render pass)
+        // 2. Destroy framebuffers.
         self.cleanup_framebuffers();
-        // 3. Then destroy render pass
+        // 3. Destroy render pass.
         self.cleanup_render_pass();
-        // 4. Then update image views (destroys old ones)
+        // 4. Update image views.
         self.update_image_views(&image_views)?;
-        // 4. Then recreate depth buffer (can now safely destroy old one)
+        // 5. Recreate depth buffer.
         self.recreate_depth_buffer(swapchain_extent)?;
-        // 5. Finally create new render pass and framebuffers
+        // 6. Create new render pass and framebuffers.
         self.create_render_pass_and_framebuffers(swapchain_extent, swapchain_format, &image_views)?;
 
         self.recreate_frame_syncs(self.framebuffers.len())?;
         self.recreate_command_buffers()?;
         self.recreate_uniform_buffers(self.framebuffers.len())?;
         self.recreate_descriptor_sets()?;
-        // 6. Finally recreate pipeline against new render pass
+        // 7. Recreate pipeline.
         self.recreate_pipeline()?;
 
         log::info!("Swapchain recreation complete ({image_count} images)");
@@ -1512,7 +1523,7 @@ impl Renderer {
                 )?;
 
                 {
-                    // Initialize with identity matrices - caller will provide real values via render_frame
+                    // Initialize with identity matrices. Values are updated during render_frame.
                     let matrices = buffer.matrices_mut();
                     matrices.model = self.transform.model_matrix();
                     matrices.view = Mat4::IDENTITY;
@@ -1566,7 +1577,7 @@ impl Renderer {
         // Hot-reload shaders if changed (throttled to every ~1 second)
         const SHADER_CHECK_INTERVAL: usize = 60;
 
-        // We use a small scope to ensure mutable borrow of pipeline ends before we call recreate_pipeline
+        // Ensure mutable borrow of pipeline scope ends prior to recreation call.
         let shaders_changed = if self.current_frame % SHADER_CHECK_INTERVAL == 0 {
             if let Some(pipeline) = &mut self.pipeline {
                 match pipeline.detect_shader_changes() {
@@ -1608,9 +1619,8 @@ impl Renderer {
                 "Render pass not available".to_string(),
             ))?;
 
-            // ===== FENCE WAIT MUST HAPPEN BEFORE UNIFORM BUFFER UPDATE =====
-            // Wait for the current frame's previous submission to complete
-            // before we write new data to the uniform buffer.
+            // Fence synchronization prior to uniform buffer updates.
+            // Ensure previous frame submission completes before writing to the uniform buffer.
             let frame_index = self.current_frame;
             let command_buffer = *self
                 .command_buffers
@@ -1628,7 +1638,7 @@ impl Renderer {
                 .device
                 .reset_fences(&[frame_sync.in_flight])?;
 
-            // NOW it's safe to update the uniform buffer since the GPU is done reading it
+            // GPU synchronization confirmed; safe to update uniform buffer.
             {
                 let uniform_buffer = &mut self.uniform_buffers[frame_index];
 
@@ -1642,7 +1652,7 @@ impl Renderer {
                 };
                 self.feature_manager.before_frame(&mut feature_ctx);
 
-                // Use matrices provided by caller (stateless rendering)
+                // Matrices provided via function arguments.
                 let matrices = uniform_buffer.matrices_mut();
                 matrices.model = self.transform.model_matrix();
                 matrices.view = view;
@@ -1726,7 +1736,7 @@ impl Renderer {
                     // Draw all meshes
                     for item in &self.draw_items {
                         if let Some(uploaded) = self.model_renderer.get(&item.key) {
-                            // Push constants: lightSpaceMatrix (64) + model (64)
+                            // Push constants for light space matrix and model transform.
                             let light_space_push =
                                 crate::renderer::model_renderer::Mat4Push::from(light_space_matrix);
                             let model_push =
@@ -1901,7 +1911,7 @@ impl Renderer {
                         }
                     }
 
-                    // Bind bindless descriptor set (set 2, previously 4)
+                    // Bind bindless descriptor set (Set 2).
                     if let Some(ref bindless) = self.bindless_manager {
                         cmd_ctx.bind_descriptor_sets(
                             vk::PipelineBindPoint::GRAPHICS,
@@ -1912,7 +1922,16 @@ impl Renderer {
                         );
                     }
 
-                    Ok(vk::DescriptorSet::null()) // No legacy set needed
+                    // Bind Forward+ descriptor set (set 4)
+                    if let Some(ref forward_plus) = self.forward_plus {
+                        forward_plus.bind(
+                            &self.vulkan_device.device,
+                            command_buffer,
+                            pipeline_layout_handle,
+                        );
+                    }
+
+                    Ok(vk::DescriptorSet::null())
                 } else {
                     Ok(vk::DescriptorSet::null())
                 }
@@ -1921,8 +1940,8 @@ impl Renderer {
             // Draw uploaded meshes in order
             for item in &self.draw_items {
                 if let Some(uploaded) = self.model_renderer.get(&item.key) {
-                    // Phase 6: Bindless - indices are passed via MaterialUniform
-                    // No descriptor set binding needed for materials/textures here.
+                    // Bindless architecture: indices passed via MaterialUniform.
+                    // Explicit descriptor set binding for materials is bypassed.
 
                     if let Some(material_buffer) = self.material_buffers.get(worker_index) {
                         let mut material_buffer = material_buffer.lock();
@@ -1956,7 +1975,7 @@ impl Renderer {
                     }
 
                     let model_matrix = item.transform;
-                    // Note: In draw_items path, uniform buffer already contains view/proj from render_frame call
+                    // Uniform buffer contains view and projection matrices from current frame synchronization.
                     let uniform_matrices = self.uniform_buffers[frame_index].matrices();
                     let view_matrix = uniform_matrices.view;
                     let projection_matrix = uniform_matrices.projection;
@@ -2073,11 +2092,11 @@ impl Renderer {
     // Post-Processing API
     // ──────────────────────────────────────────────────────────
 
-    /// Sets the MSAA preset (Off, X2, X4, X8)
+    /// Sets the MSAA preset.
     pub fn set_msaa_preset(&mut self, preset: MsaaPreset) {
         self.msaa_preset = preset;
         log::info!("MSAA preset set to {preset:?}");
-        // Note: MSAA targets need to be recreated when preset changes
+        // MSAA targets require recreation upon preset modification.
     }
 
     /// Returns the current MSAA preset
@@ -2136,13 +2155,263 @@ impl Renderer {
     }
 
     // ──────────────────────────────────────────────────────────
+    // Forward+ Lighting API
+    // ──────────────────────────────────────────────────────────
+
+    /// Update point lights for Forward+ rendering
+    ///
+    /// Call this each frame to update light positions and properties.
+    pub fn update_point_lights(&mut self, lights: &[crate::renderer::features::PointLight]) {
+        if let Some(ref mut forward_plus) = self.forward_plus {
+            forward_plus.update_lights(lights, &[]);
+            // Upload to GPU
+            unsafe {
+                let _ = forward_plus.upload_to_gpu(&self.allocator.vma);
+            }
+        }
+    }
+
+    /// Update directional lights for Forward+ rendering
+    pub fn update_directional_lights(
+        &mut self,
+        lights: &[crate::renderer::features::DirectionalLight],
+    ) {
+        if let Some(ref mut forward_plus) = self.forward_plus {
+            forward_plus.update_lights(&[], lights);
+            unsafe {
+                let _ = forward_plus.upload_to_gpu(&self.allocator.vma);
+            }
+        }
+    }
+
+    /// Update all lights (point and directional) for Forward+ rendering
+    pub fn update_lights(
+        &mut self,
+        point_lights: &[crate::renderer::features::PointLight],
+        directional_lights: &[crate::renderer::features::DirectionalLight],
+    ) {
+        if let Some(ref mut forward_plus) = self.forward_plus {
+            forward_plus.update_lights(point_lights, directional_lights);
+            unsafe {
+                let _ = forward_plus.upload_to_gpu(&self.allocator.vma);
+            }
+        }
+    }
+
+    /// Returns whether Forward+ lighting is enabled
+    pub fn forward_plus_enabled(&self) -> bool {
+        self.forward_plus
+            .as_ref()
+            .map(|fp| fp.is_enabled())
+            .unwrap_or(false)
+    }
+
+    /// Returns the number of active lights
+    pub fn forward_plus_light_count(&self) -> usize {
+        self.forward_plus
+            .as_ref()
+            .map(|fp| fp.light_count())
+            .unwrap_or(0)
+    }
+
+    // ──────────────────────────────────────────────────────────
+    // GPU-Driven Occlusion Culling API
+    // ──────────────────────────────────────────────────────────
+
+    /// Enables GPU-driven occlusion culling using Hi-Z pyramid.
+    ///
+    /// This initializes the Hi-Z pass and indirect draw pass for GPU-based
+    /// visibility culling. Objects are tested against a hierarchical depth
+    /// buffer before rendering, reducing draw calls significantly.
+    ///
+    /// # Safety
+    /// Should be called after the renderer is fully initialized.
+    pub fn enable_occlusion_culling(&mut self) -> Result<()> {
+        if self.hiz_pass.is_some() {
+            return Ok(()); // Already enabled
+        }
+
+        let extent = self
+            .swapchain
+            .as_ref()
+            .map(|s| s.extent)
+            .unwrap_or(vk::Extent2D {
+                width: 1920,
+                height: 1080,
+            });
+
+        // Create Hi-Z pass
+        let mut hiz = HiZPass::new(Arc::clone(&self.vulkan_device.device));
+        unsafe {
+            hiz.initialize(
+                &self.allocator.vma,
+                &self.vulkan_device,
+                extent.width,
+                extent.height,
+            )?;
+        }
+
+        // Create Indirect Draw pass
+        let mut indirect = IndirectDrawPass::new(Arc::clone(&self.vulkan_device.device));
+        unsafe {
+            indirect.initialize(
+                &self.allocator.vma,
+                &self.vulkan_device,
+                crate::renderer::indirect_draw::MAX_INDIRECT_OBJECTS,
+            )?;
+            indirect.update_hiz_descriptor(&hiz);
+        }
+
+        self.hiz_pass = Some(hiz);
+        self.indirect_draw_pass = Some(indirect);
+
+        log::info!("Occlusion culling enabled (Hi-Z + Indirect Draw)");
+        Ok(())
+    }
+
+    /// Returns whether GPU-driven occlusion culling is enabled
+    pub fn occlusion_culling_enabled(&self) -> bool {
+        self.hiz_pass.is_some() && self.indirect_draw_pass.is_some()
+    }
+
+    // ──────────────────────────────────────────────────────────
+    // Temporal Super-Resolution API
+    // ──────────────────────────────────────────────────────────
+
+    /// Enables Temporal Super-Resolution (TSR)
+    ///
+    /// TSR renders at a lower internal resolution and uses temporal
+    /// accumulation to reconstruct higher quality output. This improves
+    /// performance while maintaining near-native image quality.
+    ///
+    /// # Arguments
+    /// * `quality` - The TSR quality preset (affects internal render resolution)
+    pub fn enable_vsr(&mut self, quality: VsrQuality) -> Result<()> {
+        if self.vsr_pass.is_some() {
+            return Ok(()); // Already enabled
+        }
+
+        let extent = self
+            .swapchain
+            .as_ref()
+            .map(|s| s.extent)
+            .unwrap_or(vk::Extent2D {
+                width: 1920,
+                height: 1080,
+            });
+
+        let mut vsr = VsrPass::new(Arc::clone(&self.vulkan_device.device));
+        unsafe {
+            vsr.initialize(
+                &self.allocator.vma,
+                &self.vulkan_device,
+                extent.width,
+                extent.height,
+                quality,
+            )?;
+        }
+
+        self.vsr_pass = Some(vsr);
+        log::info!(
+            "TSR enabled with {:?} quality ({}x upscale)",
+            quality,
+            quality.factor()
+        );
+        Ok(())
+    }
+
+    /// Returns whether TSR is enabled
+    pub fn tsr_enabled(&self) -> bool {
+        self.vsr_pass.is_some()
+    }
+
+    /// Returns the current TSR quality preset
+    pub fn vsr_quality(&self) -> Option<VsrQuality> {
+        self.vsr_pass.as_ref().map(|t| t.quality())
+    }
+
+    /// Get jittered projection matrix for TAA/TSR
+    ///
+    /// Call this each frame to get a projection matrix with sub-pixel jitter
+    /// applied. This is essential for temporal accumulation quality.
+    pub fn jitter_projection(&mut self, projection: glam::Mat4) -> glam::Mat4 {
+        if let Some(ref mut vsr) = self.vsr_pass {
+            vsr.jitter_projection(projection)
+        } else {
+            projection
+        }
+    }
+
+    // ──────────────────────────────────────────────────────────
+    // Screen-Space Global Illumination API
+    // ──────────────────────────────────────────────────────────
+
+    /// Enables Screen-Space Global Illumination (SSGI)
+    ///
+    /// SSGI provides real-time indirect lighting by tracing rays
+    /// against the depth buffer. Runs at half resolution with
+    /// temporal accumulation for improved quality.
+    ///
+    /// # Arguments
+    /// * `quality` - The SSGI quality preset (affects ray/step counts)
+    pub fn enable_ssgi(&mut self, quality: SsgiQuality) -> Result<()> {
+        if self.ssgi_pass.is_some() {
+            return Ok(()); // Already enabled
+        }
+
+        let extent = self
+            .swapchain
+            .as_ref()
+            .map(|s| s.extent)
+            .unwrap_or(vk::Extent2D {
+                width: 1920,
+                height: 1080,
+            });
+
+        let mut ssgi = SsgiPass::new(Arc::clone(&self.vulkan_device.device));
+        unsafe {
+            ssgi.initialize(
+                &self.allocator.vma,
+                &self.vulkan_device,
+                extent.width,
+                extent.height,
+                quality,
+            )?;
+        }
+
+        self.ssgi_pass = Some(ssgi);
+        log::info!(
+            "SSGI enabled with {:?} quality ({} rays, {} steps)",
+            quality,
+            quality.ray_count(),
+            quality.step_count()
+        );
+        Ok(())
+    }
+
+    /// Returns whether SSGI is enabled
+    pub fn ssgi_enabled(&self) -> bool {
+        self.ssgi_pass.is_some()
+    }
+
+    /// Returns the current SSGI quality preset
+    pub fn ssgi_quality(&self) -> Option<SsgiQuality> {
+        self.ssgi_pass.as_ref().map(|s| s.quality())
+    }
+
+    /// Set SSGI intensity
+    pub fn set_ssgi_intensity(&mut self, intensity: f32) {
+        if let Some(ref mut ssgi) = self.ssgi_pass {
+            ssgi.set_intensity(intensity);
+        }
+    }
+
+    // ──────────────────────────────────────────────────────────
     // Post-Processing Initialization & Application
     // ──────────────────────────────────────────────────────────
 
-    /// Initializes HDR framebuffer for post-processing
-    ///
-    /// Call this after renderer creation to enable HDR rendering.
-    /// Note: This allocates GPU memory for the HDR buffer.
+    /// Enables HDR rendering. Should be called after initialization.
+    /// Allocates GPU memory for the HDR buffer.
     pub fn initialize_hdr(&mut self) -> Result<()> {
         let extent = self
             .swapchain
@@ -2168,9 +2437,7 @@ impl Renderer {
         Ok(())
     }
 
-    /// Initializes the fullscreen pass for post-processing
-    ///
-    /// Call this after renderer creation to enable fullscreen effects.
+    /// Enables fullscreen effects. Should be called after initialization.
     pub fn initialize_fullscreen_pass(&mut self) -> Result<()> {
         let format = self
             .swapchain
@@ -2192,7 +2459,7 @@ impl Renderer {
 
     /// Enables post-processing with default settings
     ///
-    /// Convenience method that initializes HDR, fullscreen pass, and enables tonemapping.
+    /// Initializes HDR, fullscreen pass, and enables tonemapping.
     pub fn enable_post_processing(&mut self) -> Result<()> {
         self.initialize_hdr()?;
         self.initialize_fullscreen_pass()?;
@@ -2205,7 +2472,7 @@ impl Renderer {
         Ok(())
     }
 
-    /// Returns whether post-processing is ready (HDR and fullscreen pass initialized)
+    /// Checks if HDR and fullscreen pass are initialized.
     pub fn post_processing_ready(&self) -> bool {
         self.hdr_framebuffer.is_some() && self.fullscreen_pass.is_some()
     }
@@ -2242,7 +2509,7 @@ impl Renderer {
         self.diagnostics.toggle_mode();
     }
 
-    /// Update diagnostics at end of frame
+    /// Collects frame diagnostics.
     /// Call this after render_frame() to collect stats
     pub fn update_diagnostics(&mut self) {
         // Begin frame profiling
@@ -2271,7 +2538,7 @@ impl Renderer {
 
     /// Initialize GPU profiler for timing queries
     ///
-    /// This is called automatically when diagnostics mode is set to anything other than Off.
+    /// Automatically initialized when diagnostics are active.
     pub fn initialize_gpu_profiler(&mut self) -> Result<()> {
         if self.gpu_profiler.is_some() {
             return Ok(());
@@ -2341,6 +2608,25 @@ impl Drop for Renderer {
             }
 
             self.feature_manager.cleanup();
+
+            // Cleanup Forward+ integration (Phase 5)
+            if let Some(mut fp) = self.forward_plus.take() {
+                fp.destroy(&self.allocator.vma);
+            }
+
+            // Cleanup UE5 feature modules (Phase 5)
+            if let Some(mut hiz) = self.hiz_pass.take() {
+                hiz.destroy(&self.allocator.vma);
+            }
+            if let Some(mut indirect) = self.indirect_draw_pass.take() {
+                indirect.destroy(&self.allocator.vma);
+            }
+            if let Some(mut vsr) = self.vsr_pass.take() {
+                vsr.destroy(&self.allocator.vma);
+            }
+            if let Some(mut ssgi) = self.ssgi_pass.take() {
+                ssgi.destroy(&self.allocator.vma);
+            }
 
             for ub in &mut self.uniform_buffers {
                 let _ = ub.cleanup();

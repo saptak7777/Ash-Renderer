@@ -71,7 +71,10 @@ impl LightingFeature {
     }
 
     pub fn with_config(config: LightingConfig) -> Self {
-        Self { config, dirty: true }
+        Self {
+            config,
+            dirty: true,
+        }
     }
 
     pub fn config(&self) -> &LightingConfig {

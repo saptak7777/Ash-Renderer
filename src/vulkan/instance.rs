@@ -40,7 +40,7 @@ impl VulkanInstance {
             if enable_validation {
                 extensions.push(debug_utils::NAME.as_ptr());
 
-                // Check if validation features extension is supported
+                // Verify support for validation features extension.
                 let available_extensions = entry
                     .enumerate_instance_extension_properties(None)
                     .map_err(|e| {
@@ -57,7 +57,7 @@ impl VulkanInstance {
                 if has_validation_features {
                     extensions.push(validation_features::NAME.as_ptr());
                 } else {
-                    warn!("VK_EXT_validation_features not supported, GPU-assisted validation disabled");
+                    warn!("VK_EXT_validation_features not supported; GPU-assisted validation disabled.");
                 }
             }
 
@@ -79,8 +79,7 @@ impl VulkanInstance {
                 create_info = create_info.push_next(info);
             }
 
-            // Enable GPU-Assisted Validation and Best Practices if validation is requested
-            // AND the extension was successfully enabled
+            // Enable GPU-assisted validation and best practice checks if supported and requested.
             let mut validation_features = vk::ValidationFeaturesEXT::default()
                 .enabled_validation_features(&[
                     vk::ValidationFeatureEnableEXT::GPU_ASSISTED,

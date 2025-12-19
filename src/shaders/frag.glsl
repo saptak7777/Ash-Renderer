@@ -220,9 +220,7 @@ void main() {
     vec3 kD = (1.0 - F) * (1.0 - metallic);
     vec3 diffuse = kD * baseColor / PI;
     
-    // Calculate Shadow
-    // Calculate Shadow
-    // Use geometric normal (N) for shadow bias to avoid self-shadowing on flat surfaces
+    // Shadow mapping calculations using geometric normal (N) for bias to avoid self-shadowing.
     float shadow = ShadowCalculation(fragPosLightSpace, N, lightDir);
 
     // Direct lighting with shadow

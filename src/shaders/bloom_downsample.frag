@@ -33,27 +33,25 @@ void main() {
     vec3 g = texture(sourceTexture, uv + vec2(0.0, -d.y)).rgb;
     vec3 h = texture(sourceTexture, uv + vec2(0.0,  d.y)).rgb;
     
-    // Karis average calculation (only for the first downsample, technically, but good generally)
+    // Karis average calculation (applied during downsampling to reduce fireflies).
     // Weight = 1 / (1 + luma)
     // Groups: (a,b,d,e), (b,c,e,f)... simple tent is easier.
     // Proper Karis:
-    // We need 5 groups for the 13-tap.
+    // A 13-tap pattern typically uses 5 groups for weighting.
     // Group 1: Center
     // Group 2-5: 4 corners.
-    // But we are doing 13-tap.
+    // Implementing weighted 13-tap pattern.
     // Standard Karis typically uses a 5-tap (center + 4 corners).
-    // Let's stick to the 13-tap pattern but apply weighting.
+    // Apply weighting to the 13-tap pattern.
     
-    // Simplified Karis Check:
+    // Luma-based weighting for stabilization.
     // Converting to luma
     float lumaCenter = dot(center, vec3(0.2126, 0.7152, 0.0722));
     float wCenter = 1.0 / (1.0 + lumaCenter);
     
-    // This is getting complex for a simple replacement.
-    // Let's just implement the weighting for the 4x4 box groups if possible?
-    // Actually, simply weighting the result by luma suppression is often enough.
+    // Weighting the result by luma suppression reduces high-frequency noise.
     
-    // Let's do a weighted average of the groups.
+    // Weighted average of sample groups.
     // Box 1 (Top Left): a, e, g, center
     // Box 2 (Top Right): b, f, g, center
     // ...
@@ -61,15 +59,15 @@ void main() {
     // The "13-tap" is standard there.
     // Karis average is usually applied *before* the first downsample or *during* it.
     
-    // Let's apply partial luma weighting to the samples.
+    // Apply partial luma weighting to the samples.
     vec3 result = center * 0.125;
     result += (a + b + c + d_sample) * 0.125;
     result += (e + f + g + h) * 0.125;
-    // Wait, the previous code weights were different (0.25, 0.0625, 0.125).
+    // Note: Standard weights for 13-tap are 0.25 (center), 0.0625 (corners), and 0.125 (edges).
     // 0.25 center, 0.0625 corners (1/16), 0.125 edges (1/8).
     // Sum: 0.25 + 4*0.0625 + 4*0.125 = 0.25 + 0.25 + 0.5 = 1.0. Correct.
     
-    // Reverting to weighted sum but adding Karis weighting
+    // Apply weighted sum with Karis weighting.
     // Function to calculate weight
     #define w(c) (1.0 / (1.0 + dot(c, vec3(0.2126, 0.7152, 0.0722))))
     

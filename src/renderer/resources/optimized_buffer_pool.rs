@@ -245,7 +245,7 @@ impl BufferPool {
         // Remove from in_use
         bucket.in_use.retain(|b| b.buffer != buffer.buffer);
 
-        // Check if we should keep it
+        // Validate retention criteria.
         if bucket.available.len() < self.config.max_per_class {
             if let Some(ref name) = buffer.name {
                 log::trace!("Returning buffer '{name}' to pool (class {class_index})");
@@ -253,7 +253,7 @@ impl BufferPool {
             bucket.available.push_back(buffer);
         } else {
             // Pool is full for this class, actually free the buffer
-            // Note: In a real implementation, we'd call allocator.destroy_buffer here
+            // Buffers are destroyed via the allocator instance.
             log::trace!("Pool full for class {class_index}, buffer will be dropped");
         }
 

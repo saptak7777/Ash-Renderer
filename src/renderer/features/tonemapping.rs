@@ -117,7 +117,7 @@ impl RenderFeature for TonemappingFeature {
             self.config.operator
         );
         // Store device reference for pipeline creation
-        // Pipeline will be created when we have access to shader modules
+        // Pipelines are created upon acquisition of shader modules.
         self.device = Some(device.clone());
     }
 

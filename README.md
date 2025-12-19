@@ -7,11 +7,11 @@
 > [!IMPORTANT]
 > **Version Stability Notice**
 > The following versions are strictly verified as **STABLE and USABLE**:
-> - **v0.3.9** (Current, Recommended)
-> - **v0.3.8**
+> - **v0.4.0** (Latest, Featured with UE5-inspired tech)
+> - **v0.3.9** (Previous stable)
 > - **v0.1.2**
 >
-> All other versions/variants may contain critical bugs or instability. I deeply apologize for any inconvenience caused by the instability of intermediate versions. Please stay on the recommended versions for a production-ready experience.
+> All other versions/variants may contain critical bugs or instability. Stability is guaranteed only for recommended versions. Please stay on the recommended versions for a production-ready experience.
 
 A **production-quality Vulkan renderer** built with [ASH](https://github.com/ash-rs/ash) (Vulkan bindings) and [VMA](https://github.com/gwihlern-gp/vk-mem-rs) (GPU memory allocator).
 
@@ -21,23 +21,20 @@ A **production-quality Vulkan renderer** built with [ASH](https://github.com/ash
 
 - 🎨 **PBR Materials** - Physically-based rendering with metallic/roughness workflow
 - 🌑 **Shadow Mapping** - Cascaded shadow maps with PCF filtering
-- ✨ **Post-Processing** - Bloom, tonemapping, and temporal anti-aliasing
+- ✨ **VSR (Vulkan Super Resolution)** - Next-gen temporal upscaling for high-fidelity performance
+- 💡 **SSGI (Screen-Space Global Illumination)** - Dynamic, high-performance indirect lighting
+- 👁️ **Hi-Z Occlusion Culling** - Hierarchy-based visibility testing for massive scenes
+- ⚡ **Indirect Draw & GPU Culling** - Compute-based draw call optimization and frustum culling
 - 📊 **GPU Profiling** - Built-in timing queries and performance diagnostics
 - 🔌 **Feature System** - Extensible plugin architecture for rendering features
-- 🚀 **High Performance** - 60+ FPS @ 1080p with 1000+ objects
+- 🚀 **High Performance** - 60+ FPS @ 4K with VSR enabled
 - 🔧 **LOD System** - Automatic level-of-detail management
 - ⚡ **GPU Instancing** - Efficient batch rendering
-- 👁️ **Occlusion Culling** - GPU-accelerated visibility testing
 - 🔄 **Hot Reloading** - Automatic shader recompilation and pipeline recreation on file change
-- 🛡️ **Robust Validation** - GPU-assisted validation with automatic fallback (VK_EXT_validation_features)
-- 🍃 **Alpha Testing** - Support for transparent shadows (e.g. foliage)
-- 💡 **Light Culling** - Tiled/clustered forward rendering
+- 🛡️ **Robust Validation** - GPU-assisted validation with automatic fallback
 - 📦 **Bindless Textures** - Efficient bindless texture management (1024+ textures)
-- 🖥️ **Headless Support** - Decoupled rendering via `SurfaceProvider` trait (CI/Benchmark ready)
-- 🎞️ **Physics-Based TAA** - Improved temporal stability with correct per-vertex motion vectors
-- 💡 **Correct Specular** - Physically accurate energy preservation for metallic surfaces
-- 🔆 **Forward+ Lighting** - (Experimental) Infrastructure for efficient many-light rendering
-- ✨ **Bloom Prefilter** - (Experimental) Advanced firefly suppression for bloom
+- 🖥️ **Headless Support** - Decoupled rendering via `SurfaceProvider` trait
+- 🎞️ **Motion Vectors** - Dedicated G-Buffer pass for high-quality temporal effects
 
 ## Quick Start
 
@@ -45,7 +42,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-ash-renderer = "0.3.9"
+ash-renderer = "0.4.0"
 glam = "0.30" # Required for math types
 ```
 

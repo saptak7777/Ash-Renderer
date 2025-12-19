@@ -2,7 +2,7 @@
 
 // Shadow map fragment shader - depth-only, no color output
 // The fragment shader can be empty for depth-only passes,
-// but we include it for explicit control.
+// Explicitly included for precise control over the fragment stage.
 
 layout(location = 0) in vec2 inUV;
 

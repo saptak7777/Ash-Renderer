@@ -32,7 +32,7 @@ fn main() -> Result<()> {
     let vertex_count = 209668;
     let index_count = 982380;
 
-    // We push 3 indices per iteration. So we need 327460 iterations.
+    // Total iterations required for 3 indices per iteration: 327460.
     for i in 0..327460 {
         vertices.push(ash_renderer::renderer::Vertex {
             position: [0.0, 0.0, 0.0],
@@ -49,21 +49,21 @@ fn main() -> Result<()> {
     }
 
     // Ensure exact counts
-    // We pushed 327460 * 1 vertex = 327460 vertices. User has 209668.
-    // We pushed 327460 * 3 indices = 982380 indices. Correct.
+    // Total vertices: 327460.
+    // Total indices: 982380.
     // Correct vertex buffer size isn't critical for alignment of *index* buffer,
     // unless they pack tightly.
     // User vertex buffer: 209668 * 48 = 10,064,064 bytes?
     // Wait, user log says "Creating buffer (12580080B)".
     // 12580080 / 48 = 262,085 vertices.
     // User log says "Vertices: 209668".
-    // Maybe `Vertex` struct size is different?
+    // Verify `Vertex` struct size against expected memory layout.
     // Ash Renderer Vertex: pos(12) + normal(12) + uv(8) + color(12) + tangent(16)?
     // 12+12+8+12+16 = 60?
     // 12580080 / 60 = 209668. EXACTLY.
     // So Vertex size is 60 bytes.
     // My crash_repro uses `ash_renderer::renderer::Vertex`, so it should match.
-    // I will adjust loop to match vertex count too.
+    // Adjust loop to match vertex count.
 
     // Create dummy texture data (2048x2048 RGBA = 16MB)
     let texture_size = 2048 * 2048 * 4;

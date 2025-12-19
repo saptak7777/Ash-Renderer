@@ -255,7 +255,7 @@ impl GpuProfiler {
 
         match result {
             Ok(_) => {
-                // Check if we have valid data (FrameEnd should be non-zero)
+                // Validate acquisition of data (FrameEnd requirement: non-zero).
                 if timestamps[TimingScope::FrameEnd.index() as usize] > 0 {
                     self.last_results = self.compute_extended_timings(&timestamps);
                     self.last_results.valid = true;

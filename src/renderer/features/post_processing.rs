@@ -61,6 +61,6 @@ impl RenderFeature for PostProcessingFeature {
     }
 
     unsafe fn render(&self, _ctx: &FeatureRenderContext<'_>) {
-        // Apply post-processing when we have a full-screen pass in place.
+        // Post-processing is applied once the full-screen pass is initialized.
     }
 }

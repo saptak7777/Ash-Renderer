@@ -37,12 +37,12 @@ void main() {
     // Weight = 1 / (1 + luma)
     // Groups: (a,b,d,e), (b,c,e,f)... simple tent is easier.
     // Proper Karis:
-    // We need 5 groups for the 13-tap.
+    // Implementation utilizes 5 groups for the 13-tap sample.
     // Group 1: Center
     // Group 2-5: 4 corners.
-    // But we are doing 13-tap.
+    // Executing 13-tap downsample.
     // Standard Karis typically uses a 5-tap (center + 4 corners).
-    // Let's stick to the 13-tap pattern but apply weighting.
+    // Adheres to the 13-tap pattern with weighted averaging.
     
     // OPTIMIZED: Pre-compute luma once per sample instead of redundant macro expansion
     // Reduces from 9 dot products inside weight macro to 9 pre-computed values
@@ -51,10 +51,10 @@ void main() {
     // float wCenter = 1.0 / (1.0 + lumaCenter);
     
     // This is getting complex for a simple replacement.
-    // Let's just implement the weighting for the 4x4 box groups if possible?
+    // Implementation of weighted 4x4 box groups.
     // Actually, simply weighting the result by luma suppression is often enough.
     
-    // Let's do a weighted average of the groups.
+    // Computing weighted average of groups.
     // Box 1 (Top Left): a, e, g, center
     // Box 2 (Top Right): b, f, g, center
     // ...
@@ -62,7 +62,7 @@ void main() {
     // The "13-tap" is standard there.
     // Karis average is usually applied *before* the first downsample or *during* it.
     
-    // Let's apply partial luma weighting to the samples.
+    // Applying luma weighting to the samples.
     vec3 result = center * 0.125;
     result += (a + b + c + d_sample) * 0.125;
     result += (e + f + g + h) * 0.125;

@@ -7,12 +7,12 @@
 //! ```ignore
 //! let queue = DeletionQueue::new("frame_resources");
 //!
-//! // Queue cleanup for later
+//! // Defer cleanup operations.
 //! queue.push(move || {
 //!     device.destroy_buffer(buffer, None);
 //! });
 //!
-//! // After GPU sync, flush all pending deletions
+//! // Flush all pending deletions after GPU synchronization.
 //! queue.flush();
 //! ```
 
@@ -179,7 +179,7 @@ mod tests {
             queue.push(move || {
                 c.fetch_add(1, Ordering::SeqCst);
             });
-            // Queue dropped here
+            // DeletionQueue is dropped.
         }
 
         // Drop should have flushed

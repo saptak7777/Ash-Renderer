@@ -6,9 +6,13 @@
 pub mod cleanup_traits;
 pub mod diagnostics;
 pub mod features;
+pub mod forward_plus_descriptor;
+pub mod forward_plus_integration;
 pub mod frame_graph;
 pub mod fullscreen_pass;
 pub mod hdr_framebuffer;
+pub mod hiz_pass;
+pub mod indirect_draw;
 pub mod instancing;
 pub mod light_culling_integration;
 pub mod lod_system;
@@ -22,10 +26,16 @@ pub mod renderer;
 pub mod resource_registry;
 pub mod resources;
 pub mod shadow_map;
+pub mod ssgi_pass;
+pub mod temporal_upscaling;
 
 // Re-exports for public API
 pub use cleanup_traits::{BufferCleanup, VulkanResourceCleanup};
 pub use features::{AutoRotateFeature, FeatureManager, RenderFeature};
+pub use forward_plus_descriptor::ForwardPlusDescriptor;
+pub use forward_plus_integration::ForwardPlusIntegration;
+pub use hiz_pass::HiZPass;
+pub use indirect_draw::IndirectDrawPass;
 pub use instancing::{InstanceData, InstancingManager};
 pub use lod_system::{LodManager, LodMesh, LodSelection};
 pub use model_renderer::{MaterialPushConstants, ModelRenderer};
@@ -35,6 +45,8 @@ pub use pipeline_cache::PipelineCache;
 pub use render_stats::{RenderStats, StatsCollector};
 pub use renderer::{RenderCommand, Renderer};
 pub use resource_registry::{ResourceId, ResourceRegistry};
+pub use ssgi_pass::{SsgiPass, SsgiQuality};
+pub use temporal_upscaling::{VsrPass, VsrQuality};
 
 // Re-export from resources submodule
 pub use resources::{

@@ -33,7 +33,8 @@
 //! - **`vulkan`**: Low-level Vulkan abstractions (internal)
 //! - **`renderer`**: High-level rendering API (public)
 
-// TODO: Re-enable missing_docs once documentation is complete
+// Documentation coverage is a work-in-progress.
+// #[warn(missing_docs)]
 // #![warn(missing_docs)]
 #![allow(missing_docs)]
 #![warn(clippy::all)]
