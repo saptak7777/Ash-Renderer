@@ -6,6 +6,7 @@ use crate::{AshError, Result};
 /// RAII wrapper for Vulkan framebuffers.
 pub struct Framebuffer {
     handle: vk::Framebuffer,
+    attachments: Vec<vk::ImageView>,
     device: Arc<ash::Device>,
     managed_by_registry: bool,
 }
@@ -32,6 +33,7 @@ impl Framebuffer {
 
         Ok(Self {
             handle,
+            attachments: attachments.to_vec(),
             device,
             managed_by_registry: false,
         })
@@ -39,6 +41,10 @@ impl Framebuffer {
 
     pub fn handle(&self) -> vk::Framebuffer {
         self.handle
+    }
+
+    pub fn attachments(&self) -> &[vk::ImageView] {
+        &self.attachments
     }
 
     pub fn mark_managed_by_registry(&mut self) {

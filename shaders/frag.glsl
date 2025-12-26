@@ -6,8 +6,12 @@ layout(location = 2) in vec3 fragNormal;
 layout(location = 3) in vec3 fragWorldPos;
 layout(location = 4) in vec4 fragPosLightSpace;
 layout(location = 5) in vec4 fragTangent;
+layout(location = 6) in vec2 motionVector;
 
 layout(location = 0) out vec4 outColor;
+layout(location = 1) out vec4 outNormal;
+layout(location = 2) out vec4 outAlbedo;
+layout(location = 3) out vec2 outMotion;
 
 layout(set = 0, binding = 0) uniform MVP {
     mat4 model;
@@ -229,4 +233,7 @@ void main() {
     color = color / (color + vec3(1.0));
 
     outColor = vec4(color, 1.0);
+    outNormal = vec4(normal, 1.0);
+    outAlbedo = vec4(baseColor, 1.0);
+    outMotion = motionVector;
 }

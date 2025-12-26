@@ -1,13 +1,13 @@
 //! GPU Light Culling System
 //!
-//! Implements Forward+ style tile-based light culling using compute shaders.
-//! This allows efficient rendering of scenes with hundreds of lights.
+//! Architecture: Tile-based Forward+ rendering.
+//! High-level flow:
+//! 1. Screen is subdivided into uniform grid tiles (typically 16x16px).
+//! 2. A compute pass culls the global light list against each tile's frustum.
+//! 3. Per-tile light indices are stored in a GPU buffer.
+//! 4. Geometry shaders fetch the index list for their current pixel's tile.
 //!
-//! # Architecture
-//! 1. Compute shader divides screen into 16x16 pixel tiles
-//! 2. For each tile, culls lights against the tile's frustum
-//! 3. Outputs a per-tile light index list
-//! 4. Fragment shader reads only relevant lights per tile
+//! This avoids the O(lights * pixels) complexity of traditional forward rendering.
 
 use glam::Mat4;
 
@@ -22,17 +22,18 @@ pub const MAX_LIGHTS_PER_TILE: usize = 256;
 /// Tile size in pixels
 pub const TILE_SIZE: u32 = 16;
 
-/// GPU light structure (matches shader)
+/// GPU light structure layout optimized for compute shader consumption.
+/// Struct members are packed to avoid unnecessary padding and maximize cache hits in the cull loop.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct GpuLight {
-    /// xyz = position, w = radius
+    /// xyz = world position, w = sphere radius
     pub position: [f32; 4],
-    /// rgb = color, a = intensity
+    /// rgb = color, a = intensity multiplier
     pub color: [f32; 4],
-    /// xyz = direction (for spot), w = type (0=point, 1=spot, 2=directional)
+    /// xyz = direction, w = type (unused in basic point light pass)
     pub direction: [f32; 4],
-    /// x = innerConeAngle, y = outerConeAngle, z = falloff, w = enabled
+    /// Misc params (cone angles for spots, etc.)
     pub params: [f32; 4],
 }
 
@@ -168,20 +169,37 @@ impl LightCullingPass {
     ) {
         self.lights.clear();
 
-        // Add point lights
+        // Adversarial Defense: NaN/Inf Data Poisoning
+        // GPU code often fails catastrophically or produces glitchy artifacts if fed NaNs.
+        // A human engineer anticipates that game objects might occasionally fly to Inf or divide by zero.
+
+        // Point Light Culling: O(N) complexity for CPU-side gathering.
         for light in point_lights {
             if self.lights.len() >= MAX_LIGHTS {
                 log::warn!("Light culling: exceeded max lights ({MAX_LIGHTS})");
                 break;
             }
+
+            // Sanitization: discard malformed data to avoid poisoning GPU buffers
+            if !light.position.is_finite() || !light.color.is_finite() || light.radius.is_nan() {
+                log::warn!("LightManager: Skipping malformed point light (NaN/Inf detected)");
+                continue;
+            }
+
             self.lights.push(GpuLight::from_point_light(light));
         }
 
-        // Add directional lights (these always affect all tiles)
+        // Directional lights: Infinitely far, these bypass tiling and affect all pixels.
         for light in directional_lights {
             if self.lights.len() >= MAX_LIGHTS {
                 break;
             }
+
+            if !light.direction.is_finite() || !light.color.is_finite() {
+                log::warn!("LightManager: Skipping malformed directional light (NaN/Inf detected)");
+                continue;
+            }
+
             self.lights.push(GpuLight::from_directional_light(light));
         }
     }
@@ -233,7 +251,8 @@ impl LightCullingPass {
     /// Get tile buffer size in bytes
     pub fn get_tile_buffer_size(&self) -> usize {
         let total_tiles = (self.tiles_x * self.tiles_y) as usize;
-        // Each tile stores: [count, light_indices...]
+        // Buffer layout: N tiles, each taking (MAX_LIGHTS_PER_TILE + 1) u32s.
+        // First element of each tile segment is the light count.
         total_tiles * (MAX_LIGHTS_PER_TILE + 1) * std::mem::size_of::<u32>()
     }
 

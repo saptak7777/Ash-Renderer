@@ -9,6 +9,15 @@ use vk_mem::Alloc;
 use super::texture::{Texture, TextureData};
 use crate::renderer::Material;
 
+/// Mesh Cluster for fine-grained culling (Nanite Phase 3)
+#[derive(Debug, Clone, Copy)]
+pub struct MeshCluster {
+    pub first_index: u32,
+    pub index_count: u32,
+    pub bounds_center: [f32; 3],
+    pub bounds_radius: f32,
+}
+
 /// Vertex struct with position, normal, UV, and color
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
@@ -140,6 +149,8 @@ pub struct Mesh {
     pub metallic_roughness_texture_index: Option<u32>,
     pub occlusion_texture_index: Option<u32>,
     pub emissive_texture_index: Option<u32>,
+
+    pub clusters: Vec<MeshCluster>,
 
     allocator: Option<Arc<crate::vulkan::Allocator>>,
 }
@@ -344,6 +355,8 @@ impl Mesh {
             indices.len()
         );
 
+        let clusters = Self::generate_clusters(&indices, &vertices);
+
         Self {
             name: name.into(),
             vertices,
@@ -368,8 +381,62 @@ impl Mesh {
             metallic_roughness_texture_index: None,
             occlusion_texture_index: None,
             emissive_texture_index: None,
+            clusters,
             allocator: None,
         }
+    }
+
+    /// Split mesh into clusters for fine-grained culling
+    pub fn generate_clusters(indices: &[u32], vertices: &[Vertex]) -> Vec<MeshCluster> {
+        let cluster_size = 128 * 3; // 128 triangles
+        let mut clusters = Vec::new();
+
+        for chunk_indices in indices.chunks(cluster_size) {
+            let mut min = [f32::MAX; 3];
+            let mut max = [f32::MIN; 3];
+
+            for &idx in chunk_indices {
+                if let Some(v) = vertices.get(idx as usize) {
+                    for i in 0..3 {
+                        min[i] = min[i].min(v.position[i]);
+                        max[i] = max[i].max(v.position[i]);
+                    }
+                }
+            }
+
+            let center = [
+                (min[0] + max[0]) * 0.5,
+                (min[1] + max[1]) * 0.5,
+                (min[2] + max[2]) * 0.5,
+            ];
+
+            let mut radius_sq = 0.0f32;
+            for &idx in chunk_indices {
+                if let Some(v) = vertices.get(idx as usize) {
+                    let d = [
+                        v.position[0] - center[0],
+                        v.position[1] - center[1],
+                        v.position[2] - center[2],
+                    ];
+                    let dist_sq = d[0] * d[0] + d[1] * d[1] + d[2] * d[2];
+                    radius_sq = radius_sq.max(dist_sq);
+                }
+            }
+
+            // Find global offset in indices buffer
+            let first_index = (chunk_indices.as_ptr() as usize - indices.as_ptr() as usize)
+                / std::mem::size_of::<u32>();
+
+            clusters.push(MeshCluster {
+                first_index: first_index as u32,
+                index_count: chunk_indices.len() as u32,
+                bounds_center: center,
+                bounds_radius: radius_sq.sqrt(),
+            });
+        }
+
+        log::debug!("Generated {} clusters for mesh", clusters.len());
+        clusters
     }
 
     /// Loads a mesh from a GLB file
@@ -461,6 +528,8 @@ impl Mesh {
             }
         }
 
+        let clusters = Self::generate_clusters(indices.as_ref().unwrap_or(&vec![]), &vertices);
+
         Ok(Self {
             name,
             vertices,
@@ -485,12 +554,18 @@ impl Mesh {
             metallic_roughness_texture_index: None,
             occlusion_texture_index: None,
             emissive_texture_index: None,
+            clusters,
             allocator: None,
         })
     }
 
     /// Builds a mesh from a descriptor without uploading to the GPU.
     pub fn from_descriptor(descriptor: &MeshDescriptor) -> Self {
+        let clusters = Self::generate_clusters(
+            descriptor.indices.as_ref().unwrap_or(&vec![]),
+            &descriptor.vertices,
+        );
+
         Self {
             name: descriptor.key.clone(),
             vertices: descriptor.vertices.clone(),
@@ -515,6 +590,7 @@ impl Mesh {
             metallic_roughness_texture_index: None,
             occlusion_texture_index: None,
             emissive_texture_index: None,
+            clusters,
             allocator: None,
         }
     }

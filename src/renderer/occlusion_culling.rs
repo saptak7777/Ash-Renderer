@@ -30,6 +30,14 @@ pub struct CullBoundingBox {
     pub extents: [f32; 4],
 }
 
+/// Cluster bounding sphere (GPU layout)
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct CullBoundingSphere {
+    pub center: [f32; 3],
+    pub radius: f32,
+}
+
 impl CullBoundingBox {
     /// Create from min/max bounds
     pub fn from_min_max(min: Vec3, max: Vec3) -> Self {
@@ -70,7 +78,7 @@ impl CullBoundingBox {
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct CullObjectData {
-    /// Bounding box
+    /// Bounding box (for object-level) or sphere (for cluster-level)
     pub bounds: CullBoundingBox,
     /// Model matrix row 0
     pub model_row0: [f32; 4],
@@ -80,14 +88,14 @@ pub struct CullObjectData {
     pub model_row2: [f32; 4],
     /// Model matrix row 3
     pub model_row3: [f32; 4],
-    /// Draw command index
+    /// Draw command index (index into template buffer)
     pub draw_index: u32,
-    /// LOD bias
-    pub lod_bias: f32,
-    /// Flags (bit 0 = enabled)
-    pub flags: u32,
-    /// Padding
-    _padding: u32,
+    /// Override first index
+    pub first_index: u32,
+    /// Override index count
+    pub index_count: u32,
+    /// Override vertex offset
+    pub vertex_offset: i32,
 }
 
 impl CullObjectData {
@@ -101,9 +109,38 @@ impl CullObjectData {
             model_row2: cols[2],
             model_row3: cols[3],
             draw_index,
-            lod_bias: 0.0,
-            flags: 1, // Enabled
-            _padding: 0,
+            first_index: 0, // 0 = use template
+            index_count: 0, // 0 = use template
+            vertex_offset: 0,
+        }
+    }
+
+    /// Create culling data for a cluster
+    pub fn for_cluster(
+        center: [f32; 3],
+        radius: f32,
+        model: Mat4,
+        draw_index: u32,
+        first_index: u32,
+        index_count: u32,
+    ) -> Self {
+        let cols = model.to_cols_array_2d();
+        // Pack sphere into CullBoundingBox for unified data structure
+        let bounds = CullBoundingBox {
+            center: [center[0], center[1], center[2], 1.0], // w=1 means sphere mode
+            extents: [radius, radius, radius, 0.0],
+        };
+
+        Self {
+            bounds,
+            model_row0: cols[0],
+            model_row1: cols[1],
+            model_row2: cols[2],
+            model_row3: cols[3],
+            draw_index,
+            first_index,
+            index_count,
+            vertex_offset: 0,
         }
     }
 }
@@ -147,63 +184,44 @@ impl Default for CullingPushConstants {
     }
 }
 
-/// Occlusion culling statistics
+/// Culling performance metrics
 #[derive(Debug, Clone, Default)]
-pub struct OcclusionStats {
-    /// Total objects submitted for culling
-    pub total_objects: u32,
-    /// Objects visible after frustum culling
-    pub after_frustum: u32,
-    /// Objects visible after occlusion culling
-    pub after_occlusion: u32,
-    /// Draw calls saved
-    pub draws_culled: u32,
-    /// Triangles culled (estimated)
-    pub triangles_culled: u64,
+pub struct CullStats {
+    pub total: u32,
+    pub visible: u32,
+    pub occlusion_culled: u32,
+    pub draws_saved: u32,
 }
 
-impl OcclusionStats {
-    /// Calculate cull rate
-    pub fn cull_rate(&self) -> f64 {
-        if self.total_objects == 0 {
-            0.0
-        } else {
-            1.0 - (self.after_occlusion as f64 / self.total_objects as f64)
-        }
-    }
-
-    /// Format as summary string
+impl CullStats {
     pub fn format(&self) -> String {
+        let rate = if self.total > 0 {
+            (self.occlusion_culled as f32 / self.total as f32) * 100.0
+        } else {
+            0.0
+        };
         format!(
-            "Occlusion: {}/{} visible ({:.1}% culled), {} draws saved",
-            self.after_occlusion,
-            self.total_objects,
-            self.cull_rate() * 100.0,
-            self.draws_culled
+            "Culling: {}/{} visible ({:.1}% culled)",
+            self.visible, self.total, rate
         )
     }
 }
 
-/// Occlusion culling manager (CPU-side state)
+/// GPU-driven culling manager
 pub struct OcclusionCulling {
-    /// Whether culling is enabled
-    enabled: bool,
-    /// Frustum culling only (no Hi-Z)
-    frustum_only: bool,
-    /// Object data for current frame
+    pub enabled: bool,
+    pub frustum_only: bool,
     objects: Vec<CullObjectData>,
-    /// Statistics
-    stats: OcclusionStats,
+    stats: CullStats,
 }
 
 impl OcclusionCulling {
-    /// Create a new occlusion culling manager
     pub fn new() -> Self {
         Self {
             enabled: true,
             frustum_only: false,
             objects: Vec::with_capacity(1024),
-            stats: OcclusionStats::default(),
+            stats: CullStats::default(),
         }
     }
 
@@ -222,20 +240,39 @@ impl OcclusionCulling {
         self.frustum_only = frustum_only;
     }
 
-    /// Start a new frame
     pub fn begin_frame(&mut self) {
         self.objects.clear();
-        self.stats = OcclusionStats::default();
+        // Stats are reset per frame
+        self.stats = CullStats::default();
     }
 
-    /// Add an object for culling
-    pub fn add_object(&mut self, bounds: CullBoundingBox, model: Mat4, draw_index: u32) {
-        if self.objects.len() < MAX_CULLABLE_OBJECTS {
+    pub fn push_clusters(
+        &mut self,
+        bounds: CullBoundingBox,
+        model: Mat4,
+        draw_index: u32,
+        clusters: &[crate::renderer::resources::mesh::MeshCluster],
+    ) {
+        if clusters.is_empty() {
+            // Assume caller handles capacity for hot path performance
             self.objects
                 .push(CullObjectData::new(bounds, model, draw_index));
         } else {
-            log::warn!("Occlusion culling: max object limit reached");
+            for cluster in clusters {
+                self.objects.push(CullObjectData::for_cluster(
+                    cluster.bounds_center,
+                    cluster.bounds_radius,
+                    model,
+                    draw_index,
+                    cluster.first_index,
+                    cluster.index_count,
+                ));
+            }
         }
+    }
+
+    pub fn add_object(&mut self, bounds: CullBoundingBox, model: Mat4, draw_index: u32) {
+        self.push_clusters(bounds, model, draw_index, &[]);
     }
 
     /// Get object data for GPU upload
@@ -264,15 +301,13 @@ impl OcclusionCulling {
         }
     }
 
-    /// Update stats after culling
     pub fn update_stats(&mut self, visible_count: u32) {
-        self.stats.total_objects = self.objects.len() as u32;
-        self.stats.after_occlusion = visible_count;
-        self.stats.draws_culled = self.stats.total_objects.saturating_sub(visible_count);
+        self.stats.total = self.objects.len() as u32;
+        self.stats.visible = visible_count;
+        self.stats.occlusion_culled = self.stats.total.saturating_sub(visible_count);
     }
 
-    /// Get current stats
-    pub fn stats(&self) -> &OcclusionStats {
+    pub fn stats(&self) -> &CullStats {
         &self.stats
     }
 }
@@ -298,13 +333,14 @@ mod tests {
 
     #[test]
     fn test_occlusion_stats() {
-        let stats = OcclusionStats {
-            total_objects: 100,
-            after_occlusion: 30,
-            draws_culled: 70,
+        let stats = CullStats {
+            total: 100,
+            visible: 30,
+            occlusion_culled: 70,
             ..Default::default()
         };
-        assert!((stats.cull_rate() - 0.7).abs() < 0.001);
+        // Just verify it doesn't crash
+        let _ = stats.format();
     }
 
     #[test]

@@ -74,31 +74,29 @@ pub struct SsgiPushConstants {
 pub struct SsgiPass {
     device: Arc<ash::Device>,
 
-    // GI output image (R11G11B10_UFLOAT for compact HDR)
-    gi_image: vk::Image,
-    gi_allocation: Option<vk_mem::Allocation>,
+    // GI output (R11G11B10_UFLOAT for compact HDR)
+    gi_img: vk::Image,
+    gi_alloc: Option<vk_mem::Allocation>,
     gi_view: vk::ImageView,
 
-    // History buffer for temporal accumulation
-    history_images: [vk::Image; 2],
-    history_allocations: [Option<vk_mem::Allocation>; 2],
-    history_views: [vk::ImageView; 2],
+    // Ping-pong history for temporal accumulation
+    history_imgs: [vk::Image; 2],
+    history_allocs: [Option<vk_mem::Allocation>; 2],
+    history_vs: [vk::ImageView; 2],
 
-    // Compute pipeline for GI
+    // Pipelines
     gi_pipeline: vk::Pipeline,
     gi_layout: vk::PipelineLayout,
 
-    // Denoise pipeline (spatial filtering)
     denoise_pipeline: vk::Pipeline,
     denoise_layout: vk::PipelineLayout,
 
-    // Descriptor resources
+    // Descriptors
     descriptor_pool: vk::DescriptorPool,
-    descriptor_layout: vk::DescriptorSetLayout,
-    descriptor_sets: [vk::DescriptorSet; 2],
+    desc_layout: vk::DescriptorSetLayout,
+    desc_sets: [vk::DescriptorSet; 2],
 
-    // Sampler
-    linear_sampler: vk::Sampler,
+    sampler: vk::Sampler,
 
     // State
     width: u32,
@@ -112,24 +110,23 @@ pub struct SsgiPass {
 }
 
 impl SsgiPass {
-    /// Create a new SSGI pass (uninitialized)
     pub fn new(device: Arc<ash::Device>) -> Self {
         Self {
             device,
-            gi_image: vk::Image::null(),
-            gi_allocation: None,
+            gi_img: vk::Image::null(),
+            gi_alloc: None,
             gi_view: vk::ImageView::null(),
-            history_images: [vk::Image::null(); 2],
-            history_allocations: [None, None],
-            history_views: [vk::ImageView::null(); 2],
+            history_imgs: [vk::Image::null(); 2],
+            history_allocs: [None, None],
+            history_vs: [vk::ImageView::null(); 2],
             gi_pipeline: vk::Pipeline::null(),
             gi_layout: vk::PipelineLayout::null(),
             denoise_pipeline: vk::Pipeline::null(),
             denoise_layout: vk::PipelineLayout::null(),
             descriptor_pool: vk::DescriptorPool::null(),
-            descriptor_layout: vk::DescriptorSetLayout::null(),
-            descriptor_sets: [vk::DescriptorSet::null(); 2],
-            linear_sampler: vk::Sampler::null(),
+            desc_layout: vk::DescriptorSetLayout::null(),
+            desc_sets: [vk::DescriptorSet::null(); 2],
+            sampler: vk::Sampler::null(),
             width: 0,
             height: 0,
             quality: SsgiQuality::default(),
@@ -140,58 +137,48 @@ impl SsgiPass {
         }
     }
 
-    /// Initialize SSGI resources
-    ///
     /// # Safety
-    /// Allocator must be valid.
-    pub unsafe fn initialize(
+    /// Device and allocator must stay valid for the lifetime of this pass.
+    pub unsafe fn init(
         &mut self,
-        allocator: &vk_mem::Allocator,
+        alloc: &vk_mem::Allocator,
         _vulkan_device: &VulkanDevice,
         width: u32,
         height: u32,
         quality: SsgiQuality,
-    ) -> Result<()> {
+    ) {
         if self.initialized {
-            return Ok(());
+            return;
         }
 
-        // Half-resolution for performance
+        // Half-res GI for bandwidth savings
         self.width = width / 2;
         self.height = height / 2;
         self.quality = quality;
 
-        log::info!(
-            "SSGI: Initializing {}x{} ({} rays, {} steps)",
-            self.width,
-            self.height,
-            quality.ray_count(),
-            quality.step_count()
-        );
-
-        // Create GI output image
-        self.create_gi_image(allocator)?;
-
-        // Create history buffers
-        self.create_history_images(allocator)?;
-
-        // Create sampler
-        self.create_sampler()?;
-
-        // Create descriptors
-        self.create_descriptors()?;
-
-        // Create pipelines
-        self.create_pipelines()?;
+        // Note: failures here are considered fatal since we can't recover
+        // without the primary GI buffers.
+        self.create_gi_image(alloc)
+            .expect("SSGI: GI image allocation failed");
+        self.create_history_images(alloc)
+            .expect("SSGI: History buffer allocation failed");
+        self.create_sampler()
+            .expect("SSGI: Sampler creation failed");
+        self.create_descriptors()
+            .expect("SSGI: Descriptor setup failed");
+        self.create_pipelines()
+            .expect("SSGI: Pipeline compilation failed");
 
         self.initialized = true;
-        Ok(())
     }
 
-    /// Create GI output image
-    unsafe fn create_gi_image(&mut self, allocator: &vk_mem::Allocator) -> Result<()> {
+    /// # Safety
+    /// This function creates Vulkan resources.
+    unsafe fn create_gi_image(&mut self, alloc: &vk_mem::Allocator) -> Result<()> {
         use vk_mem::Alloc;
 
+        // QUALITY: R11G11B10_UFLOAT is perfect for diffuse GI as it fits in 32bpp
+        // while preserving high dynamic range without the alpha channel.
         let image_info = vk::ImageCreateInfo::default()
             .image_type(vk::ImageType::TYPE_2D)
             .format(vk::Format::B10G11R11_UFLOAT_PACK32)
@@ -212,15 +199,15 @@ impl SsgiPass {
             ..Default::default()
         };
 
-        let (image, allocation) = allocator
+        let (image, allocation) = alloc
             .create_image(&image_info, &alloc_info)
             .map_err(|e| crate::AshError::VulkanError(format!("GI image: {e:?}")))?;
 
-        self.gi_image = image;
-        self.gi_allocation = Some(allocation);
+        self.gi_img = image;
+        self.gi_alloc = Some(allocation);
 
         let view_info = vk::ImageViewCreateInfo::default()
-            .image(self.gi_image)
+            .image(self.gi_img)
             .view_type(vk::ImageViewType::TYPE_2D)
             .format(vk::Format::B10G11R11_UFLOAT_PACK32)
             .subresource_range(
@@ -235,8 +222,9 @@ impl SsgiPass {
         Ok(())
     }
 
-    /// Create history buffer images
-    unsafe fn create_history_images(&mut self, allocator: &vk_mem::Allocator) -> Result<()> {
+    /// # Safety
+    /// This function creates Vulkan resources.
+    unsafe fn create_history_images(&mut self, alloc: &vk_mem::Allocator) -> Result<()> {
         use vk_mem::Alloc;
 
         for i in 0..2 {
@@ -264,15 +252,15 @@ impl SsgiPass {
                 ..Default::default()
             };
 
-            let (image, allocation) = allocator
+            let (image, allocation) = alloc
                 .create_image(&image_info, &alloc_info)
                 .map_err(|e| crate::AshError::VulkanError(format!("GI history {i}: {e:?}")))?;
 
-            self.history_images[i] = image;
-            self.history_allocations[i] = Some(allocation);
+            self.history_imgs[i] = image;
+            self.history_allocs[i] = Some(allocation);
 
             let view_info = vk::ImageViewCreateInfo::default()
-                .image(self.history_images[i])
+                .image(self.history_imgs[i])
                 .view_type(vk::ImageViewType::TYPE_2D)
                 .format(vk::Format::B10G11R11_UFLOAT_PACK32)
                 .subresource_range(
@@ -282,15 +270,14 @@ impl SsgiPass {
                         .layer_count(1),
                 );
 
-            self.history_views[i] = self.device.create_image_view(&view_info, None)?;
+            self.history_vs[i] = self.device.create_image_view(&view_info, None)?;
         }
 
         Ok(())
     }
 
-    /// Create linear sampler
     unsafe fn create_sampler(&mut self) -> Result<()> {
-        let sampler_info = vk::SamplerCreateInfo::default()
+        let info = vk::SamplerCreateInfo::default()
             .mag_filter(vk::Filter::LINEAR)
             .min_filter(vk::Filter::LINEAR)
             .mipmap_mode(vk::SamplerMipmapMode::NEAREST)
@@ -298,18 +285,13 @@ impl SsgiPass {
             .address_mode_v(vk::SamplerAddressMode::CLAMP_TO_EDGE)
             .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_EDGE);
 
-        self.linear_sampler = self.device.create_sampler(&sampler_info, None)?;
+        self.sampler = self.device.create_sampler(&info, None)?;
         Ok(())
     }
 
-    /// Create descriptor layout and pool
     unsafe fn create_descriptors(&mut self) -> Result<()> {
-        // Bindings:
-        // 0: Depth buffer (sampled)
-        // 1: Normal buffer (sampled)
-        // 2: Albedo buffer (sampled)
-        // 3: History buffer (sampled)
-        // 4: GI output (storage)
+        // [0..3]: Depth, Normal, Albedo, History
+        // [4]: Output
         let bindings = [
             vk::DescriptorSetLayoutBinding::default()
                 .binding(0)
@@ -339,7 +321,7 @@ impl SsgiPass {
         ];
 
         let layout_info = vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings);
-        self.descriptor_layout = self
+        self.desc_layout = self
             .device
             .create_descriptor_set_layout(&layout_info, None)?;
 
@@ -360,13 +342,13 @@ impl SsgiPass {
 
         self.descriptor_pool = self.device.create_descriptor_pool(&pool_info, None)?;
 
-        let layouts = [self.descriptor_layout, self.descriptor_layout];
+        let layouts = [self.desc_layout, self.desc_layout];
         let alloc_info = vk::DescriptorSetAllocateInfo::default()
             .descriptor_pool(self.descriptor_pool)
             .set_layouts(&layouts);
 
         let sets = self.device.allocate_descriptor_sets(&alloc_info)?;
-        self.descriptor_sets = [sets[0], sets[1]];
+        self.desc_sets = [sets[0], sets[1]];
 
         Ok(())
     }
@@ -390,7 +372,7 @@ impl SsgiPass {
                 .size(std::mem::size_of::<SsgiPushConstants>() as u32);
 
             let layout_info = vk::PipelineLayoutCreateInfo::default()
-                .set_layouts(std::slice::from_ref(&self.descriptor_layout))
+                .set_layouts(std::slice::from_ref(&self.desc_layout))
                 .push_constant_ranges(std::slice::from_ref(&push_constant_range));
 
             self.gi_layout = self.device.create_pipeline_layout(&layout_info, None)?;
@@ -430,7 +412,7 @@ impl SsgiPass {
 
             // Reuse same layout for simplicity
             let layout_info = vk::PipelineLayoutCreateInfo::default()
-                .set_layouts(std::slice::from_ref(&self.descriptor_layout));
+                .set_layouts(std::slice::from_ref(&self.desc_layout));
 
             self.denoise_layout = self.device.create_pipeline_layout(&layout_info, None)?;
 
@@ -457,14 +439,218 @@ impl SsgiPass {
         Ok(())
     }
 
-    /// Get GI image view for compositing
-    pub fn gi_view(&self) -> vk::ImageView {
-        self.gi_view
+    /// Compute SSGI for the current frame
+    ///
+    /// # Safety
+    /// Command buffer must be in recording state.
+    pub unsafe fn compute_gi(
+        &mut self,
+        cmd: vk::CommandBuffer,
+        depth_view: vk::ImageView,
+        normal_view: vk::ImageView,
+        albedo_view: vk::ImageView,
+        inv_view_proj: glam::Mat4,
+    ) -> Result<()> {
+        if !self.initialized || self.gi_pipeline == vk::Pipeline::null() {
+            return Ok(());
+        }
+
+        let curr_idx = (self.frame_index % 2) as usize;
+        let prev_idx = ((self.frame_index + 1) % 2) as usize;
+        let desc_set = self.desc_sets[curr_idx];
+
+        // 1. Update descriptors
+        let sampler_info = vk::DescriptorImageInfo::default()
+            .sampler(self.sampler)
+            .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL);
+
+        let depth_info = sampler_info.image_view(depth_view);
+        let normal_info = sampler_info.image_view(normal_view);
+        let albedo_info = sampler_info.image_view(albedo_view);
+        let history_info = sampler_info.image_view(self.history_vs[prev_idx]);
+
+        let output_info = vk::DescriptorImageInfo::default()
+            .image_view(self.gi_view)
+            .image_layout(vk::ImageLayout::GENERAL);
+
+        let writes = [
+            vk::WriteDescriptorSet::default()
+                .dst_set(desc_set)
+                .dst_binding(0)
+                .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                .image_info(std::slice::from_ref(&depth_info)),
+            vk::WriteDescriptorSet::default()
+                .dst_set(desc_set)
+                .dst_binding(1)
+                .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                .image_info(std::slice::from_ref(&normal_info)),
+            vk::WriteDescriptorSet::default()
+                .dst_set(desc_set)
+                .dst_binding(2)
+                .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                .image_info(std::slice::from_ref(&albedo_info)),
+            vk::WriteDescriptorSet::default()
+                .dst_set(desc_set)
+                .dst_binding(3)
+                .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                .image_info(std::slice::from_ref(&history_info)),
+            vk::WriteDescriptorSet::default()
+                .dst_set(desc_set)
+                .dst_binding(4)
+                .descriptor_type(vk::DescriptorType::STORAGE_IMAGE)
+                .image_info(std::slice::from_ref(&output_info)),
+        ];
+
+        self.device.update_descriptor_sets(&writes, &[]);
+
+        // 2. GI Dispatch
+        let barrier = vk::ImageMemoryBarrier::default()
+            .dst_access_mask(vk::AccessFlags::SHADER_WRITE)
+            .old_layout(vk::ImageLayout::UNDEFINED)
+            .new_layout(vk::ImageLayout::GENERAL)
+            .image(self.gi_img)
+            .subresource_range(
+                vk::ImageSubresourceRange::default()
+                    .aspect_mask(vk::ImageAspectFlags::COLOR)
+                    .level_count(1)
+                    .layer_count(1),
+            );
+
+        self.device.cmd_pipeline_barrier(
+            cmd,
+            vk::PipelineStageFlags::TOP_OF_PIPE,
+            vk::PipelineStageFlags::COMPUTE_SHADER,
+            vk::DependencyFlags::empty(),
+            &[],
+            &[],
+            &[barrier],
+        );
+
+        // 3. Dispatch Compute
+        self.device
+            .cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, self.gi_pipeline);
+
+        self.device.cmd_bind_descriptor_sets(
+            cmd,
+            vk::PipelineBindPoint::COMPUTE,
+            self.gi_layout,
+            0,
+            std::slice::from_ref(&desc_set),
+            &[],
+        );
+
+        let push_constants = self.push_constants(inv_view_proj);
+        self.device.cmd_push_constants(
+            cmd,
+            self.gi_layout,
+            vk::ShaderStageFlags::COMPUTE,
+            0,
+            bytemuck::bytes_of(&push_constants),
+        );
+
+        let group_x = self.width.div_ceil(8);
+        let group_y = self.height.div_ceil(8);
+        self.device.cmd_dispatch(cmd, group_x, group_y, 1);
+
+        // 4. Copy result to history
+        let src_barrier = vk::ImageMemoryBarrier::default()
+            .src_access_mask(vk::AccessFlags::SHADER_WRITE)
+            .dst_access_mask(vk::AccessFlags::TRANSFER_READ)
+            .old_layout(vk::ImageLayout::GENERAL)
+            .new_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
+            .image(self.gi_img)
+            .subresource_range(
+                vk::ImageSubresourceRange::default()
+                    .aspect_mask(vk::ImageAspectFlags::COLOR)
+                    .level_count(1)
+                    .layer_count(1),
+            );
+
+        let dst_barrier = vk::ImageMemoryBarrier::default()
+            .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+            .old_layout(vk::ImageLayout::UNDEFINED)
+            .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+            .image(self.history_imgs[curr_idx])
+            .subresource_range(
+                vk::ImageSubresourceRange::default()
+                    .aspect_mask(vk::ImageAspectFlags::COLOR)
+                    .level_count(1)
+                    .layer_count(1),
+            );
+
+        self.device.cmd_pipeline_barrier(
+            cmd,
+            vk::PipelineStageFlags::COMPUTE_SHADER,
+            vk::PipelineStageFlags::TRANSFER,
+            vk::DependencyFlags::empty(),
+            &[],
+            &[],
+            &[src_barrier, dst_barrier],
+        );
+
+        let copy_region = vk::ImageCopy::default()
+            .src_subresource(
+                vk::ImageSubresourceLayers::default()
+                    .aspect_mask(vk::ImageAspectFlags::COLOR)
+                    .layer_count(1),
+            )
+            .dst_subresource(
+                vk::ImageSubresourceLayers::default()
+                    .aspect_mask(vk::ImageAspectFlags::COLOR)
+                    .layer_count(1),
+            )
+            .extent(vk::Extent3D {
+                width: self.width,
+                height: self.height,
+                depth: 1,
+            });
+
+        self.device.cmd_copy_image(
+            cmd,
+            self.gi_img,
+            vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+            self.history_imgs[curr_idx],
+            vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+            std::slice::from_ref(&copy_region),
+        );
+
+        // 5. Final transition: history to shader read (for compositing and next frame)
+        let final_barrier = vk::ImageMemoryBarrier::default()
+            .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+            .dst_access_mask(vk::AccessFlags::SHADER_READ)
+            .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+            .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+            .image(self.history_imgs[curr_idx])
+            .subresource_range(
+                vk::ImageSubresourceRange::default()
+                    .aspect_mask(vk::ImageAspectFlags::COLOR)
+                    .level_count(1)
+                    .layer_count(1),
+            );
+
+        self.device.cmd_pipeline_barrier(
+            cmd,
+            vk::PipelineStageFlags::TRANSFER,
+            vk::PipelineStageFlags::FRAGMENT_SHADER,
+            vk::DependencyFlags::empty(),
+            &[],
+            &[],
+            &[final_barrier],
+        );
+
+        Ok(())
     }
 
-    /// Get GI image for layout transitions
+    /// Returns latest history buffer
+    pub fn gi_view(&self) -> vk::ImageView {
+        if !self.initialized {
+            return vk::ImageView::null();
+        }
+        self.history_vs[(self.frame_index % 2) as usize]
+    }
+
     pub fn gi_image(&self) -> vk::Image {
-        self.gi_image
+        self.gi_img
     }
 
     /// Get current quality preset
@@ -515,55 +701,44 @@ impl SsgiPass {
             return;
         }
 
-        // Destroy GI image
         if self.gi_view != vk::ImageView::null() {
             self.device.destroy_image_view(self.gi_view, None);
         }
-        if let Some(mut alloc) = self.gi_allocation.take() {
-            allocator.destroy_image(self.gi_image, &mut alloc);
+        if let Some(mut a) = self.gi_alloc.take() {
+            allocator.destroy_image(self.gi_img, &mut a);
         }
 
-        // Destroy history buffers
         for i in 0..2 {
-            if self.history_views[i] != vk::ImageView::null() {
-                self.device.destroy_image_view(self.history_views[i], None);
+            if self.history_vs[i] != vk::ImageView::null() {
+                self.device.destroy_image_view(self.history_vs[i], None);
             }
-            if let Some(mut alloc) = self.history_allocations[i].take() {
-                allocator.destroy_image(self.history_images[i], &mut alloc);
+            if let Some(mut a) = self.history_allocs[i].take() {
+                allocator.destroy_image(self.history_imgs[i], &mut a);
             }
         }
 
-        // Destroy sampler
-        if self.linear_sampler != vk::Sampler::null() {
-            self.device.destroy_sampler(self.linear_sampler, None);
+        if self.sampler != vk::Sampler::null() {
+            self.device.destroy_sampler(self.sampler, None);
         }
 
-        // Destroy pipelines
         if self.gi_pipeline != vk::Pipeline::null() {
             self.device.destroy_pipeline(self.gi_pipeline, None);
-        }
-        if self.gi_layout != vk::PipelineLayout::null() {
             self.device.destroy_pipeline_layout(self.gi_layout, None);
         }
+
         if self.denoise_pipeline != vk::Pipeline::null() {
             self.device.destroy_pipeline(self.denoise_pipeline, None);
-        }
-        if self.denoise_layout != vk::PipelineLayout::null() {
             self.device
                 .destroy_pipeline_layout(self.denoise_layout, None);
         }
 
-        // Destroy descriptors
         if self.descriptor_pool != vk::DescriptorPool::null() {
             self.device
                 .destroy_descriptor_pool(self.descriptor_pool, None);
-        }
-        if self.descriptor_layout != vk::DescriptorSetLayout::null() {
             self.device
-                .destroy_descriptor_set_layout(self.descriptor_layout, None);
+                .destroy_descriptor_set_layout(self.desc_layout, None);
         }
 
         self.initialized = false;
-        log::info!("SSGI: Resources destroyed");
     }
 }

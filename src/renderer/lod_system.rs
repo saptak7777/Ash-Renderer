@@ -1,13 +1,7 @@
 //! Level of Detail (LOD) System
 //!
-//! Provides automatic mesh quality selection based on screen-space size.
-//! Reduces triangle count for distant objects while maintaining visual quality.
-//!
-//! # Features
-//! - Screen-space size calculation
-//! - Smooth LOD transitions (dithered)
-//! - Per-object LOD bias
-//! - Statistics tracking
+//! Handles mesh quality selection based on distance or screen coverage.
+//! Optimized for high-throughput visibility checks in the main render loop.
 
 use glam::{Mat4, Vec3};
 
@@ -53,7 +47,7 @@ impl Default for LodConfig {
             smooth_transitions: true,
             transition_width: 0.1,
             global_bias: 0.0,
-            cull_threshold: 0.001, // Cull if < 0.1% of screen
+            cull_threshold: 0.001, // 0.1% screen coverage is typically a single pixel or less
         }
     }
 }
@@ -211,27 +205,24 @@ impl LodManager {
         screen_width: f32,
         screen_height: f32,
     ) -> f32 {
-        // Project sphere center
         let clip = *view_proj * position.extend(1.0);
 
         if clip.w <= 0.0 {
-            return 0.0; // Behind camera
+            return 0.0; // Avoid projection artifacts for objects behind camera
         }
 
         let _ndc = clip.truncate() / clip.w;
 
-        // Approximate projected radius
-        let dist = clip.w;
-        let proj_radius = radius / dist;
-
-        // Convert to screen pixels
-        let pixel_radius = proj_radius * screen_width.max(screen_height) * 0.5;
-
-        // Calculate coverage as ratio of screen area
+        // Approximate projected radius in pixels.
+        // Screen-space area is calculated as a circle; slightly over-conservative for most meshes.
+        let pixel_radius = (radius / clip.w) * screen_width.max(screen_height) * 0.5;
         let area = std::f32::consts::PI * pixel_radius * pixel_radius;
         let screen_area = screen_width * screen_height;
 
-        (area / screen_area).min(1.0)
+        // Philosophy 3: Trusting/Performance-Focused
+        // Assume screen_area is non-zero and area is sane.
+        // Stripping min(1.0) as we trust the projection math in the hot path.
+        area / screen_area
     }
 
     /// Select LOD for an object
@@ -245,17 +236,14 @@ impl LodManager {
         screen_height: f32,
     ) -> LodSelection {
         // Record base triangle count
-        if !mesh.levels.is_empty() {
-            self.stats.triangles_before += mesh.levels[0].triangle_count as u64;
-        }
+        // Philosophy 3: Assume mesh has at least one LOD level for performance.
+        self.stats.triangles_before += mesh.levels[0].triangle_count as u64;
 
         // Force mode
         if let LodSelectionMode::Force(level) = self.config.mode {
-            let level = level.min(mesh.levels.len().saturating_sub(1));
-            if !mesh.levels.is_empty() {
-                self.stats.triangles_after += mesh.levels[level].triangle_count as u64;
-                self.stats.objects_per_lod[level] += 1;
-            }
+            // Philosophy 3: Assume level is within valid range.
+            self.stats.triangles_after += mesh.levels[level].triangle_count as u64;
+            self.stats.objects_per_lod[level] += 1;
             return LodSelection {
                 level,
                 blend: 0.0,
@@ -273,10 +261,10 @@ impl LodManager {
             screen_height,
         );
 
-        // Check cull threshold
         if screen_coverage < self.config.cull_threshold {
             self.stats.objects_culled += 1;
             return LodSelection {
+                // Return lowest LOD for culled objects to provide stable index if shader still draws
                 level: mesh.levels.len().saturating_sub(1),
                 blend: 0.0,
                 culled: true,
@@ -295,16 +283,12 @@ impl LodManager {
         };
 
         // Apply global and per-object bias
-        let biased_level = (level as f32 + self.config.global_bias + mesh.lod_bias)
-            .clamp(0.0, (mesh.levels.len() - 1) as f32) as usize;
+        // Philosophy 3: Trust caller and config to provide sane bias values.
+        let biased_level = (level as f32 + self.config.global_bias + mesh.lod_bias) as usize;
 
         // Update stats
-        if biased_level < mesh.levels.len() {
-            self.stats.triangles_after += mesh.levels[biased_level].triangle_count as u64;
-            if biased_level < MAX_LOD_LEVELS {
-                self.stats.objects_per_lod[biased_level] += 1;
-            }
-        }
+        self.stats.triangles_after += mesh.levels[biased_level].triangle_count as u64;
+        self.stats.objects_per_lod[biased_level] += 1;
 
         LodSelection {
             level: biased_level,
@@ -322,6 +306,7 @@ impl LodManager {
                     let next_threshold = mesh.levels[i + 1].screen_threshold;
                     let range = level.screen_threshold - next_threshold;
                     if range > 0.0 {
+                        // Rescale coverage into [0, 1] for dithered thresholding in shader
                         let pos_in_range = (level.screen_threshold - screen_coverage) / range;
                         (pos_in_range / self.config.transition_width).clamp(0.0, 1.0)
                     } else {

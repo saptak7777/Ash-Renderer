@@ -1,0 +1,195 @@
+#version 460
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+
+// Cluster culling compute shader for Nanite-style rendering
+// Performs two-phase culling: 1) Instance-level, 2) Cluster-level
+
+layout(local_size_x = 64) in;
+
+// ============================================================================
+// STRUCTURES (Matching Rust layout)
+// ============================================================================
+
+struct BoundingBox {
+    vec4 center;   // xyz = center, w = padding
+    vec4 extents;  // xyz = half-extents, w = padding
+};
+
+struct ObjectData {
+    BoundingBox bounds;
+    mat4 model;
+    uint drawIndex;
+    uint clusterOffset;
+    uint clusterCount;
+    uint flags;
+};
+
+struct ClusterData {
+    vec4 boundingSphere; // xyz = center (object space), w = radius
+    uvec2 indexRange;    // x = firstIndex, y = indexCount
+    vec2 lodInfo;        // x = errorThreshold, y = parentIndex
+};
+
+struct IndirectCommand {
+    uint indexCount;
+    uint instanceCount;
+    uint firstIndex;
+    int vertexOffset;
+    uint firstInstance;
+};
+
+// ============================================================================
+// BINDINGS (Matching IndirectDrawPass::descriptor_set)
+// ============================================================================
+
+// 0: Object data
+layout(std430, set = 0, binding = 0) readonly buffer Objects {
+    ObjectData objects[];
+};
+
+// 1: Hi-Z pyramid
+layout(set = 0, binding = 1) uniform sampler2D hizPyramid;
+
+// 2: Draw commands template (unused by cluster cull but kept for binding consistency)
+layout(std430, set = 0, binding = 2) readonly buffer DrawCommandsIn {
+    IndirectCommand _unused[];
+};
+
+// 3: Visibility flags (1 = visible)
+layout(std430, set = 0, binding = 3) buffer Visibility {
+    uint visible[];
+};
+
+// 4: Indirect draw commands (output)
+layout(std430, set = 0, binding = 4) writeonly buffer IndirectCommands {
+    IndirectCommand commands[];
+};
+
+// 5: Visible count (atomic)
+layout(std430, set = 0, binding = 5) buffer VisibleCount {
+    uint count;
+} drawCount;
+
+// 6: Cluster data (input)
+layout(std430, set = 0, binding = 6) readonly buffer Clusters {
+    ClusterData clusters[];
+};
+
+// Push constants
+layout(push_constant) uniform PushConstants {
+    mat4 viewProj;
+    vec4 screenParams;  // width, height, 1/width, 1/height
+    uint objectCount;
+    uint totalClusterCount;
+    float lodBias;
+    uint _padding[1];
+} pc;
+
+// ============================================================================
+// UTILITIES
+// ============================================================================
+
+void extractFrustumPlanes(mat4 vp, out vec4 planes[6]) {
+    planes[0] = vp[3] + vp[0]; // Left
+    planes[1] = vp[3] - vp[0]; // Right
+    planes[2] = vp[3] + vp[1]; // Bottom
+    planes[3] = vp[3] - vp[1]; // Top
+    planes[4] = vp[3] + vp[2]; // Near
+    planes[5] = vp[3] - vp[2]; // Far
+    for (int i = 0; i < 6; i++) planes[i] /= length(planes[i].xyz);
+}
+
+bool isSphereInFrustum(vec3 center, float radius, vec4 planes[6]) {
+    for (int i = 0; i < 6; i++) {
+        if (dot(planes[i].xyz, center) + planes[i].w < -radius) return false;
+    }
+    return true;
+}
+
+bool isSphereOccluded(vec3 center, float radius) {
+    vec4 clip = pc.viewProj * vec4(center, 1.0);
+    if (clip.w <= 0.0) return false;
+    
+    vec3 ndc = clip.xyz / clip.w;
+    vec2 uv = ndc.xy * 0.5 + 0.5;
+    
+    // Choose mip level based on projected radius
+    float projRadius = radius / clip.w;
+    float pixelRadius = projRadius * max(pc.screenParams.x, pc.screenParams.y) * 0.5;
+    float mip = clamp(log2(pixelRadius), 0.0, textureQueryLevels(hizPyramid) - 1.0);
+    
+    float depth = textureLod(hizPyramid, uv, mip).r;
+    return ndc.z > depth + projRadius;
+}
+
+float calculateScreenError(vec3 center, float threshold) {
+    vec4 clip = pc.viewProj * vec4(center, 1.0);
+    return (threshold / clip.w) * max(pc.screenParams.x, pc.screenParams.y);
+}
+
+// ============================================================================
+// MAIN
+// ============================================================================
+
+void main() {
+    uint clusterIdx = gl_GlobalInvocationID.x;
+    if (clusterIdx >= pc.totalClusterCount) return;
+
+    // Find parent object (O(N) search for now, could be optimized if object count is huge)
+    uint objIdx = 0;
+    uint clusterBase = 0;
+    for (uint i = 0; i < pc.objectCount; i++) {
+        uint count = objects[i].clusterCount;
+        if (clusterIdx < clusterBase + count) {
+            objIdx = i;
+            break;
+        }
+        clusterBase += count;
+    }
+
+    ObjectData obj = objects[objIdx];
+    
+    // Check if object is enabled
+    if ((obj.flags & 1u) == 0u) {
+        visible[clusterIdx] = 0;
+        return;
+    }
+
+    uint localIdx = clusterIdx - clusterBase;
+    ClusterData cluster = clusters[obj.clusterOffset + localIdx];
+
+    // Transform cluster bounding sphere to world space
+    vec3 worldCenter = (obj.model * vec4(cluster.boundingSphere.xyz, 1.0)).xyz;
+    float worldRadius = cluster.boundingSphere.w * length(obj.model[0].xyz);
+
+    // 1. Frustum Culling
+    vec4 planes[6];
+    extractFrustumPlanes(pc.viewProj, planes);
+    if (!isSphereInFrustum(worldCenter, worldRadius, planes)) {
+        visible[clusterIdx] = 0;
+        return;
+    }
+
+    // 2. Occlusion Culling
+    if (isSphereOccluded(worldCenter, worldRadius)) {
+        visible[clusterIdx] = 0;
+        return;
+    }
+
+    // 3. LOD Selection
+    float error = calculateScreenError(worldCenter, cluster.lodInfo.x);
+    if (error < pc.lodBias) {
+        visible[clusterIdx] = 0;
+        return;
+    }
+
+    // Mark visible and generate command
+    visible[clusterIdx] = 1;
+    uint slot = atomicAdd(drawCount.count, 1);
+    
+    commands[slot].indexCount = cluster.indexRange.y;
+    commands[slot].instanceCount = 1;
+    commands[slot].firstIndex = cluster.indexRange.x;
+    commands[slot].vertexOffset = 0;
+    commands[slot].firstInstance = objIdx;
+}

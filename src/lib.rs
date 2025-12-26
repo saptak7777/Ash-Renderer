@@ -1,14 +1,14 @@
 //! # ASH Renderer
 //!
-//! A production-quality Vulkan renderer built with ASH (Vulkan bindings) and VMA (GPU memory allocator).
+//! A Vulkan rendering library built with ASH and VMA. This is an experimental renderer focusing on
+//! modern techniques (GPU-driven culling, SSGI, VSR) in a standalone, ECS-free architecture.
 //!
-//! ## Features
+//! ## Status
 //!
-//! - **PBR Materials**: Physically-based rendering with metallic/roughness workflow
-//! - **Shadow Mapping**: PCF-filtered shadow maps with slope-scale bias
-//! - **Post-Processing**: Bloom, tonemapping, and temporal anti-aliasing
-//! - **GPU Profiling**: Built-in timing queries and performance diagnostics
-//! - **Feature System**: Extensible plugin architecture for rendering features
+//! This crate is in early development. APIs are subject to frequent change.
+//! It is primarily a testbed for advanced rendering features.
+//!
+//! **Stable Versions:** 0.1.2, 0.3.8, 0.3.9, 0.4.0, 0.4.1.
 //!
 //! ## Quick Start
 //!

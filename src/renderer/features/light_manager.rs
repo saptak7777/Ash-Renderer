@@ -1,7 +1,8 @@
 //! Light Manager
 //!
-//! Coordinates GPU-side light management for Forward+ rendering.
-//! Bridges LightCullingPass (CPU logic) with GPU buffer operations.
+//! Coordinates GPU light data and tile indices for Forward+ rendering.
+//! Assumes the renderer handles frame synchronization (e.g., waiting on fences)
+//! before calling upload_lights or create_buffers.
 
 use ash::vk;
 use vk_mem::Alloc;
@@ -35,13 +36,9 @@ pub struct ForwardPlusInfo {
     pub _padding: u32,
 }
 
-/// Light Manager for Forward+ Rendering
-///
-/// Manages:
-/// - CPU-side light culling logic (via LightCullingPass)
-/// - GPU light buffer
-/// - GPU tile indices buffer (compute output)
-/// - Descriptor Set 4 bindings
+/// Manages high-level GPU resources for the light culling compute pass.
+/// Note: This implementation currently doesn't double-buffer; it assumes
+/// the caller ensures GPU execution is complete before overwriting.
 pub struct LightManager {
     /// CPU-side culling logic
     culling_pass: LightCullingPass,
@@ -72,18 +69,23 @@ impl LightManager {
 
     /// Create with custom culling config
     pub fn with_config(config: LightCullingConfig) -> Self {
+        if config.debug_tiles && !config.enabled {
+            panic!("LightManager: debug_tiles requires culling to be enabled (architectural invariant).");
+        }
+
         Self {
             culling_pass: LightCullingPass::with_config(config),
             ..Self::new()
         }
     }
 
-    /// Update lights from scene data
     pub fn update_lights(
         &mut self,
         point_lights: &[PointLight],
         directional_lights: &[DirectionalLight],
     ) {
+        // We assume the incoming slices contain valid, world-space lighting data.
+        // The culling pass handles its own internal capacity limits and sanitization.
         self.culling_pass
             .update_lights(point_lights, directional_lights);
         self.dirty = true;
@@ -171,10 +173,11 @@ impl LightManager {
     // GPU Resource Management (implemented via VMA)
     // =========================================================================
 
-    /// Create GPU buffers for lights and tiles
+    /// Create GPU buffers for lights and tiles.
     ///
     /// # Safety
-    /// The allocator must be valid and properly initialized.
+    /// Caller must ensure no GPU commands are pending that reference the old buffers
+    /// if this is called as a recreation (e.g., during resize).
     pub unsafe fn create_buffers(&mut self, allocator: &vk_mem::Allocator) -> crate::Result<()> {
         // Light buffer: MAX_LIGHTS * sizeof(GpuLight)
         let light_buffer_size = (MAX_LIGHTS * std::mem::size_of::<GpuLight>()) as u64;
@@ -193,9 +196,7 @@ impl LightManager {
 
         let (light_buffer, light_allocation) = allocator
             .create_buffer(&light_buffer_info, &light_alloc_info)
-            .map_err(|e| {
-                crate::AshError::VulkanError(format!("Light buffer creation failed: {e:?}"))
-            })?;
+            .expect("LightManager: Base buffer allocation failed during initialization");
 
         self.light_buffer = Some(LightBuffer {
             buffer: light_buffer,
@@ -219,9 +220,7 @@ impl LightManager {
 
         let (tile_buffer, tile_allocation) = allocator
             .create_buffer(&tile_buffer_info, &tile_alloc_info)
-            .map_err(|e| {
-                crate::AshError::VulkanError(format!("Tile buffer creation failed: {e:?}"))
-            })?;
+            .expect("LightManager: Tile buffer allocation failed during initialization");
 
         self.tile_buffer = Some(TileBuffer {
             buffer: tile_buffer,
@@ -257,6 +256,8 @@ impl LightManager {
 
         let mapped_ptr = allocation_info.mapped_data;
         if !mapped_ptr.is_null() {
+            // Memory is mapped with HOST_ACCESS_SEQUENTIAL_WRITE.
+            // copy_nonoverlapping is used here as we're initializing the entire buffer segment.
             std::ptr::copy_nonoverlapping(
                 lights.as_ptr() as *const u8,
                 mapped_ptr as *mut u8,

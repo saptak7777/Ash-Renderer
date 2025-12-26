@@ -108,7 +108,12 @@ impl Drop for Pipeline {
     }
 }
 
-/// Declarative pipeline builder mirroring the reference abstraction.
+/// A declarative builder for creating Vulkan graphics pipelines.
+///
+/// This follows the "Builder" pattern to accumulate pipeline state before final creation.
+/// Error handling is split: setup errors (IO, SPIR-V parsing) return `Result`,
+/// while missing architectural components (missing layout, render pass) will `panic!`
+/// as they represent logic errors in the renderer initialization.
 pub struct PipelineBuilder {
     device: Arc<ash::Device>,
     layout: Option<vk::PipelineLayout>,
@@ -251,6 +256,7 @@ impl PipelineBuilder {
         stage: vk::ShaderStageFlags,
         entry_point: &str,
     ) -> Result<Self> {
+        // Validation: SPIR-V must be 4-byte aligned
         if code.len() % 4 != 0 {
             return Err(AshError::VulkanError(
                 "Shader code size must be multiple of 4".to_string(),
@@ -278,6 +284,7 @@ impl PipelineBuilder {
         Ok(self)
     }
 
+    /// Loads SPIR-V from a file and registers it as a shader stage.
     pub fn add_shader_with_options(
         mut self,
         path: &str,
@@ -344,6 +351,14 @@ impl PipelineBuilder {
         self
     }
 
+    pub fn with_color_blend_attachments(
+        mut self,
+        attachments: Vec<vk::PipelineColorBlendAttachmentState>,
+    ) -> Self {
+        self.color_blend_attachments = attachments;
+        self
+    }
+
     pub fn with_multisampling(mut self, config: MultisampleConfig) -> Self {
         self.multisample_cfg = config;
         self
@@ -375,21 +390,24 @@ impl PipelineBuilder {
         self
     }
 
+    /// Builds the pipeline.
+    ///
+    /// # Panics
+    /// Panics if layout, render_pass, extent, or shaders are missing.
+    /// These are considered architectural invariants for a graphics pipeline.
     pub fn build(mut self) -> Result<Pipeline> {
         let layout = self
             .layout
-            .ok_or_else(|| AshError::VulkanError("Pipeline layout not specified".to_string()))?;
+            .expect("invariant: pipeline layout must be provided");
         let render_pass = self
             .render_pass
-            .ok_or_else(|| AshError::VulkanError("Render pass not specified".to_string()))?;
+            .expect("invariant: render pass must be provided");
         let extent = self
             .extent
-            .ok_or_else(|| AshError::VulkanError("Viewport extent not specified".to_string()))?;
+            .expect("invariant: viewport extent must be provided");
 
         if self.shader_stages.is_empty() {
-            return Err(AshError::VulkanError(
-                "At least one shader stage must be provided".to_string(),
-            ));
+            panic!("arch error: at least one shader stage required");
         }
 
         // Pre-create specialization infos to ensure they have a stable address

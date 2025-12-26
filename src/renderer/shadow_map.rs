@@ -48,7 +48,7 @@ pub struct ShadowMap {
     /// Sampler for shadow sampling with comparison
     pub sampler: vk::Sampler,
     /// Resolution
-    pub resolution: u32,
+    pub res: u32,
     /// Light-space matrix (view * projection from light's POV)
     pub light_space_matrix: glam::Mat4,
     /// Configuration
@@ -65,8 +65,7 @@ impl ShadowMap {
         memory_properties: vk::PhysicalDeviceMemoryProperties,
         config: ShadowConfig,
     ) -> Result<Self> {
-        let resolution = config.resolution;
-        log::info!("[ShadowMap] Creating {resolution}x{resolution} shadow map");
+        let res = config.resolution;
 
         // Create depth image
         let depth_format = vk::Format::D32_SFLOAT;
@@ -74,8 +73,8 @@ impl ShadowMap {
         let image_info = vk::ImageCreateInfo::default()
             .image_type(vk::ImageType::TYPE_2D)
             .extent(vk::Extent3D {
-                width: resolution,
-                height: resolution,
+                width: res,
+                height: res,
                 depth: 1,
             })
             .mip_levels(1)
@@ -92,16 +91,16 @@ impl ShadowMap {
             .map_err(|e| AshError::VulkanError(format!("Shadow depth image failed: {e}")))?;
 
         // Allocate memory
-        let mem_requirements = device.get_image_memory_requirements(depth_image);
+        let mem_reqs = device.get_image_memory_requirements(depth_image);
         let memory_type_index = find_memory_type(
             &memory_properties,
-            mem_requirements.memory_type_bits,
+            mem_reqs.memory_type_bits,
             vk::MemoryPropertyFlags::DEVICE_LOCAL,
         )
-        .ok_or_else(|| AshError::VulkanError("No suitable memory type".to_string()))?;
+        .expect("ShadowMap: No suitable memory type found for depth image");
 
         let alloc_info = vk::MemoryAllocateInfo::default()
-            .allocation_size(mem_requirements.size)
+            .allocation_size(mem_reqs.size)
             .memory_type_index(memory_type_index);
 
         let depth_memory = device
@@ -179,8 +178,8 @@ impl ShadowMap {
         let framebuffer_info = vk::FramebufferCreateInfo::default()
             .render_pass(render_pass)
             .attachments(&attachments)
-            .width(resolution)
-            .height(resolution)
+            .width(res)
+            .height(res)
             .layers(1);
 
         let framebuffer = device
@@ -214,34 +213,38 @@ impl ShadowMap {
             render_pass,
             framebuffer,
             sampler,
-            resolution,
+            res,
             light_space_matrix: glam::Mat4::IDENTITY,
             config,
         })
     }
 
-    /// Update light-space matrix for directional light
-    pub fn update_light_matrix(
-        &mut self,
-        light_dir: glam::Vec3,
-        scene_center: glam::Vec3,
-        scene_radius: f32,
-    ) {
+    /// Update light-space matrix for directional light.
+    ///
+    /// Generates an orthogonal projection tailored to the scene bounding sphere.
+    /// The view matrix $V$ is constructed via `look_at` from a point $p$ far outside
+    /// the scene radius $r$.
+    /// $P = \text{ortho}(-r, r, -r, r, 0.1, 4r)$
+    pub fn update_light_matrix(&mut self, l: glam::Vec3, c: glam::Vec3, r: f32) {
+        let l_norm = l.normalize();
+
+        // Adversarial Defense: LookAt Singularity
+        // If light direction is parallel to Up (Y-axis), the cross product is zero and math fails.
+        // A human engineer who's seen NaN-poisoned buffers before always checks for this.
+        let up = if l_norm.y.abs() > 0.99 {
+            glam::Vec3::Z
+        } else {
+            glam::Vec3::Y
+        };
+
         // Light position (far from scene, looking at center)
-        let light_pos = scene_center - light_dir.normalize() * scene_radius * 2.0;
+        let light_pos = c - l_norm * r * 2.0;
 
         // View matrix from light's perspective
-        let light_view = glam::Mat4::look_at_rh(light_pos, scene_center, glam::Vec3::Y);
+        let light_view = glam::Mat4::look_at_rh(light_pos, c, up);
 
         // Orthographic projection to cover the scene
-        let light_proj = glam::Mat4::orthographic_rh(
-            -scene_radius,
-            scene_radius,
-            -scene_radius,
-            scene_radius,
-            0.1,
-            scene_radius * 4.0,
-        );
+        let light_proj = glam::Mat4::orthographic_rh(-r, r, -r, r, 0.1, r * 4.0);
 
         self.light_space_matrix = light_proj * light_view;
     }
@@ -251,8 +254,8 @@ impl ShadowMap {
         vk::Viewport {
             x: 0.0,
             y: 0.0,
-            width: self.resolution as f32,
-            height: self.resolution as f32,
+            width: self.res as f32,
+            height: self.res as f32,
             min_depth: 0.0,
             max_depth: 1.0,
         }
@@ -263,8 +266,8 @@ impl ShadowMap {
         vk::Rect2D {
             offset: vk::Offset2D { x: 0, y: 0 },
             extent: vk::Extent2D {
-                width: self.resolution,
-                height: self.resolution,
+                width: self.res,
+                height: self.res,
             },
         }
     }

@@ -20,9 +20,9 @@ struct ObjectData {
     BoundingBox bounds;
     mat4 model;
     uint drawIndex;
-    float lodBias;
-    uint flags;
-    uint _padding;
+    uint firstIndex;
+    uint indexCount;
+    int vertexOffset;
 };
 
 struct DrawCommand {
@@ -190,20 +190,25 @@ void main() {
     
     ObjectData obj = objects[objectIdx];
     
-    // Check if object is enabled
-    if ((obj.flags & 1u) == 0u) {
-        visibility[objectIdx] = 0u;
-        return;
-    }
-    
-    // Transform bounds to world space
+    // Transform center to world space
     vec3 worldCenter = (obj.model * vec4(obj.bounds.center.xyz, 1.0)).xyz;
-    // Approximate world-space extents (ignoring rotation for speed)
-    vec3 worldExtents = obj.bounds.extents.xyz * vec3(
-        length(obj.model[0].xyz),
-        length(obj.model[1].xyz),
-        length(obj.model[2].xyz)
-    );
+    vec3 worldExtents;
+
+    // Check if we are in sphere mode (w=1.0)
+    bool isSphere = obj.bounds.center.w > 0.5;
+
+    if (isSphere) {
+        // Simple uniform scale for radius
+        float scale = max(length(obj.model[0].xyz), max(length(obj.model[1].xyz), length(obj.model[2].xyz)));
+        worldExtents = vec3(obj.bounds.extents.x * scale);
+    } else {
+        // Approximate world-space extents (ignoring rotation for speed)
+        worldExtents = obj.bounds.extents.xyz * vec3(
+            length(obj.model[0].xyz),
+            length(obj.model[1].xyz),
+            length(obj.model[2].xyz)
+        );
+    }
     
     // Extract frustum planes
     vec4 frustumPlanes[6];
@@ -229,5 +234,13 @@ void main() {
     
     // Copy draw command
     DrawCommand cmd = drawCommandsIn[obj.drawIndex];
+
+    // Override with cluster-specific data if provided
+    if (obj.indexCount > 0) {
+        cmd.indexCount = obj.indexCount;
+        cmd.firstIndex = obj.firstIndex;
+        cmd.vertexOffset = obj.vertexOffset;
+    }
+
     drawCommandsOut[slot] = cmd;
 }

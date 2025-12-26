@@ -12,7 +12,8 @@ use crate::vulkan::VulkanDevice;
 use crate::Result;
 
 /// Maximum objects per frame for indirect drawing
-pub const MAX_INDIRECT_OBJECTS: usize = 65536;
+pub const MAX_INDIRECT_OBJECTS: usize = 1_048_576; // 1M clusters
+pub const MAX_DRAWS: usize = 65536; // Matches occlusion_culling::MAX_CULLABLE_OBJECTS
 
 /// GPU resources for indirect draw pass
 pub struct IndirectDrawPass {
@@ -43,10 +44,10 @@ pub struct IndirectDrawPass {
     cull_pipeline: vk::Pipeline,
     cull_layout: vk::PipelineLayout,
 
-    // Descriptor resources
-    descriptor_pool: vk::DescriptorPool,
-    descriptor_layout: vk::DescriptorSetLayout,
-    descriptor_set: vk::DescriptorSet,
+    // Descriptors
+    pool: vk::DescriptorPool,
+    layout: vk::DescriptorSetLayout,
+    set: vk::DescriptorSet,
 
     initialized: bool,
 }
@@ -69,40 +70,30 @@ impl IndirectDrawPass {
             count_allocation: None,
             cull_pipeline: vk::Pipeline::null(),
             cull_layout: vk::PipelineLayout::null(),
-            descriptor_pool: vk::DescriptorPool::null(),
-            descriptor_layout: vk::DescriptorSetLayout::null(),
-            descriptor_set: vk::DescriptorSet::null(),
+            pool: vk::DescriptorPool::null(),
+            layout: vk::DescriptorSetLayout::null(),
+            set: vk::DescriptorSet::null(),
             initialized: false,
         }
     }
 
-    /// Initialize GPU resources
-    ///
-    /// # Safety
-    /// Allocator must be valid.
-    pub unsafe fn initialize(
+    pub unsafe fn init(
         &mut self,
         allocator: &vk_mem::Allocator,
         _vulkan_device: &VulkanDevice,
         max_objects: usize,
-    ) -> Result<()> {
+    ) {
         if self.initialized {
-            return Ok(());
+            return;
         }
 
-        log::info!("IndirectDrawPass: Initializing for {max_objects} objects");
-
-        // Create buffers
-        self.create_buffers(allocator, max_objects)?;
-
-        // Create descriptor layout and pool
-        self.create_descriptors()?;
-
-        // Load and create compute pipeline
-        self.create_pipeline()?;
+        self.create_buffers(allocator, max_objects)
+            .expect("Indirect buffers failed");
+        self.create_descriptors()
+            .expect("Indirect descriptors failed");
+        self.create_pipeline().expect("Indirect pipeline failed");
 
         self.initialized = true;
-        Ok(())
     }
 
     /// Create GPU buffers
@@ -231,7 +222,7 @@ impl IndirectDrawPass {
         ];
 
         let layout_info = vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings);
-        self.descriptor_layout = self
+        self.layout = self
             .device
             .create_descriptor_set_layout(&layout_info, None)?;
 
@@ -250,14 +241,14 @@ impl IndirectDrawPass {
             .max_sets(1)
             .pool_sizes(&pool_sizes);
 
-        self.descriptor_pool = self.device.create_descriptor_pool(&pool_info, None)?;
+        self.pool = self.device.create_descriptor_pool(&pool_info, None)?;
 
         let alloc_info = vk::DescriptorSetAllocateInfo::default()
-            .descriptor_pool(self.descriptor_pool)
-            .set_layouts(std::slice::from_ref(&self.descriptor_layout));
+            .descriptor_pool(self.pool)
+            .set_layouts(std::slice::from_ref(&self.layout));
 
         let sets = self.device.allocate_descriptor_sets(&alloc_info)?;
-        self.descriptor_set = sets[0];
+        self.set = sets[0];
 
         Ok(())
     }
@@ -279,7 +270,7 @@ impl IndirectDrawPass {
             .size(std::mem::size_of::<CullingPushConstants>() as u32);
 
         let layout_info = vk::PipelineLayoutCreateInfo::default()
-            .set_layouts(std::slice::from_ref(&self.descriptor_layout))
+            .set_layouts(std::slice::from_ref(&self.layout))
             .push_constant_ranges(std::slice::from_ref(&push_constant_range));
 
         self.cull_layout = self.device.create_pipeline_layout(&layout_info, None)?;
@@ -347,32 +338,32 @@ impl IndirectDrawPass {
 
         let writes = [
             vk::WriteDescriptorSet::default()
-                .dst_set(self.descriptor_set)
+                .dst_set(self.set)
                 .dst_binding(0)
                 .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
                 .buffer_info(std::slice::from_ref(&object_info)),
             vk::WriteDescriptorSet::default()
-                .dst_set(self.descriptor_set)
+                .dst_set(self.set)
                 .dst_binding(1)
                 .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
                 .image_info(std::slice::from_ref(&hiz_image_info)),
             vk::WriteDescriptorSet::default()
-                .dst_set(self.descriptor_set)
+                .dst_set(self.set)
                 .dst_binding(2)
                 .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
                 .buffer_info(std::slice::from_ref(&template_info)),
             vk::WriteDescriptorSet::default()
-                .dst_set(self.descriptor_set)
+                .dst_set(self.set)
                 .dst_binding(3)
                 .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
                 .buffer_info(std::slice::from_ref(&visibility_info)),
             vk::WriteDescriptorSet::default()
-                .dst_set(self.descriptor_set)
+                .dst_set(self.set)
                 .dst_binding(4)
                 .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
                 .buffer_info(std::slice::from_ref(&indirect_info)),
             vk::WriteDescriptorSet::default()
-                .dst_set(self.descriptor_set)
+                .dst_set(self.set)
                 .dst_binding(5)
                 .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
                 .buffer_info(std::slice::from_ref(&count_info)),
@@ -429,11 +420,13 @@ impl IndirectDrawPass {
         self.device.cmd_fill_buffer(cmd, self.count_buffer, 0, 4, 0);
 
         // Barrier for fill
-        let barrier = vk::BufferMemoryBarrier::default()
-            .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
-            .dst_access_mask(vk::AccessFlags::SHADER_READ | vk::AccessFlags::SHADER_WRITE)
-            .buffer(self.count_buffer)
-            .size(vk::WHOLE_SIZE);
+        let barrier = vk::BufferMemoryBarrier {
+            src_access_mask: vk::AccessFlags::TRANSFER_WRITE,
+            dst_access_mask: vk::AccessFlags::SHADER_READ | vk::AccessFlags::SHADER_WRITE,
+            buffer: self.count_buffer,
+            size: vk::WHOLE_SIZE,
+            ..Default::default()
+        };
 
         self.device.cmd_pipeline_barrier(
             cmd,
@@ -455,7 +448,7 @@ impl IndirectDrawPass {
             vk::PipelineBindPoint::COMPUTE,
             self.cull_layout,
             0,
-            &[self.descriptor_set],
+            &[self.set],
             &[],
         );
 
@@ -474,11 +467,13 @@ impl IndirectDrawPass {
         self.device.cmd_dispatch(cmd, group_count, 1, 1);
 
         // Barrier for indirect read
-        let indirect_barrier = vk::BufferMemoryBarrier::default()
-            .src_access_mask(vk::AccessFlags::SHADER_WRITE)
-            .dst_access_mask(vk::AccessFlags::INDIRECT_COMMAND_READ)
-            .buffer(self.indirect_buffer)
-            .size(vk::WHOLE_SIZE);
+        let indirect_barrier = vk::BufferMemoryBarrier {
+            src_access_mask: vk::AccessFlags::SHADER_WRITE,
+            dst_access_mask: vk::AccessFlags::INDIRECT_COMMAND_READ,
+            buffer: self.indirect_buffer,
+            size: vk::WHOLE_SIZE,
+            ..Default::default()
+        };
 
         self.device.cmd_pipeline_barrier(
             cmd,
@@ -535,13 +530,11 @@ impl IndirectDrawPass {
         if self.cull_layout != vk::PipelineLayout::null() {
             self.device.destroy_pipeline_layout(self.cull_layout, None);
         }
-        if self.descriptor_pool != vk::DescriptorPool::null() {
-            self.device
-                .destroy_descriptor_pool(self.descriptor_pool, None);
+        if self.pool != vk::DescriptorPool::null() {
+            self.device.destroy_descriptor_pool(self.pool, None);
         }
-        if self.descriptor_layout != vk::DescriptorSetLayout::null() {
-            self.device
-                .destroy_descriptor_set_layout(self.descriptor_layout, None);
+        if self.layout != vk::DescriptorSetLayout::null() {
+            self.device.destroy_descriptor_set_layout(self.layout, None);
         }
 
         self.initialized = false;

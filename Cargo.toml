@@ -1,10 +1,10 @@
 [package]
 name = "ash_renderer"
-version = "0.4.0"
+version = "0.4.1"
 edition = "2021"
 authors = ["Saptak Santra"]
 license = "Apache-2.0"
-description = "Production-quality Vulkan renderer in Rust using ASH - ECS-free, pure rendering engine"
+description = "Vulkan renderer in Rust using ASH - ECS-free, pure rendering engine"
 repository = "https://github.com/saptak7777/Ash-Renderer"
 documentation = "https://docs.rs/ash_renderer"
 keywords = ["vulkan", "graphics", "rendering", "gpu", "ash"]
@@ -17,7 +17,7 @@ ash = "0.38"
 vk-mem = "0.5"
 
 # Shader compilation
-shaderc = { version = "0.8", optional = true }
+shaderc = { version = "0.10.1", optional = true }
 spirv-reflect = { version = "0.2", optional = true }
 
 # Math
@@ -36,7 +36,10 @@ winit = "0.30"
 raw-window-handle = "0.6"
 
 # Asset loading
-image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+image = { version = "0.25", default-features = false, features = [
+    "png",
+    "jpeg",
+] }
 gltf = { version = "1.4", optional = true }
 archetype_asset = { version = "0.1", optional = true }
 
@@ -48,23 +51,30 @@ thiserror = "2.0"
 uuid = { version = "1.11", features = ["v4"] }
 
 [build-dependencies]
-shaderc = "0.8"
+shaderc = "0.10.1"
 walkdir = "2"
 
 [dev-dependencies]
-criterion = { version = "0.5", features = ["html_reports"] }
+criterion = { version = "0.8.1", features = ["html_reports"] }
 env_logger = "0.11"
 tempfile = "3.14"
 
 [features]
 default = ["validation", "gltf_loading"]
-validation = []                            # Enable Vulkan validation layers
+validation = [] # Enable Vulkan validation layers
 gltf_loading = ["gltf", "archetype_asset"] # GLTF model loading support
-shader_compilation = ["shaderc"]           # Runtime shader compilation
-shader_reflection = ["spirv-reflect"]      # SPIRV reflection support
-profiling = []                             # Enable GPU profiling
-parallel = []                              # Enable parallel command buffer recording
-full = ["validation", "gltf_loading", "shader_compilation", "shader_reflection", "profiling", "parallel"]
+shader_compilation = ["shaderc"] # Runtime shader compilation
+shader_reflection = ["spirv-reflect"] # SPIRV reflection support
+profiling = [] # Enable GPU profiling
+parallel = [] # Enable parallel command buffer recording
+full = [
+    "validation",
+    "gltf_loading",
+    "shader_compilation",
+    "shader_reflection",
+    "profiling",
+    "parallel",
+]
 
 [[example]]
 name = "01_triangle"
@@ -78,7 +88,6 @@ path = "examples/02_cube.rs"
 name = "03_model_loading"
 path = "examples/03_model_loading.rs"
 required-features = ["gltf_loading"]
-
 
 
 [profile.dev]

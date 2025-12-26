@@ -19,7 +19,7 @@ pub struct DescriptorManager {
     material_layout: super::descriptor_layout::DescriptorSetLayout,
     shadow_layout: super::descriptor_layout::DescriptorSetLayout,
     frame_sets: Vec<DescriptorSet>,
-    material_sets: Vec<DescriptorSet>,
+    m_sets: Vec<DescriptorSet>,
     shadow_sets: Vec<DescriptorSet>,
 }
 
@@ -64,7 +64,7 @@ impl DescriptorManager {
             .build(Arc::clone(&device))?;
 
         let frame_sets = Self::create_descriptor_sets(frame_count, &frame_layout, &mut allocator)?;
-        let material_sets =
+        let m_sets =
             Self::create_descriptor_sets(material_worker_count, &material_layout, &mut allocator)?;
         let shadow_sets =
             Self::create_descriptor_sets(frame_count, &shadow_layout, &mut allocator)?;
@@ -72,7 +72,7 @@ impl DescriptorManager {
         info!(
             "Allocated descriptor sets (frame: {}, material: {})",
             frame_sets.len(),
-            material_sets.len()
+            m_sets.len()
         );
 
         Ok(Self {
@@ -81,7 +81,7 @@ impl DescriptorManager {
             material_layout,
             shadow_layout,
             frame_sets,
-            material_sets,
+            m_sets,
             shadow_sets,
         })
     }
@@ -111,11 +111,11 @@ impl DescriptorManager {
 
     pub fn bind_material_uniform(
         &self,
-        worker_index: usize,
+        worker_id: u32,
         buffer: vk::Buffer,
         buffer_size: vk::DeviceSize,
     ) -> Result<()> {
-        let descriptor = self.material_sets.get(worker_index).ok_or_else(|| {
+        let descriptor = self.m_sets.get(worker_id as usize).ok_or_else(|| {
             AshError::VulkanError("Material descriptor set index out of bounds".into())
         })?;
 
@@ -136,7 +136,7 @@ impl DescriptorManager {
     }
 
     pub fn material_set(&self, index: usize) -> Option<vk::DescriptorSet> {
-        self.material_sets.get(index).map(|set| set.handle())
+        self.m_sets.get(index).map(|set| set.handle())
     }
 
     pub fn frame_set_count(&self) -> usize {
@@ -144,7 +144,7 @@ impl DescriptorManager {
     }
 
     pub fn material_set_count(&self) -> usize {
-        self.material_sets.len()
+        self.m_sets.len()
     }
 
     /// Get mutable access to the allocator for external allocation (e.g., bindless)

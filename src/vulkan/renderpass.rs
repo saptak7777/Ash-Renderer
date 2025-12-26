@@ -120,6 +120,28 @@ impl RenderPassBuilder {
         self
     }
 
+    /// Adds a generic color attachment.
+    pub fn with_color_attachment(
+        mut self,
+        format: vk::Format,
+        final_layout: vk::ImageLayout,
+    ) -> Self {
+        let attachment = vk::AttachmentDescription {
+            format,
+            samples: self.sample_count,
+            load_op: vk::AttachmentLoadOp::CLEAR,
+            store_op: vk::AttachmentStoreOp::STORE,
+            stencil_load_op: vk::AttachmentLoadOp::DONT_CARE,
+            stencil_store_op: vk::AttachmentStoreOp::DONT_CARE,
+            initial_layout: vk::ImageLayout::UNDEFINED,
+            final_layout,
+            ..Default::default()
+        };
+
+        self.push_color_attachment(attachment, vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL);
+        self
+    }
+
     /// Sets the MSAA sample count for this render pass
     pub fn with_sample_count(mut self, sample_count: vk::SampleCountFlags) -> Self {
         self.sample_count = sample_count;
@@ -127,7 +149,11 @@ impl RenderPassBuilder {
     }
 
     /// Adds a depth attachment configured for optimal depth/stencil usage.
-    pub fn with_depth_attachment(mut self, format: vk::Format) -> Self {
+    pub fn with_depth_attachment(
+        mut self,
+        format: vk::Format,
+        final_layout: vk::ImageLayout,
+    ) -> Self {
         let (stencil_load_op, stencil_store_op) = if utils::has_stencil_component(format) {
             (
                 vk::AttachmentLoadOp::CLEAR,
@@ -148,7 +174,7 @@ impl RenderPassBuilder {
             stencil_load_op,
             stencil_store_op,
             initial_layout: vk::ImageLayout::UNDEFINED,
-            final_layout: vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+            final_layout,
             ..Default::default()
         });
 

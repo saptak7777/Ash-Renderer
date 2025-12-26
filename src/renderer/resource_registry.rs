@@ -72,7 +72,13 @@ pub trait VulkanResource: VulkanResourceCleanup + Send + Sync {
 type ResourceEntry = Arc<RwLock<dyn VulkanResource>>;
 
 /// Dependency-aware resource registry that guarantees cleanup order.
+///
+/// Invariants:
+/// - Resources must be cleaned up in reverse dependency order.
+/// - The device must remain valid until all resources are destroyed.
 pub struct ResourceRegistry {
+    // Shared state protected by RwLocks.
+    // ResourceEntry is Arc'd to allow temporary shared ownership during cleanup calls.
     resources: RwLock<HashMap<ResourceId, ResourceEntry>>,
     dependencies: RwLock<HashMap<ResourceId, HashSet<ResourceId>>>,
     reverse_dependencies: RwLock<HashMap<ResourceId, HashSet<ResourceId>>>,
@@ -92,6 +98,8 @@ impl ResourceRegistry {
     }
 
     /// Explicitly clean up all resources honoring dependencies.
+    ///
+    /// POST: The registry will be empty or in an error state if cleanup failed.
     pub fn cleanup(&self) -> Result<(), String> {
         // Mark as cleaned up to prevent double cleanup in Drop
         if self.cleaned_up.swap(true, Ordering::SeqCst) {
@@ -258,14 +266,23 @@ impl ResourceRegistry {
         id: ResourceId,
         resource: T,
     ) -> Result<ResourceId, ResourceError> {
+        // PRE: id must not be nil (programmer error if so)
+        // PRE: id must be unique (checked below)
+        if id.0.is_nil() {
+            panic!("ResourceRegistry: Attempted to register a resource with Nil UUID");
+        }
+
         let deps = resource.dependencies();
         if let Some(cycle) = self.detect_cycle(id, &deps) {
             return Err(ResourceError::DependencyCycle(cycle));
         }
 
         let mut resources = self.resources.write().unwrap();
+
+        // Philosophy 1: Intentional panic on double registration.
+        // This is a logic error in the caller's resource management.
         if resources.contains_key(&id) {
-            return Err(ResourceError::AlreadyExists(id));
+            panic!("ResourceRegistry: Resource ID {} already exists in registry. Logic error in caller.", id);
         }
 
         let deps_set: HashSet<_> = deps.into_iter().collect();
@@ -307,6 +324,7 @@ impl ResourceRegistry {
     }
 
     fn remove_resource(&self, id: ResourceId) -> Result<(), ResourceError> {
+        // SAFETY: Upgrading Weak device pointer ensures the device is still valid for this call.
         let device = self
             .device
             .upgrade()
@@ -343,6 +361,7 @@ impl ResourceRegistry {
             if resource.is_cleaned_up() {
                 return Err(ResourceError::AlreadyCleanedUp(id));
             }
+            // SAFETY: Device is guaranteed valid by the upgrade check at function start.
             resource
                 .cleanup(&device)
                 .map_err(|e| ResourceError::CleanupFailed(id, e))?
@@ -457,6 +476,8 @@ impl VulkanResourceCleanup for FramebufferResource {
         if self.cleaned || self.framebuffer == vk::Framebuffer::null() {
             return Ok(());
         }
+        // SAFETY: The ResourceRegistry ensures correct destroy order;
+        // dependents like pipelines/image views must be destroyed first.
         unsafe {
             device.destroy_framebuffer(self.framebuffer, None);
         }

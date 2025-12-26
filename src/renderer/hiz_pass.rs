@@ -33,16 +33,16 @@ pub struct HiZPass {
     hiz_views: Vec<vk::ImageView>,
     hiz_sampler: vk::Sampler,
 
-    // Compute pipeline for mip generation
+    // Compute resources
     generate_pipeline: vk::Pipeline,
     generate_layout: vk::PipelineLayout,
 
-    // Descriptor resources
-    descriptor_pool: vk::DescriptorPool,
-    descriptor_layout: vk::DescriptorSetLayout,
+    // Descriptors
+    pool: vk::DescriptorPool,
+    layout: vk::DescriptorSetLayout,
     descriptor_sets: Vec<vk::DescriptorSet>,
 
-    // Dimensions
+    // Geometry
     width: u32,
     height: u32,
     mip_count: u32,
@@ -61,8 +61,8 @@ impl HiZPass {
             hiz_sampler: vk::Sampler::null(),
             generate_pipeline: vk::Pipeline::null(),
             generate_layout: vk::PipelineLayout::null(),
-            descriptor_pool: vk::DescriptorPool::null(),
-            descriptor_layout: vk::DescriptorSetLayout::null(),
+            pool: vk::DescriptorPool::null(),
+            layout: vk::DescriptorSetLayout::null(),
             descriptor_sets: Vec::new(),
             width: 0,
             height: 0,
@@ -71,46 +71,42 @@ impl HiZPass {
         }
     }
 
-    /// Initialize GPU resources
-    ///
-    /// # Safety
-    /// Allocator must be valid.
-    pub unsafe fn initialize(
+    pub unsafe fn init(
         &mut self,
         allocator: &vk_mem::Allocator,
         vulkan_device: &VulkanDevice,
         width: u32,
         height: u32,
-    ) -> Result<()> {
+    ) {
+        // Adversarial Defense: Zero-Sized Resource
+        // Minimizing a window on Windows often causes width/height to become 0.
+        // Creating Vulkan images with 0 dimensions is invalid and will crash.
+        if width == 0 || height == 0 {
+            log::warn!(
+                "HiZPass: Skipping initialization with zero dimensions (window likely minimized)"
+            );
+            return;
+        }
+
         if self.initialized {
-            return Ok(());
+            return;
         }
 
         self.width = width;
         self.height = height;
         self.mip_count = Self::calculate_mip_count(width, height);
 
-        log::info!(
-            "HiZPass: Initializing {}x{} with {} mip levels",
-            width,
-            height,
-            self.mip_count
-        );
+        // Hi-Z image with mip chain
+        self.create_hiz_image(allocator)
+            .expect("Hi-Z image allocation failed");
 
-        // Create Hi-Z image with mip chain
-        self.create_hiz_image(allocator)?;
-
-        // Create sampler for Hi-Z reads
-        self.create_sampler()?;
-
-        // Create descriptor layout and pool
-        self.create_descriptors()?;
-
-        // Load and create compute pipeline
-        self.create_pipeline(vulkan_device)?;
+        self.create_sampler().expect("Hi-Z sampler creation failed");
+        self.create_descriptors()
+            .expect("Hi-Z descriptor setup failed");
+        self.create_pipeline(vulkan_device)
+            .expect("Hi-Z pipeline creation failed");
 
         self.initialized = true;
-        Ok(())
     }
 
     /// Calculate required mip levels
@@ -212,7 +208,7 @@ impl HiZPass {
 
         let layout_info = vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings);
 
-        self.descriptor_layout = self
+        self.layout = self
             .device
             .create_descriptor_set_layout(&layout_info, None)?;
 
@@ -232,15 +228,13 @@ impl HiZPass {
             .max_sets(self.mip_count)
             .pool_sizes(&pool_sizes);
 
-        self.descriptor_pool = self.device.create_descriptor_pool(&pool_info, None)?;
+        self.pool = self.device.create_descriptor_pool(&pool_info, None)?;
 
         // Allocate sets
-        let layouts: Vec<_> = (0..self.mip_count)
-            .map(|_| self.descriptor_layout)
-            .collect();
+        let layouts: Vec<_> = (0..self.mip_count).map(|_| self.layout).collect();
 
         let alloc_info = vk::DescriptorSetAllocateInfo::default()
-            .descriptor_pool(self.descriptor_pool)
+            .descriptor_pool(self.pool)
             .set_layouts(&layouts);
 
         self.descriptor_sets = self.device.allocate_descriptor_sets(&alloc_info)?;
@@ -299,7 +293,7 @@ impl HiZPass {
 
         // Pipeline layout
         let layout_info = vk::PipelineLayoutCreateInfo::default()
-            .set_layouts(std::slice::from_ref(&self.descriptor_layout))
+            .set_layouts(std::slice::from_ref(&self.layout))
             .push_constant_ranges(std::slice::from_ref(&push_constant_range));
 
         self.generate_layout = self.device.create_pipeline_layout(&layout_info, None)?;
@@ -320,11 +314,8 @@ impl HiZPass {
             .map_err(|(_, e)| e)?;
 
         self.generate_pipeline = pipelines[0];
-
-        // Cleanup shader module
         self.device.destroy_shader_module(shader_module, None);
 
-        log::info!("HiZPass: Pipeline created successfully");
         Ok(())
     }
 
@@ -341,19 +332,21 @@ impl HiZPass {
             return Ok(());
         }
 
-        // Transition depth to transfer src
-        let depth_barrier = vk::ImageMemoryBarrier::default()
-            .src_access_mask(vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE)
-            .dst_access_mask(vk::AccessFlags::TRANSFER_READ)
-            .old_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
-            .new_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
-            .image(depth_image)
-            .subresource_range(
-                vk::ImageSubresourceRange::default()
-                    .aspect_mask(vk::ImageAspectFlags::DEPTH)
-                    .level_count(1)
-                    .layer_count(1),
-            );
+        // Depth -> Source for transfer
+        let depth_barrier = vk::ImageMemoryBarrier {
+            src_access_mask: vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
+            dst_access_mask: vk::AccessFlags::TRANSFER_READ,
+            old_layout: vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+            new_layout: vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+            image: depth_image,
+            subresource_range: vk::ImageSubresourceRange {
+                aspect_mask: vk::ImageAspectFlags::DEPTH,
+                level_count: 1,
+                layer_count: 1,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
 
         self.device.cmd_pipeline_barrier(
             cmd,
@@ -365,8 +358,32 @@ impl HiZPass {
             &[depth_barrier],
         );
 
-        // Copy depth to Hi-Z mip 0
-        // (Requires blit since formats may differ)
+        // Hi-Z mip 0 -> Destination for transfer
+        let hiz_barrier = vk::ImageMemoryBarrier {
+            dst_access_mask: vk::AccessFlags::TRANSFER_WRITE,
+            old_layout: vk::ImageLayout::UNDEFINED,
+            new_layout: vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+            image: self.hiz_image,
+            subresource_range: vk::ImageSubresourceRange {
+                aspect_mask: vk::ImageAspectFlags::COLOR,
+                base_mip_level: 0,
+                level_count: 1,
+                layer_count: 1,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        self.device.cmd_pipeline_barrier(
+            cmd,
+            vk::PipelineStageFlags::TOP_OF_PIPE,
+            vk::PipelineStageFlags::TRANSFER,
+            vk::DependencyFlags::empty(),
+            &[],
+            &[],
+            &[hiz_barrier],
+        );
+
         let blit_region = vk::ImageBlit::default()
             .src_subresource(
                 vk::ImageSubresourceLayers::default()
@@ -394,30 +411,6 @@ impl HiZPass {
                     z: 1,
                 },
             ]);
-
-        // Transition Hi-Z mip 0 to transfer dst
-        let hiz_barrier = vk::ImageMemoryBarrier::default()
-            .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE)
-            .old_layout(vk::ImageLayout::UNDEFINED)
-            .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
-            .image(self.hiz_image)
-            .subresource_range(
-                vk::ImageSubresourceRange::default()
-                    .aspect_mask(vk::ImageAspectFlags::COLOR)
-                    .base_mip_level(0)
-                    .level_count(1)
-                    .layer_count(1),
-            );
-
-        self.device.cmd_pipeline_barrier(
-            cmd,
-            vk::PipelineStageFlags::TOP_OF_PIPE,
-            vk::PipelineStageFlags::TRANSFER,
-            vk::DependencyFlags::empty(),
-            &[],
-            &[],
-            &[hiz_barrier],
-        );
 
         self.device.cmd_blit_image(
             cmd,
@@ -597,13 +590,18 @@ impl HiZPass {
         vulkan_device: &VulkanDevice,
         width: u32,
         height: u32,
-    ) -> Result<()> {
+    ) {
+        // Adversarial Defense: Guard against zero dimensions on resize.
+        if width == 0 || height == 0 {
+            return;
+        }
+
         if width == self.width && height == self.height {
-            return Ok(());
+            return;
         }
 
         self.destroy(allocator);
-        self.initialize(allocator, vulkan_device, width, height)
+        self.init(allocator, vulkan_device, width, height);
     }
 
     /// Destroy GPU resources
@@ -642,16 +640,14 @@ impl HiZPass {
             self.generate_layout = vk::PipelineLayout::null();
         }
 
-        if self.descriptor_pool != vk::DescriptorPool::null() {
-            self.device
-                .destroy_descriptor_pool(self.descriptor_pool, None);
-            self.descriptor_pool = vk::DescriptorPool::null();
+        if self.pool != vk::DescriptorPool::null() {
+            self.device.destroy_descriptor_pool(self.pool, None);
+            self.pool = vk::DescriptorPool::null();
         }
 
-        if self.descriptor_layout != vk::DescriptorSetLayout::null() {
-            self.device
-                .destroy_descriptor_set_layout(self.descriptor_layout, None);
-            self.descriptor_layout = vk::DescriptorSetLayout::null();
+        if self.layout != vk::DescriptorSetLayout::null() {
+            self.device.destroy_descriptor_set_layout(self.layout, None);
+            self.layout = vk::DescriptorSetLayout::null();
         }
 
         self.initialized = false;

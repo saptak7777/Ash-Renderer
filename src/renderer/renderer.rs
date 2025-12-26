@@ -12,19 +12,20 @@ use crate::{
         hiz_pass::HiZPass,
         indirect_draw::IndirectDrawPass,
         model_renderer::{MaterialPushConstants, MeshPushConstants, ModelRenderer},
+        occlusion_culling::{CullBoundingBox, OcclusionCulling},
         resource_registry::{ResourceId, ResourceRegistry},
         resources,
         resources::uniform::{MaterialBuffer, UniformBuffer},
         ssgi_pass::{SsgiPass, SsgiQuality},
         temporal_upscaling::{VsrPass, VsrQuality},
-        DepthBuffer, Material, Mesh, PipelineCache, Texture, TextureData, Transform,
+        DepthBuffer, GBuffer, Material, Mesh, PipelineCache, Texture, TextureData, Transform,
     },
     vulkan, AshError, Result,
 };
 
 use ash::vk;
 use bytemuck::Pod;
-use glam::{Mat4, Vec4};
+use glam::{Mat4, Vec3, Vec4};
 use parking_lot::Mutex;
 use resources::BufferPool;
 use std::collections::HashMap;
@@ -189,10 +190,10 @@ pub struct RendererConfig {
 pub struct Renderer {
     // Resources dependent on allocator/device - dropped in reverse order.
     buffer_pool: Arc<BufferPool>,
-    resource_registry: Arc<ResourceRegistry>,
-    feature_manager: FeatureManager,
+    resources: Arc<ResourceRegistry>,
+    features: FeatureManager,
     _pipeline_cache: PipelineCache,
-    command_manager: vulkan::CommandBufferManager,
+    cmds: vulkan::CommandBufferManager,
     worker_count: usize,
     command_buffers: Vec<vk::CommandBuffer>,
     frame_syncs: Vec<vulkan::FrameSync>,
@@ -210,7 +211,7 @@ pub struct Renderer {
     material_buffers: Vec<Mutex<MaterialBuffer>>,
     pipeline_layout: Option<vulkan::PipelineLayout>,
     pipeline_layout_id: Option<ResourceId>,
-    descriptor_manager: Option<vulkan::DescriptorManager>,
+    descriptors: Option<vulkan::DescriptorManager>,
     framebuffers: Vec<vulkan::Framebuffer>,
     framebuffer_ids: Vec<ResourceId>,
     start_time: Instant,
@@ -253,13 +254,21 @@ pub struct Renderer {
     // GPU-driven occlusion culling (Hi-Z + Indirect Draw)
     hiz_pass: Option<HiZPass>,
     indirect_draw_pass: Option<IndirectDrawPass>,
+    occlusion_culling: OcclusionCulling,
     // Temporal Super-Resolution
     vsr_pass: Option<VsrPass>,
     // Screen-Space Global Illumination
     ssgi_pass: Option<SsgiPass>,
+    // G-Buffer for Normals and Motion Vectors
+    gbuffer: Option<GBuffer>,
+    // Post-processing descriptors
+    post_descriptor_pool: vk::DescriptorPool,
+    post_descriptor_sets: Vec<vk::DescriptorSet>,
+    post_pipeline: Option<vk::Pipeline>,
+    post_framebuffers: Vec<vulkan::Framebuffer>,
     // Allocator and device are dropped last as they are the foundation for the resources above.
-    allocator: Arc<vulkan::Allocator>,
-    vulkan_device: vulkan::VulkanDevice,
+    alloc: Arc<vulkan::Allocator>,
+    device: vulkan::VulkanDevice,
 }
 
 #[derive(Clone)]
@@ -297,66 +306,61 @@ impl Renderer {
     /// Initializes the renderer.
     pub fn new<S: vulkan::SurfaceProvider>(surface_provider: &S) -> Result<Self> {
         unsafe {
-            log::info!("Initializing Ash Renderer...");
-
-            let vulkan_instance = Arc::new(vulkan::VulkanInstance::new(
+            let instance = Arc::new(vulkan::VulkanInstance::new(
                 surface_provider,
                 cfg!(debug_assertions),
             )?);
-            let vulkan_device = vulkan::VulkanDevice::new(Arc::clone(&vulkan_instance))?;
-            let allocator = Arc::new(vulkan::Allocator::new(&vulkan_device)?);
-            let resource_registry =
-                Arc::new(ResourceRegistry::new(Arc::clone(&vulkan_device.device)));
-            let mut feature_manager = FeatureManager::new();
-            feature_manager.set_device(Arc::clone(&vulkan_device.device));
-            feature_manager.add_feature(AutoRotateFeature::new());
+            let device = vulkan::VulkanDevice::new(Arc::clone(&instance))?;
+            let alloc = Arc::new(vulkan::Allocator::new(&device)?);
+            let resources = Arc::new(ResourceRegistry::new(Arc::clone(&device.device)));
+            let mut features = FeatureManager::new();
+            features.set_device(Arc::clone(&device.device));
+            features.add_feature(AutoRotateFeature::new());
 
             // Initialize Shadow Feature
             let mut shadow_feature = ShadowFeature::new();
             if shadow_feature.is_active() || shadow_feature.config.enabled {
                 let shadow_map = crate::renderer::shadow_map::ShadowMap::new(
-                    Arc::clone(&vulkan_device.device),
-                    vulkan_device.memory_properties,
+                    Arc::clone(&device.device),
+                    device.memory_properties,
                     shadow_feature.config.clone(),
                 )?;
                 shadow_feature.set_shadow_map(shadow_map);
             }
-            let pipeline_cache = PipelineCache::new(Arc::clone(&vulkan_device.device))?;
+            let pipeline_cache = PipelineCache::new(Arc::clone(&device.device))?;
             let renderer_config = RendererConfig::default();
             let pipeline_cfg = &renderer_config.pipeline;
-            let buffer_pool = Arc::new(BufferPool::new(Arc::clone(&allocator)));
-            let mut swapchain = vulkan::SwapchainWrapper::new(&vulkan_device)?;
+            let buffer_pool = Arc::new(BufferPool::new(Arc::clone(&alloc)));
+            let mut swapchain = vulkan::SwapchainWrapper::new(&device)?;
             let mut swapchain_image_view_ids = Vec::with_capacity(swapchain.image_views.len());
             for &image_view in &swapchain.image_views {
-                let image_view_id =
-                    resource_registry
-                        .register_image_view(image_view)
-                        .map_err(|e| {
-                            AshError::VulkanError(format!(
-                                "Failed to register swapchain image view: {e}"
-                            ))
-                        })?;
+                let image_view_id = resources.register_image_view(image_view).map_err(|e| {
+                    AshError::VulkanError(format!("Failed to register swapchain image view: {e}"))
+                })?;
                 swapchain_image_view_ids.push(image_view_id);
             }
             swapchain.mark_image_views_managed_by_registry();
 
             let mut depth_buffer = DepthBuffer::new(
-                Arc::clone(&vulkan_device.device),
-                Arc::clone(&allocator),
+                Arc::clone(&device.device),
+                Arc::clone(&alloc),
                 swapchain.extent.width,
                 swapchain.extent.height,
             )?;
             let depth_buffer_id = depth_buffer
-                .register_with_registry(&resource_registry)
+                .register_with_registry(&resources)
                 .map_err(|e| {
                     AshError::VulkanError(format!("Failed to register depth buffer: {e}"))
                 })?;
 
-            let mut render_pass = vulkan::RenderPass::builder(Arc::clone(&vulkan_device.device))
+            let mut render_pass = vulkan::RenderPass::builder(Arc::clone(&device.device))
                 .with_swapchain_color(swapchain.format)
-                .with_depth_attachment(depth_buffer.format())
+                .with_depth_attachment(
+                    depth_buffer.format(),
+                    vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+                )
                 .build()?;
-            let render_pass_id = resource_registry
+            let render_pass_id = resources
                 .register_render_pass(render_pass.handle())
                 .map_err(|e| {
                     AshError::VulkanError(format!("Failed to register render pass: {e}"))
@@ -368,12 +372,12 @@ impl Renderer {
             for (index, &image_view) in swapchain.image_views.iter().enumerate() {
                 let attachments = [image_view, depth_buffer.view()];
                 let framebuffer = vulkan::Framebuffer::new(
-                    Arc::clone(&vulkan_device.device),
+                    Arc::clone(&device.device),
                     render_pass.handle(),
                     &attachments,
                     swapchain.extent,
                 )?;
-                let framebuffer_id = resource_registry
+                let framebuffer_id = resources
                     .register_framebuffer(
                         framebuffer.handle(),
                         &[
@@ -391,24 +395,15 @@ impl Renderer {
                 framebuffer_ids.push(framebuffer_id);
             }
 
-            log::info!(
-                "Created {} framebuffers with depth attachment",
-                framebuffers.len()
-            );
-
             let worker_count = thread::available_parallelism()
                 .map(|n| n.get())
                 .unwrap_or(1);
 
             let command_manager = vulkan::CommandBufferManager::new(
-                Arc::clone(&vulkan_device.device),
-                vulkan_device.graphics_queue_family,
+                Arc::clone(&device.device),
+                device.graphics_queue_family,
                 worker_count,
             )?;
-            log::info!(
-                "Command manager initialized for {} frames",
-                framebuffers.len()
-            );
 
             let command_buffers =
                 command_manager.allocate_primary_buffers(framebuffers.len() as u32)?;
@@ -416,32 +411,30 @@ impl Renderer {
             let mut frame_syncs = Vec::with_capacity(framebuffers.len());
             let mut frame_sync_ids = Vec::with_capacity(framebuffers.len());
             for _ in 0..framebuffers.len() {
-                let mut sync = vulkan::FrameSync::new(Arc::clone(&vulkan_device.device))?;
-                let image_available_id = resource_registry
+                let mut sync = vulkan::FrameSync::new(Arc::clone(&device.device))?;
+                let image_available_id = resources
                     .register_semaphore(sync.image_available)
                     .map_err(|e| {
                         AshError::VulkanError(format!(
                             "Failed to register image-available semaphore: {e}"
                         ))
                     })?;
-                let render_finished_id = resource_registry
+                let render_finished_id = resources
                     .register_semaphore(sync.render_finished)
                     .map_err(|e| {
                         AshError::VulkanError(format!(
                             "Failed to register render-finished semaphore: {e}"
                         ))
                     })?;
-                let fence_id = resource_registry
-                    .register_fence(sync.in_flight)
-                    .map_err(|e| {
-                        AshError::VulkanError(format!("Failed to register in-flight fence: {e}"))
-                    })?;
+                let fence_id = resources.register_fence(sync.in_flight).map_err(|e| {
+                    AshError::VulkanError(format!("Failed to register in-flight fence: {e}"))
+                })?;
                 sync.mark_managed_by_registry();
                 frame_syncs.push(sync);
                 frame_sync_ids.push((image_available_id, render_finished_id, fence_id));
             }
 
-            resource_registry
+            resources
                 .register_command_pool(command_manager.upload_command_pool_handle())
                 .map_err(|e| {
                     AshError::VulkanError(format!("Failed to register command pool: {e}"))
@@ -449,7 +442,7 @@ impl Renderer {
             command_manager.mark_pool_managed_by_registry();
 
             let mut model_renderer =
-                ModelRenderer::new(Arc::clone(&allocator), Arc::clone(&vulkan_device.device));
+                ModelRenderer::new(Arc::clone(&alloc), Arc::clone(&device.device));
 
             // Initialize uniform buffers with double buffering.
             let mut uniform_buffers = Vec::with_capacity(framebuffers.len());
@@ -457,7 +450,7 @@ impl Renderer {
 
             for _ in 0..framebuffers.len() {
                 let mut buffer =
-                    UniformBuffer::new(Arc::clone(&allocator), Arc::clone(&vulkan_device.device))?;
+                    UniformBuffer::new(Arc::clone(&alloc), Arc::clone(&device.device))?;
 
                 {
                     let matrices = buffer.matrices_mut();
@@ -472,18 +465,14 @@ impl Renderer {
                 buffer.update()?;
                 uniform_buffers.push(buffer);
             }
-            log::info!(
-                "Uniform buffers (count: {}) initialized",
-                uniform_buffers.len()
-            );
 
             // Create descriptor manager and pipeline layout
             let default_texture_data = TextureData::solid_color([255, 255, 255, 255]);
             let default_texture = Texture::from_data(
-                Arc::clone(&allocator),
-                Arc::clone(&vulkan_device.device),
+                Arc::clone(&alloc),
+                Arc::clone(&device.device),
                 command_manager.upload_command_pool_handle(),
-                vulkan_device.graphics_queue,
+                device.graphics_queue,
                 &default_texture_data,
                 vk::Format::R8G8B8A8_SRGB,
                 Some("default_texture"),
@@ -494,7 +483,7 @@ impl Renderer {
             let mut material_buffers = Vec::with_capacity(worker_count);
             for _ in 0..worker_count {
                 let mut material_buffer =
-                    MaterialBuffer::new(Arc::clone(&allocator), Arc::clone(&vulkan_device.device))?;
+                    MaterialBuffer::new(Arc::clone(&alloc), Arc::clone(&device.device))?;
                 {
                     let uniform = material_buffer.uniform_mut();
                     uniform.set_base_color_factor(Vec4::from_array(material.color));
@@ -512,14 +501,14 @@ impl Renderer {
             }
 
             let mut descriptor_manager = vulkan::DescriptorManager::new(
-                Arc::clone(&vulkan_device.device),
+                Arc::clone(&device.device),
                 framebuffers.len() as u32,
                 worker_count as u32,
-                Some(Arc::clone(&resource_registry)),
+                Some(Arc::clone(&resources)),
             )?;
 
             let mut bindless_manager = crate::vulkan::BindlessManager::new(
-                Arc::clone(&vulkan_device.device),
+                Arc::clone(&device.device),
                 descriptor_manager.allocator_mut(),
                 1024 * 4,
             )?;
@@ -539,7 +528,7 @@ impl Renderer {
             for (worker_index, buffer) in material_buffers.iter().enumerate() {
                 let buffer = buffer.lock();
                 descriptor_manager.bind_material_uniform(
-                    worker_index,
+                    worker_index as u32,
                     buffer.buffer,
                     material_size,
                 )?;
@@ -564,10 +553,9 @@ impl Renderer {
 
             // Forward+ lighting integration
             let mut forward_plus =
-                ForwardPlusIntegration::new(Arc::clone(&vulkan_device.device), &allocator.vma)?;
-            forward_plus.initialize(&allocator.vma)?;
+                ForwardPlusIntegration::new(Arc::clone(&device.device), &alloc.vma)?;
+            forward_plus.init(&alloc.vma);
             forward_plus.on_resize(swapchain.extent.width, swapchain.extent.height);
-            log::info!("Forward+ lighting integration initialized");
 
             let set_layouts = [
                 descriptor_manager.frame_layout(),
@@ -592,7 +580,7 @@ impl Renderer {
             ];
 
             let mut pipeline_layout_builder =
-                vulkan::PipelineLayout::builder(Arc::clone(&vulkan_device.device));
+                vulkan::PipelineLayout::builder(Arc::clone(&device.device));
             for layout in &set_layouts {
                 pipeline_layout_builder = pipeline_layout_builder.add_set_layout(*layout);
             }
@@ -600,17 +588,14 @@ impl Renderer {
                 pipeline_layout_builder = pipeline_layout_builder.add_push_constant(*range);
             }
             let mut pipeline_layout = pipeline_layout_builder.build()?;
-            let pipeline_layout_id = resource_registry
+            let pipeline_layout_id = resources
                 .register_pipeline_layout(pipeline_layout.handle())
                 .map_err(|e| {
                     AshError::VulkanError(format!("Failed to register pipeline layout: {e}"))
                 })?;
             pipeline_layout.mark_managed_by_registry();
 
-            log::info!("Pipeline layout created with descriptor set layout");
-
-            // Create graphics pipeline.
-            let mut pipeline_builder = vulkan::Pipeline::builder(Arc::clone(&vulkan_device.device))
+            let mut pipeline_builder = vulkan::Pipeline::builder(Arc::clone(&device.device))
                 .with_layout(pipeline_layout.handle())
                 .with_render_pass(render_pass.handle())
                 .with_extent(swapchain.extent)
@@ -640,75 +625,74 @@ impl Renderer {
                 )?;
 
             let mut pipeline = pipeline_builder.build()?;
-            let pipeline_id = resource_registry
+            let pipeline_id = resources
                 .register_pipeline(pipeline.pipeline, &[pipeline_layout_id, render_pass_id])
                 .map_err(|e| AshError::VulkanError(format!("Failed to register pipeline: {e}")))?;
             pipeline.mark_managed_by_registry();
 
             // Create Shadow Pipeline
-            let (shadow_pipeline, shadow_pipeline_layout) = if let Some(shadow_map) =
-                shadow_feature.shadow_map()
-            {
-                let shadow_push_range = vk::PushConstantRange {
-                    stage_flags: vk::ShaderStageFlags::VERTEX,
-                    offset: 0,
-                    size: 128, // mat4 lightSpace + mat4 model
+            let (shadow_pipeline, shadow_pipeline_layout) =
+                if let Some(shadow_map) = shadow_feature.shadow_map() {
+                    let shadow_push_range = vk::PushConstantRange {
+                        stage_flags: vk::ShaderStageFlags::VERTEX,
+                        offset: 0,
+                        size: 128, // mat4 lightSpace + mat4 model
+                    };
+
+                    let shadow_push_range_frag = vk::PushConstantRange {
+                        stage_flags: vk::ShaderStageFlags::FRAGMENT,
+                        offset: 128,
+                        size: 4, // int base_color_index
+                    };
+
+                    let shadow_pipeline_layout =
+                        vulkan::PipelineLayout::builder(Arc::clone(&device.device))
+                            .add_push_constant(shadow_push_range)
+                            .add_push_constant(shadow_push_range_frag)
+                            .add_set_layout(bindless_manager.layout()) // Set 2: Bindless textures
+                            .build()?;
+
+                    let shadow_builder = vulkan::Pipeline::builder(Arc::clone(&device.device))
+                        .with_layout(shadow_pipeline_layout.handle())
+                        .with_render_pass(shadow_map.render_pass)
+                        .with_extent(vk::Extent2D {
+                            width: shadow_map.res,
+                            height: shadow_map.res,
+                        })
+                        .with_pipeline_cache(pipeline_cache.handle())
+                        .with_depth_format(vk::Format::D32_SFLOAT)
+                        .with_cull_mode(vk::CullModeFlags::FRONT)
+                        .add_shader_from_bytes(
+                            include_bytes!("../../shaders/shadow.vert.spv"),
+                            vk::ShaderStageFlags::VERTEX,
+                            "main",
+                        )?
+                        .add_shader_from_bytes(
+                            include_bytes!("../../shaders/shadow.frag.spv"),
+                            vk::ShaderStageFlags::FRAGMENT,
+                            "main",
+                        )?;
+
+                    let shadow_pipeline = shadow_builder.build()?;
+                    (Some(shadow_pipeline), Some(shadow_pipeline_layout))
+                } else {
+                    (None, None)
                 };
-
-                let shadow_push_range_frag = vk::PushConstantRange {
-                    stage_flags: vk::ShaderStageFlags::FRAGMENT,
-                    offset: 128,
-                    size: 4, // int base_color_index
-                };
-
-                let shadow_pipeline_layout =
-                    vulkan::PipelineLayout::builder(Arc::clone(&vulkan_device.device))
-                        .add_push_constant(shadow_push_range)
-                        .add_push_constant(shadow_push_range_frag)
-                        .add_set_layout(bindless_manager.layout()) // Set 2: Bindless textures
-                        .build()?;
-
-                let shadow_builder = vulkan::Pipeline::builder(Arc::clone(&vulkan_device.device))
-                    .with_layout(shadow_pipeline_layout.handle())
-                    .with_render_pass(shadow_map.render_pass)
-                    .with_extent(vk::Extent2D {
-                        width: shadow_map.resolution,
-                        height: shadow_map.resolution,
-                    })
-                    .with_pipeline_cache(pipeline_cache.handle())
-                    .with_depth_format(vk::Format::D32_SFLOAT)
-                    .with_cull_mode(vk::CullModeFlags::FRONT)
-                    .add_shader_from_bytes(
-                        include_bytes!("../../shaders/shadow.vert.spv"),
-                        vk::ShaderStageFlags::VERTEX,
-                        "main",
-                    )?
-                    .add_shader_from_bytes(
-                        include_bytes!("../../shaders/shadow.frag.spv"),
-                        vk::ShaderStageFlags::FRAGMENT,
-                        "main",
-                    )?;
-
-                let shadow_pipeline = shadow_builder.build()?;
-                (Some(shadow_pipeline), Some(shadow_pipeline_layout))
-            } else {
-                (None, None)
-            };
 
             let mut mesh = Mesh::create_cube();
             log::trace!("Ensuring cube mesh textures...");
             mesh.ensure_texture(
-                Arc::clone(&allocator),
-                Arc::clone(&vulkan_device.device),
+                Arc::clone(&alloc),
+                Arc::clone(&device.device),
                 command_manager.upload_command_pool_handle(),
-                vulkan_device.graphics_queue,
+                device.graphics_queue,
             )?;
             log::trace!("Cube mesh textures ready, registering with model renderer...");
             model_renderer.ensure_mesh(
                 &mesh.name,
                 &mesh,
                 command_manager.upload_command_pool_handle(),
-                vulkan_device.graphics_queue,
+                device.graphics_queue,
             )?;
             log::trace!("Cube mesh registered successfully");
 
@@ -749,16 +733,21 @@ impl Renderer {
             mesh_texture_flags.insert(mesh.name.clone(), initial_flags);
             let start_time = Instant::now();
 
-            log::info!("Ash Renderer initialized successfully.");
-
             let swapchain_extent = swapchain.extent;
+
+            let gbuffer = GBuffer::new(
+                Arc::clone(&device.device),
+                Arc::clone(&alloc),
+                swapchain_extent.width,
+                swapchain_extent.height,
+            )?;
 
             Ok(Self {
                 buffer_pool,
-                resource_registry,
-                feature_manager,
+                resources,
+                features,
                 _pipeline_cache: pipeline_cache,
-                command_manager,
+                cmds: command_manager,
                 worker_count,
                 command_buffers,
                 frame_syncs,
@@ -793,12 +782,12 @@ impl Renderer {
                 material_buffers,
                 pipeline_layout: Some(pipeline_layout),
                 pipeline_layout_id: Some(pipeline_layout_id),
-                descriptor_manager: Some(descriptor_manager),
+                descriptors: Some(descriptor_manager),
                 framebuffers,
                 framebuffer_ids,
                 start_time,
-                allocator,
-                vulkan_device,
+                alloc,
+                device,
                 mesh_registry,
                 mesh_indices_registry: HashMap::new(),
                 mesh_texture_flags,
@@ -831,8 +820,14 @@ impl Renderer {
                 forward_plus: Some(forward_plus),
                 hiz_pass: None,
                 indirect_draw_pass: None,
+                occlusion_culling: OcclusionCulling::new(),
                 vsr_pass: None,
                 ssgi_pass: None,
+                gbuffer: Some(gbuffer),
+                post_descriptor_pool: vk::DescriptorPool::null(),
+                post_descriptor_sets: Vec::new(),
+                post_pipeline: None,
+                post_framebuffers: Vec::new(),
             })
         }
     }
@@ -841,28 +836,110 @@ impl Renderer {
         compute_worker_index(self.worker_count, frame_index)
     }
 
-    // Legacy texture set management methods removed.
+    fn render_post_processing(
+        &self,
+        command_buffer: vk::CommandBuffer,
+        image_index: usize,
+    ) -> Result<()> {
+        if !self.tonemapping_enabled
+            || self.fullscreen_pass.is_none()
+            || self.post_pipeline.is_none()
+            || self.post_framebuffers.is_empty()
+            || self.post_descriptor_sets.is_empty()
+        {
+            return Ok(());
+        }
 
+        let pass = self.fullscreen_pass.as_ref().unwrap();
+        let pipeline = self.post_pipeline.unwrap();
+        let framebuffer = &self.post_framebuffers[image_index];
+        let descriptor_set = self.post_descriptor_sets[image_index];
+        let extent = self.swapchain.as_ref().unwrap().extent;
+
+        let clear_values = [vk::ClearValue {
+            color: vk::ClearColorValue {
+                float32: [0.0, 0.0, 0.0, 1.0],
+            },
+        }];
+
+        let render_pass_info = vk::RenderPassBeginInfo::default()
+            .render_pass(pass.render_pass())
+            .framebuffer(framebuffer.handle())
+            .render_area(vk::Rect2D {
+                offset: vk::Offset2D { x: 0, y: 0 },
+                extent,
+            })
+            .clear_values(&clear_values);
+
+        unsafe {
+            self.device.device.cmd_begin_render_pass(
+                command_buffer,
+                &render_pass_info,
+                vk::SubpassContents::INLINE,
+            );
+
+            self.device.device.cmd_bind_pipeline(
+                command_buffer,
+                vk::PipelineBindPoint::GRAPHICS,
+                pipeline,
+            );
+
+            self.device.device.cmd_bind_descriptor_sets(
+                command_buffer,
+                vk::PipelineBindPoint::GRAPHICS,
+                pass.pipeline_layout(),
+                0,
+                &[descriptor_set],
+                &[],
+            );
+
+            let push_constants = fullscreen_pass::PostProcessPushConstants {
+                exposure: self.tonemapping_exposure,
+                gamma: self.tonemapping_gamma,
+                bloom_intensity: if self.bloom_enabled {
+                    self.bloom_intensity
+                } else {
+                    0.0
+                },
+                _padding: 0.0,
+            };
+
+            self.device.device.cmd_push_constants(
+                command_buffer,
+                pass.pipeline_layout(),
+                vk::ShaderStageFlags::FRAGMENT,
+                0,
+                bytemuck::bytes_of(&push_constants),
+            );
+
+            // Draw 3 vertices for a single fullscreen triangle
+            self.device.device.cmd_draw(command_buffer, 3, 1, 0, 0);
+
+            self.device.device.cmd_end_render_pass(command_buffer);
+        }
+
+        Ok(())
+    }
     /// Set mesh to render
     pub fn set_mesh(&mut self, mut mesh: Mesh) {
         unsafe {
-            let upload_pool = self.command_manager.upload_command_pool_handle();
+            let upload_pool = self.cmds.upload_command_pool_handle();
             let key = mesh.name.clone();
             if let Err(e) = self.model_renderer.ensure_mesh(
                 &key,
                 &mesh,
                 upload_pool,
-                self.vulkan_device.graphics_queue,
+                self.device.graphics_queue,
             ) {
                 log::error!("Failed to upload mesh via ModelRenderer: {e}");
                 return;
             }
 
             if let Err(e) = mesh.ensure_texture(
-                Arc::clone(&self.allocator),
-                Arc::clone(&self.vulkan_device.device),
+                Arc::clone(&self.alloc),
+                Arc::clone(&self.device.device),
                 upload_pool,
-                self.vulkan_device.graphics_queue,
+                self.device.graphics_queue,
             ) {
                 log::error!("Failed to ensure mesh texture: {e}");
             }
@@ -915,7 +992,6 @@ impl Renderer {
             ];
             let emissive_index = mesh.emissive_texture_index.map(|i| i as i32).unwrap_or(-1);
 
-            self.mesh_indices_registry.clear();
             self.mesh_indices_registry
                 .insert(key.clone(), (indices, emissive_index));
 
@@ -939,20 +1015,16 @@ impl Renderer {
     pub fn register_mesh_handle(&mut self, handle: u32, mesh: &mut Mesh) -> Result<()> {
         unsafe {
             let key = mesh.name.clone();
-            let upload_pool = self.command_manager.upload_command_pool_handle();
+            let upload_pool = self.cmds.upload_command_pool_handle();
             mesh.ensure_texture(
-                Arc::clone(&self.allocator),
-                Arc::clone(&self.vulkan_device.device),
+                Arc::clone(&self.alloc),
+                Arc::clone(&self.device.device),
                 upload_pool,
-                self.vulkan_device.graphics_queue,
+                self.device.graphics_queue,
             )?;
 
-            self.model_renderer.ensure_mesh(
-                &key,
-                mesh,
-                upload_pool,
-                self.vulkan_device.graphics_queue,
-            )?;
+            self.model_renderer
+                .ensure_mesh(&key, mesh, upload_pool, self.device.graphics_queue)?;
 
             // Register textures with bindless manager
             if let Some(bindless_manager) = self.bindless_manager.as_mut() {
@@ -1111,7 +1183,7 @@ impl Renderer {
             );
             // Synchronize with device to prevent resource conflicts during resize.
             unsafe {
-                let _ = self.vulkan_device.device.device_wait_idle();
+                let _ = self.device.device.device_wait_idle();
             }
         }
         self.resize_pending = true;
@@ -1178,11 +1250,21 @@ impl Renderer {
     }
 
     fn recreate_swapchain_resources(&mut self) -> Result<()> {
+        // Paranoid Validation for enterprise reliability.
+        // We cannot proceed with swapchain recreation if surfaces are zero-dimensioned.
+        if let Some(extent) = self.pending_extent {
+            if extent.width == 0 || extent.height == 0 {
+                return Err(AshError::VulkanError(
+                    "Cannot recreate swapchain with zero dimensions".into(),
+                ));
+            }
+        }
+
         let old_swapchain = unsafe {
             if let Some(ref mut swapchain) = self.swapchain {
-                Some(swapchain.recreate(&self.vulkan_device)?)
+                Some(swapchain.recreate(&self.device)?)
             } else {
-                self.swapchain = Some(vulkan::SwapchainWrapper::new(&self.vulkan_device)?);
+                self.swapchain = Some(vulkan::SwapchainWrapper::new(&self.device)?);
                 None
             }
         };
@@ -1214,12 +1296,17 @@ impl Renderer {
         self.update_image_views(&image_views)?;
         // 5. Recreate depth buffer.
         self.recreate_depth_buffer(swapchain_extent)?;
+        // 5b. Recreate G-Buffer.
+        self.recreate_gbuffer(swapchain_extent)?;
+        // 5c. Recreate SSGI pass
+        self.recreate_ssgi_pass(swapchain_extent)?;
         // 6. Create new render pass and framebuffers.
         self.create_render_pass_and_framebuffers(swapchain_extent, swapchain_format, &image_views)?;
 
         self.recreate_frame_syncs(self.framebuffers.len())?;
         self.recreate_command_buffers()?;
         self.recreate_uniform_buffers(self.framebuffers.len())?;
+        self.recreate_vsr_pass(self.swapchain.as_ref().unwrap().extent)?;
         self.recreate_descriptor_sets()?;
         // 7. Recreate pipeline.
         self.recreate_pipeline()?;
@@ -1235,7 +1322,7 @@ impl Renderer {
             .zip(self.framebuffer_ids.drain(..))
         {
             drop(framebuffer);
-            if let Err(e) = self.resource_registry.cleanup_resource(id) {
+            if let Err(e) = self.resources.cleanup_resource(id) {
                 log::warn!("Failed to cleanup framebuffer {id}: {e}");
             }
         }
@@ -1243,7 +1330,7 @@ impl Renderer {
 
     fn cleanup_render_pass(&mut self) {
         if let Some(render_pass_id) = self.render_pass_id.take() {
-            if let Err(e) = self.resource_registry.cleanup_resource(render_pass_id) {
+            if let Err(e) = self.resources.cleanup_resource(render_pass_id) {
                 log::warn!("Failed to cleanup render pass: {e}");
             }
         }
@@ -1251,7 +1338,7 @@ impl Renderer {
 
     fn cleanup_pipeline(&mut self) {
         if let Some(pipeline_id) = self.pipeline_id.take() {
-            if let Err(e) = self.resource_registry.cleanup_resource(pipeline_id) {
+            if let Err(e) = self.resources.cleanup_resource(pipeline_id) {
                 log::warn!("Failed to cleanup pipeline: {e}");
             }
         }
@@ -1280,7 +1367,7 @@ impl Renderer {
             min_sample_shading: 0.0,
         };
 
-        let mut builder = vulkan::Pipeline::builder(Arc::clone(&self.vulkan_device.device))
+        let mut builder = vulkan::Pipeline::builder(Arc::clone(&self.device.device))
             .with_layout(layout)
             .with_render_pass(render_pass)
             .with_extent(extent)
@@ -1288,6 +1375,53 @@ impl Renderer {
             .with_depth_format(depth_format)
             .with_cull_mode(vk::CullModeFlags::BACK)
             .with_multisampling(multisample_config);
+
+        if self.gbuffer.is_some() {
+            let blend_attachments = vec![
+                // Index 0: Swapchain Color (with blending)
+                vk::PipelineColorBlendAttachmentState {
+                    color_write_mask: vk::ColorComponentFlags::R
+                        | vk::ColorComponentFlags::G
+                        | vk::ColorComponentFlags::B
+                        | vk::ColorComponentFlags::A,
+                    blend_enable: vk::TRUE,
+                    src_color_blend_factor: vk::BlendFactor::SRC_ALPHA,
+                    dst_color_blend_factor: vk::BlendFactor::ONE_MINUS_SRC_ALPHA,
+                    color_blend_op: vk::BlendOp::ADD,
+                    src_alpha_blend_factor: vk::BlendFactor::ONE,
+                    dst_alpha_blend_factor: vk::BlendFactor::ZERO,
+                    alpha_blend_op: vk::BlendOp::ADD,
+                },
+                // Index 1: Normals (no blending)
+                vk::PipelineColorBlendAttachmentState {
+                    color_write_mask: vk::ColorComponentFlags::R
+                        | vk::ColorComponentFlags::G
+                        | vk::ColorComponentFlags::B
+                        | vk::ColorComponentFlags::A,
+                    blend_enable: vk::FALSE,
+                    ..Default::default()
+                },
+                // Index 2: Albedo (no blending)
+                vk::PipelineColorBlendAttachmentState {
+                    color_write_mask: vk::ColorComponentFlags::R
+                        | vk::ColorComponentFlags::G
+                        | vk::ColorComponentFlags::B
+                        | vk::ColorComponentFlags::A,
+                    blend_enable: vk::FALSE,
+                    ..Default::default()
+                },
+                // Index 3: Motion Vectors (no blending)
+                vk::PipelineColorBlendAttachmentState {
+                    color_write_mask: vk::ColorComponentFlags::R
+                        | vk::ColorComponentFlags::G
+                        | vk::ColorComponentFlags::B
+                        | vk::ColorComponentFlags::A,
+                    blend_enable: vk::FALSE,
+                    ..Default::default()
+                },
+            ];
+            builder = builder.with_color_blend_attachments(blend_attachments);
+        }
 
         builder = builder.add_shader_from_bytes(
             include_bytes!("../../shaders/vert.spv"),
@@ -1309,7 +1443,7 @@ impl Renderer {
         })?;
 
         let pipeline_id = self
-            .resource_registry
+            .resources
             .register_pipeline(new_pipeline.pipeline, &[pipeline_layout_id, render_pass_id])
             .map_err(|e| AshError::VulkanError(format!("Failed to register pipeline: {e}")))?;
 
@@ -1323,19 +1457,16 @@ impl Renderer {
 
     fn update_image_views(&mut self, image_views: &[vk::ImageView]) -> Result<()> {
         for id in self.swapchain_image_view_ids.drain(..) {
-            if let Err(e) = self.resource_registry.cleanup_resource(id) {
+            if let Err(e) = self.resources.cleanup_resource(id) {
                 log::warn!("Failed to cleanup old swapchain image view {id}: {e}");
             }
         }
 
         self.swapchain_image_view_ids.clear();
         for &view in image_views {
-            let id = self
-                .resource_registry
-                .register_image_view(view)
-                .map_err(|e| {
-                    AshError::VulkanError(format!("Failed to register swapchain image view: {e}"))
-                })?;
+            let id = self.resources.register_image_view(view).map_err(|e| {
+                AshError::VulkanError(format!("Failed to register swapchain image view: {e}"))
+            })?;
             self.swapchain_image_view_ids.push(id);
         }
 
@@ -1348,27 +1479,71 @@ impl Renderer {
 
     fn recreate_depth_buffer(&mut self, extent: vk::Extent2D) -> Result<()> {
         if let Some(id) = self.depth_buffer_id.take() {
-            if let Err(e) = self.resource_registry.cleanup_resource(id) {
+            if let Err(e) = self.resources.cleanup_resource(id) {
                 log::warn!("Failed to cleanup old depth buffer: {e}");
             }
         }
 
         let mut depth_buffer = unsafe {
             DepthBuffer::new(
-                Arc::clone(&self.vulkan_device.device),
-                Arc::clone(&self.allocator),
+                Arc::clone(&self.device.device),
+                Arc::clone(&self.alloc),
                 extent.width,
                 extent.height,
             )?
         };
 
         let depth_buffer_id = depth_buffer
-            .register_with_registry(&self.resource_registry)
+            .register_with_registry(&self.resources)
             .map_err(|e| AshError::VulkanError(format!("Failed to register depth buffer: {e}")))?;
 
         self.depth_buffer = Some(depth_buffer);
         self.depth_buffer_id = Some(depth_buffer_id);
 
+        Ok(())
+    }
+
+    fn recreate_gbuffer(&mut self, extent: vk::Extent2D) -> Result<()> {
+        self.gbuffer = Some(unsafe {
+            GBuffer::new(
+                Arc::clone(&self.device.device),
+                Arc::clone(&self.alloc),
+                extent.width,
+                extent.height,
+            )?
+        });
+        Ok(())
+    }
+
+    fn recreate_ssgi_pass(&mut self, extent: vk::Extent2D) -> Result<()> {
+        if let Some(ref mut ssgi) = self.ssgi_pass {
+            unsafe {
+                ssgi.destroy(&self.alloc.vma);
+                ssgi.init(
+                    &self.alloc.vma,
+                    &self.device,
+                    extent.width,
+                    extent.height,
+                    ssgi.quality(),
+                );
+            }
+        }
+        Ok(())
+    }
+
+    fn recreate_vsr_pass(&mut self, display_extent: vk::Extent2D) -> Result<()> {
+        if let Some(ref mut vsr) = self.vsr_pass {
+            unsafe {
+                vsr.destroy(&self.alloc.vma);
+                vsr.init(
+                    &self.alloc.vma,
+                    &self.device,
+                    display_extent.width,
+                    display_extent.height,
+                    vsr.quality(),
+                );
+            }
+        }
         Ok(())
     }
 
@@ -1384,13 +1559,44 @@ impl Renderer {
             AshError::VulkanError("Depth buffer missing when rebuilding framebuffers".into())
         })?;
 
-        let mut render_pass = vulkan::RenderPass::builder(Arc::clone(&self.vulkan_device.device))
-            .with_swapchain_color(color_format)
-            .with_depth_attachment(depth_buffer.format())
+        let mut builder = vulkan::RenderPass::builder(Arc::clone(&self.device.device));
+
+        let render_to_hdr = self.hdr_framebuffer.is_some();
+        if render_to_hdr {
+            let hdr = self.hdr_framebuffer.as_ref().unwrap();
+            builder = builder
+                .with_color_attachment(hdr.format(), vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL);
+        } else {
+            builder = builder.with_swapchain_color(color_format);
+        }
+
+        if self.gbuffer.is_some() {
+            // Index 1: Normals (RGBA16F)
+            builder = builder.with_color_attachment(
+                vk::Format::R16G16B16A16_SFLOAT,
+                vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+            );
+            // Index 2: Albedo (RGBA8)
+            builder = builder.with_color_attachment(
+                vk::Format::R8G8B8A8_UNORM,
+                vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+            );
+            // Index 3: Motion Vectors (RG16F)
+            builder = builder.with_color_attachment(
+                vk::Format::R16G16_SFLOAT,
+                vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+            );
+        }
+
+        let mut render_pass = builder
+            .with_depth_attachment(
+                depth_buffer.format(),
+                vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+            )
             .build()?;
 
         let render_pass_id = self
-            .resource_registry
+            .resources
             .register_render_pass(render_pass.handle())
             .map_err(|e| AshError::VulkanError(format!("Failed to register render pass: {e}")))?;
         render_pass.mark_managed_by_registry();
@@ -1404,10 +1610,29 @@ impl Renderer {
         let mut framebuffers = Vec::with_capacity(image_views.len());
         let mut framebuffer_ids = Vec::with_capacity(image_views.len());
 
+        let gbuffer = self.gbuffer.as_ref().ok_or_else(|| {
+            AshError::VulkanError("G-Buffer missing when rebuilding framebuffers".into())
+        })?;
+
         for (index, &view) in image_views.iter().enumerate() {
-            let attachments = [view, depth_buffer.view()];
+            // If rendering to HDR, we use a single HDR view for all framebuffers.
+            // Otherwise we use the per-swapchain view.
+            let color_view = if render_to_hdr {
+                self.hdr_framebuffer.as_ref().unwrap().view()
+            } else {
+                view
+            };
+
+            // Order must match RenderPass: [Color, GBufferNormal, GBufferAlbedo, GBufferMotion, Depth]
+            let attachments = [
+                color_view,
+                gbuffer.normal_view(),
+                gbuffer.albedo_view(),
+                gbuffer.motion_view(),
+                depth_buffer.view(),
+            ];
             let framebuffer = vulkan::Framebuffer::new(
-                Arc::clone(&self.vulkan_device.device),
+                Arc::clone(&self.device.device),
                 self.render_pass
                     .as_ref()
                     .expect("render pass just created")
@@ -1416,16 +1641,19 @@ impl Renderer {
                 extent,
             )?;
 
+            let deps = if render_to_hdr {
+                vec![render_pass_id, depth_buffer_id]
+            } else {
+                vec![
+                    render_pass_id,
+                    depth_buffer_id,
+                    self.swapchain_image_view_ids[index],
+                ]
+            };
+
             let framebuffer_id = self
-                .resource_registry
-                .register_framebuffer(
-                    framebuffer.handle(),
-                    &[
-                        render_pass_id,
-                        depth_buffer_id,
-                        self.swapchain_image_view_ids[index],
-                    ],
-                )
+                .resources
+                .register_framebuffer(framebuffer.handle(), &deps)
                 .map_err(|e| {
                     AshError::VulkanError(format!("Failed to register framebuffer: {e}"))
                 })?;
@@ -1439,18 +1667,33 @@ impl Renderer {
         self.framebuffers = framebuffers;
         self.framebuffer_ids = framebuffer_ids;
 
+        // --- Post-Processing Framebuffers ---
+        if let Some(ref pass) = self.fullscreen_pass {
+            let mut post_framebuffers = Vec::with_capacity(image_views.len());
+            for &view in image_views {
+                let framebuffer = vulkan::Framebuffer::new(
+                    Arc::clone(&self.device.device),
+                    pass.render_pass(),
+                    &[view],
+                    extent,
+                )?;
+                post_framebuffers.push(framebuffer);
+            }
+            self.post_framebuffers = post_framebuffers;
+        }
+
         Ok(())
     }
 
     fn recreate_frame_syncs(&mut self, count: usize) -> Result<()> {
         for (image_available_id, render_finished_id, fence_id) in self.frame_sync_ids.drain(..) {
-            if let Err(e) = self.resource_registry.cleanup_resource(image_available_id) {
+            if let Err(e) = self.resources.cleanup_resource(image_available_id) {
                 log::warn!("Failed to cleanup image-available semaphore: {e}");
             }
-            if let Err(e) = self.resource_registry.cleanup_resource(render_finished_id) {
+            if let Err(e) = self.resources.cleanup_resource(render_finished_id) {
                 log::warn!("Failed to cleanup render-finished semaphore: {e}");
             }
-            if let Err(e) = self.resource_registry.cleanup_resource(fence_id) {
+            if let Err(e) = self.resources.cleanup_resource(fence_id) {
                 log::warn!("Failed to cleanup in-flight fence: {e}");
             }
         }
@@ -1461,9 +1704,9 @@ impl Renderer {
         let mut frame_sync_ids = Vec::with_capacity(count);
 
         for _ in 0..count {
-            let mut sync = vulkan::FrameSync::new(Arc::clone(&self.vulkan_device.device))?;
+            let mut sync = vulkan::FrameSync::new(Arc::clone(&self.device.device))?;
             let image_available_id = self
-                .resource_registry
+                .resources
                 .register_semaphore(sync.image_available)
                 .map_err(|e| {
                     AshError::VulkanError(format!(
@@ -1471,19 +1714,16 @@ impl Renderer {
                     ))
                 })?;
             let render_finished_id = self
-                .resource_registry
+                .resources
                 .register_semaphore(sync.render_finished)
                 .map_err(|e| {
                     AshError::VulkanError(format!(
                         "Failed to register render-finished semaphore: {e}"
                     ))
                 })?;
-            let fence_id = self
-                .resource_registry
-                .register_fence(sync.in_flight)
-                .map_err(|e| {
-                    AshError::VulkanError(format!("Failed to register in-flight fence: {e}"))
-                })?;
+            let fence_id = self.resources.register_fence(sync.in_flight).map_err(|e| {
+                AshError::VulkanError(format!("Failed to register in-flight fence: {e}"))
+            })?;
 
             sync.mark_managed_by_registry();
             frame_syncs.push(sync);
@@ -1498,11 +1738,11 @@ impl Renderer {
     }
 
     fn recreate_command_buffers(&mut self) -> Result<()> {
-        self.command_manager
+        self.cmds
             .reset_primary_pool(vk::CommandPoolResetFlags::RELEASE_RESOURCES)?;
 
         self.command_buffers = self
-            .command_manager
+            .cmds
             .allocate_primary_buffers(self.framebuffers.len() as u32)?;
         self.current_frame = 0;
 
@@ -1517,10 +1757,8 @@ impl Renderer {
 
         unsafe {
             for _ in 0..count {
-                let mut buffer = UniformBuffer::new(
-                    Arc::clone(&self.allocator),
-                    Arc::clone(&self.vulkan_device.device),
-                )?;
+                let mut buffer =
+                    UniformBuffer::new(Arc::clone(&self.alloc), Arc::clone(&self.device.device))?;
 
                 {
                     // Initialize with identity matrices. Values are updated during render_frame.
@@ -1539,7 +1777,7 @@ impl Renderer {
     }
 
     fn recreate_descriptor_sets(&mut self) -> Result<()> {
-        if let Some(manager) = self.descriptor_manager.as_mut() {
+        if let Some(manager) = self.descriptors.as_mut() {
             manager.recreate_frame_sets(self.frame_syncs.len() as u32)?;
 
             let buffer_size =
@@ -1570,7 +1808,7 @@ impl Renderer {
         self.flush_old_swapchains();
 
         // Recycle per-frame descriptor pools (static pools are unaffected)
-        if let Some(dm) = self.descriptor_manager.as_mut() {
+        if let Some(dm) = self.descriptors.as_mut() {
             dm.next_frame();
         }
 
@@ -1611,53 +1849,87 @@ impl Renderer {
                 .as_ref()
                 .ok_or(AshError::VulkanError("Swapchain not available".to_string()))?
                 .extent;
-            let pipeline = self
+            let scene_pipeline = self
                 .pipeline
                 .as_ref()
+                .map(|p| p.pipeline)
                 .ok_or(AshError::VulkanError("Pipeline not available".to_string()))?;
-            let render_pass = self.render_pass.as_ref().ok_or(AshError::VulkanError(
-                "Render pass not available".to_string(),
-            ))?;
+            let main_render_pass =
+                self.render_pass
+                    .as_ref()
+                    .map(|p| p.handle())
+                    .ok_or(AshError::VulkanError(
+                        "Render pass not available".to_string(),
+                    ))?;
 
             // Fence synchronization prior to uniform buffer updates.
             // Ensure previous frame submission completes before writing to the uniform buffer.
+            // Hot Path: Use unchecked access for frame-indexed resources.
+            // SAFETY: frame_index is bounded by command_buffers.len() and frame_syncs.len()
+            // which are established at initialization and swapchain recreation.
             let frame_index = self.current_frame;
-            let command_buffer = *self
-                .command_buffers
-                .get(frame_index)
-                .ok_or_else(|| AshError::VulkanError("Command buffer index out of range".into()))?;
-            let frame_sync = self
-                .frame_syncs
-                .get(frame_index)
-                .ok_or_else(|| AshError::VulkanError("Frame sync index out of range".into()))?;
+            let command_buffer = *self.command_buffers.get_unchecked(frame_index);
+            let frame_sync_ref = self.frame_syncs.get_unchecked(frame_index);
 
-            self.vulkan_device
+            let (image_available, render_finished, in_flight_fence) = (
+                frame_sync_ref.image_available,
+                frame_sync_ref.render_finished,
+                frame_sync_ref.in_flight,
+            );
+
+            self.device
                 .device
-                .wait_for_fences(&[frame_sync.in_flight], true, u64::MAX)?;
-            self.vulkan_device
-                .device
-                .reset_fences(&[frame_sync.in_flight])?;
+                .wait_for_fences(&[in_flight_fence], true, u64::MAX)?;
+            self.device.device.reset_fences(&[in_flight_fence])?;
+
+            // Prepare culling data for this frame
+            self.occlusion_culling.begin_frame();
+            for (i, item) in self.draw_items.iter().enumerate() {
+                if let Some(uploaded) = self.model_renderer.get(&item.key) {
+                    // Use mesh clusters for fine-grained culling
+                    let bounds = CullBoundingBox::new(Vec3::ZERO, Vec3::ONE);
+                    self.occlusion_culling.push_clusters(
+                        bounds,
+                        item.transform,
+                        i as u32,
+                        uploaded.clusters(),
+                    );
+                }
+            }
+
+            // Apply sub-pixel jitter for VSR/TSR if enabled
+            let mut jittered_projection = projection;
+            let mut jitter_uv = [0.0f32; 2];
+            if let Some(ref mut vsr) = self.vsr_pass {
+                let (jx, jy) = vsr.next_jitter();
+                // Jitter is in pixels [-0.5, 0.5], convert to NDC/UV
+                jitter_uv = [jx, jy];
+                let extent = self.swapchain.as_ref().unwrap().extent;
+                jittered_projection.col_mut(2).x += jx / extent.width as f32;
+                jittered_projection.col_mut(2).y += jy / extent.height as f32;
+            }
 
             // GPU synchronization confirmed; safe to update uniform buffer.
             {
-                let uniform_buffer = &mut self.uniform_buffers[frame_index];
+                // SAFETY: frame_index validity verified by previous unchecked access logic.
+                let uniform_buffer = self.uniform_buffers.get_unchecked_mut(frame_index);
 
                 let elapsed = self.start_time.elapsed().as_secs_f32();
                 let mut feature_ctx = FeatureFrameContext {
-                    device: self.vulkan_device.device.as_ref(),
-                    descriptor_manager: self.descriptor_manager.as_ref(),
+                    device: self.device.device.as_ref(),
+                    descriptor_manager: self.descriptors.as_ref(),
                     transform: &mut self.transform,
                     auto_rotate: false, // Auto-rotate now handled by examples
                     elapsed_seconds: elapsed,
                 };
-                self.feature_manager.before_frame(&mut feature_ctx);
+                self.features.before_frame(&mut feature_ctx);
 
                 // Matrices provided via function arguments.
                 let matrices = uniform_buffer.matrices_mut();
                 matrices.model = self.transform.model_matrix();
                 matrices.view = view;
-                matrices.projection = projection;
-                matrices.view_proj = projection * view;
+                matrices.projection = jittered_projection;
+                matrices.view_proj = jittered_projection * view;
                 matrices.camera_pos = camera_pos.extend(1.0);
                 let light_dir = glam::Vec3::new(-0.35, -1.0, -0.25).normalize();
 
@@ -1671,7 +1943,12 @@ impl Renderer {
                 uniform_buffer.update()?;
             }
 
-            let cmd_ctx = self.command_manager.context(command_buffer);
+            // Update post-processing descriptors once per frame to ensure they point to the correct VSR output.
+            if self.tonemapping_enabled {
+                self.update_post_descriptors()?;
+            }
+
+            let cmd_ctx = self.cmds.context(command_buffer);
             cmd_ctx.reset()?;
 
             let acquire_result = {
@@ -1679,7 +1956,7 @@ impl Renderer {
                     .swapchain
                     .as_ref()
                     .ok_or(AshError::VulkanError("Swapchain not available".to_string()))?;
-                swapchain_ref.acquire_next_image(frame_sync.image_available)
+                swapchain_ref.acquire_next_image(image_available)
             };
             let image_index = match acquire_result {
                 Ok(index) => index,
@@ -1704,7 +1981,6 @@ impl Renderer {
             );
 
             cmd_ctx.begin(vk::CommandBufferUsageFlags::empty())?;
-
             // Shadow Pass
             if let (Some(shadow_pipeline), Some(shadow_layout)) = (
                 self.shadow_pipeline.as_ref(),
@@ -1746,7 +2022,7 @@ impl Renderer {
                             push_data.extend_from_slice(bytemuck::bytes_of(&light_space_push));
                             push_data.extend_from_slice(bytemuck::bytes_of(&model_push));
 
-                            self.vulkan_device.device.cmd_push_constants(
+                            self.device.device.cmd_push_constants(
                                 command_buffer,
                                 shadow_layout.handle(),
                                 vk::ShaderStageFlags::VERTEX,
@@ -1756,7 +2032,7 @@ impl Renderer {
 
                             // Bind vertex buffers
                             let offsets = [0];
-                            self.vulkan_device.device.cmd_bind_vertex_buffers(
+                            self.device.device.cmd_bind_vertex_buffers(
                                 command_buffer,
                                 0,
                                 &[uploaded.vertex_buffer()],
@@ -1765,7 +2041,7 @@ impl Renderer {
 
                             // Bind Bindless Textures (Set 2)
                             if let Some(ref bindless) = self.bindless_manager {
-                                self.vulkan_device.device.cmd_bind_descriptor_sets(
+                                self.device.device.cmd_bind_descriptor_sets(
                                     command_buffer,
                                     vk::PipelineBindPoint::GRAPHICS,
                                     shadow_layout.handle(),
@@ -1777,7 +2053,7 @@ impl Renderer {
 
                             // Push texture index for alpha discard
                             let base_color_index = item.texture_indices[0];
-                            self.vulkan_device.device.cmd_push_constants(
+                            self.device.device.cmd_push_constants(
                                 command_buffer,
                                 shadow_layout.handle(),
                                 vk::ShaderStageFlags::FRAGMENT,
@@ -1786,13 +2062,13 @@ impl Renderer {
                             );
 
                             if let Some(index_buffer) = uploaded.index_buffer() {
-                                self.vulkan_device.device.cmd_bind_index_buffer(
+                                self.device.device.cmd_bind_index_buffer(
                                     command_buffer,
                                     index_buffer,
                                     0,
                                     vk::IndexType::UINT32,
                                 );
-                                self.vulkan_device.device.cmd_draw_indexed(
+                                self.device.device.cmd_draw_indexed(
                                     command_buffer,
                                     uploaded.index_count(),
                                     1,
@@ -1801,7 +2077,7 @@ impl Renderer {
                                     0,
                                 );
                             } else {
-                                self.vulkan_device.device.cmd_draw(
+                                self.device.device.cmd_draw(
                                     command_buffer,
                                     uploaded.vertex_count(),
                                     1,
@@ -1823,6 +2099,21 @@ impl Renderer {
                     },
                 },
                 vk::ClearValue {
+                    color: vk::ClearColorValue {
+                        float32: [0.0, 0.0, 0.0, 0.0],
+                    },
+                },
+                vk::ClearValue {
+                    color: vk::ClearColorValue {
+                        float32: [0.0, 0.0, 0.0, 0.0],
+                    },
+                },
+                vk::ClearValue {
+                    color: vk::ClearColorValue {
+                        float32: [0.0, 0.0, 0.0, 0.0],
+                    },
+                },
+                vk::ClearValue {
                     depth_stencil: vk::ClearDepthStencilValue {
                         depth: 1.0,
                         stencil: 0,
@@ -1836,7 +2127,7 @@ impl Renderer {
                 .ok_or_else(|| AshError::VulkanError("Framebuffer index out of range".into()))?;
 
             let render_pass_begin = vk::RenderPassBeginInfo::default()
-                .render_pass(render_pass.handle())
+                .render_pass(main_render_pass)
                 .framebuffer(framebuffer.handle())
                 .render_area(vk::Rect2D {
                     offset: vk::Offset2D { x: 0, y: 0 },
@@ -1845,7 +2136,7 @@ impl Renderer {
                 .clear_values(&clear_values);
 
             cmd_ctx.begin_render_pass(&render_pass_begin, vk::SubpassContents::INLINE);
-            cmd_ctx.bind_pipeline(vk::PipelineBindPoint::GRAPHICS, pipeline.pipeline);
+            cmd_ctx.bind_pipeline(vk::PipelineBindPoint::GRAPHICS, scene_pipeline);
 
             let viewport = vk::Viewport {
                 x: 0.0,
@@ -1863,13 +2154,13 @@ impl Renderer {
             cmd_ctx.set_scissor(0, &[scissor]);
 
             let render_ctx = FeatureRenderContext {
-                device: self.vulkan_device.device.as_ref(),
-                descriptor_manager: self.descriptor_manager.as_ref(),
+                device: self.device.device.as_ref(),
+                descriptor_manager: self.descriptors.as_ref(),
                 command_buffer,
                 transform: &self.transform,
             };
 
-            self.feature_manager.render(&render_ctx);
+            self.features.render(&render_ctx);
 
             let pipeline_layout = self.pipeline_layout.as_ref().ok_or_else(|| {
                 AshError::VulkanError("Pipeline layout not available".to_string())
@@ -1877,7 +2168,7 @@ impl Renderer {
             let pipeline_layout_handle = pipeline_layout.handle();
 
             let _ = (|| -> Result<vk::DescriptorSet> {
-                if let Some(manager) = self.descriptor_manager.as_ref() {
+                if let Some(manager) = self.descriptors.as_ref() {
                     let frame_set = manager.frame_set(frame_index).ok_or_else(|| {
                         AshError::VulkanError("Frame descriptor set not available".to_string())
                     })?;
@@ -1925,7 +2216,7 @@ impl Renderer {
                     // Bind Forward+ descriptor set (set 4)
                     if let Some(ref forward_plus) = self.forward_plus {
                         forward_plus.bind(
-                            &self.vulkan_device.device,
+                            &self.device.device,
                             command_buffer,
                             pipeline_layout_handle,
                         );
@@ -2014,11 +2305,51 @@ impl Renderer {
             }
 
             cmd_ctx.end_render_pass();
+
+            // --- SSGI Pass ---
+            if let (Some(ref mut gbuffer), Some(ref mut ssgi)) =
+                (&mut self.gbuffer, &mut self.ssgi_pass)
+            {
+                let depth_buffer = self.depth_buffer.as_ref().unwrap();
+                let inv_view_proj = (jittered_projection * view).inverse();
+
+                ssgi.compute_gi(
+                    command_buffer,
+                    depth_buffer.view(),
+                    gbuffer.normal_view(),
+                    gbuffer.albedo_view(),
+                    inv_view_proj,
+                )?;
+                ssgi.next_frame();
+            }
+
+            // --- VSR (Upscaling) Pass ---
+            if let (Some(ref mut vsr), Some(ref mut gbuffer)) =
+                (&mut self.vsr_pass, &mut self.gbuffer)
+            {
+                let depth_buffer = self.depth_buffer.as_ref().unwrap();
+                // Pass current color result (which is now correctly the HDR buffer if initialized)
+                // and upsample to VSR history.
+                vsr.upscale(
+                    command_buffer,
+                    framebuffer.attachments()[0], // Index 0 is now HDR if active
+                    depth_buffer.view(),
+                    gbuffer.motion_view(),
+                    jitter_uv,
+                )?;
+                vsr.next_frame();
+            }
+
+            // --- Post-Processing (Tonemapping & Resolve) ---
+            if self.tonemapping_enabled {
+                self.render_post_processing(command_buffer, image_index as usize)?;
+            }
+
             cmd_ctx.end()?;
 
-            let wait_semaphores = [frame_sync.image_available];
+            let wait_semaphores = [image_available];
             let wait_stages = [vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT];
-            let signal_semaphores = [frame_sync.render_finished];
+            let signal_semaphores = [render_finished];
             let command_buffers_submit = [command_buffer];
 
             let submit_info = vk::SubmitInfo::default()
@@ -2027,22 +2358,15 @@ impl Renderer {
                 .command_buffers(&command_buffers_submit)
                 .signal_semaphores(&signal_semaphores);
 
-            self.command_manager.submit(
-                self.vulkan_device.graphics_queue,
-                &[submit_info],
-                frame_sync.in_flight,
-            )?;
+            self.cmds
+                .submit(self.device.graphics_queue, &[submit_info], in_flight_fence)?;
 
             let present_result = {
                 let swapchain_ref = self
                     .swapchain
                     .as_ref()
                     .ok_or(AshError::VulkanError("Swapchain not available".to_string()))?;
-                swapchain_ref.present(
-                    self.vulkan_device.present_queue,
-                    image_index,
-                    frame_sync.render_finished,
-                )
+                swapchain_ref.present(self.device.present_queue, image_index, render_finished)
             };
 
             match present_result {
@@ -2166,7 +2490,7 @@ impl Renderer {
             forward_plus.update_lights(lights, &[]);
             // Upload to GPU
             unsafe {
-                let _ = forward_plus.upload_to_gpu(&self.allocator.vma);
+                let _ = forward_plus.upload_to_gpu(&self.alloc.vma);
             }
         }
     }
@@ -2179,7 +2503,7 @@ impl Renderer {
         if let Some(ref mut forward_plus) = self.forward_plus {
             forward_plus.update_lights(&[], lights);
             unsafe {
-                let _ = forward_plus.upload_to_gpu(&self.allocator.vma);
+                let _ = forward_plus.upload_to_gpu(&self.alloc.vma);
             }
         }
     }
@@ -2193,7 +2517,7 @@ impl Renderer {
         if let Some(ref mut forward_plus) = self.forward_plus {
             forward_plus.update_lights(point_lights, directional_lights);
             unsafe {
-                let _ = forward_plus.upload_to_gpu(&self.allocator.vma);
+                let _ = forward_plus.upload_to_gpu(&self.alloc.vma);
             }
         }
     }
@@ -2241,24 +2565,19 @@ impl Renderer {
             });
 
         // Create Hi-Z pass
-        let mut hiz = HiZPass::new(Arc::clone(&self.vulkan_device.device));
+        let mut hiz = HiZPass::new(Arc::clone(&self.device.device));
         unsafe {
-            hiz.initialize(
-                &self.allocator.vma,
-                &self.vulkan_device,
-                extent.width,
-                extent.height,
-            )?;
+            hiz.init(&self.alloc.vma, &self.device, extent.width, extent.height);
         }
 
         // Create Indirect Draw pass
-        let mut indirect = IndirectDrawPass::new(Arc::clone(&self.vulkan_device.device));
+        let mut indirect = IndirectDrawPass::new(Arc::clone(&self.device.device));
         unsafe {
-            indirect.initialize(
-                &self.allocator.vma,
-                &self.vulkan_device,
+            indirect.init(
+                &self.alloc.vma,
+                &self.device,
                 crate::renderer::indirect_draw::MAX_INDIRECT_OBJECTS,
-            )?;
+            );
             indirect.update_hiz_descriptor(&hiz);
         }
 
@@ -2300,15 +2619,15 @@ impl Renderer {
                 height: 1080,
             });
 
-        let mut vsr = VsrPass::new(Arc::clone(&self.vulkan_device.device));
+        let mut vsr = VsrPass::new(Arc::clone(&self.device.device));
         unsafe {
-            vsr.initialize(
-                &self.allocator.vma,
-                &self.vulkan_device,
+            vsr.init(
+                &self.alloc.vma,
+                &self.device,
                 extent.width,
                 extent.height,
                 quality,
-            )?;
+            );
         }
 
         self.vsr_pass = Some(vsr);
@@ -2368,15 +2687,15 @@ impl Renderer {
                 height: 1080,
             });
 
-        let mut ssgi = SsgiPass::new(Arc::clone(&self.vulkan_device.device));
+        let mut ssgi = SsgiPass::new(Arc::clone(&self.device.device));
         unsafe {
-            ssgi.initialize(
-                &self.allocator.vma,
-                &self.vulkan_device,
+            ssgi.init(
+                &self.alloc.vma,
+                &self.device,
                 extent.width,
                 extent.height,
                 quality,
-            )?;
+            );
         }
 
         self.ssgi_pass = Some(ssgi);
@@ -2412,26 +2731,16 @@ impl Renderer {
 
     /// Enables HDR rendering. Should be called after initialization.
     /// Allocates GPU memory for the HDR buffer.
-    pub fn initialize_hdr(&mut self) -> Result<()> {
-        let extent = self
-            .swapchain
-            .as_ref()
-            .ok_or(AshError::VulkanError("Swapchain not available".to_string()))?
-            .extent;
-
+    pub fn initialize_hdr(&mut self, width: u32, height: u32) -> Result<()> {
         unsafe {
             let hdr = hdr_framebuffer::HdrFramebuffer::new(
-                Arc::clone(&self.vulkan_device.device),
-                Arc::clone(&self.allocator),
-                extent.width,
-                extent.height,
+                Arc::clone(&self.device.device),
+                Arc::clone(&self.alloc),
+                width,
+                height,
             )?;
             self.hdr_framebuffer = Some(hdr);
-            log::info!(
-                "HDR framebuffer initialized ({}x{})",
-                extent.width,
-                extent.height
-            );
+            log::info!("HDR framebuffer initialized ({width}x{height})");
         }
 
         Ok(())
@@ -2446,10 +2755,8 @@ impl Renderer {
             .format;
 
         unsafe {
-            let pass = fullscreen_pass::FullscreenPass::new(
-                Arc::clone(&self.vulkan_device.device),
-                format,
-            )?;
+            let pass =
+                fullscreen_pass::FullscreenPass::new(Arc::clone(&self.device.device), format)?;
             self.fullscreen_pass = Some(pass);
             log::info!("Fullscreen pass initialized");
         }
@@ -2461,14 +2768,193 @@ impl Renderer {
     ///
     /// Initializes HDR, fullscreen pass, and enables tonemapping.
     pub fn enable_post_processing(&mut self) -> Result<()> {
-        self.initialize_hdr()?;
+        let extent = self
+            .swapchain
+            .as_ref()
+            .ok_or(AshError::VulkanError("Swapchain not available".into()))?
+            .extent;
+
+        self.initialize_hdr(extent.width, extent.height)?;
         self.initialize_fullscreen_pass()?;
+        self.create_post_descriptors()?;
+        self.recreate_post_pipeline()?;
+
         self.tonemapping_enabled = true;
-        log::info!(
-            "Post-processing enabled (tonemapping: exposure={}, gamma={})",
-            self.tonemapping_exposure,
-            self.tonemapping_gamma
-        );
+        log::info!("Post-processing pipeline enabled (HDR + Tonemapping)");
+        Ok(())
+    }
+
+    fn create_post_descriptors(&mut self) -> Result<()> {
+        if self.fullscreen_pass.is_none() {
+            return Ok(());
+        }
+
+        let device = &self.device.device;
+        let count = self.framebuffers.len() as u32;
+
+        // Cleanup old pool if exists
+        if self.post_descriptor_pool != vk::DescriptorPool::null() {
+            unsafe {
+                device.destroy_descriptor_pool(self.post_descriptor_pool, None);
+            }
+        }
+
+        let pool_sizes = [vk::DescriptorPoolSize {
+            ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+            descriptor_count: count * 3, // HDR, Bloom, SSGI
+        }];
+
+        let pool_info = vk::DescriptorPoolCreateInfo::default()
+            .max_sets(count)
+            .pool_sizes(&pool_sizes);
+
+        self.post_descriptor_pool = unsafe {
+            device
+                .create_descriptor_pool(&pool_info, None)
+                .map_err(|e| {
+                    AshError::VulkanError(format!("Failed to create post descriptor pool: {e}"))
+                })?
+        };
+
+        let layouts = vec![
+            self.fullscreen_pass
+                .as_ref()
+                .unwrap()
+                .descriptor_set_layout();
+            count as usize
+        ];
+        let alloc_info = vk::DescriptorSetAllocateInfo::default()
+            .descriptor_pool(self.post_descriptor_pool)
+            .set_layouts(&layouts);
+
+        self.post_descriptor_sets = unsafe {
+            device.allocate_descriptor_sets(&alloc_info).map_err(|e| {
+                AshError::VulkanError(format!("Failed to allocate post descriptor sets: {e}"))
+            })?
+        };
+
+        self.update_post_descriptors()?;
+
+        Ok(())
+    }
+
+    fn update_post_descriptors(&mut self) -> Result<()> {
+        if self.post_descriptor_sets.is_empty() {
+            return Ok(());
+        }
+
+        let hdr = self.hdr_framebuffer.as_ref();
+        let vsr = self.vsr_pass.as_ref();
+
+        let color_view = if let Some(vsr) = vsr {
+            vsr.output_view()
+        } else if let Some(hdr) = hdr {
+            hdr.view()
+        } else {
+            return Ok(());
+        };
+
+        let sampler = if let Some(hdr) = hdr {
+            hdr.sampler()
+        } else {
+            // Default sampler if HDR not available (though it should be)
+            unsafe {
+                self.device
+                    .device
+                    .create_sampler(&vk::SamplerCreateInfo::default(), None)
+                    .unwrap()
+            }
+        };
+
+        let layout = if vsr.is_some() {
+            vk::ImageLayout::GENERAL
+        } else {
+            vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL
+        };
+
+        let ssgi_view = self
+            .ssgi_pass
+            .as_ref()
+            .map(|s| s.gi_view())
+            .unwrap_or(color_view);
+        let bloom_view = color_view; // Placeholder until bloom is fully implemented
+
+        for descriptor_set in &self.post_descriptor_sets {
+            let color_info = vk::DescriptorImageInfo {
+                sampler,
+                image_view: color_view,
+                image_layout: layout,
+            };
+
+            let bloom_info = vk::DescriptorImageInfo {
+                sampler,
+                image_view: bloom_view,
+                image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+            };
+
+            let ssgi_info = vk::DescriptorImageInfo {
+                sampler,
+                image_view: ssgi_view,
+                image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+            };
+
+            let color_infos = [color_info];
+            let bloom_infos = [bloom_info];
+            let ssgi_infos = [ssgi_info];
+
+            let descriptor_writes = [
+                vk::WriteDescriptorSet::default()
+                    .dst_set(*descriptor_set)
+                    .dst_binding(0)
+                    .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                    .image_info(&color_infos),
+                vk::WriteDescriptorSet::default()
+                    .dst_set(*descriptor_set)
+                    .dst_binding(1)
+                    .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                    .image_info(&bloom_infos),
+                vk::WriteDescriptorSet::default()
+                    .dst_set(*descriptor_set)
+                    .dst_binding(2)
+                    .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                    .image_info(&ssgi_infos),
+            ];
+
+            unsafe {
+                self.device
+                    .device
+                    .update_descriptor_sets(&descriptor_writes, &[]);
+            }
+        }
+
+        Ok(())
+    }
+
+    fn recreate_post_pipeline(&mut self) -> Result<()> {
+        if let Some(ref pass) = self.fullscreen_pass {
+            let mut builder = vulkan::Pipeline::builder(Arc::clone(&self.device.device))
+                .with_layout(pass.pipeline_layout())
+                .with_render_pass(pass.render_pass())
+                .with_extent(self.swapchain.as_ref().unwrap().extent)
+                .with_cull_mode(vk::CullModeFlags::NONE);
+
+            builder = builder.add_shader_from_bytes(
+                include_bytes!("../../shaders/postprocess.vert.spv"),
+                vk::ShaderStageFlags::VERTEX,
+                "main",
+            )?;
+
+            builder = builder.add_shader_from_bytes(
+                include_bytes!("../../shaders/tonemapping.frag.spv"),
+                vk::ShaderStageFlags::FRAGMENT,
+                "main",
+            )?;
+
+            let pipeline = builder.build()?;
+            self.post_pipeline = Some(pipeline.pipeline);
+            // Pipeline cleanup is handled by resource registry if we register it,
+            // but for simplicity we'll just manage it manually for now.
+        }
         Ok(())
     }
 
@@ -2544,12 +3030,12 @@ impl Renderer {
             return Ok(());
         }
 
-        let timestamp_period = self.vulkan_device.timestamp_period_ns;
+        let timestamp_period = self.device.timestamp_period_ns;
         let timestamps_supported = timestamp_period > 0.0;
 
         unsafe {
             let profiler = GpuProfiler::new(
-                Arc::clone(&self.vulkan_device.device),
+                Arc::clone(&self.device.device),
                 timestamp_period,
                 timestamps_supported,
             )?;
@@ -2595,37 +3081,37 @@ impl Drop for Renderer {
         unsafe {
             log::info!("Shutting down Ash Renderer...");
 
-            let _ = self.vulkan_device.device.device_wait_idle();
+            let _ = self.device.device.device_wait_idle();
 
             self.flush_old_swapchains();
 
-            if let Err(e) = self.resource_registry.cleanup() {
+            if let Err(e) = self.resources.cleanup() {
                 log::error!("Resource registry cleanup failed: {e}");
             }
 
-            if let Some(manager) = self.descriptor_manager.take() {
+            if let Some(manager) = self.descriptors.take() {
                 drop(manager);
             }
 
-            self.feature_manager.cleanup();
+            self.features.cleanup();
 
             // Cleanup Forward+ integration (Phase 5)
             if let Some(mut fp) = self.forward_plus.take() {
-                fp.destroy(&self.allocator.vma);
+                fp.destroy(&self.alloc.vma);
             }
 
             // Cleanup UE5 feature modules (Phase 5)
             if let Some(mut hiz) = self.hiz_pass.take() {
-                hiz.destroy(&self.allocator.vma);
+                hiz.destroy(&self.alloc.vma);
             }
             if let Some(mut indirect) = self.indirect_draw_pass.take() {
-                indirect.destroy(&self.allocator.vma);
+                indirect.destroy(&self.alloc.vma);
             }
             if let Some(mut vsr) = self.vsr_pass.take() {
-                vsr.destroy(&self.allocator.vma);
+                vsr.destroy(&self.alloc.vma);
             }
             if let Some(mut ssgi) = self.ssgi_pass.take() {
-                ssgi.destroy(&self.allocator.vma);
+                ssgi.destroy(&self.alloc.vma);
             }
 
             for ub in &mut self.uniform_buffers {

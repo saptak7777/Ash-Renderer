@@ -85,6 +85,14 @@ impl FullscreenPass {
                 stage_flags: vk::ShaderStageFlags::FRAGMENT,
                 ..Default::default()
             },
+            // Binding 2: SSGI input
+            vk::DescriptorSetLayoutBinding {
+                binding: 2,
+                descriptor_type: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+                descriptor_count: 1,
+                stage_flags: vk::ShaderStageFlags::FRAGMENT,
+                ..Default::default()
+            },
         ];
 
         let layout_info = vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings);
@@ -150,7 +158,7 @@ impl Drop for FullscreenPass {
 
 /// Push constants for post-processing shaders
 #[repr(C)]
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct PostProcessPushConstants {
     /// Exposure multiplier for tonemapping
     pub exposure: f32,

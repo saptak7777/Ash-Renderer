@@ -15,6 +15,7 @@ pub struct UploadedMesh {
     index_buffer: Option<BufferHandle>,
     vertex_count: u32,
     index_count: u32,
+    pub clusters: Vec<crate::renderer::resources::mesh::MeshCluster>,
 }
 
 impl MaterialPushConstants {
@@ -52,13 +53,17 @@ impl UploadedMesh {
     pub fn index_count(&self) -> u32 {
         self.index_count
     }
+
+    pub fn clusters(&self) -> &[crate::renderer::resources::mesh::MeshCluster] {
+        &self.clusters
+    }
 }
 
-/// Caches GPU buffers for meshes so multiple entities can reuse uploads.
+/// Caches GPU-side data for meshes.
 pub struct ModelRenderer {
-    allocator: Arc<Allocator>,
+    alloc: Arc<Allocator>,
     device: Arc<Device>,
-    meshes: HashMap<String, UploadedMesh>,
+    cache: HashMap<String, UploadedMesh>,
 }
 
 #[repr(C, align(16))]
@@ -97,11 +102,11 @@ pub struct MaterialPushConstants {
 }
 
 impl ModelRenderer {
-    pub fn new(allocator: Arc<Allocator>, device: Arc<Device>) -> Self {
+    pub fn new(alloc: Arc<Allocator>, device: Arc<Device>) -> Self {
         Self {
-            allocator,
+            alloc,
             device,
-            meshes: HashMap::new(),
+            cache: HashMap::new(),
         }
     }
 
@@ -109,29 +114,38 @@ impl ModelRenderer {
         &mut self,
         key: &str,
         mesh: &Mesh,
-        command_pool: vk::CommandPool,
+        pool: vk::CommandPool,
         queue: vk::Queue,
     ) -> Result<&UploadedMesh> {
-        if !self.meshes.contains_key(key) {
-            let uploaded = self.upload_mesh(mesh, command_pool, queue)?;
-            self.meshes.insert(key.to_string(), uploaded);
+        // Human Pattern: Assertive on logic that should never happen
+        if key.is_empty() {
+            panic!("ModelRenderer: Empty key provided for mesh upload");
         }
 
-        self.meshes
+        if !self.cache.contains_key(key) {
+            let uploaded = self.upload_mesh(mesh, pool, queue)?;
+            self.cache.insert(key.to_string(), uploaded);
+        }
+
+        self.cache
             .get(key)
-            .ok_or_else(|| AshError::VulkanError(format!("Mesh '{key}' not found after upload")))
+            .ok_or_else(|| AshError::VulkanError(format!("Mesh '{key}' lost during cache lookup")))
     }
 
     pub fn get(&self, key: &str) -> Option<&UploadedMesh> {
-        self.meshes.get(key)
+        // Defensive: handle empty key gracefully here for safety in loops
+        if key.is_empty() {
+            return None;
+        }
+        self.cache.get(key)
     }
 
     pub fn clear(&mut self) {
-        self.meshes.clear();
+        self.cache.clear();
     }
 
     pub fn uploaded_meshes(&self) -> impl Iterator<Item = (&str, &UploadedMesh)> {
-        self.meshes.iter().map(|(k, v)| (k.as_str(), v))
+        self.cache.iter().map(|(k, v)| (k.as_str(), v))
     }
 
     fn upload_mesh(
@@ -140,25 +154,26 @@ impl ModelRenderer {
         command_pool: vk::CommandPool,
         queue: vk::Queue,
     ) -> Result<UploadedMesh> {
-        let vertex_count = mesh.vertices.len() as u32;
-        let vertex_size = (mesh.vertices.len() * std::mem::size_of::<Vertex>()) as vk::DeviceSize;
+        // v_count/v_size: abbreviated names for internal scope
+        let v_count = mesh.vertices.len() as u32;
+        let v_size = (mesh.vertices.len() * std::mem::size_of::<Vertex>()) as vk::DeviceSize;
 
         let vertex_buffer = self.allocate_and_fill_buffer(
-            vertex_size,
+            v_size,
             vk::BufferUsageFlags::VERTEX_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
             mesh.vertices.as_ptr() as *const u8,
-            vertex_size,
+            v_size,
             command_pool,
             queue,
         )?;
 
-        let (index_buffer, index_count) = if let Some(indices) = mesh.indices.as_ref() {
-            let index_size = (indices.len() * std::mem::size_of::<u32>()) as vk::DeviceSize;
+        let (index_buffer, i_count) = if let Some(indices) = mesh.indices.as_ref() {
+            let i_size = (indices.len() * std::mem::size_of::<u32>()) as vk::DeviceSize;
             let buffer = self.allocate_and_fill_buffer(
-                index_size,
+                i_size,
                 vk::BufferUsageFlags::INDEX_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
                 indices.as_ptr() as *const u8,
-                index_size,
+                i_size,
                 command_pool,
                 queue,
             )?;
@@ -170,8 +185,9 @@ impl ModelRenderer {
         Ok(UploadedMesh {
             vertex_buffer,
             index_buffer,
-            vertex_count,
-            index_count,
+            vertex_count: v_count,
+            index_count: i_count,
+            clusters: mesh.clusters.clone(),
         })
     }
 
@@ -186,7 +202,7 @@ impl ModelRenderer {
     ) -> Result<BufferHandle> {
         unsafe {
             let (staging_buffer, mut staging_alloc) = self
-                .allocator
+                .alloc
                 .vma
                 .create_buffer(
                     &vk::BufferCreateInfo::default()
@@ -203,17 +219,17 @@ impl ModelRenderer {
                     AshError::VulkanError(format!("Failed to create staging buffer: {e}"))
                 })?;
 
-            let mapped = self
-                .allocator
-                .vma
-                .map_memory(&mut staging_alloc)
-                .map_err(|e| AshError::VulkanError(format!("Failed to map staging buffer: {e}")))?;
+            let mapped =
+                self.alloc.vma.map_memory(&mut staging_alloc).map_err(|e| {
+                    AshError::VulkanError(format!("Failed to map staging buffer: {e}"))
+                })?;
             let mapped = mapped.cast::<u8>();
+            // Copy data to staging
             ptr::copy_nonoverlapping(data_ptr, mapped, data_size as usize);
-            self.allocator.vma.unmap_memory(&mut staging_alloc);
+            self.alloc.vma.unmap_memory(&mut staging_alloc);
 
             let device_buffer = BufferHandle::new(
-                Arc::clone(&self.allocator),
+                Arc::clone(&self.alloc),
                 size,
                 usage | vk::BufferUsageFlags::TRANSFER_DST,
                 vk_mem::MemoryUsage::AutoPreferDevice,
@@ -228,7 +244,7 @@ impl ModelRenderer {
                 size,
             )?;
 
-            self.allocator
+            self.alloc
                 .vma
                 .destroy_buffer(staging_buffer, &mut staging_alloc);
 
@@ -353,6 +369,8 @@ impl ModelRenderer {
             bytes_of(&push),
         );
 
+        // Human choice: Manual offset instead of automated builder for fragment push constants.
+        // This makes the layout explicit and avoids accidental overlap.
         let material_offset = std::mem::size_of::<MeshPushConstants>() as u32;
         self.device.cmd_push_constants(
             command_buffer,

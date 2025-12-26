@@ -6,14 +6,10 @@ pub struct Allocator {
 }
 
 impl Allocator {
-    /// Creates a new VMA allocator for GPU memory management.
+    /// VMA allocator initialization.
     ///
     /// # Safety
-    ///
-    /// This function creates a Vulkan memory allocator. Caller must ensure:
-    /// - `device` references a valid and initialized Vulkan device
-    /// - The device is not being destroyed while this allocator is in use
-    /// - All buffers allocated from this allocator are destroyed before dropping the allocator
+    /// // SAFETY: Assumes a valid Vulkan instance/device. Device must outlive the allocator.
     pub unsafe fn new(device: &crate::vulkan::VulkanDevice) -> crate::Result<Self> {
         let vma = vk_mem::Allocator::new(vk_mem::AllocatorCreateInfo::new(
             device.instance.instance(),
@@ -27,21 +23,18 @@ impl Allocator {
         Ok(Self { vma })
     }
 
-    /// Allocates a GPU buffer with the specified parameters.
+    /// Allocate a GPU buffer.
     ///
     /// # Safety
-    ///
-    /// This function allocates GPU memory. Caller must ensure:
-    /// - Parameters are valid (size > 0, valid usage flags)
-    /// - The returned allocation is properly destroyed with `destroy_buffer`
-    /// - The allocator outlives all buffers created from it
-    /// - Concurrent allocations use proper synchronization
+    /// // SAFETY: Standard VMA allocation. Params must be valid for the device.
     pub unsafe fn create_buffer(
         &self,
         size: u64,
         usage: vk::BufferUsageFlags,
         memory_usage: vk_mem::MemoryUsage,
     ) -> crate::Result<(vk::Buffer, vk_mem::Allocation)> {
+        debug_assert!(size > 0, "Buffer size must be non-zero"); // Catch simple logic errors in dev
+
         let flags = if memory_usage == vk_mem::MemoryUsage::AutoPreferHost {
             vk_mem::AllocationCreateFlags::HOST_ACCESS_SEQUENTIAL_WRITE
         } else {
@@ -63,12 +56,10 @@ impl Allocator {
             .map_err(|e| crate::AshError::VulkanError(format!("Buffer creation failed: {e:?}")))
     }
 
-    /// Creates an image with the specified parameters.
+    /// Create a Vulkan image.
     ///
     /// # Safety
-    /// Caller must ensure the returned image is destroyed with `vk_mem::Allocator::destroy_image`
-    /// before dropping the allocator and that the image is no longer in use by the GPU when
-    /// destroyed.
+    /// // SAFETY: Image handle must be destroyed before the allocator.
     pub unsafe fn create_image(
         &self,
         image_info: &vk::ImageCreateInfo,
@@ -85,15 +76,10 @@ impl Allocator {
             .map_err(|e| crate::AshError::VulkanError(format!("Image creation failed: {e:?}")))
     }
 
-    /// Destroys a previously allocated buffer.
+    /// Deallocate buffer memory.
     ///
     /// # Safety
-    ///
-    /// This function deallocates GPU memory. Caller must ensure:
-    /// - `buffer` was allocated from this allocator
-    /// - `buffer` is no longer in use by the GPU
-    /// - `allocation` corresponds to the buffer being destroyed
-    /// - The buffer is not accessed after destruction
+    /// // SAFETY: Handles must be valid and not currently in use by the GPU.
     pub unsafe fn destroy_buffer(&self, buffer: vk::Buffer, allocation: &mut vk_mem::Allocation) {
         self.vma.destroy_buffer(buffer, allocation);
     }

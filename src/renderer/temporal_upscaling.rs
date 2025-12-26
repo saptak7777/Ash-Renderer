@@ -48,55 +48,47 @@ impl VsrQuality {
     }
 }
 
-/// Halton sequence generator for jittered sampling
+/// Halton sequence for QMC jittering
 pub struct HaltonSequence {
-    index: u32,
-    base2: Vec<f32>,
-    base3: Vec<f32>,
+    u: u32, // current index
+    b2: Vec<f32>,
+    b3: Vec<f32>,
 }
 
 impl HaltonSequence {
-    /// Create a new Halton sequence generator
-    pub fn new(max_samples: usize) -> Self {
-        let mut base2 = Vec::with_capacity(max_samples);
-        let mut base3 = Vec::with_capacity(max_samples);
+    pub fn new(samples: usize) -> Self {
+        let mut b2 = Vec::with_capacity(samples);
+        let mut b3 = Vec::with_capacity(samples);
 
-        for i in 1..=max_samples {
-            base2.push(Self::halton(i as u32, 2));
-            base3.push(Self::halton(i as u32, 3));
+        for i in 1..=samples {
+            b2.push(Self::phi(i as u32, 2));
+            b3.push(Self::phi(i as u32, 3));
         }
 
-        Self {
-            index: 0,
-            base2,
-            base3,
+        Self { u: 0, b2, b3 }
+    }
+
+    // Corput radical inverse in base b
+    fn phi(mut i: u32, b: u32) -> f32 {
+        let mut r = 0.0;
+        let mut f = 1.0 / b as f32;
+        while i > 0 {
+            r += f * (i % b) as f32;
+            i /= b;
+            f /= b as f32;
         }
+        r
     }
 
-    /// Generate Halton sequence value
-    fn halton(mut index: u32, base: u32) -> f32 {
-        let mut result = 0.0;
-        let mut f = 1.0 / base as f32;
-
-        while index > 0 {
-            result += f * (index % base) as f32;
-            index /= base;
-            f /= base as f32;
-        }
-
-        result
+    /// Next jitter sample in [-0.5, 0.5]
+    pub fn next(&mut self) -> (f32, f32) {
+        let idx = self.u as usize % self.b2.len();
+        self.u = self.u.wrapping_add(1);
+        (self.b2[idx] - 0.5, self.b3[idx] - 0.5)
     }
 
-    /// Get next jitter offset in [-0.5, 0.5] range
-    pub fn next_sample(&mut self) -> (f32, f32) {
-        let idx = self.index as usize % self.base2.len();
-        self.index = self.index.wrapping_add(1);
-        (self.base2[idx] - 0.5, self.base3[idx] - 0.5)
-    }
-
-    /// Reset the sequence
     pub fn reset(&mut self) {
-        self.index = 0;
+        self.u = 0;
     }
 }
 
@@ -120,130 +112,108 @@ pub struct TsrPushConstants {
 pub struct VsrPass {
     device: Arc<ash::Device>,
 
-    // Motion vectors image (R16G16_SFLOAT)
-    motion_image: vk::Image,
-    motion_allocation: Option<vk_mem::Allocation>,
-    motion_view: vk::ImageView,
+    // Render-res buffers
+    motion_img: vk::Image,
+    motion_alloc: Option<vk_mem::Allocation>,
+    motion_v: vk::ImageView,
 
-    // History buffers (ping-pong)
-    history_images: [vk::Image; 2],
-    history_allocations: [Option<vk_mem::Allocation>; 2],
-    history_views: [vk::ImageView; 2],
+    // Display-res history (ping-pong)
+    history_imgs: [vk::Image; 2],
+    history_allocs: [Option<vk_mem::Allocation>; 2],
+    history_vs: [vk::ImageView; 2],
 
-    // Upscale compute pipeline
-    upscale_pipeline: vk::Pipeline,
+    upscale_pl: vk::Pipeline,
     upscale_layout: vk::PipelineLayout,
 
-    // Descriptor resources
     descriptor_pool: vk::DescriptorPool,
-    descriptor_layout: vk::DescriptorSetLayout,
-    descriptor_sets: [vk::DescriptorSet; 2],
+    desc_layout: vk::DescriptorSetLayout,
+    desc_sets: [vk::DescriptorSet; 2],
 
-    // Sampler for linear filtering
-    linear_sampler: vk::Sampler,
+    sampler: vk::Sampler,
 
-    // State
-    render_width: u32,
-    render_height: u32,
-    display_width: u32,
-    display_height: u32,
+    // Dimensions
+    render_w: u32,
+    render_h: u32,
+    display_w: u32,
+    display_h: u32,
+
     quality: VsrQuality,
     halton: HaltonSequence,
-    frame_index: u32,
+    frame_idx: u32,
 
     initialized: bool,
 }
 
 impl VsrPass {
-    /// Create a new TSR pass (uninitialized)
     pub fn new(device: Arc<ash::Device>) -> Self {
         Self {
             device,
-            motion_image: vk::Image::null(),
-            motion_allocation: None,
-            motion_view: vk::ImageView::null(),
-            history_images: [vk::Image::null(); 2],
-            history_allocations: [None, None],
-            history_views: [vk::ImageView::null(); 2],
-            upscale_pipeline: vk::Pipeline::null(),
+            motion_img: vk::Image::null(),
+            motion_alloc: None,
+            motion_v: vk::ImageView::null(),
+            history_imgs: [vk::Image::null(); 2],
+            history_allocs: [None, None],
+            history_vs: [vk::ImageView::null(); 2],
+            upscale_pl: vk::Pipeline::null(),
             upscale_layout: vk::PipelineLayout::null(),
             descriptor_pool: vk::DescriptorPool::null(),
-            descriptor_layout: vk::DescriptorSetLayout::null(),
-            descriptor_sets: [vk::DescriptorSet::null(); 2],
-            linear_sampler: vk::Sampler::null(),
-            render_width: 0,
-            render_height: 0,
-            display_width: 0,
-            display_height: 0,
+            desc_layout: vk::DescriptorSetLayout::null(),
+            desc_sets: [vk::DescriptorSet::null(); 2],
+            sampler: vk::Sampler::null(),
+            render_w: 0,
+            render_h: 0,
+            display_w: 0,
+            display_h: 0,
             quality: VsrQuality::default(),
             halton: HaltonSequence::new(16),
-            frame_index: 0,
+            frame_idx: 0,
             initialized: false,
         }
     }
 
-    /// Initialize TSR resources
-    ///
     /// # Safety
     /// Allocator must be valid.
-    pub unsafe fn initialize(
+    pub unsafe fn init(
         &mut self,
-        allocator: &vk_mem::Allocator,
+        alloc: &vk_mem::Allocator,
         _vulkan_device: &VulkanDevice,
-        display_width: u32,
-        display_height: u32,
+        w: u32,
+        h: u32,
         quality: VsrQuality,
-    ) -> Result<()> {
+    ) {
         if self.initialized {
-            return Ok(());
+            return;
         }
 
-        self.display_width = display_width;
-        self.display_height = display_height;
+        self.display_w = w;
+        self.display_h = h;
         self.quality = quality;
 
-        let (rw, rh) = quality.render_size(display_width, display_height);
-        self.render_width = rw;
-        self.render_height = rh;
+        let (rw, rh) = quality.render_size(w, h);
+        self.render_w = rw;
+        self.render_h = rh;
 
-        log::info!(
-            "TSR: Initializing {}x{} -> {}x{} ({}x upscale)",
-            rw,
-            rh,
-            display_width,
-            display_height,
-            quality.factor()
-        );
-
-        // Create motion vector image
-        self.create_motion_image(allocator)?;
-
-        // Create history buffers
-        self.create_history_images(allocator)?;
-
-        // Create sampler
-        self.create_sampler()?;
-
-        // Create descriptors
-        self.create_descriptors()?;
-
-        // Create upscale pipeline
-        self.create_pipeline()?;
+        // VSR resources are mandatory for TSR rendering paths
+        self.create_motion_image(alloc)
+            .expect("TSR: Motion buffer failed");
+        self.create_history_images(alloc)
+            .expect("TSR: History buffer failed");
+        self.create_sampler().expect("TSR: Sampler failed");
+        self.create_descriptors().expect("TSR: Descriptors failed");
+        self.create_pipeline().expect("TSR: Pipeline failed");
 
         self.initialized = true;
-        Ok(())
     }
 
-    /// Create motion vector image
-    unsafe fn create_motion_image(&mut self, allocator: &vk_mem::Allocator) -> Result<()> {
+    unsafe fn create_motion_image(&mut self, alloc: &vk_mem::Allocator) -> Result<()> {
         use vk_mem::Alloc;
 
-        let image_info = vk::ImageCreateInfo::default()
+        let info = vk::ImageCreateInfo::default()
             .image_type(vk::ImageType::TYPE_2D)
             .format(vk::Format::R16G16_SFLOAT)
             .extent(vk::Extent3D {
-                width: self.render_width,
-                height: self.render_height,
+                width: self.render_w,
+                height: self.render_h,
                 depth: 1,
             })
             .mip_levels(1)
@@ -258,15 +228,15 @@ impl VsrPass {
             ..Default::default()
         };
 
-        let (image, allocation) = allocator
-            .create_image(&image_info, &alloc_info)
+        let (img, allocation) = alloc
+            .create_image(&info, &alloc_info)
             .map_err(|e| crate::AshError::VulkanError(format!("Motion image: {e:?}")))?;
 
-        self.motion_image = image;
-        self.motion_allocation = Some(allocation);
+        self.motion_img = img;
+        self.motion_alloc = Some(allocation);
 
         let view_info = vk::ImageViewCreateInfo::default()
-            .image(self.motion_image)
+            .image(self.motion_img)
             .view_type(vk::ImageViewType::TYPE_2D)
             .format(vk::Format::R16G16_SFLOAT)
             .subresource_range(
@@ -276,22 +246,20 @@ impl VsrPass {
                     .layer_count(1),
             );
 
-        self.motion_view = self.device.create_image_view(&view_info, None)?;
-
+        self.motion_v = self.device.create_image_view(&view_info, None)?;
         Ok(())
     }
 
-    /// Create history buffer images (ping-pong for temporal accumulation)
-    unsafe fn create_history_images(&mut self, allocator: &vk_mem::Allocator) -> Result<()> {
+    unsafe fn create_history_images(&mut self, alloc: &vk_mem::Allocator) -> Result<()> {
         use vk_mem::Alloc;
 
         for i in 0..2 {
-            let image_info = vk::ImageCreateInfo::default()
+            let info = vk::ImageCreateInfo::default()
                 .image_type(vk::ImageType::TYPE_2D)
                 .format(vk::Format::R16G16B16A16_SFLOAT)
                 .extent(vk::Extent3D {
-                    width: self.display_width,
-                    height: self.display_height,
+                    width: self.display_w,
+                    height: self.display_h,
                     depth: 1,
                 })
                 .mip_levels(1)
@@ -310,15 +278,15 @@ impl VsrPass {
                 ..Default::default()
             };
 
-            let (image, allocation) = allocator
-                .create_image(&image_info, &alloc_info)
+            let (img, allocation) = alloc
+                .create_image(&info, &alloc_info)
                 .map_err(|e| crate::AshError::VulkanError(format!("History image {i}: {e:?}")))?;
 
-            self.history_images[i] = image;
-            self.history_allocations[i] = Some(allocation);
+            self.history_imgs[i] = img;
+            self.history_allocs[i] = Some(allocation);
 
             let view_info = vk::ImageViewCreateInfo::default()
-                .image(self.history_images[i])
+                .image(self.history_imgs[i])
                 .view_type(vk::ImageViewType::TYPE_2D)
                 .format(vk::Format::R16G16B16A16_SFLOAT)
                 .subresource_range(
@@ -328,15 +296,14 @@ impl VsrPass {
                         .layer_count(1),
                 );
 
-            self.history_views[i] = self.device.create_image_view(&view_info, None)?;
+            self.history_vs[i] = self.device.create_image_view(&view_info, None)?;
         }
 
         Ok(())
     }
 
-    /// Create linear sampler
     unsafe fn create_sampler(&mut self) -> Result<()> {
-        let sampler_info = vk::SamplerCreateInfo::default()
+        let info = vk::SamplerCreateInfo::default()
             .mag_filter(vk::Filter::LINEAR)
             .min_filter(vk::Filter::LINEAR)
             .mipmap_mode(vk::SamplerMipmapMode::NEAREST)
@@ -344,18 +311,13 @@ impl VsrPass {
             .address_mode_v(vk::SamplerAddressMode::CLAMP_TO_EDGE)
             .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_EDGE);
 
-        self.linear_sampler = self.device.create_sampler(&sampler_info, None)?;
+        self.sampler = self.device.create_sampler(&info, None)?;
         Ok(())
     }
 
-    /// Create descriptor layout and pool
     unsafe fn create_descriptors(&mut self) -> Result<()> {
-        // Bindings:
-        // 0: Current frame color (sampled)
-        // 1: Motion vectors (sampled)
-        // 2: Depth buffer (sampled)
-        // 3: History buffer (sampled)
-        // 4: Output buffer (storage)
+        // [0..3]: Color, Motion, Depth, History
+        // [4]: Output
         let bindings = [
             vk::DescriptorSetLayoutBinding::default()
                 .binding(0)
@@ -385,7 +347,7 @@ impl VsrPass {
         ];
 
         let layout_info = vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings);
-        self.descriptor_layout = self
+        self.desc_layout = self
             .device
             .create_descriptor_set_layout(&layout_info, None)?;
 
@@ -406,20 +368,20 @@ impl VsrPass {
 
         self.descriptor_pool = self.device.create_descriptor_pool(&pool_info, None)?;
 
-        let layouts = [self.descriptor_layout, self.descriptor_layout];
+        let layouts = [self.desc_layout, self.desc_layout];
         let alloc_info = vk::DescriptorSetAllocateInfo::default()
             .descriptor_pool(self.descriptor_pool)
             .set_layouts(&layouts);
 
         let sets = self.device.allocate_descriptor_sets(&alloc_info)?;
-        self.descriptor_sets = [sets[0], sets[1]];
+        self.desc_sets = [sets[0], sets[1]];
 
         Ok(())
     }
 
     /// Create upscale compute pipeline
     unsafe fn create_pipeline(&mut self) -> Result<()> {
-        let shader_path = std::path::Path::new("shaders/tsr_upscale.spv");
+        let shader_path = std::path::Path::new("shaders/vsr_upscale.comp.spv");
 
         // Check if shader exists, if not skip pipeline creation
         if !shader_path.exists() {
@@ -441,7 +403,7 @@ impl VsrPass {
             .size(std::mem::size_of::<TsrPushConstants>() as u32);
 
         let layout_info = vk::PipelineLayoutCreateInfo::default()
-            .set_layouts(std::slice::from_ref(&self.descriptor_layout))
+            .set_layouts(std::slice::from_ref(&self.desc_layout))
             .push_constant_ranges(std::slice::from_ref(&push_constant_range));
 
         self.upscale_layout = self.device.create_pipeline_layout(&layout_info, None)?;
@@ -460,54 +422,40 @@ impl VsrPass {
             .create_compute_pipelines(vk::PipelineCache::null(), &[pipeline_info], None)
             .map_err(|(_, e)| e)?;
 
-        self.upscale_pipeline = pipelines[0];
+        self.upscale_pl = pipelines[0];
         self.device.destroy_shader_module(shader_module, None);
 
-        log::info!("TSR: Upscale pipeline created");
         Ok(())
     }
 
-    /// Get current jitter offset for projection matrix
     pub fn get_jitter(&mut self) -> (f32, f32) {
-        self.halton.next_sample()
+        self.halton.next()
     }
 
-    /// Apply jitter to projection matrix
     pub fn jitter_projection(&mut self, projection: glam::Mat4) -> glam::Mat4 {
         let (jx, jy) = self.get_jitter();
 
-        // Scale jitter to pixel size
-        let pixel_jitter_x = jx / self.render_width as f32;
-        let pixel_jitter_y = jy / self.render_height as f32;
+        let dx = jx / self.render_w as f32;
+        let dy = jy / self.render_h as f32;
 
-        // Apply sub-pixel jitter via translation in clip space
-        let jitter_matrix = glam::Mat4::from_translation(glam::Vec3::new(
-            pixel_jitter_x * 2.0,
-            pixel_jitter_y * 2.0,
-            0.0,
-        ));
-
-        jitter_matrix * projection
+        let mat = glam::Mat4::from_translation(glam::Vec3::new(dx * 2.0, dy * 2.0, 0.0));
+        mat * projection
     }
 
-    /// Get motion vector image view for render pass attachment
     pub fn motion_view(&self) -> vk::ImageView {
-        self.motion_view
+        self.motion_v
     }
 
-    /// Get motion image for layout transitions
     pub fn motion_image(&self) -> vk::Image {
-        self.motion_image
+        self.motion_img
     }
 
-    /// Get render resolution
     pub fn render_size(&self) -> (u32, u32) {
-        (self.render_width, self.render_height)
+        (self.render_w, self.render_h)
     }
 
-    /// Get display resolution
     pub fn display_size(&self) -> (u32, u32) {
-        (self.display_width, self.display_height)
+        (self.display_w, self.display_h)
     }
 
     /// Get current quality preset
@@ -515,14 +463,179 @@ impl VsrPass {
         self.quality
     }
 
+    /// Perform temporal upscaling
+    ///
+    /// # Safety
+    /// command_buffer must be in a recording state. Image views must be valid.
+    pub unsafe fn upscale(
+        &mut self,
+        command_buffer: vk::CommandBuffer,
+        input_view: vk::ImageView,
+        depth_view: vk::ImageView,
+        motion_view: vk::ImageView,
+        jitter: [f32; 2],
+    ) -> Result<()> {
+        if !self.initialized || self.upscale_pl == vk::Pipeline::null() {
+            return Ok(());
+        }
+
+        let prev = (self.frame_idx % 2) as usize;
+        let curr = ((self.frame_idx + 1) % 2) as usize;
+
+        self.update_descriptor_set(curr, input_view, depth_view, motion_view, prev)?;
+
+        // Image barrier for history and output
+        let image_barriers = [
+            vk::ImageMemoryBarrier::default()
+                .image(self.history_imgs[prev])
+                .old_layout(vk::ImageLayout::GENERAL)
+                .new_layout(vk::ImageLayout::GENERAL)
+                .src_access_mask(vk::AccessFlags::SHADER_WRITE)
+                .dst_access_mask(vk::AccessFlags::SHADER_READ)
+                .subresource_range(vk::ImageSubresourceRange {
+                    aspect_mask: vk::ImageAspectFlags::COLOR,
+                    level_count: 1,
+                    layer_count: 1,
+                    ..Default::default()
+                }),
+            vk::ImageMemoryBarrier::default()
+                .image(self.history_imgs[curr])
+                .old_layout(vk::ImageLayout::UNDEFINED)
+                .new_layout(vk::ImageLayout::GENERAL)
+                .src_access_mask(vk::AccessFlags::empty())
+                .dst_access_mask(vk::AccessFlags::SHADER_WRITE)
+                .subresource_range(vk::ImageSubresourceRange {
+                    aspect_mask: vk::ImageAspectFlags::COLOR,
+                    level_count: 1,
+                    layer_count: 1,
+                    ..Default::default()
+                }),
+        ];
+
+        self.device.cmd_pipeline_barrier(
+            command_buffer,
+            vk::PipelineStageFlags::COMPUTE_SHADER | vk::PipelineStageFlags::TRANSFER,
+            vk::PipelineStageFlags::COMPUTE_SHADER,
+            vk::DependencyFlags::empty(),
+            &[],
+            &[],
+            &image_barriers,
+        );
+
+        // Bind pipeline and descriptor set
+        self.device.cmd_bind_pipeline(
+            command_buffer,
+            vk::PipelineBindPoint::COMPUTE,
+            self.upscale_pl,
+        );
+
+        self.device.cmd_bind_descriptor_sets(
+            command_buffer,
+            vk::PipelineBindPoint::COMPUTE,
+            self.upscale_layout,
+            0,
+            &[self.desc_sets[curr]],
+            &[],
+        );
+
+        // Push constants
+        let push_constants = TsrPushConstants {
+            jitter,
+            render_size: [self.render_w as f32, self.render_h as f32],
+            display_size: [self.display_w as f32, self.display_h as f32],
+            history_weight: 0.95,
+            frame_index: self.frame_idx,
+        };
+
+        self.device.cmd_push_constants(
+            command_buffer,
+            self.upscale_layout,
+            vk::ShaderStageFlags::COMPUTE,
+            0,
+            bytemuck::bytes_of(&push_constants),
+        );
+
+        // Dispatch compute (8x8 groups)
+        let gx = self.display_w.div_ceil(8);
+        let gy = self.display_h.div_ceil(8);
+        self.device.cmd_dispatch(command_buffer, gx, gy, 1);
+
+        Ok(())
+    }
+
+    unsafe fn update_descriptor_set(
+        &self,
+        set_idx: usize,
+        input: vk::ImageView,
+        depth: vk::ImageView,
+        motion: vk::ImageView,
+        hist_idx: usize,
+    ) -> Result<()> {
+        let sampler_info = vk::DescriptorImageInfo::default()
+            .sampler(self.sampler)
+            .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL);
+
+        let input_info = [sampler_info.image_view(input)];
+        let motion_info = [sampler_info.image_view(motion)];
+        let depth_info = [sampler_info.image_view(depth)];
+        let history_info = [sampler_info.image_view(self.history_vs[hist_idx])];
+
+        let output_info = [vk::DescriptorImageInfo::default()
+            .image_view(self.history_vs[(hist_idx + 1) % 2])
+            .image_layout(vk::ImageLayout::GENERAL)];
+
+        let writes = [
+            vk::WriteDescriptorSet::default()
+                .dst_set(self.desc_sets[set_idx])
+                .dst_binding(0)
+                .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                .image_info(&input_info),
+            vk::WriteDescriptorSet::default()
+                .dst_set(self.desc_sets[set_idx])
+                .dst_binding(1)
+                .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                .image_info(&motion_info),
+            vk::WriteDescriptorSet::default()
+                .dst_set(self.desc_sets[set_idx])
+                .dst_binding(2)
+                .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                .image_info(&depth_info),
+            vk::WriteDescriptorSet::default()
+                .dst_set(self.desc_sets[set_idx])
+                .dst_binding(3)
+                .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                .image_info(&history_info),
+            vk::WriteDescriptorSet::default()
+                .dst_set(self.desc_sets[set_idx])
+                .dst_binding(4)
+                .descriptor_type(vk::DescriptorType::STORAGE_IMAGE)
+                .image_info(&output_info),
+        ];
+
+        self.device.update_descriptor_sets(&writes, &[]);
+        Ok(())
+    }
+
+    /// Get current upscaled output view
+    pub fn output_view(&self) -> vk::ImageView {
+        self.history_vs[(self.frame_idx % 2) as usize]
+    }
+
     /// Advance to next frame
     pub fn next_frame(&mut self) {
-        self.frame_index = self.frame_index.wrapping_add(1);
+        self.frame_idx = self.frame_idx.wrapping_add(1);
+    }
+
+    pub fn next_jitter(&mut self) -> (f32, f32) {
+        if !self.initialized {
+            return (0.0, 0.0);
+        }
+        self.halton.next()
     }
 
     /// Get current frame index (for ping-pong buffer selection)
     pub fn frame_index(&self) -> u32 {
-        self.frame_index
+        self.frame_idx
     }
 
     /// Destroy GPU resources
@@ -534,49 +647,39 @@ impl VsrPass {
             return;
         }
 
-        // Destroy motion vector resources
-        if self.motion_view != vk::ImageView::null() {
-            self.device.destroy_image_view(self.motion_view, None);
+        if self.motion_v != vk::ImageView::null() {
+            self.device.destroy_image_view(self.motion_v, None);
         }
-        if let Some(mut alloc) = self.motion_allocation.take() {
-            allocator.destroy_image(self.motion_image, &mut alloc);
+        if let Some(mut a) = self.motion_alloc.take() {
+            allocator.destroy_image(self.motion_img, &mut a);
         }
 
-        // Destroy history buffers
         for i in 0..2 {
-            if self.history_views[i] != vk::ImageView::null() {
-                self.device.destroy_image_view(self.history_views[i], None);
+            if self.history_vs[i] != vk::ImageView::null() {
+                self.device.destroy_image_view(self.history_vs[i], None);
             }
-            if let Some(mut alloc) = self.history_allocations[i].take() {
-                allocator.destroy_image(self.history_images[i], &mut alloc);
+            if let Some(mut a) = self.history_allocs[i].take() {
+                allocator.destroy_image(self.history_imgs[i], &mut a);
             }
         }
 
-        // Destroy sampler
-        if self.linear_sampler != vk::Sampler::null() {
-            self.device.destroy_sampler(self.linear_sampler, None);
+        if self.sampler != vk::Sampler::null() {
+            self.device.destroy_sampler(self.sampler, None);
         }
 
-        // Destroy pipeline
-        if self.upscale_pipeline != vk::Pipeline::null() {
-            self.device.destroy_pipeline(self.upscale_pipeline, None);
-        }
-        if self.upscale_layout != vk::PipelineLayout::null() {
+        if self.upscale_pl != vk::Pipeline::null() {
+            self.device.destroy_pipeline(self.upscale_pl, None);
             self.device
                 .destroy_pipeline_layout(self.upscale_layout, None);
         }
 
-        // Destroy descriptors
         if self.descriptor_pool != vk::DescriptorPool::null() {
             self.device
                 .destroy_descriptor_pool(self.descriptor_pool, None);
-        }
-        if self.descriptor_layout != vk::DescriptorSetLayout::null() {
             self.device
-                .destroy_descriptor_set_layout(self.descriptor_layout, None);
+                .destroy_descriptor_set_layout(self.desc_layout, None);
         }
 
         self.initialized = false;
-        log::info!("TSR: Resources destroyed");
     }
 }
