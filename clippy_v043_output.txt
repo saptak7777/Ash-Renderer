@@ -1,0 +1,40 @@
+﻿cargo :     Checking ash_renderer v0.4.3 
+(C:\Users\tilok\Downloads\Ash Renderer)
+At line:1 char:1
++ cargo clippy -- -D warnings 2>&1 | Out-File 
+-FilePath clippy_v043_out ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (     
+   Checking as...s\Ash Renderer):String) [], Rem  
+  oteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+error: variables can be used directly in the 
+`format!` string
+   --> src\renderer\resources\mesh.rs:616:42
+    |
+616 |             
+crate::AshError::VulkanError(format!("Mesh '{}' 
+not found in GLB", name))
+    |                                          
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://
+rust-lang.github.io/rust-clippy/master/index.html#
+uninlined_format_args
+    = note: `-D clippy::uninlined-format-args` 
+implied by `-D warnings`
+    = help: to override `-D warnings` add 
+`#[allow(clippy::uninlined_format_args)]`
+help: change this to
+    |
+616 -             
+crate::AshError::VulkanError(format!("Mesh '{}' 
+not found in GLB", name))
+616 +             
+crate::AshError::VulkanError(format!("Mesh 
+'{name}' not found in GLB"))
+    |
+
+error: could not compile `ash_renderer` (lib) due 
+to 1 previous error

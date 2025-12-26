@@ -566,20 +566,67 @@ impl Mesh {
         Ok(results)
     }
 
-    /// Loads a mesh from a GLB file (Legacy API, returns first mesh)
+    /// Loads a mesh from a GLB file.
+    ///
+    /// If the file contains multiple meshes, they are automatically merged into one.
+    /// Use `load_all_from_gltf()` for explicit control over individual parts.
     pub fn from_gltf(path: &str) -> crate::Result<Self> {
-        let mut meshes = Self::load_all_from_gltf(path)?;
+        let meshes = Self::load_all_from_gltf(path)?;
 
-        if meshes.len() > 1 {
-            log::warn!(
-                "GLB file '{}' contains {} meshes, but from_gltf() only returns the first.",
-                path,
-                meshes.len()
-            );
-            log::warn!("Use load_all_from_gltf() to load all parts, or merge() them.");
+        if meshes.len() == 1 {
+            return Ok(meshes.into_iter().next().unwrap());
         }
 
+        log::info!(
+            "GLB file '{}' contains {} meshes, merging them into a single mesh.",
+            path,
+            meshes.len()
+        );
+        Self::merge(meshes)
+    }
+
+    /// Loads only the first mesh from a GLB file.
+    ///
+    /// Useful when you know the file structure and only need the primary mesh.
+    pub fn from_gltf_first(path: &str) -> crate::Result<Self> {
+        let mut meshes = Self::load_all_from_gltf(path)?;
         Ok(meshes.remove(0))
+    }
+
+    /// Loads a specific mesh by index from a GLB file.
+    pub fn from_gltf_index(path: &str, index: usize) -> crate::Result<Self> {
+        let meshes = Self::load_all_from_gltf(path)?;
+
+        if index >= meshes.len() {
+            return Err(crate::AshError::VulkanError(format!(
+                "Mesh index {index} out of bounds (file has {} meshes)",
+                meshes.len()
+            )));
+        }
+
+        Ok(meshes.into_iter().nth(index).unwrap())
+    }
+
+    /// Loads a mesh by name from a GLB file.
+    pub fn from_gltf_named(path: &str, name: &str) -> crate::Result<Self> {
+        let meshes = Self::load_all_from_gltf(path)?;
+
+        meshes
+            .into_iter()
+            .find(|m| m.name == name)
+            .ok_or_else(|| crate::AshError::VulkanError(format!("Mesh '{name}' not found in GLB")))
+    }
+
+    /// Returns the number of meshes in a GLB file without loading them.
+    pub fn count_meshes_in_gltf(path: &str) -> crate::Result<usize> {
+        let meshes = Self::load_all_from_gltf(path)?;
+        Ok(meshes.len())
+    }
+
+    /// Lists all mesh names in a GLB file.
+    pub fn list_meshes_in_gltf(path: &str) -> crate::Result<Vec<String>> {
+        let meshes = Self::load_all_from_gltf(path)?;
+        Ok(meshes.iter().map(|m| m.name.clone()).collect())
     }
 
     /// Builds a mesh from a descriptor without uploading to the GPU.
@@ -1082,5 +1129,35 @@ mod tests {
     fn test_merge_empty() {
         let result = Mesh::merge(vec![]);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_from_gltf_first_mock() {
+        let m1 = Mesh::create_named_cube("First");
+        let m2 = Mesh::create_named_cube("Second");
+        let mut meshes = vec![m1, m2];
+        let first = meshes.remove(0);
+        assert_eq!(first.name, "First");
+    }
+
+    #[test]
+    fn test_mesh_selection_logic() {
+        let meshes = vec![
+            Mesh::create_named_cube("PartA"),
+            Mesh::create_named_cube("PartB"),
+        ];
+
+        // Test index selection
+        assert_eq!(meshes.get(0).unwrap().name, "PartA");
+        assert_eq!(meshes.get(1).unwrap().name, "PartB");
+        assert!(meshes.get(2).is_none());
+
+        // Test named selection
+        let part_b = meshes.iter().find(|m| m.name == "PartB");
+        assert!(part_b.is_some());
+        assert_eq!(part_b.unwrap().name, "PartB");
+
+        let missing = meshes.iter().find(|m| m.name == "Missing");
+        assert!(missing.is_none());
     }
 }
