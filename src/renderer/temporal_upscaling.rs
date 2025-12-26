@@ -81,6 +81,7 @@ impl HaltonSequence {
     }
 
     /// Next jitter sample in [-0.5, 0.5]
+    #[allow(clippy::should_implement_trait)]
     pub fn next(&mut self) -> (f32, f32) {
         let idx = self.u as usize % self.b2.len();
         self.u = self.u.wrapping_add(1);
@@ -381,18 +382,10 @@ impl VsrPass {
 
     /// Create upscale compute pipeline
     unsafe fn create_pipeline(&mut self) -> Result<()> {
-        let shader_path = std::path::Path::new("shaders/vsr_upscale.comp.spv");
-
-        // Check if shader exists, if not skip pipeline creation
-        if !shader_path.exists() {
-            log::warn!("TSR: tsr_upscale.spv not found, pipeline creation skipped");
-            return Ok(());
-        }
-
-        let shader_code = std::fs::read(shader_path)?;
+        let shader_code = include_bytes!(concat!(env!("OUT_DIR"), "/vsr_upscale.comp.spv"));
 
         let shader_module_info =
-            vk::ShaderModuleCreateInfo::default().code(bytemuck::cast_slice(&shader_code));
+            vk::ShaderModuleCreateInfo::default().code(bytemuck::cast_slice(shader_code));
         let shader_module = self
             .device
             .create_shader_module(&shader_module_info, None)?;

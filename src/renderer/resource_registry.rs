@@ -282,7 +282,7 @@ impl ResourceRegistry {
         // Philosophy 1: Intentional panic on double registration.
         // This is a logic error in the caller's resource management.
         if resources.contains_key(&id) {
-            panic!("ResourceRegistry: Resource ID {} already exists in registry. Logic error in caller.", id);
+            panic!("ResourceRegistry: Resource ID {id} already exists in registry. Logic error in caller.");
         }
 
         let deps_set: HashSet<_> = deps.into_iter().collect();

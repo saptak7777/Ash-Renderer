@@ -49,7 +49,7 @@ impl LightCullingIntegration {
     ///
     /// Call this during renderer initialization.
     pub fn load_shader(&mut self, device: &VulkanDevice) -> Result<()> {
-        let code = include_bytes!("../../shaders/light_culling.spv");
+        let code = include_bytes!(concat!(env!("OUT_DIR"), "/light_culling.comp.spv"));
         let shader =
             ShaderModule::load_from_bytes(&device.device, code, vk::ShaderStageFlags::COMPUTE)?;
 

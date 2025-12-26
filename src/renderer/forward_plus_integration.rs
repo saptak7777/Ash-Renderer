@@ -88,6 +88,11 @@ impl ForwardPlusIntegration {
         })
     }
 
+    /// Initialize GPU resources for Forward+ lighting.
+    ///
+    /// # Safety
+    /// The caller must ensure that the provided allocator remains valid for the duration
+    /// of the renderer's lifetime or until `destroy` is called.
     pub unsafe fn init(&mut self, allocator: &vk_mem::Allocator) {
         if self.initialized {
             return;
@@ -114,6 +119,11 @@ impl ForwardPlusIntegration {
         self.cached_info = self.lights.get_forward_plus_info();
     }
 
+    /// Upload current light data to GPU buffers.
+    ///
+    /// # Safety
+    /// The caller must ensure that the allocator is valid and that no concurrent
+    /// access to the light buffers occurs during this operation.
     pub unsafe fn upload_to_gpu(&mut self, allocator: &vk_mem::Allocator) -> Result<()> {
         if !self.initialized {
             return Ok(());
@@ -201,6 +211,11 @@ impl ForwardPlusIntegration {
     }
 
     /// Destroy all GPU resources
+    /// Destroy all GPU resources.
+    ///
+    /// # Safety
+    /// The caller must ensure that no GPU commands using these resources are
+    /// currently executing on the device.
     pub unsafe fn destroy(&mut self, allocator: &vk_mem::Allocator) {
         if !self.initialized {
             return;

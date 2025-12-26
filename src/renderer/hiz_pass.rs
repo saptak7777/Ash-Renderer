@@ -71,6 +71,10 @@ impl HiZPass {
         }
     }
 
+    /// Initialize Hi-Z pass resources.
+    ///
+    /// # Safety
+    /// The caller must ensure that the provided allocator and device are valid.
     pub unsafe fn init(
         &mut self,
         allocator: &vk_mem::Allocator,
@@ -275,11 +279,10 @@ impl HiZPass {
     /// Create compute pipeline
     unsafe fn create_pipeline(&mut self, _vulkan_device: &VulkanDevice) -> Result<()> {
         // Load shader module
-        let shader_path = std::path::Path::new("shaders/hiz_generate.spv");
-        let shader_code = std::fs::read(shader_path)?;
+        let shader_code = include_bytes!(concat!(env!("OUT_DIR"), "/hiz_generate.comp.spv"));
 
         let shader_module_info =
-            vk::ShaderModuleCreateInfo::default().code(bytemuck::cast_slice(&shader_code));
+            vk::ShaderModuleCreateInfo::default().code(bytemuck::cast_slice(shader_code));
 
         let shader_module = self
             .device

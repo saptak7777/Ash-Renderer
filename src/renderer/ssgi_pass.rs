@@ -356,12 +356,11 @@ impl SsgiPass {
     /// Create SSGI compute pipelines
     unsafe fn create_pipelines(&mut self) -> Result<()> {
         // GI main pass
-        let gi_shader_path = std::path::Path::new("shaders/ssgi.spv");
-        if gi_shader_path.exists() {
-            let shader_code = std::fs::read(gi_shader_path)?;
+        {
+            let shader_code = include_bytes!(concat!(env!("OUT_DIR"), "/ssgi.comp.spv"));
 
             let shader_module_info =
-                vk::ShaderModuleCreateInfo::default().code(bytemuck::cast_slice(&shader_code));
+                vk::ShaderModuleCreateInfo::default().code(bytemuck::cast_slice(shader_code));
             let shader_module = self
                 .device
                 .create_shader_module(&shader_module_info, None)?;
@@ -395,45 +394,6 @@ impl SsgiPass {
             self.device.destroy_shader_module(shader_module, None);
 
             log::info!("SSGI: GI pipeline created");
-        } else {
-            log::warn!("SSGI: ssgi.spv not found, pipeline creation skipped");
-        }
-
-        // Denoise pass
-        let denoise_shader_path = std::path::Path::new("shaders/ssgi_denoise.spv");
-        if denoise_shader_path.exists() {
-            let shader_code = std::fs::read(denoise_shader_path)?;
-
-            let shader_module_info =
-                vk::ShaderModuleCreateInfo::default().code(bytemuck::cast_slice(&shader_code));
-            let shader_module = self
-                .device
-                .create_shader_module(&shader_module_info, None)?;
-
-            // Reuse same layout for simplicity
-            let layout_info = vk::PipelineLayoutCreateInfo::default()
-                .set_layouts(std::slice::from_ref(&self.desc_layout));
-
-            self.denoise_layout = self.device.create_pipeline_layout(&layout_info, None)?;
-
-            let stage_info = vk::PipelineShaderStageCreateInfo::default()
-                .stage(vk::ShaderStageFlags::COMPUTE)
-                .module(shader_module)
-                .name(c"main");
-
-            let pipeline_info = vk::ComputePipelineCreateInfo::default()
-                .stage(stage_info)
-                .layout(self.denoise_layout);
-
-            let pipelines = self
-                .device
-                .create_compute_pipelines(vk::PipelineCache::null(), &[pipeline_info], None)
-                .map_err(|(_, e)| e)?;
-
-            self.denoise_pipeline = pipelines[0];
-            self.device.destroy_shader_module(shader_module, None);
-
-            log::info!("SSGI: Denoise pipeline created");
         }
 
         Ok(())

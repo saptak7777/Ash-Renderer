@@ -52,3 +52,7 @@ test_results.txt
 
 # Brain/artifacts directory
 /.gemini/
+
+# Documentation
+*.md
+!README.md

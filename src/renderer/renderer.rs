@@ -614,12 +614,12 @@ impl Renderer {
 
             pipeline_builder = pipeline_builder
                 .add_shader_from_bytes(
-                    include_bytes!("../../shaders/vert.spv"),
+                    include_bytes!(concat!(env!("OUT_DIR"), "/vert.spv")),
                     vk::ShaderStageFlags::VERTEX,
                     "main",
                 )?
                 .add_shader_from_bytes(
-                    include_bytes!("../../shaders/frag.spv"),
+                    include_bytes!(concat!(env!("OUT_DIR"), "/frag.spv")),
                     vk::ShaderStageFlags::FRAGMENT,
                     "main",
                 )?;
@@ -663,12 +663,12 @@ impl Renderer {
                         .with_depth_format(vk::Format::D32_SFLOAT)
                         .with_cull_mode(vk::CullModeFlags::FRONT)
                         .add_shader_from_bytes(
-                            include_bytes!("../../shaders/shadow.vert.spv"),
+                            include_bytes!(concat!(env!("OUT_DIR"), "/shadow.vert.spv")),
                             vk::ShaderStageFlags::VERTEX,
                             "main",
                         )?
                         .add_shader_from_bytes(
-                            include_bytes!("../../shaders/shadow.frag.spv"),
+                            include_bytes!(concat!(env!("OUT_DIR"), "/shadow.frag.spv")),
                             vk::ShaderStageFlags::FRAGMENT,
                             "main",
                         )?;
@@ -1424,12 +1424,12 @@ impl Renderer {
         }
 
         builder = builder.add_shader_from_bytes(
-            include_bytes!("../../shaders/vert.spv"),
+            include_bytes!(concat!(env!("OUT_DIR"), "/vert.spv")),
             vk::ShaderStageFlags::VERTEX,
             "main",
         )?;
         builder = builder.add_shader_from_bytes(
-            include_bytes!("../../shaders/frag.spv"),
+            include_bytes!(concat!(env!("OUT_DIR"), "/frag.spv")),
             vk::ShaderStageFlags::FRAGMENT,
             "main",
         )?;
@@ -2939,13 +2939,13 @@ impl Renderer {
                 .with_cull_mode(vk::CullModeFlags::NONE);
 
             builder = builder.add_shader_from_bytes(
-                include_bytes!("../../shaders/postprocess.vert.spv"),
+                include_bytes!(concat!(env!("OUT_DIR"), "/postprocess.vert.spv")),
                 vk::ShaderStageFlags::VERTEX,
                 "main",
             )?;
 
             builder = builder.add_shader_from_bytes(
-                include_bytes!("../../shaders/tonemapping.frag.spv"),
+                include_bytes!(concat!(env!("OUT_DIR"), "/tonemapping.frag.spv")),
                 vk::ShaderStageFlags::FRAGMENT,
                 "main",
             )?;

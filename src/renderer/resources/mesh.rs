@@ -439,8 +439,10 @@ impl Mesh {
         clusters
     }
 
-    /// Loads a mesh from a GLB file
-    pub fn from_gltf(path: &str) -> crate::Result<Self> {
+    /// Loads all meshes found in a GLB file.
+    ///
+    /// This returns a vector of meshes, one for each primitive/mesh found in the GLB.
+    pub fn load_all_from_gltf(path: &str) -> crate::Result<Vec<Self>> {
         let path_obj = std::path::Path::new(path);
         let bytes = std::fs::read(path_obj)
             .map_err(|e| crate::AshError::VulkanError(format!("Failed to read file: {e}")))?;
@@ -450,113 +452,134 @@ impl Mesh {
             crate::AshError::VulkanError(format!("Archetype asset load error: {e}"))
         })?;
 
-        let source_mesh = model
-            .meshes
-            .first()
-            .ok_or_else(|| crate::AshError::VulkanError("No meshes found in GLB".to_string()))?;
+        let mut results = Vec::new();
 
-        // Access mesh data
-        let mesh_data = source_mesh.vertices();
+        for (mesh_idx, source_mesh) in model.meshes.iter().enumerate() {
+            // Access mesh data
+            let mesh_data = source_mesh.vertices();
 
-        let mut vertices = Vec::with_capacity(mesh_data.vertices.len() / 16);
-        for chunk in mesh_data.vertices.chunks(16) {
-            if chunk.len() < 16 {
-                break;
+            let mut vertices = Vec::with_capacity(mesh_data.vertices.len() / 16);
+            for chunk in mesh_data.vertices.chunks(16) {
+                if chunk.len() < 16 {
+                    break;
+                }
+
+                vertices.push(Vertex {
+                    position: [chunk[0], chunk[1], chunk[2]],
+                    normal: [chunk[3], chunk[4], chunk[5]],
+                    uv: [chunk[6], chunk[7]],
+                    color: [chunk[12], chunk[13], chunk[14]],
+                    tangent: [chunk[8], chunk[9], chunk[10], chunk[11]],
+                });
             }
 
-            // Normals are now valid in v0.1.3
-            let normal = [chunk[3], chunk[4], chunk[5]];
+            let indices = Some(mesh_data.indices.clone());
+            let base_name = path_obj
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("model");
+            let name = if model.meshes.len() > 1 {
+                format!("{base_name}_{mesh_idx}")
+            } else {
+                base_name.to_string()
+            };
 
-            vertices.push(Vertex {
-                position: [chunk[0], chunk[1], chunk[2]],
-                normal,
-                uv: [chunk[6], chunk[7]],
-                color: [chunk[12], chunk[13], chunk[14]],
-                tangent: [chunk[8], chunk[9], chunk[10], chunk[11]],
+            let mut material_properties = Some(MaterialProperties::default());
+            let mut texture_data = None;
+            let mut normal_texture_data = None;
+            let mut metallic_roughness_texture_data = None;
+            let mut occlusion_texture_data = None;
+            let mut emissive_texture_data = None;
+
+            if let Some(idx) = source_mesh.material_index {
+                if let Some(mat) = model.materials.get(idx) {
+                    let props = MaterialProperties {
+                        base_color_factor: mat.base_color_factor,
+                        metallic_factor: mat.metallic_factor,
+                        roughness_factor: mat.roughness_factor,
+                        emissive_factor: [
+                            mat.emissive_factor[0],
+                            mat.emissive_factor[1],
+                            mat.emissive_factor[2],
+                            1.0,
+                        ],
+                        occlusion_strength: mat.occlusion_strength,
+                        normal_scale: mat.normal_scale,
+                    };
+                    material_properties = Some(props);
+
+                    let get_texture = |idx: Option<usize>| -> Option<TextureData> {
+                        let idx = idx?;
+                        let tex = model.textures.get(idx)?;
+                        Some(TextureData {
+                            width: tex.width,
+                            height: tex.height,
+                            pixels: tex.data.clone(),
+                        })
+                    };
+
+                    texture_data = get_texture(mat.base_color_texture);
+                    normal_texture_data = get_texture(mat.normal_texture);
+                    metallic_roughness_texture_data = get_texture(mat.metallic_roughness_texture);
+                    occlusion_texture_data = get_texture(mat.occlusion_texture);
+                    emissive_texture_data = get_texture(mat.emissive_texture);
+                }
+            }
+
+            let clusters = Self::generate_clusters(indices.as_ref().unwrap_or(&vec![]), &vertices);
+
+            results.push(Self {
+                name,
+                vertices,
+                indices,
+                texture_data,
+                texture: None,
+                normal_texture_data,
+                normal_texture: None,
+                metallic_roughness_texture_data,
+                metallic_roughness_texture: None,
+                occlusion_texture_data,
+                occlusion_texture: None,
+                emissive_texture_data,
+                emissive_texture: None,
+                material_properties,
+                vertex_buffer: None,
+                vertex_allocation: None,
+                index_buffer: None,
+                index_allocation: None,
+                texture_index: None,
+                normal_texture_index: None,
+                metallic_roughness_texture_index: None,
+                occlusion_texture_index: None,
+                emissive_texture_index: None,
+                clusters,
+                allocator: None,
             });
         }
 
-        let indices = Some(mesh_data.indices.clone());
-
-        let name = path_obj
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("model")
-            .to_string();
-
-        let mut material_properties = Some(MaterialProperties::default());
-        let mut texture_data = None;
-        let mut normal_texture_data = None;
-        let mut metallic_roughness_texture_data = None;
-        let mut occlusion_texture_data = None;
-        let mut emissive_texture_data = None;
-
-        if let Some(idx) = source_mesh.material_index {
-            if let Some(mat) = model.materials.get(idx) {
-                // Map properties
-                let props = MaterialProperties {
-                    base_color_factor: mat.base_color_factor,
-                    metallic_factor: mat.metallic_factor,
-                    roughness_factor: mat.roughness_factor,
-                    emissive_factor: [
-                        mat.emissive_factor[0],
-                        mat.emissive_factor[1],
-                        mat.emissive_factor[2],
-                        1.0,
-                    ],
-                    occlusion_strength: mat.occlusion_strength,
-                    normal_scale: mat.normal_scale,
-                };
-                material_properties = Some(props);
-
-                // Helper to map textures
-                let get_texture = |idx: Option<usize>| -> Option<TextureData> {
-                    let idx = idx?;
-                    let tex = model.textures.get(idx)?;
-                    Some(TextureData {
-                        width: tex.width,
-                        height: tex.height,
-                        pixels: tex.data.clone(),
-                    })
-                };
-
-                texture_data = get_texture(mat.base_color_texture);
-                normal_texture_data = get_texture(mat.normal_texture);
-                metallic_roughness_texture_data = get_texture(mat.metallic_roughness_texture);
-                occlusion_texture_data = get_texture(mat.occlusion_texture);
-                emissive_texture_data = get_texture(mat.emissive_texture);
-            }
+        if results.is_empty() {
+            return Err(crate::AshError::VulkanError(
+                "No meshes found in GLB".to_string(),
+            ));
         }
 
-        let clusters = Self::generate_clusters(indices.as_ref().unwrap_or(&vec![]), &vertices);
+        Ok(results)
+    }
 
-        Ok(Self {
-            name,
-            vertices,
-            indices,
-            texture_data,
-            texture: None,
-            normal_texture_data,
-            normal_texture: None,
-            metallic_roughness_texture_data,
-            metallic_roughness_texture: None,
-            occlusion_texture_data,
-            occlusion_texture: None,
-            emissive_texture_data,
-            emissive_texture: None,
-            material_properties,
-            vertex_buffer: None,
-            vertex_allocation: None,
-            index_buffer: None,
-            index_allocation: None,
-            texture_index: None,
-            normal_texture_index: None,
-            metallic_roughness_texture_index: None,
-            occlusion_texture_index: None,
-            emissive_texture_index: None,
-            clusters,
-            allocator: None,
-        })
+    /// Loads a mesh from a GLB file (Legacy API, returns first mesh)
+    pub fn from_gltf(path: &str) -> crate::Result<Self> {
+        let mut meshes = Self::load_all_from_gltf(path)?;
+
+        if meshes.len() > 1 {
+            log::warn!(
+                "GLB file '{}' contains {} meshes, but from_gltf() only returns the first.",
+                path,
+                meshes.len()
+            );
+            log::warn!("Use load_all_from_gltf() to load all parts, or merge() them.");
+        }
+
+        Ok(meshes.remove(0))
     }
 
     /// Builds a mesh from a descriptor without uploading to the GPU.
@@ -593,6 +616,43 @@ impl Mesh {
             clusters,
             allocator: None,
         }
+    }
+
+    /// Merges multiple meshes into a single mesh.
+    ///
+    /// Useful for reducing draw calls when materials are compatible or ignored.
+    pub fn merge(meshes: Vec<Self>) -> crate::Result<Self> {
+        if meshes.is_empty() {
+            return Err(crate::AshError::VulkanError(
+                "No meshes to merge".to_string(),
+            ));
+        }
+
+        let mut iter = meshes.into_iter();
+        let mut merged = iter.next().unwrap();
+
+        for mut mesh in iter {
+            let vertex_offset = merged.vertices.len() as u32;
+
+            // Append vertices using mem::take to avoid moving out of Drop type
+            let vertices = std::mem::take(&mut mesh.vertices);
+            merged.vertices.extend(vertices);
+
+            // Append indices with vertex offset
+            if let Some(idx_list) = mesh.indices.take() {
+                let merged_indices = merged.indices.get_or_insert_with(Vec::new);
+                for idx in idx_list {
+                    merged_indices.push(idx + vertex_offset);
+                }
+            }
+        }
+
+        // Recalculate clusters for the final merged mesh
+        if let Some(ref indices) = merged.indices {
+            merged.clusters = Self::generate_clusters(indices, &merged.vertices);
+        }
+
+        Ok(merged)
     }
 
     /// Upload mesh data to GPU (Phase 3)
@@ -990,5 +1050,37 @@ impl Drop for Mesh {
         }
 
         log::debug!("Mesh '{}' dropped", self.name);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_merge_meshes() {
+        let m1 = Mesh::create_named_cube("Cube1");
+        let m2 = Mesh::create_named_cube("Cube2");
+
+        let v1_count = m1.vertices.len();
+        let i1_count = m1.indices.as_ref().unwrap().len();
+
+        let merged = Mesh::merge(vec![m1, m2]).expect("Merge failed");
+
+        assert_eq!(merged.vertices.len(), v1_count * 2);
+        assert_eq!(merged.indices.as_ref().unwrap().len(), i1_count * 2);
+
+        // Verify index offset: first index of second mesh should be v1_count
+        let indices = merged.indices.as_ref().unwrap();
+        assert_eq!(indices[i1_count], v1_count as u32);
+
+        // Clusters are generated for merged mesh
+        assert!(!merged.clusters.is_empty());
+    }
+
+    #[test]
+    fn test_merge_empty() {
+        let result = Mesh::merge(vec![]);
+        assert!(result.is_err());
     }
 }
