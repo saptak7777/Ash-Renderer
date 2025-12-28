@@ -8,7 +8,7 @@ A Vulkan rendering library built with [ash](https://github.com/ash-rs/ash). This
 
 > [!NOTE]
 > This is still very much a "work in progress." Expect breaking changes and occasional Vulkan validation errors if you feed it weird data.
-> **Stable Versions:** 0.1.2, 0.3.8, 0.3.9, 0.4.0, 0.4.1, 0.4.2, 0.4.3, 0.4.4, 0.4.5.
+> **Stable Versions:** 0.1.2, 0.3.8, 0.3.9, 0.4.0, 0.4.1, 0.4.2, 0.4.3, 0.4.4, 0.4.6.
 
 ## Features
 

@@ -202,6 +202,18 @@ impl DescriptorManager {
         Ok(())
     }
 
+    pub fn recreate_shadow_sets(&mut self, frame_count: u32) -> Result<()> {
+        self.shadow_sets =
+            Self::create_descriptor_sets(frame_count, &self.shadow_layout, &mut self.allocator)?;
+        Ok(())
+    }
+
+    pub fn recreate_joint_sets(&mut self, frame_count: u32) -> Result<()> {
+        self.joint_sets =
+            Self::create_descriptor_sets(frame_count, &self.joint_layout, &mut self.allocator)?;
+        Ok(())
+    }
+
     // material_texture_descriptor method removed.
 
     pub fn frame_layout(&self) -> vk::DescriptorSetLayout {

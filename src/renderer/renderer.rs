@@ -1404,9 +1404,10 @@ impl Renderer {
         // 6. Create new render pass and framebuffers.
         self.create_render_pass_and_framebuffers(swapchain_extent, swapchain_format, &image_views)?;
 
-        self.recreate_frame_syncs(self.framebuffers.len())?;
+        self.recreate_joint_buffers(image_count)?;
+        self.recreate_frame_syncs(image_count)?;
         self.recreate_command_buffers()?;
-        self.recreate_uniform_buffers(self.framebuffers.len())?;
+        self.recreate_uniform_buffers(image_count)?;
         self.recreate_vsr_pass(self.swapchain.as_ref().unwrap().extent)?;
         self.recreate_descriptor_sets()?;
         // 7. Recreate pipeline.
@@ -1963,7 +1964,10 @@ impl Renderer {
 
     fn recreate_descriptor_sets(&mut self) -> Result<()> {
         if let Some(manager) = self.descriptors.as_mut() {
-            manager.recreate_frame_sets(self.frame_syncs.len() as u32)?;
+            let count = self.frame_syncs.len() as u32;
+            manager.recreate_frame_sets(count)?;
+            manager.recreate_shadow_sets(count)?;
+            manager.recreate_joint_sets(count)?;
 
             let buffer_size =
                 std::mem::size_of::<crate::renderer::resources::uniform::MvpMatrices>()
@@ -1981,6 +1985,17 @@ impl Renderer {
             }
         }
 
+        Ok(())
+    }
+
+    fn recreate_joint_buffers(&mut self, count: usize) -> Result<()> {
+        self.joint_matrices_buffer.clear();
+        for _ in 0..count {
+            let buffer = unsafe {
+                resources::JointMatricesBuffer::new(Arc::clone(&self.alloc), self.max_bones)?
+            };
+            self.joint_matrices_buffer.push(buffer);
+        }
         Ok(())
     }
 
@@ -2059,6 +2074,12 @@ impl Renderer {
             // SAFETY: frame_index is bounded by command_buffers.len() and frame_syncs.len()
             // which are established at initialization and swapchain recreation.
             let frame_index = self.current_frame;
+            assert!(
+                frame_index < self.joint_matrices_buffer.len(),
+                "Frame index {} out of bounds for joint buffers ({})",
+                frame_index,
+                self.joint_matrices_buffer.len()
+            );
             let command_buffer = *self.command_buffers.get_unchecked(frame_index);
             let frame_sync_ref = self.frame_syncs.get_unchecked(frame_index);
 
