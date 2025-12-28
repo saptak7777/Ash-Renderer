@@ -70,17 +70,19 @@ impl Texture {
             vk_mem::MemoryUsage::AutoPreferHost,
         )?;
 
-        let staging_ptr = allocator.vma.map_memory(&mut staging_alloc).map_err(|e| {
-            AshError::VulkanError(format!("Failed to map texture staging buffer: {e}"))
-        })?;
-        std::ptr::copy_nonoverlapping(data.pixels.as_ptr(), staging_ptr, data.pixels.len());
+        {
+            let mut guard =
+                unsafe { allocator.map_allocation_guarded(&mut staging_alloc, image_size)? };
+            guard.copy_from_slice(&data.pixels);
+        }
+
         allocator
             .vma
             .flush_allocation(&staging_alloc, 0, image_size)
             .map_err(|e| {
                 AshError::VulkanError(format!("Failed to flush texture staging buffer: {e}"))
             })?;
-        allocator.vma.unmap_memory(&mut staging_alloc);
+        // unmap handled by guard drop
 
         // Create image with mipmaps and proper usage
         let image_info = vk::ImageCreateInfo::default()

@@ -1,4 +1,5 @@
 use ash::vk;
+use std::ops::{Deref, DerefMut};
 use vk_mem::Alloc;
 
 pub struct Allocator {
@@ -33,7 +34,12 @@ impl Allocator {
         usage: vk::BufferUsageFlags,
         memory_usage: vk_mem::MemoryUsage,
     ) -> crate::Result<(vk::Buffer, vk_mem::Allocation)> {
-        debug_assert!(size > 0, "Buffer size must be non-zero"); // Catch simple logic errors in dev
+        debug_assert!(size > 0, "Buffer size must be non-zero");
+        // Defensive: catch accidental massive allocations (e.g. 2GB sanity limit)
+        debug_assert!(
+            size < 2 * 1024 * 1024 * 1024,
+            "Buffer size exceeds 2GB sanity limit"
+        );
 
         let flags = if memory_usage == vk_mem::MemoryUsage::AutoPreferHost {
             vk_mem::AllocationCreateFlags::HOST_ACCESS_SEQUENTIAL_WRITE
@@ -82,6 +88,77 @@ impl Allocator {
     /// // SAFETY: Handles must be valid and not currently in use by the GPU.
     pub unsafe fn destroy_buffer(&self, buffer: vk::Buffer, allocation: &mut vk_mem::Allocation) {
         self.vma.destroy_buffer(buffer, allocation);
+    }
+
+    /// Map an allocation and return an RAII guard.
+    ///
+    /// # Safety
+    /// // SAFETY: Allocation must be host-visible. Unmap is handled by the guard.
+    pub unsafe fn map_allocation_guarded<'a>(
+        &'a self,
+        allocation: &'a mut vk_mem::Allocation,
+        size: u64,
+    ) -> crate::Result<MapGuard<'a>> {
+        let ptr = self
+            .vma
+            .map_memory(allocation)
+            .map_err(|e| crate::AshError::VulkanError(format!("Map memory failed: {e:?}")))?;
+
+        Ok(MapGuard {
+            vma: &self.vma,
+            allocation,
+            ptr,
+            size,
+        })
+    }
+}
+
+/// RAII guard for mapped GPU memory.
+///
+/// Ensures memory is unmapped when dropped, providing panic safety.
+pub struct MapGuard<'a> {
+    vma: &'a vk_mem::Allocator,
+    allocation: &'a mut vk_mem::Allocation,
+    ptr: *mut u8,
+    size: u64,
+}
+
+impl<'a> MapGuard<'a> {
+    /// Access mapped memory as a mutable slice.
+    pub fn as_mut_slice(&mut self) -> &mut [u8] {
+        unsafe { std::slice::from_raw_parts_mut(self.ptr, self.size as usize) }
+    }
+
+    /// Copy data from a slice into the mapped memory.
+    pub fn copy_from_slice<T: Copy>(&mut self, data: &[T]) {
+        let size = std::mem::size_of_val(data);
+        debug_assert!(size <= self.size as usize, "Copy size exceeds mapped range");
+
+        unsafe {
+            std::ptr::copy_nonoverlapping(data.as_ptr() as *const u8, self.ptr, size);
+        }
+    }
+}
+
+impl<'a> Deref for MapGuard<'a> {
+    type Target = [u8];
+
+    fn deref(&self) -> &Self::Target {
+        unsafe { std::slice::from_raw_parts(self.ptr, self.size as usize) }
+    }
+}
+
+impl<'a> DerefMut for MapGuard<'a> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        unsafe { std::slice::from_raw_parts_mut(self.ptr, self.size as usize) }
+    }
+}
+
+impl<'a> Drop for MapGuard<'a> {
+    fn drop(&mut self) {
+        unsafe {
+            self.vma.unmap_memory(self.allocation);
+        }
     }
 }
 

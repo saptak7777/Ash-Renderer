@@ -187,6 +187,17 @@ pub struct RendererConfig {
 }
 
 /// Main rendering system.
+///
+/// # Safety Contract
+///
+/// The `Renderer` manages complex GPU resource lifecycles. To ensure memory safety:
+///
+/// 1. **Drop Order**: Rust's drop order (top-to-bottom for fields) is critical. Buffers,
+///    textures, and pipelines must be destroyed before the `Allocator` and `Device`.
+/// 2. **Map Safety**: All `MapGuard` instances must be dropped before the underlying
+///    buffer is destroyed or the allocator is dropped.
+/// 3. **Validation**: Use Vulkan validation layers (`VK_LAYER_KHRONOS_validation`) in
+///    development to verify that no resources leak or are accessed after destruction.
 pub struct Renderer {
     // Resources dependent on allocator/device - dropped in reverse order.
     buffer_pool: Arc<BufferPool>,

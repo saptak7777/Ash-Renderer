@@ -197,25 +197,16 @@ impl UniformBuffer {
         let data = MvpMatrices::default();
 
         {
-            let data_ptr = allocator.vma.map_memory(&mut allocation).map_err(|e| {
-                crate::AshError::VulkanError(format!("Failed to map uniform buffer: {e}"))
-            })?;
-
-            std::ptr::copy_nonoverlapping(
-                &data as *const MvpMatrices as *const u8,
-                data_ptr,
-                size as usize,
-            );
-
-            allocator
-                .vma
-                .flush_allocation(&allocation, 0, size)
-                .map_err(|e| {
-                    crate::AshError::VulkanError(format!("Failed to flush uniform buffer: {e}"))
-                })?;
-
-            allocator.vma.unmap_memory(&mut allocation);
+            let mut guard = allocator.map_allocation_guarded(&mut allocation, size)?;
+            guard.copy_from_slice(&[data]);
         }
+
+        allocator
+            .vma
+            .flush_allocation(&allocation, 0, size)
+            .map_err(|e| {
+                crate::AshError::VulkanError(format!("Failed to flush uniform buffer: {e}"))
+            })?;
 
         log::info!("Created uniform buffer ({size} bytes)");
 
@@ -234,19 +225,13 @@ impl UniformBuffer {
     pub unsafe fn update(&mut self) -> crate::Result<()> {
         let size = std::mem::size_of::<MvpMatrices>() as u64;
 
-        let data_ptr = self
-            .allocator
-            .vma
-            .map_memory(&mut self.allocation)
-            .map_err(|e| {
-                crate::AshError::VulkanError(format!("Failed to map uniform buffer: {e}"))
-            })?;
+        {
+            let mut guard = self
+                .allocator
+                .map_allocation_guarded(&mut self.allocation, size)?;
 
-        std::ptr::copy_nonoverlapping(
-            &self.data as *const MvpMatrices as *const u8,
-            data_ptr,
-            size as usize,
-        );
+            guard.copy_from_slice(&[self.data]);
+        }
 
         self.allocator
             .vma
@@ -254,8 +239,6 @@ impl UniformBuffer {
             .map_err(|e| {
                 crate::AshError::VulkanError(format!("Failed to flush uniform buffer: {e}"))
             })?;
-
-        self.allocator.vma.unmap_memory(&mut self.allocation);
 
         Ok(())
     }
@@ -341,25 +324,16 @@ impl MaterialBuffer {
         let data = MaterialUniform::default();
 
         {
-            let data_ptr = allocator.vma.map_memory(&mut allocation).map_err(|e| {
-                crate::AshError::VulkanError(format!("Failed to map material buffer: {e}"))
-            })?;
-
-            std::ptr::copy_nonoverlapping(
-                &data as *const MaterialUniform as *const u8,
-                data_ptr,
-                size as usize,
-            );
-
-            allocator
-                .vma
-                .flush_allocation(&allocation, 0, size)
-                .map_err(|e| {
-                    crate::AshError::VulkanError(format!("Failed to flush material buffer: {e}"))
-                })?;
-
-            allocator.vma.unmap_memory(&mut allocation);
+            let mut guard = allocator.map_allocation_guarded(&mut allocation, size)?;
+            guard.copy_from_slice(&[data]);
         }
+
+        allocator
+            .vma
+            .flush_allocation(&allocation, 0, size)
+            .map_err(|e| {
+                crate::AshError::VulkanError(format!("Failed to flush material buffer: {e}"))
+            })?;
 
         log::info!("Created material buffer ({size} bytes)");
 
@@ -378,19 +352,13 @@ impl MaterialBuffer {
     pub unsafe fn update(&mut self) -> crate::Result<()> {
         let size = std::mem::size_of::<MaterialUniform>() as u64;
 
-        let data_ptr = self
-            .allocator
-            .vma
-            .map_memory(&mut self.allocation)
-            .map_err(|e| {
-                crate::AshError::VulkanError(format!("Failed to map material buffer: {e}"))
-            })?;
+        {
+            let mut guard = self
+                .allocator
+                .map_allocation_guarded(&mut self.allocation, size)?;
 
-        std::ptr::copy_nonoverlapping(
-            &self.data as *const MaterialUniform as *const u8,
-            data_ptr,
-            size as usize,
-        );
+            guard.copy_from_slice(&[self.data]);
+        }
 
         self.allocator
             .vma
@@ -398,8 +366,6 @@ impl MaterialBuffer {
             .map_err(|e| {
                 crate::AshError::VulkanError(format!("Failed to flush material buffer: {e}"))
             })?;
-
-        self.allocator.vma.unmap_memory(&mut self.allocation);
 
         Ok(())
     }

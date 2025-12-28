@@ -740,15 +740,11 @@ impl Mesh {
             })?;
 
         // Copy vertex data to staging buffer
-        let data_ptr = allocator.vma.map_memory(&mut staging_alloc).map_err(|e| {
-            crate::AshError::VulkanError(format!("Failed to map staging buffer: {e}"))
-        })?;
-        std::ptr::copy_nonoverlapping(
-            self.vertices.as_ptr() as *const u8,
-            data_ptr,
-            vertex_size as usize,
-        );
-        allocator.vma.unmap_memory(&mut staging_alloc);
+        {
+            let mut guard =
+                unsafe { allocator.map_allocation_guarded(&mut staging_alloc, vertex_size)? };
+            guard.copy_from_slice(&self.vertices);
+        }
 
         // Create device-local vertex buffer
         let (vertex_buffer, vertex_alloc) = allocator
@@ -811,15 +807,11 @@ impl Mesh {
                     crate::AshError::VulkanError(format!("Failed to create staging buffer: {e}"))
                 })?;
 
-            let data_ptr = allocator.vma.map_memory(&mut staging_alloc).map_err(|e| {
-                crate::AshError::VulkanError(format!("Failed to map staging buffer: {e}"))
-            })?;
-            std::ptr::copy_nonoverlapping(
-                indices.as_ptr() as *const u8,
-                data_ptr,
-                index_size as usize,
-            );
-            allocator.vma.unmap_memory(&mut staging_alloc);
+            {
+                let mut guard =
+                    unsafe { allocator.map_allocation_guarded(&mut staging_alloc, index_size)? };
+                guard.copy_from_slice(indices);
+            }
 
             let (index_buffer, index_alloc) = allocator
                 .vma

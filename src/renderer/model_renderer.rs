@@ -219,14 +219,13 @@ impl ModelRenderer {
                     AshError::VulkanError(format!("Failed to create staging buffer: {e}"))
                 })?;
 
-            let mapped =
-                self.alloc.vma.map_memory(&mut staging_alloc).map_err(|e| {
-                    AshError::VulkanError(format!("Failed to map staging buffer: {e}"))
-                })?;
-            let mapped = mapped.cast::<u8>();
-            // Copy data to staging
-            ptr::copy_nonoverlapping(data_ptr, mapped, data_size as usize);
-            self.alloc.vma.unmap_memory(&mut staging_alloc);
+            {
+                let mut guard = self
+                    .alloc
+                    .map_allocation_guarded(&mut staging_alloc, size)?;
+                // Copy data to staging
+                ptr::copy_nonoverlapping(data_ptr, guard.as_mut_ptr(), data_size as usize);
+            }
 
             let device_buffer = BufferHandle::new(
                 Arc::clone(&self.alloc),
