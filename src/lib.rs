@@ -51,7 +51,7 @@ pub use error::{AshError, Result};
 #[doc(hidden)]
 pub use renderer::{
     Camera, DepthBuffer, Material, Mesh, PipelineCache, RenderStats, Renderer, ResourceId,
-    ResourceRegistry, StatsCollector, Texture, TextureData, Transform, Vertex, MVP,
+    ResourceRegistry, SkinnedVertex, StatsCollector, Texture, TextureData, Transform, Vertex, MVP,
 };
 
 pub use renderer::features::{AutoRotateFeature, FeatureManager, RenderFeature};
@@ -59,6 +59,7 @@ pub use renderer::features::{AutoRotateFeature, FeatureManager, RenderFeature};
 /// Prelude module for convenient imports
 pub mod prelude {
     pub use crate::{
-        AshError, Camera, Material, Mesh, Renderer, Result, Texture, Transform, Vertex,
+        AshError, Camera, Material, Mesh, Renderer, Result, SkinnedVertex, Texture, Transform,
+        Vertex,
     };
 }

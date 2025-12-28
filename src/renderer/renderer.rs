@@ -18,7 +18,8 @@ use crate::{
         resources::uniform::{MaterialBuffer, UniformBuffer},
         ssgi_pass::{SsgiPass, SsgiQuality},
         temporal_upscaling::{VsrPass, VsrQuality},
-        DepthBuffer, GBuffer, Material, Mesh, PipelineCache, Texture, TextureData, Transform,
+        DepthBuffer, GBuffer, Material, Mesh, PipelineCache, SkinnedVertex, Texture, TextureData,
+        Transform,
     },
     vulkan, AshError, Result,
 };
@@ -53,6 +54,8 @@ pub struct RenderCommand {
     pub material_handle: u32,
     /// Transform matrix for positioning the mesh in world space
     pub transform: Mat4,
+    /// Whether this is a skinned mesh
+    pub is_skinned: bool,
 }
 
 fn compute_worker_index(worker_count: usize, frame_index: usize) -> usize {
@@ -277,6 +280,11 @@ pub struct Renderer {
     post_descriptor_sets: Vec<vk::DescriptorSet>,
     post_pipeline: Option<vk::Pipeline>,
     post_framebuffers: Vec<vulkan::Framebuffer>,
+    // GPU skinning
+    joint_matrices_buffer: Vec<resources::JointMatricesBuffer>,
+    max_bones: usize,
+    skinned_pipeline: Option<vulkan::Pipeline>,
+    skinned_pipeline_id: Option<ResourceId>,
     // Allocator and device are dropped last as they are the foundation for the resources above.
     alloc: Arc<vulkan::Allocator>,
     device: vulkan::VulkanDevice,
@@ -290,6 +298,7 @@ struct DrawItem {
     texture_flags: TexturePresenceFlags,
     texture_indices: [i32; 4], // base, normal, mr, occ
     emissive_index: i32,
+    is_skinned: bool,
 }
 
 #[derive(Copy, Clone, Default, Debug)]
@@ -477,6 +486,14 @@ impl Renderer {
                 uniform_buffers.push(buffer);
             }
 
+            // Initialize joint matrices buffers (double/triple buffering for skinning)
+            let max_bones = 1024;
+            let mut joint_matrices_buffer = Vec::with_capacity(framebuffers.len());
+            for _ in 0..framebuffers.len() {
+                let buffer = resources::JointMatricesBuffer::new(Arc::clone(&alloc), max_bones)?;
+                joint_matrices_buffer.push(buffer);
+            }
+
             // Create descriptor manager and pipeline layout
             let default_texture_data = TextureData::solid_color([255, 255, 255, 255]);
             let default_texture = Texture::from_data(
@@ -545,6 +562,12 @@ impl Renderer {
                 )?;
             }
 
+            // Bind joint buffers to descriptor sets
+            let joint_size = (max_bones * std::mem::size_of::<Mat4>()) as vk::DeviceSize;
+            for (i, buffer) in joint_matrices_buffer.iter().enumerate() {
+                descriptor_manager.bind_joint_buffer(i, buffer.buffer(), joint_size)?;
+            }
+
             // Default texture binding removed
 
             // Register default texture as a fallback for all slots.
@@ -574,6 +597,7 @@ impl Renderer {
                 bindless_manager.layout(), // Set 2: Bindless textures
                 descriptor_manager.shadow_layout(), // Set 3: Shadow map sampler
                 forward_plus.layout(),     // Set 4: Forward+ lights
+                descriptor_manager.joint_layout(), // Set 5: Joint matrices
             ];
             let mesh_push_size = std::mem::size_of::<MeshPushConstants>() as u32;
             let material_push_size = std::mem::size_of::<MaterialPushConstants>() as u32;
@@ -779,6 +803,7 @@ impl Renderer {
                         mesh.occlusion_texture_index.map(|i| i as i32).unwrap_or(-1),
                     ],
                     emissive_index: mesh.emissive_texture_index.map(|i| i as i32).unwrap_or(-1),
+                    is_skinned: false,
                 }],
                 swapchain: Some(swapchain),
                 render_pass: Some(render_pass),
@@ -839,6 +864,10 @@ impl Renderer {
                 post_descriptor_sets: Vec::new(),
                 post_pipeline: None,
                 post_framebuffers: Vec::new(),
+                joint_matrices_buffer,
+                max_bones,
+                skinned_pipeline: None,
+                skinned_pipeline_id: None,
             })
         }
     }
@@ -1014,6 +1043,7 @@ impl Renderer {
                 texture_flags: flags,
                 texture_indices: indices,
                 emissive_index,
+                is_skinned: false,
             });
 
             self.mesh_registry.clear();
@@ -1124,6 +1154,53 @@ impl Renderer {
         material
     }
 
+    /// Update the joint matrices buffer for GPU skinning
+    ///
+    /// # Safety
+    /// Caller must ensure matrices slice does not exceed max_bones capacity
+    pub unsafe fn update_joint_ssbo(&mut self, matrices: &[Mat4]) -> Result<()> {
+        self.update_joint_ssbo_offset(matrices, 0)
+    }
+
+    /// Update the joint matrices buffer for GPU skinning at a specific offset
+    ///
+    /// # Safety
+    /// Caller must ensure matrices slice and offset do not exceed max_bones capacity
+    pub unsafe fn update_joint_ssbo_offset(
+        &mut self,
+        matrices: &[Mat4],
+        offset: usize,
+    ) -> Result<()> {
+        if offset + matrices.len() > self.max_bones {
+            return Err(AshError::VulkanError(format!(
+                "Joint matrices update (offset: {}, count: {}) exceeds max_bones ({})",
+                offset,
+                matrices.len(),
+                self.max_bones
+            )));
+        }
+
+        if let Some(buffer) = self.joint_matrices_buffer.get_mut(self.current_frame) {
+            buffer.update_offset(matrices, offset)?;
+        }
+
+        Ok(())
+    }
+
+    pub fn max_bones(&self) -> usize {
+        self.max_bones
+    }
+
+    /// Queues a skinned mesh for rendering.
+    pub fn draw_skinned_mesh(&mut self, mesh_handle: u32, material_handle: u32, transform: Mat4) {
+        self.submit_render_commands(&[RenderCommand {
+            mesh_handle,
+            material_handle,
+            transform,
+            is_skinned: true,
+        }]);
+    }
+
     /// Submit render commands for the current frame.
     ///
     /// Each `RenderCommand` specifies a mesh handle, material handle, and transform.
@@ -1152,6 +1229,7 @@ impl Renderer {
                         texture_flags,
                         texture_indices: indices,
                         emissive_index: emissive,
+                        is_skinned: command.is_skinned,
                     });
                 }
             }
@@ -1165,23 +1243,35 @@ impl Renderer {
                     .get(&mesh.name)
                     .copied()
                     .unwrap_or_default();
+
+                let (indices, emissive) = self
+                    .mesh_indices_registry
+                    .get(&mesh.name)
+                    .cloned()
+                    .unwrap_or(([-1, -1, -1, -1], -1));
+
                 self.draw_items.push(DrawItem {
                     key: mesh.name.clone(),
                     transform: self.transform.model_matrix(),
                     material: self.material.clone(),
                     texture_flags,
-                    texture_indices: [
-                        mesh.texture_index.map(|i| i as i32).unwrap_or(-1),
-                        mesh.normal_texture_index.map(|i| i as i32).unwrap_or(-1),
-                        mesh.metallic_roughness_texture_index
-                            .map(|i| i as i32)
-                            .unwrap_or(-1),
-                        mesh.occlusion_texture_index.map(|i| i as i32).unwrap_or(-1),
-                    ],
-                    emissive_index: mesh.emissive_texture_index.map(|i| i as i32).unwrap_or(-1),
+                    texture_indices: indices,
+                    emissive_index: emissive,
+                    is_skinned: false, // Legacy fallback is always static
                 });
             }
         }
+
+        // Sort draw items to minimize pipeline and material changes
+        // Primary sort: is_skinned (to group non-skinned then skinned)
+        // Secondary sort: material name (to minimize uniform updates)
+        // Tertiary sort: mesh key (to minimize VB/IB binds)
+        self.draw_items.sort_by(|a, b| {
+            a.is_skinned
+                .cmp(&b.is_skinned)
+                .then_with(|| a.material.name.cmp(&b.material.name))
+                .then_with(|| a.key.cmp(&b.key))
+        });
     }
 
     pub fn request_swapchain_resize(&mut self, new_extent: vk::Extent2D) {
@@ -1462,7 +1552,91 @@ impl Renderer {
         self.pipeline = Some(new_pipeline);
         self.pipeline_id = Some(pipeline_id);
 
-        log::info!("Pipeline recompiled successfully!");
+        // Build Skinned Pipeline
+        log::info!("Compiling skinned pipeline...");
+        let mut skinned_builder = vulkan::Pipeline::builder(Arc::clone(&self.device.device))
+            .with_layout(layout)
+            .with_render_pass(render_pass)
+            .with_extent(extent)
+            .with_pipeline_cache(cache)
+            .with_depth_format(depth_format)
+            .with_cull_mode(vk::CullModeFlags::BACK)
+            .with_multisampling(multisample_config)
+            .with_vertex_input(
+                vec![SkinnedVertex::binding_description()],
+                SkinnedVertex::attribute_descriptions().to_vec(),
+            );
+
+        if self.gbuffer.is_some() {
+            let blend_attachments = vec![
+                vk::PipelineColorBlendAttachmentState {
+                    color_write_mask: vk::ColorComponentFlags::R
+                        | vk::ColorComponentFlags::G
+                        | vk::ColorComponentFlags::B
+                        | vk::ColorComponentFlags::A,
+                    blend_enable: vk::TRUE,
+                    src_color_blend_factor: vk::BlendFactor::SRC_ALPHA,
+                    dst_color_blend_factor: vk::BlendFactor::ONE_MINUS_SRC_ALPHA,
+                    color_blend_op: vk::BlendOp::ADD,
+                    src_alpha_blend_factor: vk::BlendFactor::ONE,
+                    dst_alpha_blend_factor: vk::BlendFactor::ZERO,
+                    alpha_blend_op: vk::BlendOp::ADD,
+                },
+                vk::PipelineColorBlendAttachmentState {
+                    color_write_mask: vk::ColorComponentFlags::R
+                        | vk::ColorComponentFlags::G
+                        | vk::ColorComponentFlags::B
+                        | vk::ColorComponentFlags::A,
+                    blend_enable: vk::FALSE,
+                    ..Default::default()
+                },
+                vk::PipelineColorBlendAttachmentState {
+                    color_write_mask: vk::ColorComponentFlags::R
+                        | vk::ColorComponentFlags::G
+                        | vk::ColorComponentFlags::B
+                        | vk::ColorComponentFlags::A,
+                    blend_enable: vk::FALSE,
+                    ..Default::default()
+                },
+                vk::PipelineColorBlendAttachmentState {
+                    color_write_mask: vk::ColorComponentFlags::R
+                        | vk::ColorComponentFlags::G
+                        | vk::ColorComponentFlags::B
+                        | vk::ColorComponentFlags::A,
+                    blend_enable: vk::FALSE,
+                    ..Default::default()
+                },
+            ];
+            skinned_builder = skinned_builder.with_color_blend_attachments(blend_attachments);
+        }
+
+        skinned_builder = skinned_builder.add_shader_from_bytes(
+            include_bytes!(concat!(env!("OUT_DIR"), "/skinning.vert.spv")),
+            vk::ShaderStageFlags::VERTEX,
+            "main",
+        )?;
+        skinned_builder = skinned_builder.add_shader_from_bytes(
+            include_bytes!(concat!(env!("OUT_DIR"), "/frag.spv")),
+            vk::ShaderStageFlags::FRAGMENT,
+            "main",
+        )?;
+
+        let mut new_skinned_pipeline = skinned_builder.build()?;
+        let skinned_pipeline_id = self
+            .resources
+            .register_pipeline(
+                new_skinned_pipeline.pipeline,
+                &[pipeline_layout_id, render_pass_id],
+            )
+            .map_err(|e| {
+                AshError::VulkanError(format!("Failed to register skinned pipeline: {e}"))
+            })?;
+
+        new_skinned_pipeline.mark_managed_by_registry();
+        self.skinned_pipeline = Some(new_skinned_pipeline);
+        self.skinned_pipeline_id = Some(skinned_pipeline_id);
+
+        log::info!("Pipelines recompiled successfully!");
         Ok(())
     }
 
@@ -1798,6 +1972,12 @@ impl Renderer {
                 if let Some(ubo) = self.uniform_buffers.get(index) {
                     manager.bind_frame_uniform(index, ubo.buffer, buffer_size)?;
                 }
+            }
+
+            // Re-bind joint matrices buffers
+            let joint_size = (self.max_bones * std::mem::size_of::<Mat4>()) as vk::DeviceSize;
+            for (index, buffer) in self.joint_matrices_buffer.iter().enumerate() {
+                manager.bind_joint_buffer(index, buffer.buffer(), joint_size)?;
             }
         }
 
@@ -2233,6 +2413,25 @@ impl Renderer {
                         );
                     }
 
+                    // Bind joint matrices descriptor (set 5)
+                    if let Some(joint_set) = manager.joint_set(frame_index) {
+                        if let Some(buffer) = self.joint_matrices_buffer.get(frame_index) {
+                            manager.bind_joint_buffer(
+                                frame_index,
+                                buffer.buffer(),
+                                buffer.capacity() as vk::DeviceSize
+                                    * std::mem::size_of::<Mat4>() as vk::DeviceSize,
+                            )?;
+                            cmd_ctx.bind_descriptor_sets(
+                                vk::PipelineBindPoint::GRAPHICS,
+                                pipeline_layout_handle,
+                                5, // Set 5: Joint matrices
+                                &[joint_set],
+                                &[],
+                            );
+                        }
+                    }
+
                     Ok(vk::DescriptorSet::null())
                 } else {
                     Ok(vk::DescriptorSet::null())
@@ -2240,8 +2439,23 @@ impl Renderer {
             })()?;
 
             // Draw uploaded meshes in order
+            let mut current_pipeline = scene_pipeline;
             for item in &self.draw_items {
                 if let Some(uploaded) = self.model_renderer.get(&item.key) {
+                    // Switch pipeline if needed
+                    let target_pipeline = if item.is_skinned {
+                        self.skinned_pipeline
+                            .as_ref()
+                            .map(|p| p.pipeline)
+                            .unwrap_or(scene_pipeline)
+                    } else {
+                        scene_pipeline
+                    };
+
+                    if target_pipeline != current_pipeline {
+                        cmd_ctx.bind_pipeline(vk::PipelineBindPoint::GRAPHICS, target_pipeline);
+                        current_pipeline = target_pipeline;
+                    }
                     // Bindless architecture: indices passed via MaterialUniform.
                     // Explicit descriptor set binding for materials is bypassed.
 

@@ -8,7 +8,7 @@ A Vulkan rendering library built with [ash](https://github.com/ash-rs/ash). This
 
 > [!NOTE]
 > This is still very much a "work in progress." Expect breaking changes and occasional Vulkan validation errors if you feed it weird data.
-> **Stable Versions:** 0.1.2, 0.3.8, 0.3.9, 0.4.0, 0.4.1, 0.4.2, 0.4.3, 0.4.4..
+> **Stable Versions:** 0.1.2, 0.3.8, 0.3.9, 0.4.0, 0.4.1, 0.4.2, 0.4.3, 0.4.4, 0.4.5.
 
 ## Features
 
@@ -18,6 +18,7 @@ A Vulkan rendering library built with [ash](https://github.com/ash-rs/ash). This
 - **Lighting**: Cascaded Shadow Mapping (CSM) and Screen-Space Global Illumination (SSGI).
 - **Bindless Architecture**: Full bindless texture support (`SampledImage` arrays).
 - **Post-Processing**: Tonemapping, Bloom, and internal VSR (Temporal upscaling) support.
+- **GPU Skinning**: Linear blend skinning (LBS) with compute-based joint updates and double-buffering.
 - **Headless**: Decoupled from windowing via `SurfaceProvider`.
 
 ## Quick Start (Winit 0.30)
@@ -97,6 +98,7 @@ impl ApplicationHandler for App {
 | **Shadows** | Working, but cascades need tuning |
 | **SSGI** | Experimental (Expect noise) |
 | **VSR (Temporal Upscaling)** | Implemented (basic jitter patterns, needs refinement) |
+| **GPU Skinning** | Stable (Double-buffered, 1024 bone limit) |
 | **GLTF Loading** | Basic support via `gltf` crate |
 | **Stability** | Dev-grade (Validation layers recommended during dev) |
 

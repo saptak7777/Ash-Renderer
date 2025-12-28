@@ -5,7 +5,7 @@ use bytemuck::{bytes_of, Pod, Zeroable};
 use vk_mem::Alloc;
 
 use crate::renderer::resources::BufferHandle;
-use crate::renderer::{Material, Mesh, Vertex};
+use crate::renderer::{Material, Mesh, SkinnedVertex, Vertex};
 use crate::vulkan::Allocator;
 use crate::{AshError, Result};
 
@@ -154,14 +154,24 @@ impl ModelRenderer {
         command_pool: vk::CommandPool,
         queue: vk::Queue,
     ) -> Result<UploadedMesh> {
-        // v_count/v_size: abbreviated names for internal scope
-        let v_count = mesh.vertices.len() as u32;
-        let v_size = (mesh.vertices.len() * std::mem::size_of::<Vertex>()) as vk::DeviceSize;
+        let (v_count, v_ptr, v_size) = if !mesh.skinned_vertices.is_empty() {
+            let count = mesh.skinned_vertices.len();
+            let size = (count * std::mem::size_of::<SkinnedVertex>()) as vk::DeviceSize;
+            (
+                count as u32,
+                mesh.skinned_vertices.as_ptr() as *const u8,
+                size,
+            )
+        } else {
+            let count = mesh.vertices.len();
+            let size = (count * std::mem::size_of::<Vertex>()) as vk::DeviceSize;
+            (count as u32, mesh.vertices.as_ptr() as *const u8, size)
+        };
 
         let vertex_buffer = self.allocate_and_fill_buffer(
             v_size,
             vk::BufferUsageFlags::VERTEX_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
-            mesh.vertices.as_ptr() as *const u8,
+            v_ptr,
             v_size,
             command_pool,
             queue,

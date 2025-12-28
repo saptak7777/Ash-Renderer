@@ -10,7 +10,7 @@ use super::texture::{Texture, TextureData};
 use crate::renderer::Material;
 
 /// Mesh Cluster for fine-grained culling (Nanite Phase 3)
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct MeshCluster {
     pub first_index: u32,
     pub index_count: u32,
@@ -121,9 +121,11 @@ impl Vertex {
 }
 
 /// GPU Mesh with vertex/index buffers uploaded (PHASE 3)
+#[derive(Default)]
 pub struct Mesh {
     pub name: String,
     pub vertices: Vec<Vertex>,
+    pub skinned_vertices: Vec<crate::renderer::SkinnedVertex>,
     pub indices: Option<Vec<u32>>,
     pub texture_data: Option<TextureData>,
     pub texture: Option<Texture>,
@@ -360,6 +362,7 @@ impl Mesh {
         Self {
             name: name.into(),
             vertices,
+            skinned_vertices: Vec::new(),
             indices: Some(indices),
             texture_data: None,
             texture: None,
@@ -531,6 +534,7 @@ impl Mesh {
             results.push(Self {
                 name,
                 vertices,
+                skinned_vertices: Vec::new(),
                 indices,
                 texture_data,
                 texture: None,
@@ -639,6 +643,7 @@ impl Mesh {
         Self {
             name: descriptor.key.clone(),
             vertices: descriptor.vertices.clone(),
+            skinned_vertices: Vec::new(),
             indices: descriptor.indices.clone(),
             texture_data: descriptor.texture.clone(),
             texture: None,

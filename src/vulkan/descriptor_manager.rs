@@ -18,9 +18,11 @@ pub struct DescriptorManager {
     frame_layout: super::descriptor_layout::DescriptorSetLayout,
     material_layout: super::descriptor_layout::DescriptorSetLayout,
     shadow_layout: super::descriptor_layout::DescriptorSetLayout,
+    joint_layout: super::descriptor_layout::DescriptorSetLayout,
     frame_sets: Vec<DescriptorSet>,
     m_sets: Vec<DescriptorSet>,
     shadow_sets: Vec<DescriptorSet>,
+    joint_sets: Vec<DescriptorSet>,
 }
 
 impl DescriptorManager {
@@ -69,6 +71,18 @@ impl DescriptorManager {
         let shadow_sets =
             Self::create_descriptor_sets(frame_count, &shadow_layout, &mut allocator)?;
 
+        // Joint matrices layout (Storage buffer)
+        let joint_layout = DescriptorSetLayoutBuilder::new()
+            .add_binding(
+                0,
+                vk::DescriptorType::STORAGE_BUFFER,
+                vk::ShaderStageFlags::VERTEX,
+                1,
+            )
+            .build(Arc::clone(&device))?;
+
+        let joint_sets = Self::create_descriptor_sets(frame_count, &joint_layout, &mut allocator)?;
+
         info!(
             "Allocated descriptor sets (frame: {}, material: {})",
             frame_sets.len(),
@@ -80,9 +94,11 @@ impl DescriptorManager {
             frame_layout,
             material_layout,
             shadow_layout,
+            joint_layout,
             frame_sets,
             m_sets,
             shadow_sets,
+            joint_sets,
         })
     }
 
@@ -194,6 +210,28 @@ impl DescriptorManager {
 
     pub fn material_layout(&self) -> vk::DescriptorSetLayout {
         self.material_layout.handle()
+    }
+
+    pub fn joint_layout(&self) -> vk::DescriptorSetLayout {
+        self.joint_layout.handle()
+    }
+
+    pub fn joint_set(&self, index: usize) -> Option<vk::DescriptorSet> {
+        self.joint_sets.get(index).map(|set| set.handle())
+    }
+
+    /// Bind joint matrices buffer to joint descriptor set for given frame
+    pub fn bind_joint_buffer(
+        &self,
+        frame_index: usize,
+        buffer: vk::Buffer,
+        size: vk::DeviceSize,
+    ) -> Result<()> {
+        let descriptor = self.joint_sets.get(frame_index).ok_or_else(|| {
+            AshError::VulkanError("Joint descriptor set index out of bounds".into())
+        })?;
+
+        descriptor.update_buffer(0, buffer, 0, size, vk::DescriptorType::STORAGE_BUFFER)
     }
 
     fn create_descriptor_sets(

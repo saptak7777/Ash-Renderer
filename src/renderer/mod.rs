@@ -27,6 +27,7 @@ pub mod renderer;
 pub mod resource_registry;
 pub mod resources;
 pub mod shadow_map;
+pub mod skinned_vertex;
 pub mod ssgi_pass;
 pub mod temporal_upscaling;
 
@@ -56,3 +57,4 @@ pub use resources::{
     DescriptorSetHandle, ImageHandle, Material, Mesh, MvpMatrices, PipelineHandle, Texture,
     TextureData, Transform, UniformBuffer, Vertex, VertexBuffer, MVP,
 };
+pub use skinned_vertex::SkinnedVertex;
