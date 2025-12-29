@@ -27,6 +27,12 @@ layout(set = 0, binding = 0) uniform MVP {
     vec4 ambient_color;
 } mvp;
 
+layout(push_constant) uniform PushConstants {
+    mat4 model;
+    uint joint_offset;
+    uint _padding;
+} push;
+
 layout(set = 5, binding = 0) readonly buffer JointMatrices {
     mat4 joints[];
 };
@@ -34,15 +40,16 @@ layout(set = 5, binding = 0) readonly buffer JointMatrices {
 void main() {
     // Linear Blend Skinning
     mat4 skinMatrix = mat4(0.0);
-    skinMatrix += inJointWeights.x * joints[inJointIndices.x];
-    skinMatrix += inJointWeights.y * joints[inJointIndices.y];
-    skinMatrix += inJointWeights.z * joints[inJointIndices.z];
-    skinMatrix += inJointWeights.w * joints[inJointIndices.w];
+    uint base_offset = push.joint_offset;
+    skinMatrix += inJointWeights.x * joints[inJointIndices.x + base_offset];
+    skinMatrix += inJointWeights.y * joints[inJointIndices.y + base_offset];
+    skinMatrix += inJointWeights.z * joints[inJointIndices.z + base_offset];
+    skinMatrix += inJointWeights.w * joints[inJointIndices.w + base_offset];
 
     vec4 skinnedPosition = skinMatrix * vec4(inPosition, 1.0);
     vec3 skinnedNormal = mat3(skinMatrix) * inNormal;
 
-    vec4 worldPosition = mvp.model * skinnedPosition;
+    vec4 worldPosition = push.model * skinnedPosition;
 
     gl_Position = mvp.view_proj * worldPosition;
 

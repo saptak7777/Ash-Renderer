@@ -80,8 +80,8 @@ impl From<glam::Mat4> for Mat4Push {
 #[derive(Clone, Copy, Pod, Zeroable)]
 pub struct MeshPushConstants {
     pub model: Mat4Push,
-    pub view: Mat4Push,
-    pub projection: Mat4Push,
+    pub joint_offset: u32,
+    pub _padding: [u32; 3],
 }
 
 #[repr(C, align(16))]
@@ -330,16 +330,14 @@ impl ModelRenderer {
     /// Caller must ensure the command buffer is recording and that the provided pipeline layout is
     /// compatible with the push constant ranges used here. The referenced mesh buffers must remain
     /// valid for the duration of the call.
-    #[allow(clippy::too_many_arguments)]
     pub unsafe fn draw_mesh(
         &self,
         command_buffer: vk::CommandBuffer,
         pipeline_layout: vk::PipelineLayout,
         uploaded: &UploadedMesh,
         model_matrix: glam::Mat4,
-        view_matrix: glam::Mat4,
-        projection_matrix: glam::Mat4,
-        material: &MaterialPushConstants,
+        joint_offset: u32,
+        _material: &MaterialPushConstants,
     ) {
         if command_buffer == vk::CommandBuffer::null() {
             log::error!("ModelRenderer::draw_mesh called with null command buffer");
@@ -366,8 +364,8 @@ impl ModelRenderer {
 
         let push = MeshPushConstants {
             model: model_matrix.into(),
-            view: view_matrix.into(),
-            projection: projection_matrix.into(),
+            joint_offset,
+            _padding: [0; 3],
         };
 
         self.device.cmd_push_constants(
@@ -376,17 +374,6 @@ impl ModelRenderer {
             vk::ShaderStageFlags::VERTEX,
             0,
             bytes_of(&push),
-        );
-
-        // Human choice: Manual offset instead of automated builder for fragment push constants.
-        // This makes the layout explicit and avoids accidental overlap.
-        let material_offset = std::mem::size_of::<MeshPushConstants>() as u32;
-        self.device.cmd_push_constants(
-            command_buffer,
-            pipeline_layout,
-            vk::ShaderStageFlags::FRAGMENT,
-            material_offset,
-            bytes_of(material),
         );
 
         if let Some(index_buffer) = uploaded.index_buffer() {

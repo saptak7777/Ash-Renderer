@@ -232,6 +232,28 @@ impl DescriptorManager {
         self.joint_sets.get(index).map(|set| set.handle())
     }
 
+    /// Get the descriptor set for joint matrices for a specific frame
+    pub fn get_joint_descriptor_set(&self, frame_index: usize) -> Result<vk::DescriptorSet> {
+        let descriptor_set = self
+            .joint_sets
+            .get(frame_index)
+            .map(|set| set.handle())
+            .ok_or_else(|| {
+                AshError::VulkanError(format!(
+                    "Joint descriptor set index {frame_index} exceeds buffer count {}",
+                    self.joint_sets.len()
+                ))
+            })?;
+
+        if descriptor_set == vk::DescriptorSet::null() {
+            return Err(AshError::VulkanError(format!(
+                "Joint descriptor set is null for frame {frame_index}"
+            )));
+        }
+
+        Ok(descriptor_set)
+    }
+
     /// Bind joint matrices buffer to joint descriptor set for given frame
     pub fn bind_joint_buffer(
         &self,

@@ -45,7 +45,6 @@ pub enum MsaaPreset {
     X8,
 }
 
-/// A render command specifying a mesh, material, and transform to render.
 #[derive(Clone, Debug)]
 pub struct RenderCommand {
     /// Handle identifying the mesh to render
@@ -56,6 +55,20 @@ pub struct RenderCommand {
     pub transform: Mat4,
     /// Whether this is a skinned mesh
     pub is_skinned: bool,
+    /// Offset into the joint matrices SSBO (for skeletal animation)
+    pub joint_offset: u32,
+}
+
+impl Default for RenderCommand {
+    fn default() -> Self {
+        Self {
+            mesh_handle: 0,
+            material_handle: 0,
+            transform: Mat4::IDENTITY,
+            is_skinned: false,
+            joint_offset: 0,
+        }
+    }
 }
 
 fn compute_worker_index(worker_count: usize, frame_index: usize) -> usize {
@@ -299,6 +312,7 @@ struct DrawItem {
     texture_indices: [i32; 4], // base, normal, mr, occ
     emissive_index: i32,
     is_skinned: bool,
+    joint_offset: u32,
 }
 
 #[derive(Copy, Clone, Default, Debug)]
@@ -566,6 +580,9 @@ impl Renderer {
             let joint_size = (max_bones * std::mem::size_of::<Mat4>()) as vk::DeviceSize;
             for (i, buffer) in joint_matrices_buffer.iter().enumerate() {
                 descriptor_manager.bind_joint_buffer(i, buffer.buffer(), joint_size)?;
+
+                // Validation: Ensure joint descriptor sets were allocated and bound correctly
+                let _ = descriptor_manager.get_joint_descriptor_set(i)?;
             }
 
             // Default texture binding removed
@@ -600,19 +617,11 @@ impl Renderer {
                 descriptor_manager.joint_layout(), // Set 5: Joint matrices
             ];
             let mesh_push_size = std::mem::size_of::<MeshPushConstants>() as u32;
-            let material_push_size = std::mem::size_of::<MaterialPushConstants>() as u32;
-            let push_constant_ranges = [
-                vk::PushConstantRange {
-                    stage_flags: vk::ShaderStageFlags::VERTEX,
-                    offset: 0,
-                    size: mesh_push_size,
-                },
-                vk::PushConstantRange {
-                    stage_flags: vk::ShaderStageFlags::FRAGMENT,
-                    offset: mesh_push_size,
-                    size: material_push_size,
-                },
-            ];
+            let push_constant_ranges = [vk::PushConstantRange {
+                stage_flags: vk::ShaderStageFlags::VERTEX,
+                offset: 0,
+                size: mesh_push_size,
+            }];
 
             let mut pipeline_layout_builder =
                 vulkan::PipelineLayout::builder(Arc::clone(&device.device));
@@ -804,6 +813,7 @@ impl Renderer {
                     ],
                     emissive_index: mesh.emissive_texture_index.map(|i| i as i32).unwrap_or(-1),
                     is_skinned: false,
+                    joint_offset: 0,
                 }],
                 swapchain: Some(swapchain),
                 render_pass: Some(render_pass),
@@ -1044,6 +1054,7 @@ impl Renderer {
                 texture_indices: indices,
                 emissive_index,
                 is_skinned: false,
+                joint_offset: 0,
             });
 
             self.mesh_registry.clear();
@@ -1192,12 +1203,19 @@ impl Renderer {
     }
 
     /// Queues a skinned mesh for rendering.
-    pub fn draw_skinned_mesh(&mut self, mesh_handle: u32, material_handle: u32, transform: Mat4) {
+    pub fn draw_skinned_mesh(
+        &mut self,
+        mesh_handle: u32,
+        material_handle: u32,
+        transform: Mat4,
+        joint_offset: u32,
+    ) {
         self.submit_render_commands(&[RenderCommand {
             mesh_handle,
             material_handle,
             transform,
             is_skinned: true,
+            joint_offset,
         }]);
     }
 
@@ -1230,6 +1248,7 @@ impl Renderer {
                         texture_indices: indices,
                         emissive_index: emissive,
                         is_skinned: command.is_skinned,
+                        joint_offset: command.joint_offset,
                     });
                 }
             }
@@ -1258,6 +1277,7 @@ impl Renderer {
                     texture_indices: indices,
                     emissive_index: emissive,
                     is_skinned: false, // Legacy fallback is always static
+                    joint_offset: 0,
                 });
             }
         }
@@ -2434,30 +2454,25 @@ impl Renderer {
                         );
                     }
 
-                    // Bind joint matrices descriptor (set 5)
-                    if let Some(joint_set) = manager.joint_set(frame_index) {
-                        if let Some(buffer) = self.joint_matrices_buffer.get(frame_index) {
-                            manager.bind_joint_buffer(
-                                frame_index,
-                                buffer.buffer(),
-                                buffer.capacity() as vk::DeviceSize
-                                    * std::mem::size_of::<Mat4>() as vk::DeviceSize,
-                            )?;
-                            cmd_ctx.bind_descriptor_sets(
-                                vk::PipelineBindPoint::GRAPHICS,
-                                pipeline_layout_handle,
-                                5, // Set 5: Joint matrices
-                                &[joint_set],
-                                &[],
-                            );
-                        }
-                    }
-
                     Ok(vk::DescriptorSet::null())
                 } else {
                     Ok(vk::DescriptorSet::null())
                 }
             })()?;
+
+            // Explicitly bind the joint matrices descriptor set (Set 5) for the current frame.
+            // This ensures that all draw calls in this frame (including skinned meshes)
+            // have valid bone matrix data available in the vertex shader.
+            if let Some(manager) = self.descriptors.as_ref() {
+                let joint_set = manager.get_joint_descriptor_set(frame_index)?;
+                cmd_ctx.bind_descriptor_sets(
+                    vk::PipelineBindPoint::GRAPHICS,
+                    pipeline_layout_handle,
+                    5, // Set 5: Joint matrices
+                    &[joint_set],
+                    &[],
+                );
+            }
 
             // Draw uploaded meshes in order
             let mut current_pipeline = scene_pipeline;
@@ -2512,10 +2527,6 @@ impl Renderer {
                     }
 
                     let model_matrix = item.transform;
-                    // Uniform buffer contains view and projection matrices from current frame synchronization.
-                    let uniform_matrices = self.uniform_buffers[frame_index].matrices();
-                    let view_matrix = uniform_matrices.view;
-                    let projection_matrix = uniform_matrices.projection;
                     let base_color_binding = if item.texture_flags.base_color {
                         Some(0u32)
                     } else {
@@ -2541,8 +2552,7 @@ impl Renderer {
                         pipeline_layout_handle,
                         uploaded,
                         model_matrix,
-                        view_matrix,
-                        projection_matrix,
+                        item.joint_offset,
                         &material_push,
                     );
                 } else {

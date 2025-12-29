@@ -29,8 +29,14 @@ layout(set = 0, binding = 0) uniform MVP {
     vec4 ambient_color;
 } mvp;
 
+layout(push_constant) uniform PushConstants {
+    mat4 model;
+    uint joint_offset;
+    uint _padding;
+} push;
+
 void main() {
-    vec4 worldPosition = mvp.model * vec4(inPosition, 1.0);
+    vec4 worldPosition = push.model * vec4(inPosition, 1.0);
 
     gl_Position = mvp.view_proj * worldPosition;
 

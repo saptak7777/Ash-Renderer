@@ -164,7 +164,7 @@ impl ApplicationHandler for App {
                     proj.y_axis.y *= -1.0;
 
                     // Draw
-                    renderer.draw_skinned_mesh(0, 0, Mat4::IDENTITY);
+                    renderer.draw_skinned_mesh(0, 0, Mat4::IDENTITY, 0);
                     renderer.render_frame(view, proj, camera_pos).unwrap();
                 }
                 if let Some(window) = &self.window {
