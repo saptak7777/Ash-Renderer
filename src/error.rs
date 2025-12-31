@@ -26,6 +26,12 @@ pub enum AshError {
     ResourceNotFound(String),
     /// Feature not initialized.
     FeatureNotInitialized(String),
+    /// GPU memory budget exceeded.
+    VramExhausted {
+        requested: ash::vk::DeviceSize,
+        available: ash::vk::DeviceSize,
+        recommendation: &'static str,
+    },
 }
 
 impl fmt::Display for AshError {
@@ -39,6 +45,16 @@ impl fmt::Display for AshError {
             Self::SwapchainOutOfDate(msg) => write!(f, "Swapchain out of date: {msg}"),
             Self::ResourceNotFound(msg) => write!(f, "Resource not found: {msg}"),
             Self::FeatureNotInitialized(msg) => write!(f, "Feature not initialized: {msg}"),
+            Self::VramExhausted {
+                requested,
+                available,
+                ..
+            } => {
+                write!(
+                    f,
+                    "VRAM exhausted: requested {requested} bytes, but only {available} bytes available in budget"
+                )
+            }
         }
     }
 }

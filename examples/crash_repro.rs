@@ -1,3 +1,4 @@
+#![allow(deprecated)]
 use ash_renderer::{
     renderer::{Mesh, Renderer},
     vulkan::WindowSurfaceProvider,
@@ -29,11 +30,11 @@ fn main() -> Result<()> {
     let mut indices = Vec::new();
 
     // User's mesh has 209668 vertices and 982380 indices
-    let vertex_count = 209668;
-    let index_count = 982380;
+    let _vertex_count = 209668;
+    let _index_count = 982380;
 
     // Total iterations required for 3 indices per iteration: 327460.
-    for i in 0..327460 {
+    for _ in 0..327460 {
         vertices.push(ash_renderer::renderer::Vertex {
             position: [0.0, 0.0, 0.0],
             normal: [0.0, 1.0, 0.0],

@@ -5,12 +5,11 @@ fn main() {
     // Mock renderer for compilation check - just checking API existence types
     // We don't actually run this, just compile it.
 
-    let matrices: Vec<Mat4> = vec![Mat4::IDENTITY; 10];
-
     // We can't easily instantiate Renderer without Vulkan context, so we just check methods on a hypothetical instance if we could.
     // However, to satisfy the compiler we need an instance.
     // Instead, let's just make a dummy function that takes a &mut Renderer.
 
+    #[allow(dead_code)]
     fn check_api(renderer: &mut Renderer) {
         let matrices: Vec<Mat4> = vec![Mat4::IDENTITY; 10];
         unsafe {
@@ -30,7 +29,7 @@ fn main() {
             material_handle: 0,
             transform: Mat4::IDENTITY,
             is_skinned: false,
-            joint_offset: 0, // Now this should SUCCEED
+            joint_offset: 0,
         };
     }
 }

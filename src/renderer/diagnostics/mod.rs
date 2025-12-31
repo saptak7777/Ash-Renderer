@@ -13,6 +13,7 @@
 //! println!("FPS: {:.1}", stats.frame_stats.fps());
 //! ```
 
+mod debug_stats;
 mod font_data;
 mod frame_profiler;
 mod gpu_profiler;
@@ -20,6 +21,7 @@ mod overlay;
 mod overlay_pipeline;
 mod overlay_types;
 
+pub use debug_stats::RendererStats;
 pub use font_data::{get_glyph, FONT_8X8, GLYPH_HEIGHT, GLYPH_WIDTH};
 pub use frame_profiler::FrameProfiler;
 pub use gpu_profiler::{ExtendedGpuTimings, GpuProfiler, TimingScope};

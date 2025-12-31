@@ -18,8 +18,8 @@ use crate::{
         resources::uniform::{MaterialBuffer, UniformBuffer},
         ssgi_pass::{SsgiPass, SsgiQuality},
         temporal_upscaling::{VsrPass, VsrQuality},
-        DepthBuffer, GBuffer, Material, Mesh, PipelineCache, SkinnedVertex, Texture, TextureData,
-        Transform,
+        vram_budget, DepthBuffer, GBuffer, Material, Mesh, PipelineCache, SkinnedVertex, Texture,
+        TextureData, Transform,
     },
     vulkan, AshError, Result,
 };
@@ -197,9 +197,19 @@ impl PipelineConfig {
     }
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct RendererConfig {
     pub pipeline: PipelineConfig,
+    pub texture_compression: bool,
+}
+
+impl Default for RendererConfig {
+    fn default() -> Self {
+        Self {
+            pipeline: PipelineConfig::default(),
+            texture_compression: true,
+        }
+    }
 }
 
 /// Main rendering system.
@@ -298,6 +308,8 @@ pub struct Renderer {
     max_bones: usize,
     skinned_pipeline: Option<vulkan::Pipeline>,
     skinned_pipeline_id: Option<ResourceId>,
+    vram_budget: vram_budget::VramBudget,
+    texture_compression: bool,
     // Allocator and device are dropped last as they are the foundation for the resources above.
     alloc: Arc<vulkan::Allocator>,
     device: vulkan::VulkanDevice,
@@ -313,6 +325,7 @@ struct DrawItem {
     emissive_index: i32,
     is_skinned: bool,
     joint_offset: u32,
+    alpha_cutoff: f32,
 }
 
 #[derive(Copy, Clone, Default, Debug)]
@@ -347,6 +360,9 @@ impl Renderer {
             let device = vulkan::VulkanDevice::new(Arc::clone(&instance))?;
             let alloc = Arc::new(vulkan::Allocator::new(&device)?);
             let resources = Arc::new(ResourceRegistry::new(Arc::clone(&device.device)));
+            let dev_mem_props = device.memory_properties;
+            let mut vram_budget = vram_budget::VramBudget::new(&dev_mem_props);
+
             let mut features = FeatureManager::new();
             features.set_device(Arc::clone(&device.device));
             features.add_feature(AutoRotateFeature::new());
@@ -363,6 +379,7 @@ impl Renderer {
             }
             let pipeline_cache = PipelineCache::new(Arc::clone(&device.device))?;
             let renderer_config = RendererConfig::default();
+            let texture_compression = renderer_config.texture_compression;
             let pipeline_cfg = &renderer_config.pipeline;
             let buffer_pool = Arc::new(BufferPool::new(Arc::clone(&alloc)));
             let mut swapchain = vulkan::SwapchainWrapper::new(&device)?;
@@ -536,7 +553,7 @@ impl Renderer {
                     uniform.set_normal_scale(material.normal_scale);
                     // uniform.set_texture_flags(...) removed
 
-                    uniform.set_alpha_cutoff(0.1);
+                    uniform.set_alpha_cutoff(material.alpha_cutoff);
                 }
                 material_buffer.update()?;
                 material_buffers.push(Mutex::new(material_buffer));
@@ -552,7 +569,7 @@ impl Renderer {
             let mut bindless_manager = crate::vulkan::BindlessManager::new(
                 Arc::clone(&device.device),
                 descriptor_manager.allocator_mut(),
-                1024 * 4,
+                crate::vulkan::BindlessManager::DEFAULT_MAX_TEXTURES,
             )?;
 
             let buffer_size =
@@ -730,6 +747,8 @@ impl Renderer {
                 Arc::clone(&device.device),
                 command_manager.upload_command_pool_handle(),
                 device.graphics_queue,
+                &mut vram_budget,
+                texture_compression,
             )?;
             log::trace!("Cube mesh textures ready, registering with model renderer...");
             model_renderer.ensure_mesh(
@@ -814,6 +833,7 @@ impl Renderer {
                     emissive_index: mesh.emissive_texture_index.map(|i| i as i32).unwrap_or(-1),
                     is_skinned: false,
                     joint_offset: 0,
+                    alpha_cutoff: material.alpha_cutoff,
                 }],
                 swapchain: Some(swapchain),
                 render_pass: Some(render_pass),
@@ -878,6 +898,8 @@ impl Renderer {
                 max_bones,
                 skinned_pipeline: None,
                 skinned_pipeline_id: None,
+                vram_budget,
+                texture_compression,
             })
         }
     }
@@ -990,6 +1012,8 @@ impl Renderer {
                 Arc::clone(&self.device.device),
                 upload_pool,
                 self.device.graphics_queue,
+                &mut self.vram_budget,
+                self.texture_compression,
             ) {
                 log::error!("Failed to ensure mesh texture: {e}");
             }
@@ -1055,6 +1079,7 @@ impl Renderer {
                 emissive_index,
                 is_skinned: false,
                 joint_offset: 0,
+                alpha_cutoff: self.material.alpha_cutoff,
             });
 
             self.mesh_registry.clear();
@@ -1073,6 +1098,8 @@ impl Renderer {
                 Arc::clone(&self.device.device),
                 upload_pool,
                 self.device.graphics_queue,
+                &mut self.vram_budget,
+                self.texture_compression,
             )?;
 
             self.model_renderer
@@ -1133,6 +1160,19 @@ impl Renderer {
         }
 
         Ok(())
+    }
+
+    pub fn get_stats(&self) -> crate::renderer::diagnostics::RendererStats {
+        crate::renderer::diagnostics::RendererStats {
+            vram_usage: self.vram_budget.get_stats(),
+            draw_calls_per_frame: self.diagnostics.frame_stats.draw_calls,
+            triangles_rendered: self.diagnostics.frame_stats.triangles,
+        }
+    }
+
+    /// Logs the current frame statistics to the debug log.
+    pub fn log_frame_stats(&self) {
+        self.get_stats().log_frame_stats();
     }
 
     pub fn register_material_handle(&mut self, handle: u32, material: &Material) {
@@ -1249,6 +1289,7 @@ impl Renderer {
                         emissive_index: emissive,
                         is_skinned: command.is_skinned,
                         joint_offset: command.joint_offset,
+                        alpha_cutoff: material.alpha_cutoff,
                     });
                 }
             }
@@ -1278,6 +1319,7 @@ impl Renderer {
                     emissive_index: emissive,
                     is_skinned: false, // Legacy fallback is always static
                     joint_offset: 0,
+                    alpha_cutoff: self.material.alpha_cutoff,
                 });
             }
         }
@@ -2523,6 +2565,7 @@ impl Renderer {
                             item.texture_indices[3],
                             item.emissive_index,
                         );
+                        uniform.set_alpha_cutoff(item.alpha_cutoff);
                         material_buffer.update()?;
                     }
 

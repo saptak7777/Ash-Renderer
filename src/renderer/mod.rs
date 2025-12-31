@@ -30,6 +30,7 @@ pub mod shadow_map;
 pub mod skinned_vertex;
 pub mod ssgi_pass;
 pub mod temporal_upscaling;
+pub mod vram_budget;
 
 // Re-exports for public API
 pub use cleanup_traits::{BufferCleanup, VulkanResourceCleanup};

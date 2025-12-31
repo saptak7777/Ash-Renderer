@@ -8,7 +8,7 @@ A Vulkan rendering library built with [ash](https://github.com/ash-rs/ash). This
 
 > [!NOTE]
 > This is still very much a "work in progress." Expect breaking changes and occasional Vulkan validation errors if you feed it weird data.
-> **Stable Versions:** 0.1.2, 0.3.8, 0.3.9, 0.4.0, 0.4.1, 0.4.2, 0.4.3, 0.4.4, 0.4.7.
+> **Stable Versions:** 0.1.2, 0.3.8, 0.3.9, 0.4.0, 0.4.1, 0.4.2, 0.4.3, 0.4.4, 0.4.7, 0.4.8.
 
 ## Features
 
@@ -16,7 +16,8 @@ A Vulkan rendering library built with [ash](https://github.com/ash-rs/ash). This
 - **Occlusion Culling**: Hi-Z based visibility testing (GPU driven).
 - **GPU Culling**: Frustum culling and indirect draw call generation.
 - **Lighting**: Cascaded Shadow Mapping (CSM) and Screen-Space Global Illumination (SSGI).
-- **Bindless Architecture**: Full bindless texture support (`SampledImage` arrays).
+- **Bindless Architecture**: Full bindless texture support with 16,384 slots.
+- **Texture Compression**: CPU-side BC7 (albedo) and BC5 (normals) compression for 4x+ VRAM savings.
 - **Post-Processing**: Tonemapping, Bloom, and internal VSR (Temporal upscaling) support.
 - **GPU Skinning**: Linear blend skinning (LBS) with compute-based joint updates and double-buffering.
 - **Headless**: Decoupled from windowing via `SurfaceProvider`.
@@ -110,6 +111,26 @@ cargo run --example 02_cube
 
 # GLTF loading (experimental)
 cargo run --example 03_model_loading --features gltf_loading
+```
+
+## API Usage: Skeletal Animation
+
+The skeletal animation API uses explicit updates for safety and performance. Note the `unsafe` requirement for buffer updates.
+
+```rust
+// 1. Update Joint Matrices (Unsafe because it writes directly to mapped GPU memory)
+let joints: &[glam::Mat4] = ...; // Your calculated joint matrices
+unsafe {
+    renderer.update_joint_ssbo(joints).expect("Failed to update joints");
+}
+
+// 2. Draw Skinned Mesh
+renderer.draw_skinned_mesh(
+    mesh_handle,
+    material_handle,
+    transform_matrix,
+    joint_offset, // Offset into the SSBO where this instance's joints begin
+);
 ```
 
 ## Requirements

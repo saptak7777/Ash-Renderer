@@ -41,11 +41,7 @@ impl Allocator {
             "Buffer size exceeds 2GB sanity limit"
         );
 
-        let flags = if memory_usage == vk_mem::MemoryUsage::AutoPreferHost {
-            vk_mem::AllocationCreateFlags::HOST_ACCESS_SEQUENTIAL_WRITE
-        } else {
-            vk_mem::AllocationCreateFlags::empty()
-        };
+        let flags = vk_mem::AllocationCreateFlags::empty();
 
         self.vma
             .create_buffer(
@@ -59,7 +55,11 @@ impl Allocator {
                     ..Default::default()
                 },
             )
-            .map_err(|e| crate::AshError::VulkanError(format!("Buffer creation failed: {e:?}")))
+            .map_err(|e| {
+                crate::AshError::VulkanError(format!(
+                    "Buffer creation failed (size={size}, usage={usage:?}): {e:?}"
+                ))
+            })
     }
 
     /// Create a Vulkan image.

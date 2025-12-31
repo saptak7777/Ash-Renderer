@@ -31,16 +31,13 @@ layout(set = 1, binding = 0) uniform Material {
     vec4 base_color_factor;
     vec4 emissive_factor;
     vec4 parameters; // x: metallic, y: roughness, z: occlusion strength, w: normal scale
-    vec4 texture_flags; // x: base color, y: normal, z: metallic-roughness, w: occlusion
-    float emissive_texture_flag;
-    vec3 _material_padding;
+    ivec4 texture_indices; // x: base color, y: normal, z: metallic-roughness, w: occlusion
+    int emissive_texture_index;
+    float alpha_cutoff;
+    vec2 _material_padding;
 } material;
 
-layout(set = 2, binding = 0) uniform sampler2D baseTexture;
-layout(set = 2, binding = 1) uniform sampler2D normalTexture;
-layout(set = 2, binding = 2) uniform sampler2D metallicRoughnessTexture;
-layout(set = 2, binding = 3) uniform sampler2D occlusionTexture;
-layout(set = 2, binding = 4) uniform sampler2D emissiveTexture;
+layout(set = 2, binding = 0) uniform sampler2D textures[16384];
 
 
 layout(set = 3, binding = 0) uniform sampler2D shadowMap;
@@ -124,8 +121,8 @@ void main() {
     vec3 lightDir = normalize(-mvp.light_direction.xyz);
 
     // Sample base color
-    vec4 baseSample = material.texture_flags.x > 0.0
-        ? texture(baseTexture, fragUV)
+    vec4 baseSample = material.texture_indices.x >= 0
+        ? texture(textures[material.texture_indices.x], fragUV)
         : vec4(1.0);
     vec3 baseColor = baseSample.rgb * material.base_color_factor.rgb;
     float alpha = baseSample.a * material.base_color_factor.a;
@@ -153,8 +150,8 @@ void main() {
     mat3 TBN = mat3(T, B, N);
     
     vec3 normal = N;
-    if (material.texture_flags.y > 0.0) {
-        vec3 mapSample = texture(normalTexture, fragUV).xyz;
+    if (material.texture_indices.y >= 0) {
+        vec3 mapSample = texture(textures[material.texture_indices.y], fragUV).xyz;
         // Check for validity (e.g. if mipmapping averages to 0)
         if (length(mapSample) > 0.001) {
             vec3 mapNormal = mapSample * 2.0 - 1.0;
@@ -173,16 +170,16 @@ void main() {
     float metallic = material.parameters.x;
     float roughness = max(material.parameters.y, 0.04); // Min roughness to prevent fireflies
     
-    if (material.texture_flags.z > 0.0) {
-        vec4 mrSample = texture(metallicRoughnessTexture, fragUV);
+    if (material.texture_indices.z >= 0) {
+        vec4 mrSample = texture(textures[material.texture_indices.z], fragUV);
         metallic = metallic * mrSample.b;
         roughness = max(roughness * mrSample.g, 0.04);
     }
 
     // Ambient occlusion
     float occlusion = 1.0;
-    if (material.texture_flags.w > 0.0) {
-        occlusion = mix(1.0, texture(occlusionTexture, fragUV).r, material.parameters.z);
+    if (material.texture_indices.w >= 0) {
+        occlusion = mix(1.0, texture(textures[material.texture_indices.w], fragUV).r, material.parameters.z);
     }
 
     // PBR
@@ -223,8 +220,8 @@ void main() {
     
     // Emissive
     vec3 emissive = material.emissive_factor.rgb;
-    if (material.emissive_texture_flag > 0.0) {
-        emissive *= texture(emissiveTexture, fragUV).rgb;
+    if (material.emissive_texture_index >= 0) {
+        emissive *= texture(textures[material.emissive_texture_index], fragUV).rgb;
     }
 
     vec3 color = ambient + Lo + emissive;

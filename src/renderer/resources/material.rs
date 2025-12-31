@@ -10,6 +10,7 @@ pub struct Material {
     pub emissive: [f32; 4],
     pub occlusion_strength: f32,
     pub normal_scale: f32,
+    pub alpha_cutoff: f32,
 }
 
 impl Default for Material {
@@ -22,6 +23,7 @@ impl Default for Material {
             emissive: [0.0, 0.0, 0.0, 1.0],
             occlusion_strength: 1.0,
             normal_scale: 1.0,
+            alpha_cutoff: 0.1,
         }
     }
 }
@@ -37,6 +39,7 @@ impl Material {
             emissive: [0.0, 0.0, 0.0, 1.0],
             occlusion_strength: 1.0,
             normal_scale: 1.0,
+            alpha_cutoff: 0.1,
         }
     }
 }

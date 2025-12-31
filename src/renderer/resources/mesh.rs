@@ -7,6 +7,7 @@ use std::sync::Arc;
 use vk_mem::Alloc;
 
 use super::texture::{Texture, TextureData};
+use super::texture_compressor::{CompressionFormat, TextureCompressor};
 use crate::renderer::Material;
 
 /// Mesh Cluster for fine-grained culling (Nanite Phase 3)
@@ -58,6 +59,7 @@ pub struct MaterialProperties {
     pub emissive_factor: [f32; 4],
     pub occlusion_strength: f32,
     pub normal_scale: f32,
+    pub alpha_cutoff: f32,
 }
 
 impl Default for MaterialProperties {
@@ -69,6 +71,7 @@ impl Default for MaterialProperties {
             emissive_factor: [0.0, 0.0, 0.0, 1.0],
             occlusion_strength: 1.0,
             normal_scale: 1.0,
+            alpha_cutoff: 0.1,
         }
     }
 }
@@ -508,6 +511,7 @@ impl Mesh {
                         ],
                         occlusion_strength: mat.occlusion_strength,
                         normal_scale: mat.normal_scale,
+                        alpha_cutoff: mat.alpha_cutoff,
                     };
                     material_properties = Some(props);
 
@@ -891,6 +895,8 @@ impl Mesh {
         device: Arc<ash::Device>,
         command_pool: vk::CommandPool,
         queue: vk::Queue,
+        vram_budget: &mut crate::renderer::vram_budget::VramBudget,
+        compression_enabled: bool,
     ) -> crate::Result<()> {
         #[allow(clippy::too_many_arguments)]
         unsafe fn upload_texture_map(
@@ -902,21 +908,90 @@ impl Mesh {
             queue: vk::Queue,
             texture: &mut Option<Texture>,
             data: &mut Option<TextureData>,
-            format: vk::Format,
+            srgb: bool,
+            compression: CompressionFormat,
+            vram_budget: &mut crate::renderer::vram_budget::VramBudget,
+            compression_enabled: bool,
         ) -> crate::Result<()> {
             if texture.is_none() {
-                if let Some(texture_data) = data.take() {
-                    log::info!("Uploading {map_name} texture for mesh '{mesh_name}'");
-                    let gpu_texture = Texture::from_data(
-                        Arc::clone(allocator),
-                        Arc::clone(device),
-                        command_pool,
-                        queue,
-                        &texture_data,
-                        format,
-                        Some(&format!("{mesh_name}_{map_name}")),
-                    )?;
-                    *texture = Some(gpu_texture);
+                if let Some(mut texture_data) = data.take() {
+                    let mut format = compression.to_vk_format(srgb);
+
+                    if compression_enabled && compression != CompressionFormat::None {
+                        log::debug!(
+                            "Compressing {map_name} texture for mesh '{mesh_name}' using {compression:?}"
+                        );
+                        match compression {
+                            CompressionFormat::Bc7 => {
+                                if let Ok(compressed) =
+                                    TextureCompressor::compress_bc7(&texture_data)
+                                {
+                                    texture_data.pixels = compressed;
+                                } else {
+                                    log::warn!("BC7 compression failed for {map_name} on '{mesh_name}', falling back to uncompressed.");
+                                    format = CompressionFormat::None.to_vk_format(srgb);
+                                }
+                            }
+                            CompressionFormat::Bc5 => {
+                                if let Ok(compressed) =
+                                    TextureCompressor::compress_bc5(&texture_data)
+                                {
+                                    log::debug!("BC5 compressed size: {} bytes", compressed.len());
+                                    texture_data.pixels = compressed;
+                                } else {
+                                    log::warn!("BC5 compression failed for {map_name} on '{mesh_name}', falling back to uncompressed.");
+                                    format = CompressionFormat::None.to_vk_format(srgb);
+                                }
+                            }
+                            _ => {}
+                        }
+                    } else {
+                        // Force uncompressed if global toggle is off or None requested
+                        format = CompressionFormat::None.to_vk_format(srgb);
+                    }
+
+                    // Estimate size with mipmaps (base * 1.33)
+                    let estimated_total =
+                        (texture_data.pixels.len() as f64 * 1.33) as vk::DeviceSize;
+
+                    if let Err(e) = vram_budget.can_allocate(estimated_total) {
+                        log::warn!(
+                            "VRAM budget exceeded for {map_name} texture on mesh '{mesh_name}': {e}. Using fallback."
+                        );
+                        // Create 1x1 fallback
+                        let fallback_data = TextureData::solid_color(if map_name == "normal" {
+                            [128, 128, 255, 255]
+                        } else {
+                            [255, 255, 255, 255]
+                        });
+                        let gpu_texture = Texture::from_data(
+                            Arc::clone(allocator),
+                            Arc::clone(device),
+                            command_pool,
+                            queue,
+                            &fallback_data,
+                            format,
+                            Some(&format!("{mesh_name}_{map_name}_fallback")),
+                        )?;
+                        *texture = Some(gpu_texture);
+                        vram_budget.allocate(4); // Minimal
+                    } else {
+                        log::info!(
+                            "Uploading {map_name} texture for mesh '{mesh_name}' (Estimated: {}MB)",
+                            estimated_total / 1024 / 1024
+                        );
+                        let gpu_texture = Texture::from_data(
+                            Arc::clone(allocator),
+                            Arc::clone(device),
+                            command_pool,
+                            queue,
+                            &texture_data,
+                            format,
+                            Some(&format!("{mesh_name}_{map_name}")),
+                        )?;
+                        *texture = Some(gpu_texture);
+                        vram_budget.allocate(estimated_total);
+                    }
                 }
             }
             Ok(())
@@ -931,7 +1006,10 @@ impl Mesh {
             queue,
             &mut self.texture,
             &mut self.texture_data,
-            vk::Format::R8G8B8A8_SRGB,
+            true, // srgb
+            CompressionFormat::Bc7,
+            vram_budget,
+            compression_enabled,
         )?;
         upload_texture_map(
             &self.name,
@@ -942,7 +1020,10 @@ impl Mesh {
             queue,
             &mut self.normal_texture,
             &mut self.normal_texture_data,
-            vk::Format::R8G8B8A8_UNORM,
+            false, // unorm
+            CompressionFormat::Bc5,
+            vram_budget,
+            compression_enabled,
         )?;
         upload_texture_map(
             &self.name,
@@ -953,7 +1034,10 @@ impl Mesh {
             queue,
             &mut self.metallic_roughness_texture,
             &mut self.metallic_roughness_texture_data,
-            vk::Format::R8G8B8A8_UNORM,
+            false,                  // unorm
+            CompressionFormat::Bc7, // or Bc5 if 2 channels, but MR is often packed
+            vram_budget,
+            compression_enabled,
         )?;
         upload_texture_map(
             &self.name,
@@ -964,7 +1048,10 @@ impl Mesh {
             queue,
             &mut self.occlusion_texture,
             &mut self.occlusion_texture_data,
-            vk::Format::R8G8B8A8_UNORM,
+            false, // unorm
+            CompressionFormat::Bc7,
+            vram_budget,
+            compression_enabled,
         )?;
         upload_texture_map(
             &self.name,
@@ -975,7 +1062,10 @@ impl Mesh {
             queue,
             &mut self.emissive_texture,
             &mut self.emissive_texture_data,
-            vk::Format::R8G8B8A8_SRGB,
+            true, // srgb
+            CompressionFormat::Bc7,
+            vram_budget,
+            compression_enabled,
         )?;
 
         Ok(())

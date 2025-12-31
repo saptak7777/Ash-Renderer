@@ -1,3 +1,4 @@
+pub mod bindless_validator;
 pub mod buffer;
 pub mod buffer_pool;
 pub mod depth_buffer;
@@ -11,11 +12,13 @@ pub mod pipeline;
 pub mod safe_resource;
 pub mod shadow;
 pub mod texture;
+pub mod texture_compressor;
 pub mod thread_safe_pool;
 pub mod transform;
 pub mod uniform;
 pub mod vertex_buffer;
 
+pub use bindless_validator::BindlessValidator;
 pub use buffer::BufferHandle;
 pub use buffer_pool::{BufferAllocation, BufferPool};
 pub use depth_buffer::DepthBuffer;
@@ -29,6 +32,7 @@ pub use pipeline::PipelineHandle;
 pub use safe_resource::SafeResource;
 pub use shadow::CascadedShadowMap;
 pub use texture::{Texture, TextureData};
+pub use texture_compressor::{CompressionFormat, TextureCompressor};
 pub use thread_safe_pool::{PoolStats, PooledResource, ThreadSafeResourcePool};
 pub use transform::{Camera, Transform, MVP};
 pub use uniform::{MvpMatrices, UniformBuffer};

@@ -16,6 +16,8 @@ pub struct BindlessManager {
 }
 
 impl BindlessManager {
+    pub const DEFAULT_MAX_TEXTURES: u32 = 16384;
+
     pub fn new(
         device: Arc<ash::Device>,
         allocator: &mut DescriptorAllocator,
@@ -112,11 +114,22 @@ impl BindlessManager {
         Ok(index)
     }
 
+    pub fn validate_index(&self, index: u32) -> Result<()> {
+        if index >= self.next_index {
+            return Err(AshError::VulkanError(format!(
+                "Invalid bindless index: {} (max: {})",
+                index, self.next_index
+            )));
+        }
+        Ok(())
+    }
+
     fn allocate_index(&mut self) -> Result<u32> {
         if self.next_index >= self.max_resources {
-            return Err(AshError::VulkanError(
-                "Exceeded maximum number of bindless resources".into(),
-            ));
+            return Err(AshError::VulkanError(format!(
+                "Exceeded maximum number of bindless resources: {}/{}",
+                self.next_index, self.max_resources
+            )));
         }
         let index = self.next_index;
         self.next_index += 1;

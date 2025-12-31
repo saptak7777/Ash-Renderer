@@ -59,9 +59,26 @@ impl Texture {
         format: vk::Format,
         name: Option<&str>,
     ) -> Result<Self> {
-        let image_size = (data.width as usize * data.height as usize * 4) as vk::DeviceSize;
+        let image_size = data.pixels.len() as vk::DeviceSize;
+        if image_size == 0 {
+            return Err(crate::AshError::VulkanError(
+                "Cannot create texture from empty pixel data".to_string(),
+            ));
+        }
 
-        let mip_levels = (data.width.max(data.height) as f32).log2().floor() as u32 + 1;
+        let is_compressed = matches!(
+            format,
+            vk::Format::BC7_UNORM_BLOCK
+                | vk::Format::BC7_SRGB_BLOCK
+                | vk::Format::BC5_UNORM_BLOCK
+                | vk::Format::BC5_SNORM_BLOCK
+        );
+
+        let mip_levels = if is_compressed {
+            1
+        } else {
+            (data.width.max(data.height) as f32).log2().floor() as u32 + 1
+        };
 
         // Staging buffer
         let (staging_buffer, mut staging_alloc) = allocator.create_buffer(
