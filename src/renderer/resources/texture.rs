@@ -81,10 +81,11 @@ impl Texture {
         };
 
         // Staging buffer
-        let (staging_buffer, mut staging_alloc) = allocator.create_buffer(
+        let (staging_buffer, mut staging_alloc) = allocator.create_buffer_with_flags(
             image_size,
             vk::BufferUsageFlags::TRANSFER_SRC,
             vk_mem::MemoryUsage::AutoPreferHost,
+            vk_mem::AllocationCreateFlags::HOST_ACCESS_SEQUENTIAL_WRITE,
         )?;
 
         {

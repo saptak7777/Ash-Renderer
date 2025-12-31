@@ -1,6 +1,6 @@
 [package]
 name = "ash_renderer"
-version = "0.4.15"
+version = "0.4.30"
 edition = "2021"
 authors = ["Saptak Santra"]
 license = "Apache-2.0"
