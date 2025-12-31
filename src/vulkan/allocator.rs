@@ -62,6 +62,63 @@ impl Allocator {
             })
     }
 
+    /// Allocate a GPU buffer with custom VMA allocation flags.
+    ///
+    /// # Arguments
+    /// * `size` - Buffer size in bytes
+    /// * `usage` - Vulkan buffer usage flags
+    /// * `memory_usage` - VMA memory usage type
+    /// * `flags` - VMA allocation flags (use HOST_ACCESS_SEQUENTIAL_WRITE for CPU writes)
+    ///
+    /// # Important
+    /// If you plan to map this buffer (call `map_allocation_guarded`), you MUST
+    /// include `AllocationCreateFlags::HOST_ACCESS_SEQUENTIAL_WRITE` in the flags.
+    /// Otherwise, VMA will reject the mapping at runtime.
+    ///
+    /// # Safety
+    /// // SAFETY: Standard VMA allocation. Params must be valid for the device.
+    pub unsafe fn create_buffer_with_flags(
+        &self,
+        size: u64,
+        usage: vk::BufferUsageFlags,
+        memory_usage: vk_mem::MemoryUsage,
+        flags: vk_mem::AllocationCreateFlags,
+    ) -> crate::Result<(vk::Buffer, vk_mem::Allocation)> {
+        debug_assert!(size > 0, "Buffer size must be non-zero");
+        // Defensive: catch accidental massive allocations (e.g. 2GB sanity limit)
+        debug_assert!(
+            size < 2 * 1024 * 1024 * 1024,
+            "Buffer size exceeds 2GB sanity limit"
+        );
+
+        // Warn if flags are empty for AutoPreferHost
+        if flags.is_empty() && memory_usage == vk_mem::MemoryUsage::AutoPreferHost {
+            log::warn!(
+                "Creating AutoPreferHost buffer without mapping flags - \
+                 this buffer cannot be CPU-accessed. Use \
+                 HOST_ACCESS_SEQUENTIAL_WRITE if you need CPU writes."
+            );
+        }
+
+        self.vma
+            .create_buffer(
+                &vk::BufferCreateInfo::default()
+                    .size(size)
+                    .usage(usage)
+                    .sharing_mode(vk::SharingMode::EXCLUSIVE),
+                &vk_mem::AllocationCreateInfo {
+                    usage: memory_usage,
+                    flags,
+                    ..Default::default()
+                },
+            )
+            .map_err(|e| {
+                crate::AshError::VulkanError(format!(
+                    "Buffer creation failed (size={size}, usage={usage:?}): {e:?}"
+                ))
+            })
+    }
+
     /// Create a Vulkan image.
     ///
     /// # Safety

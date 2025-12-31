@@ -21,10 +21,11 @@ impl JointMatricesBuffer {
     pub unsafe fn new(allocator: Arc<Allocator>, capacity: usize) -> Result<Self> {
         let size = (capacity * std::mem::size_of::<Mat4>()) as u64;
 
-        let (buffer, allocation) = allocator.create_buffer(
+        let (buffer, allocation) = allocator.create_buffer_with_flags(
             size,
             vk::BufferUsageFlags::STORAGE_BUFFER,
             vk_mem::MemoryUsage::AutoPreferHost,
+            vk_mem::AllocationCreateFlags::HOST_ACCESS_SEQUENTIAL_WRITE,
         )?;
 
         log::info!("Created joint matrices buffer (capacity: {capacity}, size: {size} bytes)");
