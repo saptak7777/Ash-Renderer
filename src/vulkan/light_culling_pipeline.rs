@@ -138,10 +138,11 @@ impl LightCullingPipeline {
 
         // Create buffers using VMA (consistent with rest of engine)
         // Light buffer (host-visible for CPU uploads)
-        let (light_buffer, light_buffer_alloc) = allocator.create_buffer(
+        let (light_buffer, light_buffer_alloc) = allocator.create_buffer_with_flags(
             light_buffer_size as u64,
             vk::BufferUsageFlags::STORAGE_BUFFER,
             vk_mem::MemoryUsage::AutoPreferHost,
+            vk_mem::AllocationCreateFlags::HOST_ACCESS_SEQUENTIAL_WRITE,
         )?;
 
         // Tile buffer (device-local for GPU-only access)
@@ -152,10 +153,11 @@ impl LightCullingPipeline {
         )?;
 
         // Camera buffer (host-visible for CPU uploads)
-        let (camera_buffer, camera_buffer_alloc) = allocator.create_buffer(
+        let (camera_buffer, camera_buffer_alloc) = allocator.create_buffer_with_flags(
             camera_buffer_size as u64,
             vk::BufferUsageFlags::UNIFORM_BUFFER,
             vk_mem::MemoryUsage::AutoPreferHost,
+            vk_mem::AllocationCreateFlags::HOST_ACCESS_SEQUENTIAL_WRITE,
         )?;
 
         // Update descriptor set
