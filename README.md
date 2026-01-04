@@ -8,11 +8,13 @@ A Vulkan rendering library built with [ash](https://github.com/ash-rs/ash). This
 
 > [!NOTE]
 > This is still very much a "work in progress." Expect breaking changes and occasional Vulkan validation errors if you feed it weird data.
-> **Stable Versions:** 0.1.2, 0.3.8, 0.3.9, 0.4.0, 0.4.1, 0.4.2, 0.4.3, 0.4.4, 0.4.9.
+> **Stable Versions:** 0.1.2, 0.3.8, 0.3.9, 0.4.0, 0.4.1, 0.4.2, 0.4.3, 0.4.4, 0.4.9, 0.4.45.
 
 ## Features
 
-- **Core Renderer**: Basic PBR metallic/roughness workflow.
+- **Core Renderer**: Basic PBR metallic/roughness workflow with automatic GLB material registration.
+- **GLB Support**: Automatic material registration from GLB files with PBR properties (metallic, roughness, emissive).
+- **Multi-Material Foundation**: Data structures ready for multi-material GLB models with submesh descriptors.
 - **Occlusion Culling**: Hi-Z based visibility testing (GPU driven).
 - **GPU Culling**: Frustum culling and indirect draw call generation.
 - **Lighting**: Cascaded Shadow Mapping (CSM) and Screen-Space Global Illumination (SSGI).
@@ -20,7 +22,10 @@ A Vulkan rendering library built with [ash](https://github.com/ash-rs/ash). This
 - **Texture Compression**: CPU-side BC7 (albedo) and BC5 (normals) compression for 4x+ VRAM savings.
 - **Post-Processing**: Tonemapping, Bloom, and internal VSR (Temporal upscaling) support.
 - **GPU Skinning**: Linear blend skinning (LBS) with compute-based joint updates and double-buffering.
+- **Buffer Safety**: Type-safe `BufferBuilder` API with runtime validation and allocation tracking.
 - **Headless**: Decoupled from windowing via `SurfaceProvider`.
+- **Advanced Diagnostics**: Real-time VRAM budgeting (prevents OOM crashes) and nanosecond-precision GPU timestamp profiling.
+- **Parallel Rendering**: Multi-threaded command buffer recording support (opt-in via `parallel` feature).
 
 ## Quick Start (Winit 0.30)
 
@@ -95,7 +100,7 @@ impl ApplicationHandler for App {
 
 | Feature | Status |
 | :--- | :--- |
-| **Material System** | Functional (Basic PBR) |
+| **Material System** | Functional (Full GLB PBR Support) |
 | **Shadows** | Working, but cascades need tuning |
 | **SSGI** | Experimental (Expect noise) |
 | **VSR (Temporal Upscaling)** | Implemented (basic jitter patterns, needs refinement) |
@@ -131,6 +136,41 @@ renderer.draw_skinned_mesh(
     transform_matrix,
     joint_offset, // Offset into the SSBO where this instance's joints begin
 );
+```
+
+## API Usage: Buffer Creation
+
+The new `BufferBuilder` API makes creating GPU buffers explicit and safe:
+
+```rust
+// 1. Using a convenient preset (Best Practice)
+let (buffer, allocation) = allocator.create_joint_buffer(size)?;
+
+// 2. Using the fluent builder (For manual control)
+let (buffer, allocation) = BufferBuilder::new(size)
+    .storage_buffer()
+    .cpu_writable()
+    .named("My Custom Buffer")
+    .build(&allocator)?;
+```
+
+## API Usage: Material System
+
+Materials from GLB files are now automatically registered and deduplicated.
+
+```rust
+// 1. Loading a GLB model
+let mesh = Mesh::load_from_file("model.glb")?;
+let handle = renderer.register_mesh_handle(&mesh)?;
+
+// 2. Rendering (Material is automatically selected)
+// No need to manually specify material_handle for GLB meshes
+renderer.submit_render_commands(&[RenderCommand {
+    mesh_handle: handle,
+    material_handle: 0, // 0 = Auto-detect from mesh registration
+    transform: glam::Mat4::IDENTITY,
+    ..Default::default()
+}])?;
 ```
 
 ## Requirements

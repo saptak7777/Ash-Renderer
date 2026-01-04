@@ -1,4 +1,6 @@
 pub mod allocator;
+pub mod buffer_builder;
+pub mod buffer_types;
 pub mod command;
 pub mod command_manager;
 pub mod compute_pipeline;
@@ -25,6 +27,8 @@ pub mod sync;
 pub mod utils;
 
 pub use allocator::Allocator;
+pub use buffer_builder::BufferBuilder;
+pub use buffer_types::BufferDescriptor;
 pub use command::CommandPool;
 pub use command_manager::CommandBufferManager;
 pub use compute_pipeline::{ComputePipeline, ComputePipelineBuilder};

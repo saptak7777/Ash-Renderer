@@ -56,3 +56,4 @@ test_results.txt
 # Documentation
 *.md
 !README.md
+!CHANGELOG.md

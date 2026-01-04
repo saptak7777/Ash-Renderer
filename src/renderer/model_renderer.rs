@@ -24,7 +24,7 @@ impl MaterialPushConstants {
             base_color_factor: material.color,
             metallic_factor: material.metallic,
             roughness_factor: material.roughness,
-            alpha_cutoff: 0.1,
+            alpha_cutoff: material.alpha_cutoff,
             alpha_mode: 0,
             base_color_texture_set: base_color_binding.map(|b| b as i32).unwrap_or(-1),
             normal_texture_set: -1,

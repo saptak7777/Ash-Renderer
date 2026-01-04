@@ -259,6 +259,7 @@ pub struct Renderer {
     mesh_indices_registry: HashMap<String, ([i32; 4], i32)>,
     mesh_texture_flags: HashMap<String, TexturePresenceFlags>,
     material_registry: HashMap<u32, Material>,
+    mesh_material_mapping: HashMap<u32, u32>, // mesh_handle → material_handle
     swapchain_image_view_ids: Vec<ResourceId>,
     depth_buffer_id: Option<ResourceId>,
     frame_sync_ids: Vec<(ResourceId, ResourceId, ResourceId)>,
@@ -550,7 +551,6 @@ impl Renderer {
                     uniform.set_metallic_roughness(material.metallic, material.roughness);
                     uniform.set_occlusion_strength(material.occlusion_strength);
                     uniform.set_normal_scale(material.normal_scale);
-                    uniform.set_normal_scale(material.normal_scale);
                     // uniform.set_texture_flags(...) removed
 
                     uniform.set_alpha_cutoff(material.alpha_cutoff);
@@ -766,6 +766,8 @@ impl Renderer {
             mesh_registry.insert(0, mesh.name.clone());
             let mut material_registry = HashMap::new();
             material_registry.insert(0, material.clone());
+            let mut mesh_material_mapping = HashMap::new();
+            mesh_material_mapping.insert(0, 0);
             let mut mesh_texture_flags = HashMap::new();
 
             let initial_flags = TexturePresenceFlags::from_mesh(&mesh);
@@ -858,6 +860,7 @@ impl Renderer {
                 mesh_indices_registry: HashMap::new(),
                 mesh_texture_flags,
                 material_registry,
+                mesh_material_mapping,
                 swapchain_image_view_ids,
                 depth_buffer_id: Some(depth_buffer_id),
                 frame_sync_ids,
@@ -1139,6 +1142,69 @@ impl Renderer {
                 }
             }
 
+            // Register material from mesh properties
+            if let Some(props) = &mesh.material_properties {
+                let material = Material {
+                    name: format!("{}_material_{}", mesh.name, handle),
+                    color: props.base_color_factor,
+                    metallic: props.metallic_factor,
+                    roughness: props.roughness_factor,
+                    emissive: props.emissive_factor,
+                    occlusion_strength: props.occlusion_strength,
+                    normal_scale: props.normal_scale,
+                    alpha_cutoff: props.alpha_cutoff,
+                };
+
+                // deduplication: check if an identical material already exists
+                let mut target_material_handle = handle;
+                for (&existing_h, existing_m) in &self.material_registry {
+                    // Compare core PBR properties (allowing for minor float variance)
+                    let same_color = existing_m
+                        .color
+                        .iter()
+                        .zip(material.color.iter())
+                        .all(|(a, b)| (a - b).abs() < 0.001);
+                    let same_emissive = existing_m
+                        .emissive
+                        .iter()
+                        .zip(material.emissive.iter())
+                        .all(|(a, b)| (a - b).abs() < 0.001);
+
+                    if same_color
+                        && same_emissive
+                        && (existing_m.roughness - material.roughness).abs() < 0.001
+                        && (existing_m.metallic - material.metallic).abs() < 0.001
+                        && (existing_m.occlusion_strength - material.occlusion_strength).abs()
+                            < 0.001
+                        && (existing_m.normal_scale - material.normal_scale).abs() < 0.001
+                        && (existing_m.alpha_cutoff - material.alpha_cutoff).abs() < 0.001
+                    {
+                        target_material_handle = existing_h;
+                        break;
+                    }
+                }
+
+                if target_material_handle == handle {
+                    log::debug!(
+                        "Registered auto-material for mesh '{}': handle={}, metallic={:.2}, roughness={:.2}",
+                        mesh.name, handle, material.metallic, material.roughness
+                    );
+                    self.material_registry.insert(handle, material);
+                } else {
+                    log::debug!(
+                        "Deduplicated material for mesh '{}': using existing handle {}",
+                        mesh.name,
+                        target_material_handle
+                    );
+                }
+
+                self.mesh_material_mapping
+                    .insert(handle, target_material_handle);
+            } else {
+                // If no specific material properties, map to default material (0)
+                self.mesh_material_mapping.insert(handle, 0);
+            }
+
             let flags = TexturePresenceFlags::from_mesh(mesh);
 
             // Store indices for bindless texture mapping.
@@ -1177,6 +1243,11 @@ impl Renderer {
 
     pub fn register_material_handle(&mut self, handle: u32, material: &Material) {
         self.material_registry.insert(handle, material.clone());
+    }
+
+    /// Get access to the material registry (for testing)
+    pub fn material_registry(&self) -> &HashMap<u32, Material> {
+        &self.material_registry
     }
 
     /// Registers mesh data described by a [`MeshDescriptor`] with the renderer and returns the
@@ -1267,31 +1338,47 @@ impl Renderer {
 
         for command in commands {
             if let Some(mesh_key) = self.mesh_registry.get(&command.mesh_handle) {
-                if let Some(material) = self.material_registry.get(&command.material_handle) {
-                    let texture_flags = self
-                        .mesh_texture_flags
-                        .get(mesh_key)
+                // Option A: Automatic material selection (if material_handle not explicitly set)
+                let material_handle = if command.material_handle == 0 {
+                    self.mesh_material_mapping
+                        .get(&command.mesh_handle)
                         .copied()
-                        .unwrap_or_default();
+                        .unwrap_or(0)
+                } else {
+                    command.material_handle
+                };
 
-                    let (indices, emissive) = self
-                        .mesh_indices_registry
-                        .get(mesh_key)
-                        .cloned()
-                        .unwrap_or(([-1, -1, -1, -1], -1));
-
-                    self.draw_items.push(DrawItem {
-                        key: mesh_key.clone(),
-                        transform: command.transform,
-                        material: material.clone(),
-                        texture_flags,
-                        texture_indices: indices,
-                        emissive_index: emissive,
-                        is_skinned: command.is_skinned,
-                        joint_offset: command.joint_offset,
-                        alpha_cutoff: material.alpha_cutoff,
+                let material = self
+                    .material_registry
+                    .get(&material_handle)
+                    .unwrap_or_else(|| {
+                        log::warn!("Material handle {material_handle} not found, using default");
+                        &self.material
                     });
-                }
+
+                let texture_flags = self
+                    .mesh_texture_flags
+                    .get(mesh_key)
+                    .copied()
+                    .unwrap_or_default();
+
+                let (indices, emissive) = self
+                    .mesh_indices_registry
+                    .get(mesh_key)
+                    .cloned()
+                    .unwrap_or(([-1, -1, -1, -1], -1));
+
+                self.draw_items.push(DrawItem {
+                    key: mesh_key.clone(),
+                    transform: command.transform,
+                    material: material.clone(),
+                    texture_flags,
+                    texture_indices: indices,
+                    emissive_index: emissive,
+                    is_skinned: command.is_skinned,
+                    joint_offset: command.joint_offset,
+                    alpha_cutoff: material.alpha_cutoff,
+                });
             }
         }
 

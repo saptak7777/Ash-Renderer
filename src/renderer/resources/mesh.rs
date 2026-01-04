@@ -123,6 +123,15 @@ impl Vertex {
     }
 }
 
+/// Submesh descriptor for multi-material meshes (Phase 2)
+#[derive(Debug, Clone, Default)]
+pub struct SubmeshDescriptor {
+    pub start_index: u32,
+    pub index_count: u32,
+    pub material_slot: u32, // Index into material_handles
+    pub name: String,
+}
+
 /// GPU Mesh with vertex/index buffers uploaded (PHASE 3)
 #[derive(Default)]
 pub struct Mesh {
@@ -132,6 +141,12 @@ pub struct Mesh {
     pub indices: Option<Vec<u32>>,
     pub texture_data: Option<TextureData>,
     pub texture: Option<Texture>,
+
+    // Phase 2: Multi-material support foundation
+    pub material_handle: Option<u32>, // Single material (Phase 1)
+    pub material_handles: Vec<u32>,   // Multiple materials (future)
+    pub submeshes: Vec<SubmeshDescriptor>, // Future submesh descriptors
+
     pub normal_texture_data: Option<TextureData>,
     pub normal_texture: Option<Texture>,
     pub metallic_roughness_texture_data: Option<TextureData>,
@@ -140,7 +155,7 @@ pub struct Mesh {
     pub occlusion_texture: Option<Texture>,
     pub emissive_texture_data: Option<TextureData>,
     pub emissive_texture: Option<Texture>,
-    material_properties: Option<MaterialProperties>,
+    pub material_properties: Option<MaterialProperties>,
 
     // Phase 3: GPU buffers
     pub vertex_buffer: Option<vk::Buffer>,
@@ -369,6 +384,9 @@ impl Mesh {
             indices: Some(indices),
             texture_data: None,
             texture: None,
+            material_handle: None,
+            material_handles: Vec::new(),
+            submeshes: Vec::new(),
             normal_texture_data: None,
             normal_texture: None,
             metallic_roughness_texture_data: None,
@@ -484,7 +502,7 @@ impl Mesh {
                 .file_stem()
                 .and_then(|s| s.to_str())
                 .unwrap_or("model");
-            let name = if model.meshes.len() > 1 {
+            let primitive_name = if model.meshes.len() > 1 {
                 format!("{base_name}_{mesh_idx}")
             } else {
                 base_name.to_string()
@@ -535,13 +553,35 @@ impl Mesh {
 
             let clusters = Self::generate_clusters(indices.as_ref().unwrap_or(&vec![]), &vertices);
 
+            // Add logging for material properties
+            if let Some(ref props) = material_properties {
+                log::debug!(
+                    "Loaded GLB primitive '{}': metallic={:.2}, roughness={:.2}, emissive={:?}",
+                    primitive_name,
+                    props.metallic_factor,
+                    props.roughness_factor,
+                    props.emissive_factor
+                );
+            }
+
             results.push(Self {
-                name,
+                name: primitive_name.clone(),
                 vertices,
                 skinned_vertices: Vec::new(),
-                indices,
+                indices: indices.clone(),
                 texture_data,
                 texture: None,
+
+                // Phase 2 fields
+                material_handle: None,
+                material_handles: Vec::new(),
+                submeshes: vec![SubmeshDescriptor {
+                    start_index: 0,
+                    index_count: indices.as_ref().map_or(0, |i| i.len()) as u32,
+                    material_slot: 0,
+                    name: primitive_name.clone(),
+                }],
+
                 normal_texture_data,
                 normal_texture: None,
                 metallic_roughness_texture_data,
@@ -651,6 +691,9 @@ impl Mesh {
             indices: descriptor.indices.clone(),
             texture_data: descriptor.texture.clone(),
             texture: None,
+            material_handle: None,
+            material_handles: Vec::new(),
+            submeshes: Vec::new(),
             normal_texture_data: descriptor.normal_texture.clone(),
             normal_texture: None,
             metallic_roughness_texture_data: descriptor.metallic_roughness_texture.clone(),
@@ -689,6 +732,7 @@ impl Mesh {
 
         for mut mesh in iter {
             let vertex_offset = merged.vertices.len() as u32;
+            let index_offset = merged.indices.as_ref().map_or(0, |i| i.len()) as u32;
 
             // Append vertices using mem::take to avoid moving out of Drop type
             let vertices = std::mem::take(&mut mesh.vertices);
@@ -700,6 +744,13 @@ impl Mesh {
                 for idx in idx_list {
                     merged_indices.push(idx + vertex_offset);
                 }
+            }
+
+            // Append submeshes with index offset
+            let submeshes = std::mem::take(&mut mesh.submeshes);
+            for mut submesh in submeshes {
+                submesh.start_index += index_offset;
+                merged.submeshes.push(submesh);
             }
         }
 

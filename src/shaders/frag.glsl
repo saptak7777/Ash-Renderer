@@ -28,7 +28,8 @@ layout(set = 1, binding = 0) uniform Material {
     vec4 parameters; // x: metallic, y: roughness, z: occlusion strength, w: normal scale
     vec4 texture_flags; // x: base color, y: normal, z: metallic-roughness, w: occlusion
     float emissive_texture_flag;
-    vec3 _material_padding;
+    float alpha_cutoff;
+    vec2 _material_padding;
 } material;
 
 layout(set = 2, binding = 0) uniform sampler2D baseTexture;
@@ -142,9 +143,11 @@ void main() {
         : vec4(1.0);
     vec3 baseColor = baseSample.rgb * material.base_color_factor.rgb;
     float alpha = baseSample.a * material.base_color_factor.a;
-    
-    // Alpha handling happens in pipeline blending for transparent objects.
-    // offsets/discard logic removed to prevent accidental holes in opaque meshes.
+
+    // Alpha testing
+    if (alpha < material.alpha_cutoff) {
+        discard;
+    }
 
     // Tangent-based Normal Mapping
     vec3 N = normalize(fragNormal);
