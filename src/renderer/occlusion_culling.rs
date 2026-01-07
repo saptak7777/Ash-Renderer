@@ -74,6 +74,10 @@ impl CullBoundingBox {
     }
 }
 
+/// Culling flags (bits)
+pub const CULL_FLAG_ENABLED: u32 = 1 << 0;
+pub const CULL_FLAG_CAST_SHADOWS: u32 = 1 << 1;
+
 /// Per-object culling data
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, bytemuck::Pod, bytemuck::Zeroable)]
@@ -180,14 +184,42 @@ impl CullObjectData {
         self
     }
 
+    /// Set cast shadows flag
+    pub fn with_cast_shadows(mut self, enabled: bool) -> Self {
+        self.set_flag(CULL_FLAG_CAST_SHADOWS, enabled);
+        self
+    }
+
     /// Get position from matrix
     pub fn position(&self) -> Vec3 {
         Vec3::new(self.model_row3[0], self.model_row3[1], self.model_row3[2])
     }
 
+    /// Get model matrix
+    pub fn model_matrix(&self) -> Mat4 {
+        Mat4::from_cols_array_2d(&[
+            self.model_row0,
+            self.model_row1,
+            self.model_row2,
+            self.model_row3,
+        ])
+    }
+
     /// Create from matrix with default bounds/index
     pub fn from_matrix(model: Mat4) -> Self {
         Self::new(CullBoundingBox::default(), model, 0)
+    }
+
+    pub fn set_flag(&mut self, flag: u32, enabled: bool) {
+        if enabled {
+            self.flags |= flag;
+        } else {
+            self.flags &= !flag;
+        }
+    }
+
+    pub fn has_flag(&self, flag: u32) -> bool {
+        (self.flags & flag) != 0
     }
 }
 

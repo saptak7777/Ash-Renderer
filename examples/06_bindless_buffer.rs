@@ -76,21 +76,20 @@ impl ApplicationHandler for App {
                 log::info!("✓ Mesh uploaded to GPU");
                 *renderer.material_mut() = material.clone();
 
-                // CRITICAL FIX 1: Register material with bindless buffer so shader uses orange, not grey
-                let material_index = 1u32; // Index 0 is reserved for default grey material
-                renderer.register_material_handle(material_index, &material);
+                // CRITICAL FIX 1: Register material with material manager so shader uses orange, not grey
+                let material_handle = renderer.material_manager_mut().register_material(material.clone());
                 
                 // CRITICAL: Upload the material data to GPU so shader can access it
-                if let Err(e) = renderer.upload_material_to_gpu(material_index, &material) {
+                if let Err(e) = renderer.upload_material_to_gpu(material_handle.index as u32, &material) {
                     log::error!("Failed to upload material to GPU: {e}");
                 }
                 
                 // Update mesh_data so the draw_items path uses the correct material
                 if let Some(mesh_data) = renderer.get_mesh_data_mut(0) {
-                    mesh_data.material_handle = material_index;
+                    mesh_data.material_handle = material_handle;
                 }
                 
-                log::info!("✓ Registered orange material at index {}", material_index);
+                log::info!("✓ Registered orange material with handle {:?}", material_handle);
 
                 // 3. Register bindless storage buffer
                 let tint_colors = [Vec4::new(1.0, 1.0, 1.0, 1.0)];

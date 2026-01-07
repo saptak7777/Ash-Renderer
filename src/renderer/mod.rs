@@ -20,9 +20,9 @@ pub mod lod_system;
 pub mod model_renderer;
 pub mod msaa_targets;
 pub mod occlusion_culling;
+pub mod pass_manager;
 pub mod pipeline_cache;
 pub mod render_stats;
-#[allow(clippy::module_inception)]
 pub mod renderer;
 pub mod resource_registry;
 pub mod resources;
@@ -45,6 +45,7 @@ pub use lod_system::{LodManager, LodMesh, LodSelection};
 pub use model_renderer::{MaterialPushConstants, ModelRenderer};
 pub use msaa_targets::{MsaaColorTarget, MsaaDepthTarget};
 pub use occlusion_culling::{CullBoundingBox, CullObjectData, OcclusionCulling};
+pub use pass_manager::{RenderPassManager, RenderingMode};
 pub use pipeline_cache::PipelineCache;
 pub use render_stats::{RenderStats, StatsCollector};
 pub use renderer::{RenderCommand, Renderer};
@@ -55,7 +56,7 @@ pub use temporal_upscaling::{VsrPass, VsrQuality};
 // Re-export from resources submodule
 pub use resources::{
     BufferAllocation, BufferHandle, BufferPool, Camera, CascadedShadowMap, DepthBuffer,
-    DescriptorSetHandle, ImageHandle, InstanceBuffer, Material, MaterialRegistry, Mesh,
+    DescriptorSetHandle, ImageHandle, InstanceBuffer, Material, MaterialHandle, MaterialManager, Mesh,
     MvpMatrices, PipelineHandle, Texture, TextureData, Transform, UniformBuffer, Vertex,
     VertexBuffer, MVP,
 };

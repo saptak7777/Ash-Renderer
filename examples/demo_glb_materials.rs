@@ -70,16 +70,20 @@ impl ApplicationHandler for App {
                     log::info!("✅ Demo mesh registered with handle {}", handle);
 
                     // Check if material was registered
-                    if renderer.material_registry().get(handle).is_some() {
-                        log::info!("✅ Material automatically registered for demo mesh");
+                    let mesh_data = renderer.mesh_data();
+                    if !mesh_data.is_empty() {
+                        let mat_handle = mesh_data[0].material_handle;
+                        if renderer.material_manager().is_handle_valid(mat_handle) {
+                            log::info!("✅ Material automatically registered for demo mesh");
 
-                        let material = renderer.material_registry().get(handle).unwrap();
-                        log::info!("   - Material: {}", material.name);
-                        log::info!("   - Metallic: {:.2}", material.metallic);
-                        log::info!("   - Roughness: {:.2}", material.roughness);
-                        log::info!("   - Color: {:?}", material.color);
-                    } else {
-                        log::warn!("❌ No material registered for demo mesh");
+                            let material = renderer.material_manager().get_material(mat_handle);
+                            log::info!("   - Material: {}", material.name);
+                            log::info!("   - Metallic: {:.2}", material.metallic);
+                            log::info!("   - Roughness: {:.2}", material.roughness);
+                            log::info!("   - Color: {:?}", material.color);
+                        } else {
+                            log::warn!("❌ No material registered for demo mesh");
+                        }
                     }
 
                     // Store for rendering
@@ -89,12 +93,13 @@ impl ApplicationHandler for App {
 
                 // Submit render command with automatic material selection
                 if let Some(mesh_handle) = self.mesh_handle {
-                    renderer.submit_render_commands(&[ash_renderer::renderer::RenderCommand {
+                    let _ = renderer.submit_render_commands(&[ash_renderer::renderer::RenderCommand {
                         mesh_handle,
-                        material_handle: 0, // 0 = auto-select from mesh_material_mapping
+                        material_handle: ash_renderer::renderer::MaterialHandle::null(), // null = auto-select from mesh material
                         transform: Mat4::IDENTITY,
                         is_skinned: false,
                         joint_offset: 0,
+                        cast_shadows: true,
                     }]);
                     log::info!("✅ Render command submitted with auto material selection");
                 }

@@ -75,11 +75,11 @@ mod tests {
     #[test]
     fn test_mesh_material_mapping() {
         // Test mesh-to-material mapping logic (Phase 4)
-        let mut mesh_material_mapping = HashMap::new();
-        let mut material_registry = HashMap::new();
+        use ash_renderer::renderer::{MaterialManager, MaterialHandle};
+        
+        let mut manager = MaterialManager::new();
 
         // Simulate registering a mesh with material
-        let mesh_handle = 1u32;
         let material = Material {
             name: "test_mesh_material".to_string(),
             metallic: 0.8,
@@ -87,35 +87,22 @@ mod tests {
             ..Default::default()
         };
 
-        // Populate registries
-        material_registry.insert(mesh_handle, material);
-        mesh_material_mapping.insert(mesh_handle, mesh_handle);
+        // Register in manager
+        let registered_handle = manager.register_material(material);
 
-        // Test automatic selection (material_handle = 0)
-        let material_handle = 0;
-        let selected_handle = if material_handle == 0 {
-            mesh_material_mapping
-                .get(&mesh_handle)
-                .copied()
-                .unwrap_or(0)
+        // Test automatic selection (null material handle)
+        let material_handle = MaterialHandle::null();
+        let selected_handle = if material_handle.is_null() {
+            registered_handle
         } else {
             material_handle
         };
 
-        assert_eq!(
-            selected_handle, mesh_handle,
-            "Should auto-select mesh's material"
-        );
-
-        // Verify material is correct
-        assert!(
-            material_registry.contains_key(&selected_handle),
-            "Material should exist in registry"
-        );
-        let selected_material = material_registry.get(&selected_handle).unwrap();
+        // Retrieve and verify
+        let selected_material = manager.get_material(selected_handle);
         assert_eq!(
             selected_material.metallic, 0.8,
-            "Should get correct material"
+            "Should have correctly resolved the mesh's material"
         );
     }
 

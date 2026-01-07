@@ -68,15 +68,17 @@ impl LightManager {
     }
 
     /// Create with custom culling config
-    pub fn with_config(config: LightCullingConfig) -> Self {
+    pub fn with_config(config: LightCullingConfig) -> Result<Self, crate::error::AshError> {
         if config.debug_tiles && !config.enabled {
-            panic!("LightManager: debug_tiles requires culling to be enabled (architectural invariant).");
+            return Err(crate::error::AshError::HardwareCapabilityMissing(
+                "LightManager: debug_tiles requires culling to be enabled".to_string(),
+            ));
         }
 
-        Self {
+        Ok(Self {
             culling_pass: LightCullingPass::with_config(config),
             ..Self::new()
-        }
+        })
     }
 
     pub fn update_lights(

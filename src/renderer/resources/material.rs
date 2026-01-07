@@ -113,65 +113,131 @@ impl MaterialKey {
     }
 }
 
-/// A centralized registry for materials with O(1) deduplication
-pub struct MaterialRegistry {
-    materials: HashMap<u32, Material>,
-    key_to_handle: HashMap<MaterialKey, u32>,
+use bytemuck::{Pod, Zeroable};
+
+/// Material handle with versioning to catch use-after-free
+#[repr(C)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Default, Pod, Zeroable)]
+pub struct MaterialHandle {
+    pub index: u16,
+    pub version: u16, // Catch use-after-free
 }
 
-impl Default for MaterialRegistry {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl MaterialRegistry {
-    pub fn new() -> Self {
+impl MaterialHandle {
+    pub fn null() -> Self {
         Self {
-            materials: HashMap::new(),
-            key_to_handle: HashMap::new(),
+            index: 0,
+            version: 0,
         }
     }
 
-    /// Returns handle of existing material or registers new one
-    pub fn get_or_register(&mut self, handle: u32, material: Material) -> u32 {
+    pub fn is_null(&self) -> bool {
+        self.index == 0 && self.version == 0
+    }
+
+    pub fn is_valid(&self, manager: &MaterialManager) -> bool {
+        if (self.index as usize) >= manager.materials.len() {
+            return false;
+        }
+        manager.versions[self.index as usize] == self.version
+    }
+
+    pub fn get<'a>(&self, manager: &'a MaterialManager) -> Option<&'a Material> {
+        if self.is_valid(manager) {
+            Some(&manager.materials[self.index as usize])
+        } else {
+            None
+        }
+    }
+}
+
+pub struct MaterialManager {
+    materials: Vec<Material>,
+    versions: Vec<u16>,
+    next_material_id: u16,
+    default_material: MaterialHandle,
+    key_to_handle: HashMap<MaterialKey, MaterialHandle>,
+}
+
+impl MaterialManager {
+    pub fn new() -> Self {
+        let mut manager = Self {
+            materials: Vec::new(),
+            versions: Vec::new(),
+            next_material_id: 0,
+            default_material: MaterialHandle {
+                index: 0,
+                version: 0,
+            },
+            key_to_handle: HashMap::new(),
+        };
+
+        // Register default material at index 0
+        let default_handle = manager.register_material(Material::default());
+        manager.default_material = default_handle;
+        manager
+    }
+
+    pub fn register_material(&mut self, material: Material) -> MaterialHandle {
         let key = MaterialKey::from_material(&material);
         if let Some(&existing_handle) = self.key_to_handle.get(&key) {
             return existing_handle;
         }
 
+        let index = self.next_material_id;
+        self.next_material_id += 1;
+
+        if (index as usize) >= self.materials.len() {
+            self.materials.resize(index as usize + 1, Material::default());
+            self.versions.resize(index as usize + 1, 0);
+        }
+
+        self.materials[index as usize] = material;
+        self.versions[index as usize] += 1;
+
+        let handle = MaterialHandle {
+            index,
+            version: self.versions[index as usize],
+        };
         self.key_to_handle.insert(key, handle);
-        self.materials.insert(handle, material);
         handle
     }
 
-    pub fn get_handle_by_key(&self, key: MaterialKey) -> Option<u32> {
-        self.key_to_handle.get(&key).copied()
+    pub fn get_default_material(&self) -> &Material {
+        &self.materials[self.default_material.index as usize]
     }
 
-    pub fn insert(&mut self, handle: u32, material: Material) {
-        let key = MaterialKey::from_material(&material);
-        self.key_to_handle.insert(key, handle);
-        self.materials.insert(handle, material);
+    pub fn default_material(&self) -> MaterialHandle {
+        self.default_material
     }
 
-    pub fn get(&self, handle: u32) -> Option<&Material> {
-        self.materials.get(&handle)
+    pub fn get_material(&self, handle: MaterialHandle) -> &Material {
+        if self.is_handle_valid(handle) {
+            &self.materials[handle.index as usize]
+        } else {
+            &self.materials[self.default_material.index as usize]
+        }
     }
 
-    pub fn get_mut(&mut self, handle: u32) -> Option<&mut Material> {
-        self.materials.get_mut(&handle)
+    pub fn is_handle_valid(&self, handle: MaterialHandle) -> bool {
+        let idx = handle.index as usize;
+        idx < self.materials.len() && self.versions[idx] == handle.version
     }
 
-    pub fn iter(&self) -> std::collections::hash_map::Iter<u32, Material> {
-        self.materials.iter()
+    pub fn get(&self, handle: MaterialHandle) -> Option<&Material> {
+        handle.get(self)
     }
 
-    pub fn clear(&mut self) {
-        self.materials.clear();
-        self.key_to_handle.clear();
+    pub fn get_mut(&mut self, handle: MaterialHandle) -> Option<&mut Material> {
+        if handle.is_valid(self) {
+            Some(&mut self.materials[handle.index as usize])
+        } else {
+            None
+        }
     }
 }
+
+/// A centralized registry for materials with O(1) deduplication
 
 #[cfg(test)]
 mod tests {
@@ -198,7 +264,7 @@ mod tests {
 
     #[test]
     fn test_material_deduplication() {
-        let mut registry = MaterialRegistry::new();
+        let mut manager = MaterialManager::new();
         let mat1 = Material {
             color: [1.0, 0.0, 0.0, 1.0],
             metallic: 0.5,
@@ -207,20 +273,16 @@ mod tests {
         };
         let mat2 = mat1.clone();
 
-        let handle1 = 1;
-        let handle2 = 2;
+        let handle1 = manager.register_material(mat1);
+        let handle2 = manager.register_material(mat2);
 
-        let result_h1 = registry.get_or_register(handle1, mat1);
-        let result_h2 = registry.get_or_register(handle2, mat2);
-
-        assert_eq!(result_h1, handle1);
-        assert_eq!(result_h2, handle1); // Should reuse handle1
-        assert_eq!(registry.materials.len(), 1);
+        assert_eq!(handle1, handle2); // Should reuse the same handle
+        assert_eq!(manager.materials.len(), 2); // Default material at 0, new material at 1
     }
 
     #[test]
     fn test_quantization_variance() {
-        let mut registry = MaterialRegistry::new();
+        let mut manager = MaterialManager::new();
         let mat1 = Material {
             color: [0.5, 0.5, 0.5, 1.0],
             ..Default::default()
@@ -231,8 +293,8 @@ mod tests {
             ..Default::default()
         };
 
-        let h1 = registry.get_or_register(1, mat1);
-        let h2 = registry.get_or_register(2, mat2);
+        let h1 = manager.register_material(mat1);
+        let h2 = manager.register_material(mat2);
 
         assert_eq!(h1, h2);
     }

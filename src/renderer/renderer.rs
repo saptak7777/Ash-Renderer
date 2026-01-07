@@ -14,13 +14,14 @@ use crate::{
         instancing::{BatchKey, InstanceData, InstancingManager},
         model_renderer::{DrawContext, MaterialPushConstants, MeshPushConstants, ModelRenderer},
         occlusion_culling::{CullBoundingBox, OcclusionCulling},
+        pass_manager::{RenderPassManager, RenderingMode},
         resource_registry::{ResourceId, ResourceRegistry},
         resources,
         resources::uniform::{StorageBuffer, UniformBuffer},
         ssgi_pass::{SsgiPass, SsgiQuality},
         temporal_upscaling::{VsrPass, VsrQuality},
-        vram_budget, DepthBuffer, GBuffer, Material, MaterialRegistry, Mesh, PipelineCache,
-        SkinnedVertex, Texture, TextureData, Transform,
+        vram_budget, DepthBuffer, GBuffer, Material, MaterialHandle, MaterialManager, Mesh,
+        PipelineCache, SkinnedVertex, Texture, TextureData, Transform,
     },
     vulkan::{self, Allocator, BindlessManager},
     AshError, Result,
@@ -53,23 +54,26 @@ pub struct RenderCommand {
     /// Handle identifying the mesh to render
     pub mesh_handle: u32,
     /// Handle identifying the material to use
-    pub material_handle: u32,
+    pub material_handle: MaterialHandle,
     /// Transform matrix for positioning the mesh in world space
     pub transform: Mat4,
     /// Whether this is a skinned mesh
     pub is_skinned: bool,
     /// Offset into the joint matrices SSBO (for skeletal animation)
     pub joint_offset: u32,
+    /// Whether this object should cast shadows
+    pub cast_shadows: bool,
 }
 
 impl Default for RenderCommand {
     fn default() -> Self {
         Self {
             mesh_handle: 0,
-            material_handle: 0,
+            material_handle: MaterialHandle::null(),
             transform: Mat4::IDENTITY,
             is_skinned: false,
             joint_offset: 0,
+            cast_shadows: true,
         }
     }
 }
@@ -273,7 +277,7 @@ pub struct Renderer {
     material: Material,
     transform: Transform,
     mesh_data: Vec<MeshData>, // Indexed by mesh handle for O(1) access
-    material_registry: MaterialRegistry,
+    material_manager: MaterialManager,
     swapchain_image_view_ids: Vec<ResourceId>,
     depth_buffer_id: Option<ResourceId>,
     frame_sync_ids: Vec<(ResourceId, ResourceId, ResourceId)>,
@@ -331,6 +335,8 @@ pub struct Renderer {
     texture_compression: bool,
     instancing_manager: InstancingManager,
     instance_buffer: Vec<resources::InstanceBuffer>, // One per frame
+    // Pass management
+    pass_manager: RenderPassManager,
     // Image-Based Lighting
     brdf_lut_pass: Option<crate::renderer::features::brdf_lut::BrdfLutPass>,
     irradiance_map: Option<resources::ImageHandle>,
@@ -365,12 +371,14 @@ struct DrawItem {
     key: Arc<str>,
     transform: Mat4,
     material: Material,
+    material_handle: MaterialHandle,
     texture_flags: TexturePresenceFlags,
     texture_indices: [i32; 4], // base, normal, mr, occ
     emissive_index: i32,
     is_skinned: bool,
     joint_offset: u32,
     alpha_cutoff: f32,
+    cast_shadows: bool,
 }
 
 #[derive(Copy, Clone, Default, Debug)]
@@ -402,7 +410,7 @@ pub struct MeshData {
     pub texture_indices: [i32; 4], // base, normal, mr, occlusion
     pub emissive_index: i32,
     pub texture_flags: TexturePresenceFlags,
-    pub material_handle: u32,
+    pub material_handle: MaterialHandle,
 }
 
 impl Default for MeshData {
@@ -412,7 +420,7 @@ impl Default for MeshData {
             texture_indices: [-1, -1, -1, -1],
             emissive_index: -1,
             texture_flags: TexturePresenceFlags::default(),
-            material_handle: 0,
+            material_handle: MaterialHandle { index: 0, version: 0 },
         }
     }
 }
@@ -688,6 +696,9 @@ impl Renderer {
 
             let initial_flags = TexturePresenceFlags::from_mesh(&mesh);
 
+            let mut material_manager = MaterialManager::new();
+            let initial_material_handle = material_manager.register_material(material.clone());
+
             // Initialize mesh_data with the cube mesh and CORRECT indices
             let mesh_data = vec![MeshData {
                 name: Arc::clone(&mesh.name),
@@ -701,7 +712,7 @@ impl Renderer {
                 ],
                 emissive_index: mesh.emissive_texture_index.map(|i| i as i32).unwrap_or(-1),
                 texture_flags: initial_flags,
-                material_handle: 0,
+                material_handle: initial_material_handle,
             }];
 
             // Mesh data already added to mesh_data Vec above
@@ -757,6 +768,7 @@ impl Renderer {
                     key: Arc::clone(&mesh.name),
                     transform: transform_matrix,
                     material: material.clone(),
+                    material_handle: initial_material_handle,
                     texture_flags: initial_flags,
                     texture_indices: [
                         mesh.texture_index.map(|i| i as i32).unwrap_or(-1),
@@ -770,6 +782,7 @@ impl Renderer {
                     is_skinned: false,
                     joint_offset: 0,
                     alpha_cutoff: material.alpha_cutoff,
+                    cast_shadows: true,
                 }],
                 swapchain: Some(swapchain),
                 render_pass: Some(render_pass),
@@ -792,7 +805,7 @@ impl Renderer {
                 alloc,
                 device,
                 mesh_data,
-                material_registry: MaterialRegistry::new(),
+                material_manager,
                 swapchain_image_view_ids,
                 depth_buffer_id: Some(depth_buffer_id),
                 frame_sync_ids,
@@ -840,6 +853,7 @@ impl Renderer {
                 instance_buffer: instance_buffers,
                 instance_buffer_indices,
                 joint_buffer_indices,
+                pass_manager: RenderPassManager::new(RenderingMode::GPUDriven),
                 brdf_lut_pass: Some(brdf_lut_pass),
                 irradiance_map: None,
                 prefiltered_map: None,
@@ -1594,12 +1608,14 @@ impl Renderer {
 
             let flags = TexturePresenceFlags::from_mesh(&mesh);
 
+            let material_handle = self.material_manager.register_material(self.material.clone());
+
             let mesh_data = MeshData {
                 name: Arc::clone(&key),
                 texture_indices: indices,
                 emissive_index,
                 texture_flags: flags,
-                material_handle: 0,
+                material_handle,
             };
 
             self.draw_items.clear();
@@ -1607,12 +1623,14 @@ impl Renderer {
                 key: Arc::clone(&key),
                 transform: self.transform.model_matrix(),
                 material: self.material.clone(),
+                material_handle,
                 texture_flags: flags,
                 texture_indices: indices,
                 emissive_index,
                 is_skinned: false,
                 joint_offset: 0,
                 alpha_cutoff: self.material.alpha_cutoff,
+                cast_shadows: true,
             });
 
             if self.mesh_data.is_empty() {
@@ -1621,11 +1639,20 @@ impl Renderer {
                 self.mesh_data[0] = mesh_data;
             }
 
-            self.material_registry.insert(0, self.material.clone());
             self.mesh = Some(mesh);
         }
 
         Ok(())
+    }
+
+    /// Set the rendering mode (GPU-driven, Legacy, or Hybrid).
+    pub fn set_rendering_mode(&mut self, mode: RenderingMode) {
+        self.pass_manager.set_mode(mode);
+    }
+
+    /// Returns the current rendering mode.
+    pub fn rendering_mode(&self) -> RenderingMode {
+        self.pass_manager.mode()
     }
 
     /// Access the underlying memory allocator.
@@ -1661,14 +1688,19 @@ impl Renderer {
             .map(|(i, _)| i as u32)
     }
 
+    /// Get immutable access to consolidated mesh data.
+    pub fn mesh_data(&self) -> &[MeshData] {
+        &self.mesh_data
+    }
+
     /// Get mutable access to mesh data by handle.
     pub fn get_mesh_data_mut(&mut self, handle: u32) -> Option<&mut MeshData> {
         self.mesh_data.get_mut(handle as usize)
     }
 
-    /// Get mutable access to the material registry.
-    pub fn material_registry_mut(&mut self) -> &mut MaterialRegistry {
-        &mut self.material_registry
+    /// Get mutable access to the material manager.
+    pub fn material_manager_mut(&mut self) -> &mut MaterialManager {
+        &mut self.material_manager
     }
 
     pub fn register_mesh_handle(&mut self, handle: u32, mesh: &mut Mesh) -> Result<()> {
@@ -1693,8 +1725,7 @@ impl Renderer {
             }
 
             // Register material from mesh properties
-            // Register material from mesh properties
-            let mut material_handle = 0;
+            let mut material_handle = self.material_manager.default_material();
             if let Some(props) = &mesh.material_properties {
                 if !self.allow_auto_material {
                     log::warn!(
@@ -1702,36 +1733,24 @@ impl Renderer {
                         &*mesh.name
                     );
                 } else {
-                    use crate::renderer::resources::material::MaterialKey;
-                    let key = MaterialKey::from_props(props);
-
-                    material_handle = if let Some(existing) =
-                        self.material_registry.get_handle_by_key(key)
-                    {
-                        log::debug!(
-                            "Deduplicated material for mesh '{}': using existing handle {}",
-                            &*mesh.name,
-                            existing
-                        );
-                        existing
-                    } else {
-                        let material = Material {
-                            name: format!("{}_material_{}", &*mesh.name, handle),
-                            color: props.base_color_factor,
-                            metallic: props.metallic_factor,
-                            roughness: props.roughness_factor,
-                            emissive: props.emissive_factor,
-                            occlusion_strength: props.occlusion_strength,
-                            normal_scale: props.normal_scale,
-                            alpha_cutoff: props.alpha_cutoff,
-                            tint_index: -1,
-                        };
-                        log::debug!(
-                                "Registered auto-material for mesh '{}': handle={}, metallic={:.2}, roughness={:.2}",
-                                &*mesh.name, handle, props.metallic_factor, props.roughness_factor
-                            );
-                        self.material_registry.get_or_register(handle, material)
+                    let material = Material {
+                        name: format!("{}_material_{}", &*mesh.name, handle),
+                        color: props.base_color_factor,
+                        metallic: props.metallic_factor,
+                        roughness: props.roughness_factor,
+                        emissive: props.emissive_factor,
+                        occlusion_strength: props.occlusion_strength,
+                        normal_scale: props.normal_scale,
+                        alpha_cutoff: props.alpha_cutoff,
+                        tint_index: -1,
                     };
+                    
+                    material_handle = self.material_manager.register_material(material);
+                    
+                    log::debug!(
+                        "Registered auto-material for mesh '{}': handle={:?}, metallic={:.2}, roughness={:.2}",
+                        &*mesh.name, material_handle, props.metallic_factor, props.roughness_factor
+                    );
                 }
             }
 
@@ -1778,12 +1797,8 @@ impl Renderer {
         self.get_stats().log_frame_stats();
     }
 
-    pub fn register_material_handle(&mut self, handle: u32, material: &Material) {
-        self.material_registry.insert(handle, material.clone());
-    }
-
     /// Updates the GPU material buffer with a material at the specified index
-    /// This must be called after register_material_handle to ensure the GPU sees the correct material
+    /// This must be called after registering the material to ensure the GPU sees the correct material
     pub fn upload_material_to_gpu(&mut self, handle: u32, material: &Material) -> Result<()> {
         if let Some(buffer) = self.material_storage_buffer.as_mut() {
             let capacity = buffer.capacity();
@@ -1838,9 +1853,9 @@ impl Renderer {
         }
     }
 
-    /// Get access to the material registry (for testing)
-    pub fn material_registry(&self) -> &MaterialRegistry {
-        &self.material_registry
+    /// Get access to the material manager (for testing)
+    pub fn material_manager(&self) -> &MaterialManager {
+        &self.material_manager
     }
 
     /// Registers mesh data described by a [`MeshDescriptor`] with the renderer and returns the
@@ -1861,12 +1876,11 @@ impl Renderer {
     /// Converts a material descriptor into a renderer material and registers it.
     pub fn register_material_descriptor(
         &mut self,
-        handle: u32,
+        _handle: u32,
         descriptor: &MaterialDescriptor,
-    ) -> Material {
+    ) -> MaterialHandle {
         let material = descriptor.material.clone();
-        self.register_material_handle(handle, &material);
-        material
+        self.material_manager.register_material(material)
     }
 
     /// Registers a generic storage buffer with the bindless manager.
@@ -1949,16 +1963,17 @@ impl Renderer {
     pub fn draw_skinned_mesh(
         &mut self,
         mesh_handle: u32,
-        material_handle: u32,
+        material_handle: MaterialHandle,
         transform: Mat4,
         joint_offset: u32,
     ) {
-        self.submit_render_commands(&[RenderCommand {
+        let _ = self.submit_render_commands(&[RenderCommand {
             mesh_handle,
             material_handle,
             transform,
             is_skinned: true,
             joint_offset,
+            cast_shadows: true,
         }]);
     }
 
@@ -1966,7 +1981,7 @@ impl Renderer {
     ///
     /// Each `RenderCommand` specifies a mesh handle, material handle, and transform.
     /// For large command counts (>1000), uses parallel processing across all CPU cores.
-    pub fn submit_render_commands(&mut self, commands: &[RenderCommand]) {
+    pub fn submit_render_commands(&mut self, commands: &[RenderCommand]) -> Result<()> {
         self.draw_items.clear();
         self.instancing_manager.begin_frame();
 
@@ -1978,8 +1993,7 @@ impl Renderer {
 
             // Capture only thread-safe fields
             let mesh_data = &self.mesh_data;
-            let material_registry = &self.material_registry;
-            let default_material = &self.material;
+            let material_manager = &self.material_manager;
             let strict_mode = self.strict_mode;
 
             let (draw_items, instance_batches) = commands
@@ -1990,22 +2004,24 @@ impl Renderer {
                         if let Some(mesh_data_entry) = mesh_data.get(command.mesh_handle as usize) {
                             let mesh_key = &mesh_data_entry.name;
 
-                            let material_handle = if command.material_handle == 0 {
+                            let material_handle = if command.material_handle.is_null() {
                                 mesh_data_entry.material_handle
                             } else {
                                 command.material_handle
                             };
-                            let material = material_registry
-                                .get(material_handle)
-                                .unwrap_or_else(|| {
-                                    let msg = format!("Material handle {material_handle} not found for mesh handle {}, using default", command.mesh_handle);
-                                    if strict_mode {
-                                        panic!("{msg}");
-                                    } else {
-                                        log::warn!("{msg}");
-                                    }
-                                    default_material
-                                });
+                            
+                            // Unreal-Style validation: get material or fallback to default
+                            let material = material_manager.get_material(material_handle);
+                            
+                            // Safety check: log if version mismatch (rare but possible)
+                            if !material_manager.is_handle_valid(material_handle) {
+                                let msg = format!("Invalid material handle {material_handle:?} detected for mesh handle {}, using default", command.mesh_handle);
+                                if strict_mode {
+                                    log::error!("{msg}");
+                                } else {
+                                    log::warn!("{msg}");
+                                }
+                            }
 
                             let texture_flags = mesh_data_entry.texture_flags;
                             let (indices, emissive_index) = (mesh_data_entry.texture_indices, mesh_data_entry.emissive_index);
@@ -2015,23 +2031,28 @@ impl Renderer {
                                     key: mesh_key.clone(),
                                     transform: command.transform,
                                     material: material.clone(),
+                                    material_handle,
                                     texture_flags,
                                     texture_indices: indices,
                                     emissive_index,
                                     is_skinned: true,
                                     joint_offset: command.joint_offset,
                                     alpha_cutoff: material.alpha_cutoff,
+                                    cast_shadows: command.cast_shadows,
                                 });
                             } else {
                                 let key = BatchKey::new(command.mesh_handle, material_handle);
-                                let instance = InstanceData::from_matrix(command.transform);
+                                let mut instance = InstanceData::from_matrix(command.transform);
+                                if command.cast_shadows {
+                                    instance.set_flag(crate::renderer::occlusion_culling::CULL_FLAG_CAST_SHADOWS, true);
+                                }
                                 batches
                                     .entry(key)
                                     .or_default()
                                     .push(instance);
                             }
                         } else if strict_mode {
-                            panic!("Mesh handle {} not found in registry", command.mesh_handle);
+                            log::error!("Mesh handle {} not found in registry", command.mesh_handle);
                         }
                         (items, batches)
                     },
@@ -2061,24 +2082,24 @@ impl Renderer {
                 if let Some(mesh_data) = self.mesh_data.get(command.mesh_handle as usize) {
                     let mesh_key = &mesh_data.name;
 
-                    let material_handle = if command.material_handle == 0 {
+                    let material_handle = if command.material_handle.is_null() {
                         mesh_data.material_handle
                     } else {
                         command.material_handle
                     };
 
-                    let material = self
-                        .material_registry
-                        .get(material_handle)
-                        .unwrap_or_else(|| {
-                            let msg = format!("Material handle {material_handle} not found for mesh handle {}, using default", command.mesh_handle);
-                            if self.strict_mode {
-                                panic!("{msg}");
-                            } else {
-                                log::warn!("{msg}");
-                            }
-                            &self.material
-                        });
+                    // Unreal-Style validation: get material or fallback to default
+                    let material = self.material_manager.get_material(material_handle);
+                    
+                    // Safety check: log if version mismatch (rare but possible)
+                    if !self.material_manager.is_handle_valid(material_handle) {
+                        let msg = format!("Invalid material handle {material_handle:?} detected for mesh handle {}, using default", command.mesh_handle);
+                        if self.strict_mode {
+                            log::error!("{msg}");
+                        } else {
+                            log::warn!("{msg}");
+                        }
+                    }
 
                     let texture_flags = mesh_data.texture_flags;
                     let (indices, emissive_index) =
@@ -2089,22 +2110,26 @@ impl Renderer {
                             key: mesh_key.clone(),
                             transform: command.transform,
                             material: material.clone(),
+                            material_handle,
                             texture_flags,
                             texture_indices: indices,
                             emissive_index,
                             is_skinned: true,
                             joint_offset: command.joint_offset,
                             alpha_cutoff: material.alpha_cutoff,
+                            cast_shadows: command.cast_shadows,
                         });
                     } else {
                         let key = BatchKey::new(command.mesh_handle, material_handle);
-                        let instance = InstanceData::from_matrix(command.transform);
+                        let instance = InstanceData::from_matrix(command.transform)
+                            .with_cast_shadows(command.cast_shadows);
                         self.instancing_manager.add_instance(key, instance);
                     }
                 } else {
                     let msg = format!("Mesh handle {} not found in registry", command.mesh_handle);
                     if self.strict_mode {
-                        panic!("{msg}");
+                        log::error!("{msg}");
+                        return Err(AshError::MeshNotFound(command.mesh_handle));
                     } else {
                         log::warn!("{msg}");
                     }
@@ -2115,8 +2140,9 @@ impl Renderer {
         // Fallback: if no commands were submitted, use default cube
         if self.draw_items.is_empty() && self.instancing_manager.stats().total_instances == 0 {
             if let Some(_mesh) = self.mesh.as_ref() {
-                let key = BatchKey::new(0, 0);
-                let instance = InstanceData::from_matrix(self.transform.model_matrix());
+                let key = BatchKey::new(0, self.material_manager.default_material());
+                let instance = InstanceData::from_matrix(self.transform.model_matrix())
+                    .with_cast_shadows(true);
                 self.instancing_manager.add_instance(key, instance);
             }
         }
@@ -2130,6 +2156,8 @@ impl Renderer {
                 .then_with(|| a.material.name.cmp(&b.material.name))
                 .then_with(|| a.key.cmp(&b.key))
         });
+
+        Ok(())
     }
 
     /// Bake IBL maps from an equirectangular texture.
@@ -3199,8 +3227,13 @@ impl Renderer {
 
                     let light_space_matrix = self.shadow_feature.light_space_matrix();
 
-                    // Draw all meshes
+                    // Draw all shadow casters
+                    // 1. Draw skinned meshes (draw_items)
                     for item in &self.draw_items {
+                        if !item.cast_shadows {
+                            continue;
+                        }
+
                         if let Some(uploaded) = self.model_renderer.get(&item.key) {
                             // Push constants for light space matrix and model transform.
                             let light_space_push =
@@ -3274,6 +3307,105 @@ impl Renderer {
                                     0,
                                     0,
                                 );
+                            }
+                        }
+                    }
+
+                    // 2. Draw instanced meshes (batches) that cast shadows
+                    for batch in self.instancing_manager.batches() {
+                        let mesh_data = if let Some(m) = self.mesh_data.get(batch.key.mesh_id as usize) {
+                            m
+                        } else {
+                            continue;
+                        };
+                        
+                        if let Some(uploaded) = self.model_renderer.get(&mesh_data.name) {
+                            // Bind vertex buffers once per batch
+                            let offsets = [0];
+                            self.device.device.cmd_bind_vertex_buffers(
+                                command_buffer,
+                                0,
+                                &[uploaded.vertex_buffer()],
+                                &offsets,
+                            );
+
+                            // Bind index buffer once per batch if available
+                            if let Some(index_buffer) = uploaded.index_buffer() {
+                                self.device.device.cmd_bind_index_buffer(
+                                    command_buffer,
+                                    index_buffer,
+                                    0,
+                                    vk::IndexType::UINT32,
+                                );
+                            }
+
+                            // Bind Bindless Textures (Set 2) once per batch
+                            if let Some(ref bindless) = self.bindless_manager {
+                                self.device.device.cmd_bind_descriptor_sets(
+                                    command_buffer,
+                                    vk::PipelineBindPoint::GRAPHICS,
+                                    shadow_layout.handle(),
+                                    2, // Set 2
+                                    &[bindless.descriptor_set()],
+                                    &[],
+                                );
+                            }
+
+                            for instance in &batch.instances {
+                                // Check if this instance casts shadows using the flag we added
+                                if !instance.has_flag(crate::renderer::occlusion_culling::CULL_FLAG_CAST_SHADOWS) {
+                                    continue;
+                                }
+
+                                // Construct model matrix from instance data
+                                let model_matrix = instance.model_matrix();
+                                
+                                let light_space_push =
+                                    crate::renderer::model_renderer::Mat4Push::from(light_space_matrix);
+                                let model_push =
+                                    crate::renderer::model_renderer::Mat4Push::from(model_matrix);
+
+                                let mut push_data = Vec::with_capacity(128);
+                                push_data.extend_from_slice(bytemuck::bytes_of(&light_space_push));
+                                push_data.extend_from_slice(bytemuck::bytes_of(&model_push));
+
+                                self.device.device.cmd_push_constants(
+                                    command_buffer,
+                                    shadow_layout.handle(),
+                                    vk::ShaderStageFlags::VERTEX,
+                                    0,
+                                    &push_data,
+                                );
+
+                                // Push texture index for alpha discard (fetch from mesh_data)
+                                let base_color_index = mesh_data.texture_indices[0] as u32;
+                                
+                                self.device.device.cmd_push_constants(
+                                    command_buffer,
+                                    shadow_layout.handle(),
+                                    vk::ShaderStageFlags::FRAGMENT,
+                                    128,
+                                    bytemuck::bytes_of(&base_color_index),
+                                );
+
+                                if uploaded.index_buffer().is_some() {
+                                    self.device.device.cmd_draw_indexed(
+                                        command_buffer,
+                                        uploaded.index_count(),
+                                        1,
+                                        0,
+                                        0,
+                                        0,
+                                    );
+                                } else {
+                                    self.device.device.cmd_draw(
+                                        command_buffer,
+                                        uploaded.vertex_count(),
+                                        1,
+                                        0,
+                                        0,
+                                    );
+                                }
                             }
                         }
                     }
@@ -3441,28 +3573,27 @@ impl Renderer {
                 if let Some(mesh_data) = self.mesh_data.get(batch.key.mesh_id as usize) {
                     let mesh_key = &mesh_data.name;
 
-                    let _material = self
-                        .material_registry
-                        .get(batch.key.material_id)
-                        .unwrap_or_else(|| {
-                            let msg = format!(
-                                "Material handle {} not found for mesh '{}', using default",
-                                batch.key.material_id, mesh_key
-                            );
-                            if self.strict_mode {
-                                panic!("{}", msg);
-                            } else {
-                                log::warn!("{msg}");
-                            }
-                            &self.material
-                        });
+                    let _material = self.material_manager.get_material(batch.key.material_id);
+                    
+                    if !self.material_manager.is_handle_valid(batch.key.material_id) {
+                        let msg = format!(
+                            "Invalid material handle {:?} detected for mesh '{}', using default",
+                            batch.key.material_id, mesh_key
+                        );
+                        if self.strict_mode {
+                            log::error!("{msg}");
+                        } else {
+                            log::warn!("{msg}");
+                        }
+                    }
 
                     if let Some(uploaded) = self.model_renderer.get(mesh_key) {
                         // Push constants - use material handle from batch
                         let material_push = MaterialPushConstants::new(batch.key.material_id);
 
                         // --- GPU-Driven Path ---
-                        if let Some(ref mut indirect) = self.indirect_draw_pass {
+                        if self.pass_manager.use_gpu_driven() && self.indirect_draw_pass.is_some() {
+                            let indirect = self.indirect_draw_pass.as_mut().unwrap();
                             // 1. Upload instances for this batch to the object buffer
                             indirect.upload_objects(
                                 &self.alloc.vma,
@@ -3496,6 +3627,7 @@ impl Renderer {
                             )?;
 
                             // 5. Draw Indirect
+                            let material_push = material_push.with_debug_path(1); // 1: GPU-Driven
                             let ctx = DrawContext {
                                 command_buffer,
                                 pipeline_layout: pipeline_layout_handle,
@@ -3518,8 +3650,9 @@ impl Renderer {
                             );
 
                             current_object_offset += batch.count();
-                        } else {
+                        } else if self.pass_manager.use_legacy() || (self.pass_manager.use_gpu_driven() && self.indirect_draw_pass.is_none()) {
                             // --- Direct Path Fallback ---
+                            let material_push = material_push.with_debug_path(2); // 2: Legacy
                             let ctx = DrawContext {
                                 command_buffer,
                                 pipeline_layout: pipeline_layout_handle,
@@ -3540,53 +3673,54 @@ impl Renderer {
 
             // 4. Draw remaining meshes (draw_items path) - FIXED to use correct material index
             // This path is used for simple meshes that don't use the GPU-driven batching system
-            let mut current_pipeline = scene_pipeline;
-            for item in &self.draw_items {
-                if let Some(uploaded) = self.model_renderer.get(&item.key) {
-                    log::info!(
-                        "Rendering mesh: key='{}', vertices={}, tint_index={}",
-                        item.key,
-                        uploaded.vertex_count(),
-                        item.material.tint_index
-                    );
-                    // Switch pipeline if needed
-                    let target_pipeline = if item.is_skinned {
-                        self.skinned_pipeline
-                            .as_ref()
-                            .map(|p| p.pipeline)
-                            .unwrap_or(scene_pipeline)
-                    } else {
-                        scene_pipeline
-                    };
-
-                    if target_pipeline != current_pipeline {
-                        cmd_ctx.bind_pipeline(vk::PipelineBindPoint::GRAPHICS, target_pipeline);
-                        current_pipeline = target_pipeline;
-                    }
-                    let model_matrix = item.transform;
+            // Skinned meshes always use this path for now as they aren't handled by GPU-driven instancing.
+            {
+                let mut current_pipeline = scene_pipeline;
+                for item in &self.draw_items {
+                    // TODO: Implement frustum culling for draw_items here
                     
-                    // CRITICAL FIX: Use material_handle from mesh_data if available, otherwise fallback to 0
-                    // This allows the material registered in the bindless buffer to be used
-                    let material_index = if !self.mesh_data.is_empty() {
-                        self.mesh_data[0].material_handle
+                    if let Some(uploaded) = self.model_renderer.get(&item.key) {
+                        log::info!(
+                            "Rendering mesh: key='{}', vertices={}, tint_index={}",
+                            item.key,
+                            uploaded.vertex_count(),
+                            item.material.tint_index
+                        );
+                        // Switch pipeline if needed
+                        let target_pipeline = if item.is_skinned {
+                            self.skinned_pipeline
+                                .as_ref()
+                                .map(|p| p.pipeline)
+                                .unwrap_or(scene_pipeline)
+                        } else {
+                            scene_pipeline
+                        };
+
+                        if target_pipeline != current_pipeline {
+                            cmd_ctx.bind_pipeline(vk::PipelineBindPoint::GRAPHICS, target_pipeline);
+                            current_pipeline = target_pipeline;
+                        }
+                        let model_matrix = item.transform;
+                        
+                        // FIXED: Use material_handle from the item itself
+                        let material_handle = item.material_handle;
+                        let material_push = MaterialPushConstants::new(material_handle)
+                            .with_debug_path(2); // 2: Legacy (Direct path)
+
+                        let ctx = DrawContext {
+                            command_buffer,
+                            pipeline_layout: pipeline_layout_handle,
+                            uploaded,
+                            material: &material_push,
+                            instance_buffer_index: self.instance_buffer_indices[frame_index],
+                            joint_buffer_index: self.joint_buffer_indices[frame_index],
+                        };
+
+                        self.model_renderer
+                            .draw_mesh(&ctx, model_matrix, item.joint_offset);
                     } else {
-                        0u32
-                    };
-                    let material_push = MaterialPushConstants::new(material_index);
-
-                    let ctx = DrawContext {
-                        command_buffer,
-                        pipeline_layout: pipeline_layout_handle,
-                        uploaded,
-                        material: &material_push,
-                        instance_buffer_index: self.instance_buffer_indices[frame_index],
-                        joint_buffer_index: self.joint_buffer_indices[frame_index],
-                    };
-
-                    self.model_renderer
-                        .draw_mesh(&ctx, model_matrix, item.joint_offset);
-                } else {
-                    log::error!("CRITICAL: Mesh not found in ModelRenderer cache! key='{}'. Mesh will not render.", item.key);
+                        log::error!("CRITICAL: Mesh not found in ModelRenderer cache! key='{}'. Mesh will not render.", item.key);
+                    }
                 }
             }
 

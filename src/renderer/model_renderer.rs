@@ -5,7 +5,7 @@ use bytemuck::{bytes_of, Pod, Zeroable};
 use vk_mem::Alloc;
 
 use crate::renderer::resources::BufferHandle;
-use crate::renderer::{Mesh, SkinnedVertex, Vertex};
+use crate::renderer::{MaterialHandle, Mesh, SkinnedVertex, Vertex};
 use crate::vulkan::Allocator;
 use crate::{AshError, Result};
 
@@ -19,11 +19,17 @@ pub struct UploadedMesh {
 }
 
 impl MaterialPushConstants {
-    pub fn new(material_index: u32) -> Self {
+    pub fn new(material_handle: MaterialHandle) -> Self {
         Self {
-            material_index,
-            _padding: [0; 3],
+            material_handle,
+            debug_path: 0,
+            _padding: [0; 2],
         }
+    }
+
+    pub fn with_debug_path(mut self, path: u32) -> Self {
+        self.debug_path = path;
+        self
     }
 }
 
@@ -79,8 +85,9 @@ pub struct MeshPushConstants {
 #[repr(C, align(16))]
 #[derive(Clone, Copy, Default, Pod, Zeroable)]
 pub struct MaterialPushConstants {
-    pub material_index: u32,
-    pub _padding: [u32; 3],
+    pub material_handle: MaterialHandle,
+    pub debug_path: u32, // 0: None, 1: GPU-Driven, 2: Legacy
+    pub _padding: [u32; 2],
 }
 
 /// Context for draw calls to reduce argument count

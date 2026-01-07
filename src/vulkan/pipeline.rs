@@ -398,16 +398,18 @@ impl PipelineBuilder {
     pub fn build(mut self) -> Result<Pipeline> {
         let layout = self
             .layout
-            .expect("invariant: pipeline layout must be provided");
+            .ok_or_else(|| AshError::PipelineMissing("Pipeline layout must be provided".to_string()))?;
         let render_pass = self
             .render_pass
-            .expect("invariant: render pass must be provided");
+            .ok_or_else(|| AshError::RenderPassMissing("Render pass must be provided".to_string()))?;
         let extent = self
             .extent
-            .expect("invariant: viewport extent must be provided");
+            .ok_or_else(|| AshError::SwapchainMissing("Viewport extent must be provided".to_string()))?;
 
         if self.shader_stages.is_empty() {
-            panic!("arch error: at least one shader stage required");
+            return Err(AshError::PipelineMissing(
+                "At least one shader stage required".to_string(),
+            ));
         }
 
         // Pre-create specialization infos to ensure they have a stable address

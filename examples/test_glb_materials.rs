@@ -65,14 +65,18 @@ impl ApplicationHandler for App {
                                         );
 
                                         // Check if material was registered
-                                        if renderer.material_registry().get(handle).is_some() {
-                                            log::info!(
-                                                "✅ Material registered for mesh '{}' (handle {})",
-                                                mesh.name,
-                                                handle
-                                            );
-                                        } else {
-                                            log::warn!("❌ No material registered for mesh '{}' (handle {})", mesh.name, handle);
+                                        let mesh_data = renderer.mesh_data();
+                                        if (handle as usize) < mesh_data.len() {
+                                            let mat_handle = mesh_data[handle as usize].material_handle;
+                                            if renderer.material_manager().is_handle_valid(mat_handle) {
+                                                log::info!(
+                                                    "✅ Material registered for mesh '{}' (handle {:?})",
+                                                    mesh.name,
+                                                    mat_handle
+                                                );
+                                            } else {
+                                                log::warn!("❌ No material registered for mesh '{}' (handle {:?})", mesh.name, mat_handle);
+                                            }
                                         }
                                     }
                                 }
@@ -108,20 +112,25 @@ impl ApplicationHandler for App {
                         log::info!("Test cube registered with material properties");
 
                         // Check if material was registered
-                        if renderer.material_registry().get(1).is_some() {
-                            log::info!("✅ Material registered for test cube");
-                        } else {
-                            log::warn!("❌ No material registered for test cube");
+                        let mesh_data = renderer.mesh_data();
+                        if !mesh_data.is_empty() {
+                            let mat_handle = mesh_data[0].material_handle;
+                            if renderer.material_manager().is_handle_valid(mat_handle) {
+                                log::info!("✅ Material registered for test cube (handle {:?})", mat_handle);
+                            } else {
+                                log::warn!("❌ No material registered for test cube (handle {:?})", mat_handle);
+                            }
                         }
                     }
 
-                    // Submit render command with material_handle=0 to test fallback
-                    renderer.submit_render_commands(&[ash_renderer::renderer::RenderCommand {
+                    // Submit render command with null handle to test fallback
+                    let _ = renderer.submit_render_commands(&[ash_renderer::renderer::RenderCommand {
                         mesh_handle: 1,
-                        material_handle: 0, // Should fallback to mesh's registered material
+                        material_handle: ash_renderer::renderer::MaterialHandle::null(), // Should fallback to mesh's registered material
                         transform: Mat4::IDENTITY,
                         is_skinned: false,
                         joint_offset: 0,
+                        cast_shadows: true,
                     }]);
                 }
 

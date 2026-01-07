@@ -47,6 +47,8 @@ pub enum ResourceError {
     DependencyCycle(String),
     #[error("Resource is already cleaned up: {0}")]
     AlreadyCleanedUp(ResourceId),
+    #[error("Invalid Resource ID: {0}")]
+    InvalidResourceId(String),
     #[error("Invalid dependency: {0}")]
     InvalidDependency(String),
 }
@@ -269,7 +271,9 @@ impl ResourceRegistry {
         // PRE: id must not be nil (programmer error if so)
         // PRE: id must be unique (checked below)
         if id.0.is_nil() {
-            panic!("ResourceRegistry: Attempted to register a resource with Nil UUID");
+            return Err(ResourceError::InvalidResourceId(
+                "Attempted to register a resource with Nil UUID".to_string(),
+            ));
         }
 
         let deps = resource.dependencies();
@@ -279,10 +283,9 @@ impl ResourceRegistry {
 
         let mut resources = self.resources.write().unwrap();
 
-        // Philosophy 1: Intentional panic on double registration.
-        // This is a logic error in the caller's resource management.
+        // Philosophy 1: Graceful error instead of panic on double registration.
         if resources.contains_key(&id) {
-            panic!("ResourceRegistry: Resource ID {id} already exists in registry. Logic error in caller.");
+            return Err(ResourceError::AlreadyExists(id));
         }
 
         let deps_set: HashSet<_> = deps.into_iter().collect();

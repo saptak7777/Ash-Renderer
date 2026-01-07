@@ -2,95 +2,87 @@
 //!
 //! This module provides a unified error type [`AshError`] and a convenient [`Result`] alias.
 
-use std::fmt;
+use thiserror::Error;
 
 /// Main error type for the renderer.
 ///
 /// All fallible operations in the renderer return this error type, providing
 /// detailed context about what went wrong.
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum AshError {
     /// A Vulkan API call failed.
+    #[error("Vulkan error: {0}")]
     VulkanError(String),
     /// An I/O operation failed (file loading, etc.).
-    IoError(std::io::Error),
+    #[error("IO error: {0}")]
+    IoError(#[from] std::io::Error),
     /// Device initialization failed.
+    #[error("Device init failed: {0}")]
     DeviceInitFailed(String),
     /// Swapchain creation failed.
+    #[error("Swapchain creation failed: {0}")]
     SwapchainCreationFailed(String),
     /// Failed to acquire next swapchain image.
+    #[error("Frame acquisition failed: {0}")]
     FrameAcquisitionFailed(String),
     /// Swapchain is out of date (window resized).
+    #[error("Swapchain out of date: {0}")]
     SwapchainOutOfDate(String),
     /// Resource not found in registry.
+    #[error("Resource not found: {0}")]
     ResourceNotFound(String),
     /// Feature not initialized.
+    #[error("Feature not initialized: {0}")]
     FeatureNotInitialized(String),
     /// GPU memory budget exceeded.
+    #[error("VRAM exhausted: requested {requested} bytes, but only {available} bytes available in budget")]
     VramExhausted {
         requested: ash::vk::DeviceSize,
         available: ash::vk::DeviceSize,
         recommendation: &'static str,
     },
     /// Render pass not found or not initialized.
+    #[error("Render pass missing: {0}")]
     RenderPassMissing(String),
     /// Pipeline not found or not initialized.
+    #[error("Pipeline missing: {0}")]
     PipelineMissing(String),
     /// Swapchain not initialized.
+    #[error("Swapchain missing: {0}")]
     SwapchainMissing(String),
     /// Texture not found or invalid.
+    #[error("Texture not found: {0}")]
     TextureNotFound(String),
     /// Failed to bind texture to descriptor set.
+    #[error("Texture binding failed: {0}")]
     TextureBindingFailed(String),
+    /// Material handle not found in registry.
+    #[error("Material not found: {0}")]
+    MaterialNotFound(u32),
+    /// Mesh handle not found in registry.
+    #[error("Mesh not found: {0}")]
+    MeshNotFound(u32),
+    /// Resource registration failed.
+    #[error("Resource registration failed: {0}")]
+    ResourceRegistrationFailed(String),
+    /// Required hardware capability missing.
+    #[error("Hardware capability missing: {0}")]
+    HardwareCapabilityMissing(String),
 }
 
-impl fmt::Display for AshError {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match self {
-            Self::VulkanError(msg) => write!(f, "Vulkan error: {msg}"),
-            Self::IoError(err) => write!(f, "IO error: {err}"),
-            Self::DeviceInitFailed(msg) => write!(f, "Device init failed: {msg}"),
-            Self::SwapchainCreationFailed(msg) => write!(f, "Swapchain creation failed: {msg}"),
-            Self::FrameAcquisitionFailed(msg) => write!(f, "Frame acquisition failed: {msg}"),
-            Self::SwapchainOutOfDate(msg) => write!(f, "Swapchain out of date: {msg}"),
-            Self::ResourceNotFound(msg) => write!(f, "Resource not found: {msg}"),
-            Self::FeatureNotInitialized(msg) => write!(f, "Feature not initialized: {msg}"),
-            Self::VramExhausted {
-                requested,
-                available,
-                ..
-            } => {
-                write!(
-                    f,
-                    "VRAM exhausted: requested {requested} bytes, but only {available} bytes available in budget"
-                )
-            }
-            Self::RenderPassMissing(msg) => write!(f, "Render pass missing: {msg}"),
-            Self::PipelineMissing(msg) => write!(f, "Pipeline missing: {msg}"),
-            Self::SwapchainMissing(msg) => write!(f, "Swapchain missing: {msg}"),
-            Self::TextureNotFound(msg) => write!(f, "Texture not found: {msg}"),
-            Self::TextureBindingFailed(msg) => write!(f, "Texture binding failed: {msg}"),
-        }
+/// Alias for [`AshError`] to match Phase 1 requirements.
+#[allow(dead_code)]
+pub type RendererError = AshError;
+
+impl AshError {
+    /// Helper to create a Vulkan error from a message.
+    pub fn vulkan<S: Into<String>>(msg: S) -> Self {
+        Self::VulkanError(msg.into())
     }
 }
 
-impl std::error::Error for AshError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::IoError(err) => Some(err),
-            _ => None,
-        }
-    }
-}
-
-/// Convenient Result type alias for renderer operations.
-pub type Result<T> = std::result::Result<T, AshError>;
-
-impl From<std::io::Error> for AshError {
-    fn from(err: std::io::Error) -> Self {
-        Self::IoError(err)
-    }
-}
+/// Convenient result type for the renderer.
+pub type Result<T, E = AshError> = std::result::Result<T, E>;
 
 impl From<ash::vk::Result> for AshError {
     fn from(result: ash::vk::Result) -> Self {

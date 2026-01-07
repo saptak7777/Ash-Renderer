@@ -62,7 +62,8 @@ layout(push_constant) uniform PushConstants {
 
     // Fragment stage (128-255)
     layout(offset = 128) uint material_index;
-    layout(offset = 132) uint _material_padding[3];
+    layout(offset = 132) uint debug_path; // 0: None, 1: GPU-Driven, 2: Legacy
+    layout(offset = 136) uint _material_padding[2];
 } push;
 
 // Set 2: Environment (ShadowMap + IBL)
@@ -256,6 +257,13 @@ void main() {
     }
 
     vec3 color = ambient + Lo + emissive;
+    
+    // Debug Path Visualization
+    if (push.debug_path == 1) { // GPU-Driven
+        color = mix(color, vec3(0.0, 0.0, 1.0), 0.3); // Blue tint
+    } else if (push.debug_path == 2) { // Legacy
+        color = mix(color, vec3(0.0, 1.0, 0.0), 0.3); // Green tint
+    }
     
     outColor = vec4(color, 1.0);
     outNormal = vec4(normal, 1.0);

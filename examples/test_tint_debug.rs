@@ -23,7 +23,7 @@ fn main() -> Result<()> {
     
     // Register bindless storage buffer with bright orange color
     let tint_colors = [Vec4::new(1.0, 0.5, 0.0, 1.0)]; // Bright orange
-    let (tint_buffer_gpu, tint_index) = renderer
+    let (_tint_buffer_gpu, tint_index) = renderer
         .register_bindless_storage_buffer(&tint_colors, "DebugTintBuffer")?;
     
     // Update the material to use the tint

@@ -26,7 +26,7 @@ pub use depth_buffer::DepthBuffer;
 pub use descriptor::DescriptorSetHandle;
 pub use image::ImageHandle;
 pub use joint_buffer::JointMatricesBuffer;
-pub use material::{Material, MaterialRegistry};
+pub use material::{Material, MaterialHandle, MaterialManager};
 pub use mesh::{Mesh, Vertex};
 pub use optimized_buffer_pool::{BufferPoolConfig, BufferPoolStats};
 pub use pipeline::PipelineHandle;

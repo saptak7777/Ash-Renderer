@@ -4,6 +4,7 @@
 //! A simple animated arm with two joints.
 
 use ash_renderer::prelude::*;
+use ash_renderer::renderer::MaterialHandle;
 use glam::{Mat4, Quat, Vec3};
 use std::time::Instant;
 use winit::{
@@ -17,6 +18,7 @@ struct App {
     window: Option<Window>,
     renderer: Option<Renderer>,
     start_time: Instant,
+    material_handle: MaterialHandle,
 }
 
 impl Default for App {
@@ -25,6 +27,7 @@ impl Default for App {
             window: None,
             renderer: None,
             start_time: Instant::now(),
+            material_handle: MaterialHandle::default(),
         }
     }
 }
@@ -125,11 +128,12 @@ impl ApplicationHandler for App {
                     roughness: 0.8,
                     ..Default::default()
                 };
-                renderer.register_material_handle(0, &green_material);
+                let material_handle = renderer.material_manager_mut().register_material(green_material);
 
                 self.renderer = Some(renderer);
                 self.window = Some(window);
                 self.start_time = Instant::now();
+                self.material_handle = material_handle;
                 log::info!("Skinning test initialized!");
             }
             Err(e) => {
@@ -168,7 +172,7 @@ impl ApplicationHandler for App {
                     proj.y_axis.y *= -1.0;
 
                     // Draw
-                    renderer.draw_skinned_mesh(0, 0, Mat4::IDENTITY, 0);
+                    renderer.draw_skinned_mesh(0, self.material_handle, Mat4::IDENTITY, 0);
                     renderer.render_frame(view, proj, camera_pos).unwrap();
                 }
                 if let Some(window) = &self.window {

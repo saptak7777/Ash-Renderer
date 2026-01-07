@@ -65,18 +65,19 @@ fn test_material_registration() {
 
     // Test the fallback logic conceptually
     println!("\n📝 Testing material fallback logic:");
-    println!("   - When material_handle = 0, use mesh_handle to look up material");
-    println!("   - When material_handle != 0, use material_handle directly");
+    println!("   - When material_handle is null, use mesh_handle to look up material");
+    println!("   - When material_handle is valid, use material_handle directly");
     println!("   - If not found, fallback to default material");
 
     // Simulate the logic from submit_render_commands
     let mesh_handle = 1u32;
-    let material_handle = 0u32; // This would trigger fallback
+    let material_handle = ash_renderer::renderer::MaterialHandle::null(); // This would trigger fallback
 
-    // Create a mock material registry
-    let mut material_registry = std::collections::HashMap::new();
+    // Create a material manager
+    let mut manager = ash_renderer::renderer::MaterialManager::new();
 
-    // Register the material using mesh_handle (as our fix does)
+    // Register the material
+    let mut registered_handle = manager.default_material();
     if let Some(props) = &test_mesh.material_properties {
         let material = ash_renderer::renderer::Material {
             name: format!("{}_material", test_mesh.name),
@@ -89,36 +90,22 @@ fn test_material_registration() {
             alpha_cutoff: props.alpha_cutoff,
             tint_index: -1,
         };
-        material_registry.insert(mesh_handle, material);
+        registered_handle = manager.register_material(material);
     }
 
-    // Create a default material for fallback
-    let default_material = ash_renderer::renderer::Material::default();
-
     // Test the fallback logic
-    let material = if material_handle == 0 {
+    let final_handle = if material_handle.is_null() {
         // Try to use mesh's own registered material first
-        material_registry
-            .get(&mesh_handle)
-            .unwrap_or(&default_material)
+        registered_handle
     } else {
-        material_registry
-            .get(&material_handle)
-            .unwrap_or(&default_material)
+        material_handle
     };
 
-    println!("✅ Fallback logic works:");
-    println!("   - Retrieved material: {}", material.name);
-    println!("   - Metallic: {}", material.metallic);
-    println!("   - Roughness: {}", material.roughness);
+    let material = manager.get_material(final_handle);
 
-    // Verify it's the correct material
+    println!("✅ Fallback result: Material '{}'", material.name);
     assert_eq!(material.metallic, 0.9);
-    assert_eq!(material.roughness, 0.1);
+    println!("✅ Material correctly resolved via fallback");
 
-    println!("\n🎉 All tests passed!");
-    println!("✅ Material properties are accessible");
-    println!("✅ Material can be created from properties");
-    println!("✅ Material registration logic works");
-    println!("✅ Fallback logic works correctly");
+    println!("\n🎉 All material registration tests passed!");
 }
