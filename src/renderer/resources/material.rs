@@ -167,21 +167,7 @@ pub struct MaterialManager {
 
 impl MaterialManager {
     pub fn new() -> Self {
-        let mut manager = Self {
-            materials: Vec::new(),
-            versions: Vec::new(),
-            next_material_id: 0,
-            default_material: MaterialHandle {
-                index: 0,
-                version: 0,
-            },
-            key_to_handle: HashMap::new(),
-        };
-
-        // Register default material at index 0
-        let default_handle = manager.register_material(Material::default());
-        manager.default_material = default_handle;
-        manager
+        Self::default()
     }
 
     pub fn register_material(&mut self, material: Material) -> MaterialHandle {
@@ -240,6 +226,26 @@ impl MaterialManager {
         } else {
             None
         }
+    }
+}
+
+impl Default for MaterialManager {
+    fn default() -> Self {
+        let mut manager = Self {
+            materials: Vec::new(),
+            versions: Vec::new(),
+            next_material_id: 0,
+            default_material: MaterialHandle {
+                index: 0,
+                version: 0,
+            },
+            key_to_handle: HashMap::new(),
+        };
+
+        // Register default material at index 0
+        let default_handle = manager.register_material(Material::default());
+        manager.default_material = default_handle;
+        manager
     }
 }
 

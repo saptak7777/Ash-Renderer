@@ -23,12 +23,22 @@ impl MaterialPushConstants {
         Self {
             material_handle,
             debug_path: 0,
-            _padding: [0; 2],
+            flags: 0,
+            _padding: 0,
         }
     }
 
     pub fn with_debug_path(mut self, path: u32) -> Self {
         self.debug_path = path;
+        self
+    }
+
+    pub fn with_receive_shadows(mut self, enabled: bool) -> Self {
+        if enabled {
+            self.flags |= 1 << 0;
+        } else {
+            self.flags &= !(1 << 0);
+        }
         self
     }
 }
@@ -87,7 +97,8 @@ pub struct MeshPushConstants {
 pub struct MaterialPushConstants {
     pub material_handle: MaterialHandle,
     pub debug_path: u32, // 0: None, 1: GPU-Driven, 2: Legacy
-    pub _padding: [u32; 2],
+    pub flags: u32,
+    pub _padding: u32,
 }
 
 #[repr(C, align(16))]

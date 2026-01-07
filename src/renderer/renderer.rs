@@ -23,7 +23,7 @@ use crate::{
         vram_budget, DepthBuffer, GBuffer, Material, MaterialHandle, MaterialManager, Mesh,
         PipelineCache, SkinnedVertex, Texture, TextureData, Transform,
     },
-    vulkan::{self, Allocator, BindlessManager},
+    vulkan::{self, Allocator, BindlessManager, CommandBufferContext},
     AshError, Result,
 };
 
@@ -41,33 +41,30 @@ use std::time::Instant;
 use crate::renderer::resources::buffer::BufferHandle;
 use crate::renderer::resources::mesh::{MaterialDescriptor, MeshDescriptor};
 
-pub struct RenderObjectRegistry {
-    // Track which objects are rendered where
+#[derive(Default)]
+pub struct CullingManager {
+    pub shadow_casters: HashSet<u32>,
+    pub shadow_receivers: HashSet<u32>,
+    pub transparent_objects: HashSet<u32>,
     pub gpu_driven_objects: HashSet<u32>,
     pub traditional_objects: HashSet<u32>,
-    pub shadow_casters: HashSet<u32>,
-    pub transparent_objects: HashSet<u32>,
 }
 
-impl RenderObjectRegistry {
+impl CullingManager {
     pub fn new() -> Self {
-        Self {
-            gpu_driven_objects: HashSet::new(),
-            traditional_objects: HashSet::new(),
-            shadow_casters: HashSet::new(),
-            transparent_objects: HashSet::new(),
-        }
+        Self::default()
     }
 
-    pub fn build_from_scene(
+    pub fn build(
         &mut self,
         draw_items: &[DrawItem],
         instancing_manager: &InstancingManager,
-        mesh_data: &[MeshData],
+        _mesh_data: &[MeshData],
     ) {
         self.gpu_driven_objects.clear();
         self.traditional_objects.clear();
         self.shadow_casters.clear();
+        self.shadow_receivers.clear();
         self.transparent_objects.clear();
 
         // Register GPU-driven objects (from instancing manager)
@@ -77,19 +74,18 @@ impl RenderObjectRegistry {
 
         // Register traditional objects (non-batched)
         for item in draw_items {
-            let mesh_handle = mesh_data
-                .iter()
-                .position(|m| m.name == item.key)
-                .map(|p| p as u32)
-                .unwrap_or(0);
+            let mesh_handle = item.mesh_id;
 
             if !self.gpu_driven_objects.contains(&mesh_handle) {
                 self.traditional_objects.insert(mesh_handle);
             }
 
-            // Track which cast shadows
+            // Track shadow casters/receivers
             if item.cast_shadows {
                 self.shadow_casters.insert(mesh_handle);
+            }
+            if item.receive_shadows {
+                self.shadow_receivers.insert(mesh_handle);
             }
 
             // Track which are transparent
@@ -97,6 +93,14 @@ impl RenderObjectRegistry {
                 self.transparent_objects.insert(mesh_handle);
             }
         }
+    }
+
+    pub fn is_shadow_caster(&self, mesh_id: u32) -> bool {
+        self.shadow_casters.contains(&mesh_id)
+    }
+
+    pub fn is_transparent(&self, mesh_id: u32) -> bool {
+        self.transparent_objects.contains(&mesh_id)
     }
 }
 
@@ -123,6 +127,8 @@ pub struct RenderCommand {
     pub joint_offset: u32,
     /// Whether this object should cast shadows
     pub cast_shadows: bool,
+    /// Whether this object should receive shadows
+    pub receive_shadows: bool,
     /// Whether this object is transparent
     pub is_transparent: bool,
 }
@@ -136,6 +142,7 @@ impl Default for RenderCommand {
             is_skinned: false,
             joint_offset: 0,
             cast_shadows: true,
+            receive_shadows: true,
             is_transparent: false,
         }
     }
@@ -245,11 +252,36 @@ impl SpecializationOverride {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum SampleShadingQuality {
+    Disabled,           // Maximum performance
+    Low,               // 25% samples
+    #[default]
+    Medium,            // 50% samples
+    High,              // 75% samples
+    Full,              // 100% samples
+}
+
+impl SampleShadingQuality {
+    pub fn min_sample_shading(&self) -> f32 {
+        match self {
+            Self::Disabled => 0.0,
+            Self::Low => 0.25,
+            Self::Medium => 0.5,
+            Self::High => 0.75,
+            Self::Full => 1.0,
+        }
+    }
+
+    pub fn enabled(&self) -> bool {
+        *self != Self::Disabled
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct PipelineConfig {
     pub msaa: MsaaPreset,
-    pub enable_sample_shading: bool,
-    pub min_sample_shading: f32,
+    pub sample_shading: SampleShadingQuality,
     pub watch_shaders: bool,
     pub specialization_constants: Vec<SpecializationOverride>,
 }
@@ -258,8 +290,7 @@ impl Default for PipelineConfig {
     fn default() -> Self {
         Self {
             msaa: MsaaPreset::Off,
-            enable_sample_shading: false,
-            min_sample_shading: 0.0,
+            sample_shading: SampleShadingQuality::Disabled,
             watch_shaders: false,
             specialization_constants: Vec::new(),
         }
@@ -270,8 +301,8 @@ impl PipelineConfig {
     fn multisample_config(&self) -> vulkan::MultisampleConfig {
         vulkan::MultisampleConfig {
             sample_count: self.msaa.sample_count(),
-            enable_sample_shading: self.enable_sample_shading,
-            min_sample_shading: self.min_sample_shading,
+            enable_sample_shading: self.sample_shading.enabled(),
+            min_sample_shading: self.sample_shading.min_sample_shading(),
         }
     }
 }
@@ -350,6 +381,7 @@ pub struct Renderer {
     pending_extent: Option<vk::Extent2D>,
     // Post-processing support
     msaa_preset: MsaaPreset,
+    sample_shading: SampleShadingQuality,
     hdr_framebuffer: Option<hdr_framebuffer::HdrFramebuffer>,
     fullscreen_pass: Option<fullscreen_pass::FullscreenPass>,
     pub tonemapping_enabled: bool,
@@ -381,7 +413,8 @@ pub struct Renderer {
     // G-Buffer for Normals and Motion Vectors
     gbuffer: Option<GBuffer>,
     // Pipeline optimization
-    object_registry: RenderObjectRegistry,
+    culling_manager: CullingManager,
+    use_gpu_driven: bool,
     // Lighting
     light_direction: Vec3,
     light_color: [f32; 4],
@@ -434,6 +467,7 @@ pub struct Renderer {
 #[allow(dead_code)]
 pub struct DrawItem {
     pub key: Arc<str>,
+    pub mesh_id: u32,
     pub transform: Mat4,
     pub material: Material,
     pub material_handle: MaterialHandle,
@@ -444,6 +478,7 @@ pub struct DrawItem {
     pub joint_offset: u32,
     pub alpha_cutoff: f32,
     pub cast_shadows: bool,
+    pub receive_shadows: bool,
 }
 
 #[derive(Copy, Clone, Default, Debug)]
@@ -511,7 +546,26 @@ struct FrameData {
     worker_count: usize,
 }
 
+pub struct MainPassParameters<'a> {
+    pub cmd_ctx: &'a CommandBufferContext<'a>,
+    pub frame_index: usize,
+    pub scene_pipeline: vk::Pipeline,
+    pub pipeline_layout_handle: vk::PipelineLayout,
+    pub batch_offsets: &'a HashMap<BatchKey, u32>,
+    pub view: Mat4,
+    pub projection: Mat4,
+    pub swapchain_extent: vk::Extent2D,
+}
+
 impl Renderer {
+    fn sample_shading_config(&self) -> vulkan::MultisampleConfig {
+        vulkan::MultisampleConfig {
+            sample_count: self.msaa_preset.sample_count(),
+            enable_sample_shading: self.sample_shading.enabled(),
+            min_sample_shading: self.sample_shading.min_sample_shading(),
+        }
+    }
+
     /// Initializes the renderer.
     pub fn new<S: vulkan::SurfaceProvider>(surface_provider: &S) -> Result<Self> {
         unsafe {
@@ -543,7 +597,14 @@ impl Renderer {
             let pipeline_cache = PipelineCache::new(Arc::clone(&device.device))?;
             let renderer_config = RendererConfig::default();
             let texture_compression = renderer_config.texture_compression;
-            let pipeline_cfg = &renderer_config.pipeline;
+            let mut pipeline_cfg = renderer_config.pipeline.clone();
+            
+            // Hardware fallback for sample shading
+            if !device.sample_rate_shading_supported && pipeline_cfg.sample_shading.enabled() {
+                log::warn!("Sample rate shading requested but not supported by hardware. Falling back to disabled.");
+                pipeline_cfg.sample_shading = SampleShadingQuality::Disabled;
+            }
+
             let buffer_pool = Arc::new(BufferPool::new(Arc::clone(&alloc)));
             let (width, height) = surface_provider.physical_size();
             let extent = vk::Extent2D { width, height };
@@ -680,7 +741,7 @@ impl Renderer {
                     swapchain.extent,
                     pipeline_cache.handle(),
                     depth_buffer.format(),
-                    pipeline_cfg,
+                    &pipeline_cfg,
                     &set_layouts,
                 )?;
 
@@ -816,6 +877,8 @@ impl Renderer {
                 None
             };
 
+            let pass_manager = RenderPassManager::new(RenderingMode::GPUDriven);
+
             let renderer = Self {
                 texture_streamer: Mutex::new(Some(texture_streamer)),
                 buffer_pool,
@@ -831,6 +894,7 @@ impl Renderer {
                 model_renderer,
                 draw_items: vec![DrawItem {
                     key: Arc::clone(&mesh.name),
+                    mesh_id: 0, // Cube mesh is at index 0
                     transform: transform_matrix,
                     material: material.clone(),
                     material_handle: initial_material_handle,
@@ -848,6 +912,7 @@ impl Renderer {
                     joint_offset: 0,
                     alpha_cutoff: material.alpha_cutoff,
                     cast_shadows: true,
+                    receive_shadows: true,
                 }],
                 swapchain: Some(swapchain),
                 render_pass: Some(render_pass),
@@ -878,7 +943,8 @@ impl Renderer {
                 swapchain_cleanup_pending: false,
                 resize_pending: false,
                 pending_extent: Some(swapchain_extent),
-                msaa_preset: MsaaPreset::default(),
+                msaa_preset: pipeline_cfg.msaa,
+                sample_shading: pipeline_cfg.sample_shading,
                 hdr_framebuffer: None,
                 fullscreen_pass: None,
                 tonemapping_enabled: true,
@@ -901,7 +967,8 @@ impl Renderer {
                 vsr_pass: None,
                 ssgi_pass: None,
                 gbuffer: Some(gbuffer),
-                object_registry: RenderObjectRegistry::new(),
+                culling_manager: CullingManager::new(),
+                use_gpu_driven: pass_manager.use_gpu_driven(),
                 light_direction: Vec3::new(-0.35, -1.0, -0.25).normalize(),
                 light_color: [1.5, 1.5, 1.5, 1.0],
                 ambient_color: [0.0, 0.2, 0.8, 1.0], // Default to vibrant blue
@@ -919,7 +986,7 @@ impl Renderer {
                 instance_buffer: instance_buffers,
                 instance_buffer_indices,
                 joint_buffer_indices,
-                pass_manager: RenderPassManager::new(RenderingMode::GPUDriven),
+                pass_manager,
                 brdf_lut_pass: Some(brdf_lut_pass),
                 irradiance_map: None,
                 prefiltered_map: None,
@@ -1691,6 +1758,7 @@ impl Renderer {
             self.draw_items.clear();
             self.draw_items.push(DrawItem {
                 key: Arc::clone(&key),
+                mesh_id: 0,
                 transform: self.transform.model_matrix(),
                 material: self.material.clone(),
                 material_handle,
@@ -1701,6 +1769,7 @@ impl Renderer {
                 joint_offset: 0,
                 alpha_cutoff: self.material.alpha_cutoff,
                 cast_shadows: true,
+                receive_shadows: true,
             });
 
             if self.mesh_data.is_empty() {
@@ -2045,6 +2114,7 @@ impl Renderer {
             is_skinned: true,
             joint_offset,
             cast_shadows: true,
+            receive_shadows: true,
             is_transparent: false,
         }]);
     }
@@ -2101,6 +2171,7 @@ impl Renderer {
                             if command.is_skinned {
                                 items.push(DrawItem {
                                     key: mesh_key.clone(),
+                                    mesh_id: command.mesh_handle,
                                     transform: command.transform,
                                     material: material.clone(),
                                     material_handle,
@@ -2111,6 +2182,7 @@ impl Renderer {
                                     joint_offset: command.joint_offset,
                                     alpha_cutoff: material.alpha_cutoff,
                                     cast_shadows: command.cast_shadows,
+                                    receive_shadows: command.receive_shadows,
                                 });
                             } else {
                                 let key = BatchKey::new(command.mesh_handle, material_handle);
@@ -2180,6 +2252,7 @@ impl Renderer {
                     if command.is_skinned {
                         self.draw_items.push(DrawItem {
                             key: mesh_key.clone(),
+                            mesh_id: command.mesh_handle,
                             transform: command.transform,
                             material: material.clone(),
                             material_handle,
@@ -2190,11 +2263,13 @@ impl Renderer {
                             joint_offset: command.joint_offset,
                             alpha_cutoff: material.alpha_cutoff,
                             cast_shadows: command.cast_shadows,
+                            receive_shadows: command.receive_shadows,
                         });
                     } else {
                         let key = BatchKey::new(command.mesh_handle, material_handle);
                         let instance = InstanceData::from_matrix(command.transform)
-                            .with_cast_shadows(command.cast_shadows);
+                            .with_cast_shadows(command.cast_shadows)
+                            .with_receive_shadows(command.receive_shadows);
                         self.instancing_manager.add_instance(key, instance);
                     }
                 } else {
@@ -2483,11 +2558,7 @@ impl Renderer {
             .ok_or(AshError::VulkanError("Depth buffer missing".into()))?
             .format();
 
-        let multisample_config = vulkan::MultisampleConfig {
-            sample_count: self.msaa_preset.sample_count(),
-            enable_sample_shading: false,
-            min_sample_shading: 0.0,
-        };
+        let multisample_config = self.sample_shading_config();
 
         let mut builder = vulkan::Pipeline::builder(Arc::clone(&self.device.device))
             .with_layout(layout)
@@ -2546,12 +2617,12 @@ impl Renderer {
         }
 
         builder = builder.add_shader_from_bytes(
-            include_bytes!(concat!(env!("OUT_DIR"), "/vert.spv")),
+            include_bytes!(concat!(env!("OUT_DIR"), "/vert.vert.spv")),
             vk::ShaderStageFlags::VERTEX,
             "main",
         )?;
         builder = builder.add_shader_from_bytes(
-            include_bytes!(concat!(env!("OUT_DIR"), "/frag.spv")),
+            include_bytes!(concat!(env!("OUT_DIR"), "/frag.frag.spv")),
             vk::ShaderStageFlags::FRAGMENT,
             "main",
         )?;
@@ -3027,6 +3098,418 @@ impl Renderer {
     /// - `view`: View matrix (camera look-at)
     /// - `projection`: Projection matrix (perspective/orthographic)
     /// - `camera_pos`: Camera world position (for lighting calculations)
+    pub fn render_shadow_pass(
+        &mut self,
+        cmd_ctx: &CommandBufferContext,
+        frame_index: usize,
+        light_space_matrix: Mat4,
+        batch_offsets: &HashMap<BatchKey, u32>,
+    ) -> Result<()> {
+        let (shadow_pipeline, shadow_layout) = if let (Some(pipeline), Some(layout)) = (
+            self.shadow_pipeline.as_ref(),
+            self.shadow_pipeline_layout.as_ref(),
+        ) {
+            (pipeline, layout)
+        } else {
+            return Ok(());
+        };
+
+        let shadow_map = if let Some(map) = self.shadow_feature.shadow_map() {
+            map
+        } else {
+            return Ok(());
+        };
+
+        let clear_values = [vk::ClearValue {
+            depth_stencil: vk::ClearDepthStencilValue {
+                depth: 1.0,
+                stencil: 0,
+            },
+        }];
+
+        let render_pass_begin = vk::RenderPassBeginInfo::default()
+            .render_pass(shadow_map.render_pass)
+            .framebuffer(shadow_map.framebuffer)
+            .render_area(shadow_map.scissor())
+            .clear_values(&clear_values);
+
+        cmd_ctx.begin_render_pass(&render_pass_begin, vk::SubpassContents::INLINE);
+        cmd_ctx.bind_pipeline(vk::PipelineBindPoint::GRAPHICS, shadow_pipeline.pipeline);
+
+        cmd_ctx.set_viewport(0, &[shadow_map.viewport()]);
+        cmd_ctx.set_scissor(0, &[shadow_map.scissor()]);
+
+        // Bind Descriptor Sets for Shadows
+        if let Some(manager) = self.descriptors.as_ref() {
+            if let Some(frame_set) = manager.frame_set(frame_index) {
+                cmd_ctx.bind_descriptor_sets(
+                    vk::PipelineBindPoint::GRAPHICS,
+                    shadow_layout.handle(),
+                    0,
+                    &[frame_set],
+                    &[],
+                );
+            }
+        }
+
+        if let Some(ref bindless) = self.bindless_manager {
+            cmd_ctx.bind_descriptor_sets(
+                vk::PipelineBindPoint::GRAPHICS,
+                shadow_layout.handle(),
+                1,
+                &[bindless.descriptor_set()],
+                &[],
+            );
+        }
+
+        // METHOD A: GPU-Driven (RECOMMENDED)
+        if self.use_gpu_driven {
+            for batch in self.instancing_manager.shadow_batches() {
+                let mesh_data = if let Some(m) = self.mesh_data.get(batch.key.mesh_id as usize) {
+                    m
+                } else {
+                    continue;
+                };
+
+                if let Some(uploaded) = self.model_renderer.get(&mesh_data.name) {
+                    if let Some(&first_instance) = batch_offsets.get(&batch.key) {
+                        let push = crate::renderer::model_renderer::ShadowPushConstants {
+                            light_space_matrix: crate::renderer::model_renderer::Mat4Push::from(light_space_matrix),
+                            model: crate::renderer::model_renderer::Mat4Push::from(glam::Mat4::IDENTITY),
+                            joint_offset: 0,
+                            use_instancing: 1,
+                            instance_buffer_index: self.instance_buffer_indices[frame_index],
+                            joint_buffer_index: 0,
+                            base_color_index: mesh_data.texture_indices[0],
+                            _padding: [0; 3],
+                        };
+
+                        unsafe {
+                            self.model_renderer.draw_mesh_instanced_shadow(
+                                cmd_ctx.handle(),
+                                shadow_layout.handle(),
+                                uploaded,
+                                batch.count() as u32,
+                                first_instance,
+                                &push,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        // METHOD B: Traditional (FALLBACK / Non-batched)
+        for item in &self.draw_items {
+            let mesh_index = item.mesh_id;
+            
+            // Skip if not a shadow caster
+            if !self.culling_manager.is_shadow_caster(mesh_index) {
+                continue;
+            }
+
+            // Skip if already handled by GPU-driven
+            if self.use_gpu_driven && self.culling_manager.gpu_driven_objects.contains(&mesh_index) {
+                continue;
+            }
+
+            if let Some(uploaded) = self.model_renderer.get(&item.key) {
+                let push = crate::renderer::model_renderer::ShadowPushConstants {
+                    light_space_matrix: crate::renderer::model_renderer::Mat4Push::from(light_space_matrix),
+                    model: crate::renderer::model_renderer::Mat4Push::from(item.transform),
+                    joint_offset: item.joint_offset,
+                    use_instancing: 0,
+                    instance_buffer_index: 0,
+                    joint_buffer_index: if item.is_skinned { self.joint_buffer_indices[frame_index] } else { 0 },
+                    base_color_index: item.texture_indices[0],
+                    _padding: [0; 3],
+                };
+
+                unsafe {
+                    self.model_renderer.draw_mesh_shadow(
+                        cmd_ctx.handle(),
+                        shadow_layout.handle(),
+                        uploaded,
+                        &push,
+                    );
+                }
+            }
+        }
+
+        cmd_ctx.end_render_pass();
+        Ok(())
+    }
+
+    pub fn render_main_pass(
+        &mut self,
+        params: &MainPassParameters,
+    ) -> Result<()> {
+        let cmd_ctx = params.cmd_ctx;
+        let frame_index = params.frame_index;
+        let scene_pipeline = params.scene_pipeline;
+        let pipeline_layout_handle = params.pipeline_layout_handle;
+        let batch_offsets = params.batch_offsets;
+        let view = params.view;
+        let projection = params.projection;
+        let swapchain_extent = params.swapchain_extent;
+
+        // --- Phase 10: GPU Instancing & Culling Integration ---
+
+        // 3. Render all visible opaque instanced batches (static meshes)
+        let mut current_object_offset = 0;
+        for batch in self.instancing_manager.visible_batches() {
+            // Rage Engine Optimization: Skip if only a shadow caster and doesn't receive shadows
+            if batch.is_shadow_only() {
+                continue;
+            }
+
+            if let Some(mesh_data) = self.mesh_data.get(batch.key.mesh_id as usize) {
+                let mesh_key = &mesh_data.name;
+
+                if let Some(uploaded) = self.model_renderer.get(mesh_key) {
+                    let material_push = MaterialPushConstants::new(batch.key.material_id)
+                        .with_receive_shadows(batch.receives_shadows());
+
+                    // --- GPU-Driven Path ---
+                    if self.use_gpu_driven && self.indirect_draw_pass.is_some() {
+                        let indirect = self.indirect_draw_pass.as_mut().unwrap();
+                        // 1. Upload instances for this batch to the object buffer
+                        unsafe {
+                            indirect.upload_objects(
+                                &self.alloc.vma,
+                                &batch.instances,
+                                current_object_offset,
+                            )?;
+                        }
+
+                        // 2. Upload draw template for this mesh
+                        let template = vk::DrawIndexedIndirectCommand {
+                            index_count: uploaded.index_count(),
+                            instance_count: 1,
+                            first_index: 0,
+                            vertex_offset: 0,
+                            first_instance: 0, // Set by compute shader
+                        };
+                        unsafe {
+                            indirect.upload_templates(&self.alloc.vma, &[template], 0)?;
+                        }
+
+                        // 4. Run Culling Compute Shader
+                        let bindless_manager =
+                            self.bindless_manager.as_ref().expect("Bindless manager");
+                        unsafe {
+                            indirect.execute_culling(
+                                cmd_ctx.handle(),
+                                &self.occlusion_culling,
+                                bindless_manager,
+                                projection * view,
+                                swapchain_extent.width,
+                                swapchain_extent.height,
+                                current_object_offset as u32,
+                                batch.count() as u32,
+                                0, // indirect_offset
+                            )?;
+                        }
+
+                        // 5. Draw Indirect
+                        let material_push = material_push.with_debug_path(1); // 1: GPU-Driven
+                        let ctx = DrawContext {
+                            command_buffer: cmd_ctx.handle(),
+                            pipeline_layout: pipeline_layout_handle,
+                            uploaded,
+                            material: &material_push,
+                            instance_buffer_index: indirect.object_buffer_index().unwrap_or(0),
+                            joint_buffer_index: self.joint_buffer_indices[frame_index],
+                        };
+                        unsafe {
+                            self.model_renderer.draw_mesh_indirect_count(
+                                &ctx,
+                                &crate::renderer::model_renderer::IndirectDrawCountParams {
+                                    indirect_buffer: indirect.indirect_buffer(),
+                                    indirect_offset: 0,
+                                    count_buffer: indirect.count_buffer(),
+                                    count_offset: 0,
+                                    max_draw_count: batch.count() as u32,
+                                    stride: std::mem::size_of::<vk::DrawIndexedIndirectCommand>()
+                                        as u32,
+                                },
+                            );
+                        }
+
+                        current_object_offset += batch.count();
+                    } else {
+                        // --- Direct Path Fallback ---
+                        let material_push = material_push.with_debug_path(2); // 2: Legacy
+                        let ctx = DrawContext {
+                            command_buffer: cmd_ctx.handle(),
+                            pipeline_layout: pipeline_layout_handle,
+                            uploaded,
+                            material: &material_push,
+                            instance_buffer_index: self.instance_buffer_indices[frame_index],
+                            joint_buffer_index: self.joint_buffer_indices[frame_index],
+                        };
+
+                        let offset = batch_offsets.get(&batch.key).copied().unwrap_or(0);
+                        unsafe {
+                            self.model_renderer.draw_mesh_instanced(
+                                &ctx,
+                                batch.count() as u32,
+                                offset,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        // 4. Draw remaining opaque meshes (draw_items path)
+        {
+            let mut current_pipeline = scene_pipeline;
+            for item in &self.draw_items {
+                let mesh_index = item.mesh_id;
+                
+                // Skip if handled by GPU-driven
+                if self.use_gpu_driven && self.culling_manager.gpu_driven_objects.contains(&mesh_index) {
+                    continue;
+                }
+
+                // Skip if transparent (separate pass)
+                if self.culling_manager.is_transparent(mesh_index) {
+                    continue;
+                }
+                
+                // Rage Engine Optimization: Skip if only a shadow caster and doesn't receive shadows
+                if item.cast_shadows && !item.receive_shadows {
+                    continue;
+                }
+
+                if let Some(uploaded) = self.model_renderer.get(&item.key) {
+                    // Switch pipeline if needed
+                    let target_pipeline = if item.is_skinned {
+                        self.skinned_pipeline
+                            .as_ref()
+                            .map(|p| p.pipeline)
+                            .unwrap_or(scene_pipeline)
+                    } else {
+                        scene_pipeline
+                    };
+
+                    if target_pipeline != current_pipeline {
+                        cmd_ctx.bind_pipeline(vk::PipelineBindPoint::GRAPHICS, target_pipeline);
+                        current_pipeline = target_pipeline;
+                    }
+                    
+                    let material_handle = item.material_handle;
+                    let material_push = MaterialPushConstants::new(material_handle)
+                        .with_receive_shadows(item.receive_shadows)
+                        .with_debug_path(2); // 2: Legacy (Direct path)
+
+                    let ctx = DrawContext {
+                        command_buffer: cmd_ctx.handle(),
+                        pipeline_layout: pipeline_layout_handle,
+                        uploaded,
+                        material: &material_push,
+                        instance_buffer_index: self.instance_buffer_indices[frame_index],
+                        joint_buffer_index: self.joint_buffer_indices[frame_index],
+                    };
+
+                    unsafe {
+                        self.model_renderer
+                            .draw_mesh(&ctx, item.transform, item.joint_offset);
+                    }
+                }
+            }
+        }
+
+        // 5. Draw all transparent meshes
+        {
+            let mut current_pipeline = scene_pipeline;
+            
+            // 5a. Draw transparent instanced batches
+            for batch in self.instancing_manager.transparent_batches() {
+                if let Some(mesh_data) = self.mesh_data.get(batch.key.mesh_id as usize) {
+                    let mesh_key = &mesh_data.name;
+                    if let Some(uploaded) = self.model_renderer.get(mesh_key) {
+                        let material_push = MaterialPushConstants::new(batch.key.material_id)
+                            .with_receive_shadows(batch.receives_shadows())
+                            .with_debug_path(2); // 2: Legacy (Direct path)
+                        
+                        let ctx = DrawContext {
+                            command_buffer: cmd_ctx.handle(),
+                            pipeline_layout: pipeline_layout_handle,
+                            uploaded,
+                            material: &material_push,
+                            instance_buffer_index: self.instance_buffer_indices[frame_index],
+                            joint_buffer_index: self.joint_buffer_indices[frame_index],
+                        };
+
+                        let offset = batch_offsets.get(&batch.key).copied().unwrap_or(0);
+                        unsafe {
+                            self.model_renderer.draw_mesh_instanced(
+                                &ctx,
+                                batch.count() as u32,
+                                offset,
+                            );
+                        }
+                    }
+                }
+            }
+
+            // 5b. Draw transparent traditional meshes
+            for item in &self.draw_items {
+                let mesh_index = item.mesh_id;
+                
+                // Skip if not transparent
+                if !self.culling_manager.is_transparent(mesh_index) {
+                    continue;
+                }
+
+                // Skip if handled by GPU-driven
+                if self.use_gpu_driven && self.culling_manager.gpu_driven_objects.contains(&mesh_index) {
+                    continue;
+                }
+                
+                if let Some(uploaded) = self.model_renderer.get(&item.key) {
+                    // Switch pipeline if needed
+                    let target_pipeline = if item.is_skinned {
+                        self.skinned_pipeline
+                            .as_ref()
+                            .map(|p| p.pipeline)
+                            .unwrap_or(scene_pipeline)
+                    } else {
+                        scene_pipeline
+                    };
+
+                    if target_pipeline != current_pipeline {
+                        cmd_ctx.bind_pipeline(vk::PipelineBindPoint::GRAPHICS, target_pipeline);
+                        current_pipeline = target_pipeline;
+                    }
+
+                    let material_handle = item.material_handle;
+                    let material_push = MaterialPushConstants::new(material_handle)
+                        .with_receive_shadows(item.receive_shadows)
+                        .with_debug_path(2); // 2: Legacy (Direct path)
+
+                    let ctx = DrawContext {
+                        command_buffer: cmd_ctx.handle(),
+                        pipeline_layout: pipeline_layout_handle,
+                        uploaded,
+                        material: &material_push,
+                        instance_buffer_index: self.instance_buffer_indices[frame_index],
+                        joint_buffer_index: self.joint_buffer_indices[frame_index],
+                    };
+
+                    unsafe {
+                        self.model_renderer
+                            .draw_mesh(&ctx, item.transform, item.joint_offset);
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     pub fn render_frame(
         &mut self,
         view: Mat4,
@@ -3130,7 +3613,7 @@ impl Renderer {
             self.device.device.reset_fences(&[in_flight_fence])?;
 
             // Build object registry once per frame
-            self.object_registry.build_from_scene(&self.draw_items, &self.instancing_manager, &self.mesh_data);
+            self.culling_manager.build(&self.draw_items, &self.instancing_manager, &self.mesh_data);
 
             // Prepare culling data for this frame
             self.occlusion_culling.begin_frame();
@@ -3228,7 +3711,8 @@ impl Renderer {
             // Update post-processing descriptors once per frame to ensure they point to the correct VSR output.
             self.update_post_descriptors()?;
 
-            let cmd_ctx = self.cmds.context(command_buffer);
+            let device_arc = Arc::clone(&self.device.device);
+            let cmd_ctx = CommandBufferContext::new(device_arc.as_ref(), command_buffer);
             cmd_ctx.reset()?;
 
             let acquire_result = {
@@ -3290,124 +3774,8 @@ impl Renderer {
             }
 
             // Shadow Pass
-            if let (Some(shadow_pipeline), Some(shadow_layout)) = (
-                self.shadow_pipeline.as_ref(),
-                self.shadow_pipeline_layout.as_ref(),
-            ) {
-                if let Some(shadow_map) = self.shadow_feature.shadow_map() {
-                    let clear_values = [vk::ClearValue {
-                        depth_stencil: vk::ClearDepthStencilValue {
-                            depth: 1.0,
-                            stencil: 0,
-                        },
-                    }];
-
-                    let render_pass_begin = vk::RenderPassBeginInfo::default()
-                        .render_pass(shadow_map.render_pass)
-                        .framebuffer(shadow_map.framebuffer)
-                        .render_area(shadow_map.scissor())
-                        .clear_values(&clear_values);
-
-                    cmd_ctx.begin_render_pass(&render_pass_begin, vk::SubpassContents::INLINE);
-                    cmd_ctx
-                        .bind_pipeline(vk::PipelineBindPoint::GRAPHICS, shadow_pipeline.pipeline);
-
-                    cmd_ctx.set_viewport(0, &[shadow_map.viewport()]);
-                    cmd_ctx.set_scissor(0, &[shadow_map.scissor()]);
-
-                    let light_space_matrix = self.shadow_feature.light_space_matrix();
-
-                    // Bind Descriptor Sets for Shadows
-                    // Set 0: Frame Data (Matrices) - required by layout even if not used by shader
-                    if let Some(manager) = self.descriptors.as_ref() {
-                        if let Some(frame_set) = manager.frame_set(frame_index) {
-                            self.device.device.cmd_bind_descriptor_sets(
-                                command_buffer,
-                                vk::PipelineBindPoint::GRAPHICS,
-                                shadow_layout.handle(),
-                                0, // Set 0
-                                &[frame_set],
-                                &[],
-                            );
-                        }
-                    }
-
-                    // Set 1: Bindless resources (Textures, Instances)
-                    if let Some(ref bindless) = self.bindless_manager {
-                        self.device.device.cmd_bind_descriptor_sets(
-                            command_buffer,
-                            vk::PipelineBindPoint::GRAPHICS,
-                            shadow_layout.handle(),
-                            1, // Set 1: Bindless
-                            &[bindless.descriptor_set()],
-                            &[],
-                        );
-                    }
-
-                    // Draw all shadow casters
-                    // 1. Draw traditional objects that cast shadows
-                    for item in &self.draw_items {
-                    if !item.cast_shadows || self.object_registry.gpu_driven_objects.contains(&(self.mesh_data.iter().position(|m| m.name == item.key).unwrap_or(0) as u32)) {
-                        continue;
-                    }
-
-                        if let Some(uploaded) = self.model_renderer.get(&item.key) {
-                            let push = crate::renderer::model_renderer::ShadowPushConstants {
-                                light_space_matrix: crate::renderer::model_renderer::Mat4Push::from(light_space_matrix),
-                                model: crate::renderer::model_renderer::Mat4Push::from(item.transform),
-                                joint_offset: item.joint_offset,
-                                use_instancing: 0,
-                                instance_buffer_index: 0,
-                                joint_buffer_index: if item.is_skinned { self.joint_buffer_indices[frame_index] } else { 0 },
-                                base_color_index: item.texture_indices[0],
-                                _padding: [0; 3],
-                            };
-
-                            self.model_renderer.draw_mesh_shadow(
-                                command_buffer,
-                                shadow_layout.handle(),
-                                uploaded,
-                                &push,
-                            );
-                        }
-                    }
-
-                    // 2. Draw instanced meshes (batches) that cast shadows
-                    for batch in self.instancing_manager.shadow_batches() {
-                        let mesh_data = if let Some(m) = self.mesh_data.get(batch.key.mesh_id as usize) {
-                            m
-                        } else {
-                            continue;
-                        };
-                        
-                        if let Some(uploaded) = self.model_renderer.get(&mesh_data.name) {
-                            if let Some(&first_instance) = batch_offsets.get(&batch.key) {
-                                let push = crate::renderer::model_renderer::ShadowPushConstants {
-                                    light_space_matrix: crate::renderer::model_renderer::Mat4Push::from(light_space_matrix),
-                                    model: crate::renderer::model_renderer::Mat4Push::from(glam::Mat4::IDENTITY), // model matrix is in instance buffer
-                                    joint_offset: 0,
-                                    use_instancing: 1,
-                                    instance_buffer_index: self.instance_buffer_indices[frame_index],
-                                    joint_buffer_index: 0,
-                                    base_color_index: mesh_data.texture_indices[0] as i32,
-                                    _padding: [0; 3],
-                                };
-
-                                self.model_renderer.draw_mesh_instanced_shadow(
-                                    command_buffer,
-                                    shadow_layout.handle(),
-                                    uploaded,
-                                    batch.count() as u32,
-                                    first_instance,
-                                    &push,
-                                );
-                            }
-                        }
-                    }
-
-                    cmd_ctx.end_render_pass();
-                }
-            }
+            let light_space_matrix = self.shadow_feature.light_space_matrix();
+            self.render_shadow_pass(&cmd_ctx, frame_index, light_space_matrix, &batch_offsets)?;
 
             let clear_values = [
                 vk::ClearValue {
@@ -3423,19 +3791,22 @@ impl Renderer {
                 },
             ];
 
-            let framebuffer = self.framebuffers.get(image_index as usize).ok_or_else(|| {
-                log::error!(
-                    "Frame {}: Framebuffer index {} out of range (max: {})",
-                    self.current_frame,
-                    image_index,
-                    self.framebuffers.len()
-                );
-                AshError::VulkanError("Framebuffer index out of range".into())
-            })?;
+            let (framebuffer_handle, hdr_attachment) = {
+                let framebuffer = self.framebuffers.get(image_index as usize).ok_or_else(|| {
+                    log::error!(
+                        "Frame {}: Framebuffer index {} out of range (max: {})",
+                        self.current_frame,
+                        image_index,
+                        self.framebuffers.len()
+                    );
+                    AshError::VulkanError("Framebuffer index out of range".into())
+                })?;
+                (framebuffer.handle(), framebuffer.attachments()[0])
+            };
 
             let render_pass_begin = vk::RenderPassBeginInfo::default()
                 .render_pass(main_render_pass)
-                .framebuffer(framebuffer.handle())
+                .framebuffer(framebuffer_handle)
                 .render_area(vk::Rect2D {
                     offset: vk::Offset2D { x: 0, y: 0 },
                     extent: swapchain_extent,
@@ -3547,239 +3918,17 @@ impl Renderer {
             })()?;
 
             // --- Phase 10: GPU Instancing & Culling Integration ---
-
-            // 3. Render all visible opaque instanced batches (static meshes)
-            let mut current_object_offset = 0;
-            for batch in self.instancing_manager.visible_batches() {
-                if let Some(mesh_data) = self.mesh_data.get(batch.key.mesh_id as usize) {
-                    let mesh_key = &mesh_data.name;
-
-                    let _material = self.material_manager.get_material(batch.key.material_id);
-                    
-                    if !self.material_manager.is_handle_valid(batch.key.material_id) {
-                        let msg = format!(
-                            "Invalid material handle {:?} detected for mesh '{}', using default",
-                            batch.key.material_id, mesh_key
-                        );
-                        if self.strict_mode {
-                            log::error!("{msg}");
-                        } else {
-                            log::warn!("{msg}");
-                        }
-                    }
-
-                    if let Some(uploaded) = self.model_renderer.get(mesh_key) {
-                        // Push constants - use material handle from batch
-                        let material_push = MaterialPushConstants::new(batch.key.material_id);
-
-                        // --- GPU-Driven Path ---
-                        if self.pass_manager.use_gpu_driven() && self.indirect_draw_pass.is_some() {
-                            let indirect = self.indirect_draw_pass.as_mut().unwrap();
-                            // 1. Upload instances for this batch to the object buffer
-                            indirect.upload_objects(
-                                &self.alloc.vma,
-                                &batch.instances,
-                                current_object_offset,
-                            )?;
-
-                            // 2. Upload draw template for this mesh
-                            let template = vk::DrawIndexedIndirectCommand {
-                                index_count: uploaded.index_count(),
-                                instance_count: 1,
-                                first_index: 0,
-                                vertex_offset: 0,
-                                first_instance: 0, // Set by compute shader
-                            };
-                            indirect.upload_templates(&self.alloc.vma, &[template], 0)?;
-
-                            // 4. Run Culling Compute Shader
-                            let bindless_manager =
-                                self.bindless_manager.as_ref().expect("Bindless manager");
-                            indirect.execute_culling(
-                                command_buffer,
-                                &self.occlusion_culling,
-                                bindless_manager,
-                                projection * view,
-                                swapchain_extent.width,
-                                swapchain_extent.height,
-                                current_object_offset as u32,
-                                batch.count() as u32,
-                                0, // indirect_offset
-                            )?;
-
-                            // 5. Draw Indirect
-                            let material_push = material_push.with_debug_path(1); // 1: GPU-Driven
-                            let ctx = DrawContext {
-                                command_buffer,
-                                pipeline_layout: pipeline_layout_handle,
-                                uploaded,
-                                material: &material_push,
-                                instance_buffer_index: indirect.object_buffer_index().unwrap_or(0),
-                                joint_buffer_index: self.joint_buffer_indices[frame_index],
-                            };
-                            self.model_renderer.draw_mesh_indirect_count(
-                                &ctx,
-                                &crate::renderer::model_renderer::IndirectDrawCountParams {
-                                    indirect_buffer: indirect.indirect_buffer(),
-                                    indirect_offset: 0,
-                                    count_buffer: indirect.count_buffer(),
-                                    count_offset: 0,
-                                    max_draw_count: batch.count() as u32,
-                                    stride: std::mem::size_of::<vk::DrawIndexedIndirectCommand>()
-                                        as u32,
-                                },
-                            );
-
-                            current_object_offset += batch.count();
-                        } else if self.pass_manager.use_legacy() || (self.pass_manager.use_gpu_driven() && self.indirect_draw_pass.is_none()) {
-                            // --- Direct Path Fallback ---
-                            let material_push = material_push.with_debug_path(2); // 2: Legacy
-                            let ctx = DrawContext {
-                                command_buffer,
-                                pipeline_layout: pipeline_layout_handle,
-                                uploaded,
-                                material: &material_push,
-                                instance_buffer_index: self.instance_buffer_indices[frame_index],
-                                joint_buffer_index: self.joint_buffer_indices[frame_index],
-                            };
-
-                            let offset = batch_offsets.get(&batch.key).copied().unwrap_or(0);
-                            self.model_renderer.draw_mesh_instanced(
-                                &ctx,
-                                batch.count() as u32,
-                                offset,
-                            );
-                        }
-                    }
-                }
-            }
-
-            // 4. Draw remaining opaque meshes (draw_items path)
-            {
-                let mut current_pipeline = scene_pipeline;
-                for item in &self.draw_items {
-                    let mesh_index = self.mesh_data.iter().position(|m| m.name == item.key).unwrap_or(0) as u32;
-                    if item.material.is_transparent || self.object_registry.gpu_driven_objects.contains(&mesh_index) {
-                        continue;
-                    }
-                    
-                    if let Some(uploaded) = self.model_renderer.get(&item.key) {
-                        log::info!(
-                            "Rendering mesh: key='{}', vertices={}, tint_index={}",
-                            item.key,
-                            uploaded.vertex_count(),
-                            item.material.tint_index
-                        );
-                        // Switch pipeline if needed
-                        let target_pipeline = if item.is_skinned {
-                            self.skinned_pipeline
-                                .as_ref()
-                                .map(|p| p.pipeline)
-                                .unwrap_or(scene_pipeline)
-                        } else {
-                            scene_pipeline
-                        };
-
-                        if target_pipeline != current_pipeline {
-                            cmd_ctx.bind_pipeline(vk::PipelineBindPoint::GRAPHICS, target_pipeline);
-                            current_pipeline = target_pipeline;
-                        }
-                        let model_matrix = item.transform;
-                        
-                        // FIXED: Use material_handle from the item itself
-                        let material_handle = item.material_handle;
-                        let material_push = MaterialPushConstants::new(material_handle)
-                            .with_debug_path(2); // 2: Legacy (Direct path)
-
-                        let ctx = DrawContext {
-                            command_buffer,
-                            pipeline_layout: pipeline_layout_handle,
-                            uploaded,
-                            material: &material_push,
-                            instance_buffer_index: self.instance_buffer_indices[frame_index],
-                            joint_buffer_index: self.joint_buffer_indices[frame_index],
-                        };
-
-                        self.model_renderer
-                            .draw_mesh(&ctx, model_matrix, item.joint_offset);
-                    } else {
-                        log::error!("CRITICAL: Mesh not found in ModelRenderer cache! key='{}'. Mesh will not render.", item.key);
-                    }
-                }
-            }
-
-            // 5. Draw all transparent meshes
-            {
-                let mut current_pipeline = scene_pipeline;
-                
-                // 5a. Draw transparent instanced batches
-                for batch in self.instancing_manager.transparent_batches() {
-                    if let Some(mesh_data) = self.mesh_data.get(batch.key.mesh_id as usize) {
-                        let mesh_key = &mesh_data.name;
-                        if let Some(uploaded) = self.model_renderer.get(mesh_key) {
-                            let material_push = MaterialPushConstants::new(batch.key.material_id)
-                                .with_debug_path(2); // 2: Legacy (Direct path)
-                            
-                            let ctx = DrawContext {
-                                command_buffer,
-                                pipeline_layout: pipeline_layout_handle,
-                                uploaded,
-                                material: &material_push,
-                                instance_buffer_index: self.instance_buffer_indices[frame_index],
-                                joint_buffer_index: self.joint_buffer_indices[frame_index],
-                            };
-
-                            let offset = batch_offsets.get(&batch.key).copied().unwrap_or(0);
-                            self.model_renderer.draw_mesh_instanced(
-                                &ctx,
-                                batch.count() as u32,
-                                offset,
-                            );
-                        }
-                    }
-                }
-
-                // 5b. Draw transparent traditional meshes
-                for item in &self.draw_items {
-                    let mesh_index = self.mesh_data.iter().position(|m| m.name == item.key).unwrap_or(0) as u32;
-                    if !item.material.is_transparent || self.object_registry.gpu_driven_objects.contains(&mesh_index) {
-                        continue;
-                    }
-                    
-                    if let Some(uploaded) = self.model_renderer.get(&item.key) {
-                        // Switch pipeline if needed
-                        let target_pipeline = if item.is_skinned {
-                            self.skinned_pipeline
-                                .as_ref()
-                                .map(|p| p.pipeline)
-                                .unwrap_or(scene_pipeline)
-                        } else {
-                            scene_pipeline
-                        };
-
-                        if target_pipeline != current_pipeline {
-                            cmd_ctx.bind_pipeline(vk::PipelineBindPoint::GRAPHICS, target_pipeline);
-                            current_pipeline = target_pipeline;
-                        }
-
-                        let material_handle = item.material_handle;
-                        let material_push = MaterialPushConstants::new(material_handle)
-                            .with_debug_path(2); // 2: Legacy (Direct path)
-
-                        let ctx = DrawContext {
-                            command_buffer,
-                            pipeline_layout: pipeline_layout_handle,
-                            uploaded,
-                            material: &material_push,
-                            instance_buffer_index: self.instance_buffer_indices[frame_index],
-                            joint_buffer_index: self.joint_buffer_indices[frame_index],
-                        };
-
-                        self.model_renderer
-                            .draw_mesh(&ctx, item.transform, item.joint_offset);
-                    }
-                }
-            }
+            let main_pass_params = MainPassParameters {
+                cmd_ctx: &cmd_ctx,
+                frame_index,
+                scene_pipeline,
+                pipeline_layout_handle,
+                batch_offsets: &batch_offsets,
+                view,
+                projection: jittered_projection,
+                swapchain_extent,
+            };
+            self.render_main_pass(&main_pass_params)?;
 
             cmd_ctx.end_render_pass();
 
@@ -3815,7 +3964,7 @@ impl Renderer {
                 // and upsample to VSR history.
                 vsr.upscale(
                     command_buffer,
-                    framebuffer.attachments()[0], // Index 0 is now HDR if active
+                    hdr_attachment, // Index 0 is now HDR if active
                     depth_buffer.view(),
                     gbuffer.motion_view(),
                     jitter_uv,

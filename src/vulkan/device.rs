@@ -14,6 +14,7 @@ pub struct VulkanDevice {
     pub present_queue_family: u32,
     /// Timestamp period in nanoseconds (for GPU timing queries)
     pub timestamp_period_ns: f32,
+    pub sample_rate_shading_supported: bool,
     pub memory_properties: vk::PhysicalDeviceMemoryProperties,
     pub headless: bool,
     pub instance: Arc<crate::vulkan::VulkanInstance>,
@@ -53,6 +54,9 @@ impl VulkanDevice {
                 })?;
 
             let device_properties = vk_instance.get_physical_device_properties(physical_device);
+            let device_features_supported = vk_instance.get_physical_device_features(physical_device);
+            let sample_rate_shading_supported = device_features_supported.sample_rate_shading == vk::TRUE;
+            
             let memory_properties =
                 vk_instance.get_physical_device_memory_properties(physical_device);
             let device_name = CStr::from_ptr(device_properties.device_name.as_ptr());
@@ -82,7 +86,8 @@ impl VulkanDevice {
 
             let device_features = vk::PhysicalDeviceFeatures::default()
                 .sampler_anisotropy(true)
-                .multi_draw_indirect(true);
+                .multi_draw_indirect(true)
+                .sample_rate_shading(sample_rate_shading_supported);
 
             let mut vulnerability_features = vk::PhysicalDeviceVulkan12Features::default()
                 .buffer_device_address(false)
@@ -124,6 +129,7 @@ impl VulkanDevice {
                 graphics_queue_family,
                 present_queue_family,
                 timestamp_period_ns,
+                sample_rate_shading_supported,
                 memory_properties,
                 headless,
             })

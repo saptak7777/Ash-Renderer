@@ -109,6 +109,18 @@ impl InstanceBatch {
             .any(|i| i.has_flag(crate::renderer::occlusion_culling::CULL_FLAG_CAST_SHADOWS))
     }
 
+    /// Check if batch contains any shadow-receiving instances
+    pub fn receives_shadows(&self) -> bool {
+        self.instances
+            .iter()
+            .any(|i| i.has_flag(crate::renderer::occlusion_culling::CULL_FLAG_RECEIVE_SHADOWS))
+    }
+
+    /// Check if batch is shadow-only (casts shadows but doesn't receive them, used for Rage Engine optimization)
+    pub fn is_shadow_only(&self) -> bool {
+        self.casts_shadows() && !self.receives_shadows()
+    }
+
     /// Clear instances
     pub fn clear(&mut self) {
         self.instances.clear();

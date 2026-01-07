@@ -33,7 +33,7 @@ pub use allocator::Allocator;
 pub use buffer_builder::BufferBuilder;
 pub use buffer_types::BufferDescriptor;
 pub use command::CommandPool;
-pub use command_manager::CommandBufferManager;
+pub use command_manager::{CommandBufferContext, CommandBufferManager};
 pub use compute_pipeline::{ComputePipeline, ComputePipelineBuilder};
 pub use descriptor_allocator::DescriptorAllocator;
 pub use descriptor_bindless::BindlessManager;

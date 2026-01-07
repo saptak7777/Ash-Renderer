@@ -78,6 +78,7 @@ impl CullBoundingBox {
 pub const CULL_FLAG_ENABLED: u32 = 1 << 0;
 pub const CULL_FLAG_CAST_SHADOWS: u32 = 1 << 1;
 pub const CULL_FLAG_TRANSPARENT: u32 = 1 << 2;
+pub const CULL_FLAG_RECEIVE_SHADOWS: u32 = 1 << 3;
 
 /// Per-object culling data
 #[repr(C)]
@@ -194,6 +195,12 @@ impl CullObjectData {
     /// Set transparent flag
     pub fn with_transparent(mut self, enabled: bool) -> Self {
         self.set_flag(CULL_FLAG_TRANSPARENT, enabled);
+        self
+    }
+
+    /// Set receive shadows flag
+    pub fn with_receive_shadows(mut self, enabled: bool) -> Self {
+        self.set_flag(CULL_FLAG_RECEIVE_SHADOWS, enabled);
         self
     }
 

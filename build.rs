@@ -55,7 +55,7 @@ fn compile_shaders(dir: &Path, out_dir: &Path) -> Result<(), Box<dyn std::error:
         if src_content.contains("nonuniformEXT") && !src_content.contains("GL_EXT_nonuniform_qualifier") {
              if let Some(version_end) = src_content.find("\n") {
                  let (version, rest) = src_content.split_at(version_end + 1);
-                 src_content = format!("{}#extension GL_EXT_nonuniform_qualifier : enable\n{}", version, rest);
+                 src_content = format!("{version}#extension GL_EXT_nonuniform_qualifier : enable\n{rest}");
              }
         }
 

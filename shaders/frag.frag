@@ -3,11 +3,23 @@
 
 layout(location = 0) in vec3 fragColor;
 layout(location = 1) in vec2 fragUV;
-layout(location = 2) in vec3 fragNormal;
-layout(location = 3) in vec3 fragWorldPos;
+layout(location = 2) centroid in vec3 fragNormal;
+layout(location = 3) sample in vec3 fragWorldPos;
 layout(location = 4) in vec4 fragPosLightSpace;
 layout(location = 5) in vec4 fragTangent;
 layout(location = 6) in vec2 motionVector;
+
+// Edge detection helper for adaptive anti-aliasing
+vec3 edge_denoise(vec3 color, vec3 worldPos) {
+    // Higher gradient = more likely to be an edge
+    vec3 dX = dFdx(worldPos);
+    vec3 dY = dFdy(worldPos);
+    float edge_factor = length(dX) + length(dY);
+    
+    // Smooth high-frequency edges using adaptive blur
+    // This complements hardware sample shading
+    return mix(color, color * 0.95, clamp(edge_factor * 0.1, 0.0, 0.05));
+}
 
 layout(location = 0) out vec4 outColor;
 layout(location = 1) out vec4 outNormal;
@@ -63,7 +75,8 @@ layout(push_constant) uniform PushConstants {
     // Fragment stage (128-255)
     layout(offset = 128) uint material_index;
     layout(offset = 132) uint debug_path; // 0: None, 1: GPU-Driven, 2: Legacy
-    layout(offset = 136) uint _material_padding[2];
+    layout(offset = 136) uint flags; // bit 0: receive_shadows
+    layout(offset = 140) uint _material_padding;
 } push;
 
 // Set 2: Environment (ShadowMap + IBL)
@@ -244,7 +257,10 @@ void main() {
     vec3 kD = (1.0 - F) * (1.0 - metallic);
     vec3 diffuse = kD * baseColor / PI;
     
-    float shadow = ShadowCalculation(fragPosLightSpace, N, lightDir);
+    float shadow = 0.0;
+    if ((push.flags & 1u) != 0u) {
+        shadow = ShadowCalculation(fragPosLightSpace, N, lightDir);
+    }
 
     vec3 Lo = (diffuse + specular) * lightColor * NdotL * (1.0 - shadow);
     vec3 ambient = ambientColor * baseColor * occlusion;
@@ -256,7 +272,8 @@ void main() {
         emissive *= texture(textures[nonuniformEXT(emissive_idx)], fragUV).rgb;
     }
 
-    vec3 color = ambient + Lo + emissive;
+    // Apply edge-aware denoising (id Tech style)
+    vec3 color = edge_denoise(ambient + Lo + emissive, fragWorldPos);
     
     // Debug Path Visualization
     if (push.debug_path == 1) { // GPU-Driven

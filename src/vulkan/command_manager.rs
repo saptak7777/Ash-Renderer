@@ -23,6 +23,13 @@ pub struct CommandBufferContext<'a> {
 }
 
 impl<'a> CommandBufferContext<'a> {
+    pub fn new(device: &'a ash::Device, command_buffer: vk::CommandBuffer) -> Self {
+        Self {
+            device,
+            command_buffer,
+        }
+    }
+
     pub fn handle(&self) -> vk::CommandBuffer {
         self.command_buffer
     }

@@ -8,8 +8,8 @@ layout(location = 4) in vec4 inJointWeights;
 
 layout(location = 0) out vec3 fragColor;
 layout(location = 1) out vec2 fragUV;
-layout(location = 2) out vec3 fragNormal;
-layout(location = 3) out vec3 fragWorldPos;
+layout(location = 2) centroid out vec3 fragNormal;
+layout(location = 3) sample out vec3 fragWorldPos;
 layout(location = 4) out vec4 fragPosLightSpace;
 layout(location = 6) out vec2 motionVector;
 
