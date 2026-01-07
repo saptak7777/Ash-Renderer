@@ -69,12 +69,12 @@ impl BindlessManager {
         })
     }
 
-    pub fn descriptor_set(&self) -> vk::DescriptorSet {
-        self.descriptor_set.handle()
-    }
-
     pub fn layout(&self) -> vk::DescriptorSetLayout {
         self.layout.handle()
+    }
+
+    pub fn descriptor_set(&self) -> vk::DescriptorSet {
+        self.descriptor_set.handle()
     }
 
     pub fn add_sampled_image(

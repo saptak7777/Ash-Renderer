@@ -77,6 +77,7 @@ impl CullBoundingBox {
 /// Culling flags (bits)
 pub const CULL_FLAG_ENABLED: u32 = 1 << 0;
 pub const CULL_FLAG_CAST_SHADOWS: u32 = 1 << 1;
+pub const CULL_FLAG_TRANSPARENT: u32 = 1 << 2;
 
 /// Per-object culling data
 #[repr(C)]
@@ -188,6 +189,17 @@ impl CullObjectData {
     pub fn with_cast_shadows(mut self, enabled: bool) -> Self {
         self.set_flag(CULL_FLAG_CAST_SHADOWS, enabled);
         self
+    }
+
+    /// Set transparent flag
+    pub fn with_transparent(mut self, enabled: bool) -> Self {
+        self.set_flag(CULL_FLAG_TRANSPARENT, enabled);
+        self
+    }
+
+    /// Check if transparent
+    pub fn is_transparent(&self) -> bool {
+        self.has_flag(CULL_FLAG_TRANSPARENT)
     }
 
     /// Get position from matrix

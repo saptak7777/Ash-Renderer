@@ -336,8 +336,8 @@ impl IblManager {
                 source_view: equirect_view,
                 source_sampler: equirect_sampler,
                 shader_bytes: (
-                    include_bytes!(concat!(env!("OUT_DIR"), "/skybox.spv")),
-                    include_bytes!(concat!(env!("OUT_DIR"), "/equirect_to_cube.spv")),
+                    include_bytes!(concat!(env!("OUT_DIR"), "/skybox.vert.spv")),
+                    include_bytes!(concat!(env!("OUT_DIR"), "/equirect_to_cube.frag.spv")),
                 ),
                 mip: 0,
                 roughness: 0.0,
@@ -374,8 +374,8 @@ impl IblManager {
                 source_view: env_view,
                 source_sampler: env_sampler,
                 shader_bytes: (
-                    include_bytes!(concat!(env!("OUT_DIR"), "/skybox.spv")),
-                    include_bytes!(concat!(env!("OUT_DIR"), "/irradiance.spv")),
+                    include_bytes!(concat!(env!("OUT_DIR"), "/skybox.vert.spv")),
+                    include_bytes!(concat!(env!("OUT_DIR"), "/irradiance.frag.spv")),
                 ),
                 mip: 0,
                 roughness: 0.0,
@@ -416,11 +416,11 @@ impl IblManager {
                     source_view: env_view,
                     source_sampler: env_sampler,
                     shader_bytes: (
-                        include_bytes!(concat!(env!("OUT_DIR"), "/skybox.spv")),
-                        include_bytes!(concat!(env!("OUT_DIR"), "/prefilter.spv")),
-                    ),
-                    mip,
-                    roughness,
+                        include_bytes!(concat!(env!("OUT_DIR"), "/skybox.vert.spv")),
+                         include_bytes!(concat!(env!("OUT_DIR"), "/prefilter.frag.spv")),
+                     ),
+                     mip,
+                     roughness,
                 },
             )?;
         }

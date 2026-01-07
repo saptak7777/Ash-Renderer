@@ -97,6 +97,18 @@ impl InstanceBatch {
         self.instances.is_empty()
     }
 
+    /// Check if batch contains any transparent instances
+    pub fn is_transparent(&self) -> bool {
+        self.instances.iter().any(|i| i.is_transparent())
+    }
+
+    /// Check if batch contains any shadow-casting instances
+    pub fn casts_shadows(&self) -> bool {
+        self.instances
+            .iter()
+            .any(|i| i.has_flag(crate::renderer::occlusion_culling::CULL_FLAG_CAST_SHADOWS))
+    }
+
     /// Clear instances
     pub fn clear(&mut self) {
         self.instances.clear();
@@ -257,6 +269,21 @@ impl InstancingManager {
     /// Get all batches for rendering
     pub fn batches(&self) -> impl Iterator<Item = &InstanceBatch> {
         self.batches.values()
+    }
+
+    /// Get batches that cast shadows
+    pub fn shadow_batches(&self) -> impl Iterator<Item = &InstanceBatch> {
+        self.batches.values().filter(|b| b.casts_shadows())
+    }
+
+    /// Get visible opaque batches
+    pub fn visible_batches(&self) -> impl Iterator<Item = &InstanceBatch> {
+        self.batches.values().filter(|b| !b.is_transparent())
+    }
+
+    /// Get transparent batches
+    pub fn transparent_batches(&self) -> impl Iterator<Item = &InstanceBatch> {
+        self.batches.values().filter(|b| b.is_transparent())
     }
 
     /// Get batch by key

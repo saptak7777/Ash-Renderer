@@ -49,7 +49,16 @@ fn compile_shaders(dir: &Path, out_dir: &Path) -> Result<(), Box<dyn std::error:
             continue;
         }
 
-        let src_content = fs::read_to_string(&path)?;
+        let mut src_content = fs::read_to_string(&path)?;
+        
+        // Ensure nonuniform_qualifier is enabled for all shaders if they use it
+        if src_content.contains("nonuniformEXT") && !src_content.contains("GL_EXT_nonuniform_qualifier") {
+             if let Some(version_end) = src_content.find("\n") {
+                 let (version, rest) = src_content.split_at(version_end + 1);
+                 src_content = format!("{}#extension GL_EXT_nonuniform_qualifier : enable\n{}", version, rest);
+             }
+        }
+
         let file_name = path.file_name().unwrap().to_str().unwrap();
 
         let binary_result =
@@ -57,15 +66,8 @@ fn compile_shaders(dir: &Path, out_dir: &Path) -> Result<(), Box<dyn std::error:
 
         match binary_result {
             Ok(binary) => {
-                // Special case for backward compatibility (v0.2.7 style)
-                let new_name = if file_name == "vert.vert" {
-                    "vert.spv".to_string()
-                } else if file_name == "frag.frag" {
-                    "frag.spv".to_string()
-                } else {
-                    // Use full filename + .spv (e.g., shader.comp.spv)
-                    format!("{file_name}.spv")
-                };
+                // Use full filename + .spv (e.g., shader.vert.spv)
+                let new_name = format!("{file_name}.spv");
 
                 let out_path = out_dir.join(new_name);
                 fs::write(&out_path, binary.as_binary_u8())?;

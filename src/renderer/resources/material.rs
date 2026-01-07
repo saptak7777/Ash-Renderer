@@ -13,6 +13,7 @@ pub struct Material {
     pub normal_scale: f32,
     pub alpha_cutoff: f32,
     pub tint_index: i32,
+    pub is_transparent: bool,
 }
 
 impl Default for Material {
@@ -27,6 +28,7 @@ impl Default for Material {
             normal_scale: 1.0,
             alpha_cutoff: 0.1,
             tint_index: -1,
+            is_transparent: false,
         }
     }
 }
@@ -44,6 +46,7 @@ impl Material {
             normal_scale: 1.0,
             alpha_cutoff: 0.1,
             tint_index: -1,
+            is_transparent: color[3] < 1.0,
         }
     }
 }
@@ -65,6 +68,7 @@ pub struct MaterialKey {
     normal_scale: u8,
     alpha_cutoff: u8,
     tint_index: i32,
+    is_transparent: bool,
 }
 
 impl MaterialKey {
@@ -87,6 +91,7 @@ impl MaterialKey {
             normal_scale: quantize(material.normal_scale),
             alpha_cutoff: quantize(material.alpha_cutoff),
             tint_index: material.tint_index,
+            is_transparent: material.is_transparent,
         }
     }
 
@@ -109,6 +114,7 @@ impl MaterialKey {
             normal_scale: quantize(props.normal_scale),
             alpha_cutoff: quantize(props.alpha_cutoff),
             tint_index: -1,
+            is_transparent: props.base_color_factor[3] < 1.0,
         }
     }
 }

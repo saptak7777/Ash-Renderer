@@ -90,6 +90,19 @@ pub struct MaterialPushConstants {
     pub _padding: [u32; 2],
 }
 
+#[repr(C, align(16))]
+#[derive(Clone, Copy, Pod, Zeroable)]
+pub struct ShadowPushConstants {
+    pub light_space_matrix: Mat4Push,
+    pub model: Mat4Push,
+    pub joint_offset: u32,
+    pub use_instancing: u32,
+    pub instance_buffer_index: u32,
+    pub joint_buffer_index: u32,
+    pub base_color_index: i32,
+    pub _padding: [u32; 3],
+}
+
 /// Context for draw calls to reduce argument count
 pub struct DrawContext<'a> {
     pub command_buffer: vk::CommandBuffer,
@@ -621,6 +634,120 @@ impl ModelRenderer {
                 params.count_offset,
                 params.max_draw_count,
                 params.stride,
+            );
+        }
+    }
+
+    /// Record a draw call for shadow mapping.
+    ///
+    /// # Safety
+    /// Caller must ensure the command buffer is recording and that the provided pipeline layout is
+    /// compatible with the shadow push constant ranges.
+    pub unsafe fn draw_mesh_shadow(
+        &self,
+        command_buffer: vk::CommandBuffer,
+        pipeline_layout: vk::PipelineLayout,
+        uploaded: &UploadedMesh,
+        push: &ShadowPushConstants,
+    ) {
+        self.device.cmd_push_constants(
+            command_buffer,
+            pipeline_layout,
+            vk::ShaderStageFlags::VERTEX,
+            0,
+            &bytes_of(push)[0..144],
+        );
+
+        self.device.cmd_push_constants(
+            command_buffer,
+            pipeline_layout,
+            vk::ShaderStageFlags::FRAGMENT,
+            144,
+            &bytes_of(push)[144..148],
+        );
+
+        if let Some(index_buffer) = uploaded.index_buffer() {
+            self.device.cmd_bind_index_buffer(
+                command_buffer,
+                index_buffer,
+                0,
+                vk::IndexType::UINT32,
+            );
+            self.device.cmd_draw_indexed(
+                command_buffer,
+                uploaded.index_count(),
+                1,
+                0,
+                0,
+                0,
+            );
+        } else {
+            self.device.cmd_draw(
+                command_buffer,
+                uploaded.vertex_count(),
+                1,
+                0,
+                0,
+            );
+        }
+    }
+
+    /// Record an instanced draw call for shadow mapping.
+    ///
+    /// # Safety
+    /// Caller must ensure the command buffer is recording and that the provided pipeline layout is
+    /// compatible with the shadow push constant ranges.
+    pub unsafe fn draw_mesh_instanced_shadow(
+        &self,
+        command_buffer: vk::CommandBuffer,
+        pipeline_layout: vk::PipelineLayout,
+        uploaded: &UploadedMesh,
+        instance_count: u32,
+        first_instance: u32,
+        push: &ShadowPushConstants,
+    ) {
+        if instance_count == 0 {
+            return;
+        }
+
+        self.device.cmd_push_constants(
+            command_buffer,
+            pipeline_layout,
+            vk::ShaderStageFlags::VERTEX,
+            0,
+            &bytes_of(push)[0..144],
+        );
+
+        self.device.cmd_push_constants(
+            command_buffer,
+            pipeline_layout,
+            vk::ShaderStageFlags::FRAGMENT,
+            144,
+            &bytes_of(push)[144..148],
+        );
+
+        if let Some(index_buffer) = uploaded.index_buffer() {
+            self.device.cmd_bind_index_buffer(
+                command_buffer,
+                index_buffer,
+                0,
+                vk::IndexType::UINT32,
+            );
+            self.device.cmd_draw_indexed(
+                command_buffer,
+                uploaded.index_count(),
+                instance_count,
+                0,
+                0,
+                first_instance,
+            );
+        } else {
+            self.device.cmd_draw(
+                command_buffer,
+                uploaded.vertex_count(),
+                instance_count,
+                0,
+                first_instance,
             );
         }
     }

@@ -1,4 +1,5 @@
 #version 450
+#extension GL_EXT_nonuniform_qualifier : enable
 
 // Shadow map fragment shader - depth-only, no color output
 // The fragment shader can be empty for depth-only passes,
@@ -7,11 +8,13 @@
 layout(location = 0) in vec2 inUV;
 
 layout(push_constant) uniform PushConstants {
-    layout(offset = 128) int base_color_index; // Offset 128 to skip Vertex push constants
+    // Skip Vertex push constants (0-143)
+    // We'll put base_color_index at offset 144
+    layout(offset = 144) int base_color_index; 
 } pc;
 
-#extension GL_EXT_nonuniform_qualifier : require
-layout(set = 2, binding = 0) uniform sampler2D textures[];
+// Binding 0: Textures (Set 1)
+layout(set = 1, binding = 0) uniform sampler2D textures[];
 
 void main() {
     if (pc.base_color_index >= 0) {
