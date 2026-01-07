@@ -1,4 +1,5 @@
 #version 450
+#extension GL_EXT_nonuniform_qualifier : require
 
 layout(location = 0) in vec3 fragColor;
 layout(location = 1) in vec2 fragUV;
@@ -6,15 +7,19 @@ layout(location = 2) in vec3 fragNormal;
 layout(location = 3) in vec3 fragWorldPos;
 layout(location = 4) in vec4 fragPosLightSpace;
 layout(location = 5) in vec4 fragTangent;
+layout(location = 6) in vec2 motionVector;
 
 layout(location = 0) out vec4 outColor;
+layout(location = 1) out vec4 outNormal;
+layout(location = 2) out vec4 outAlbedo;
+layout(location = 3) out vec2 outMotion;
 
 layout(set = 0, binding = 0) uniform MVP {
     mat4 model;
     mat4 view;
     mat4 projection;
     mat4 view_proj;
-    mat4 prev_view_proj;  // TAA (unused in fragment but must match vertex UBO)
+    mat4 prev_view_proj;
     mat4 light_space_matrix;
     mat4 normal_matrix;
     vec4 camera_pos;
@@ -23,101 +28,91 @@ layout(set = 0, binding = 0) uniform MVP {
     vec4 ambient_color;
 } mvp;
 
-layout(set = 1, binding = 0) uniform Material {
+struct MaterialUniform {
     vec4 base_color_factor;
     vec4 emissive_factor;
-    vec4 parameters; // x: metallic, y: roughness, z: occlusion strength, w: normal scale
-    // Texture indices for bindless array (-1 means no texture)
-    int base_color_index;
-    int normal_map_index;
-    int metallic_roughness_index;
-    int occlusion_index;
-    int emissive_index;
+    vec4 parameters; // x: metallic, y: roughness, z: occlusion, w: normal_scale
+    ivec4 texture_indices; // x: base, y: normal, z: mr, w: occlusion
+    int emissive_texture_index;
+    int tint_index;
     float alpha_cutoff;
-    vec2 _material_padding;
-} material;
-
-// Bindless texture array (Phase 6)
-// All textures are registered in this single array at init time
-#extension GL_EXT_nonuniform_qualifier : require
-layout(set = 2, binding = 0) uniform sampler2D textures[];
-
-layout(set = 3, binding = 0) uniform sampler2D shadowMap;
-
-// ============================================================================
-// FORWARD+ POINT LIGHTS (Enable by defining ENABLE_POINT_LIGHTS and binding Set 4)
-// ============================================================================
-#ifdef ENABLE_POINT_LIGHTS
-
-#define MAX_LIGHTS_PER_TILE 256
-#define MAX_LIGHTS_PER_PIXEL 32  // Performance cap per fragment
-
-// Light structure (must match light_culling.comp)
-struct Light {
-    vec4 position;   // xyz = position, w = radius
-    vec4 color;      // rgb = color, a = intensity
-    vec4 direction;  // xyz = direction (for spot), w = type
-    vec4 params;     // x = innerCone, y = outerCone, z = falloff, w = enabled
+    float _padding;
 };
 
-// Forward+ bindings (Set 4)
-layout(set = 4, binding = 0, std430) readonly buffer LightBuffer {
-    Light lights[];
-};
+// Set 1: Bindless consolidated resources
+layout(set = 1, binding = 0) uniform sampler2D textures[];
+layout(std430, set = 1, binding = 1) readonly buffer MaterialBuffer {
+    MaterialUniform materials[];
+} material_buffer;
 
-layout(set = 4, binding = 1, std430) readonly buffer TileLightIndices {
-    uint tileData[];
-};
+// Tint buffer (still used by some parts, but consolidated to Set 1 if needed - 
+// however Renderer doesn't seem to bind separate tint buffers in BindlessManager yet)
+// Let's keep it in Set 2 for now IF Renderer still binds it there, 
+// but wait, DescriptorManager Set 2 is Environment.
+// Tints SHOULD be in Bindless (Set 1) if they are storage buffers.
+// For now, I'll rely on MaterialUniform's fields.
 
-layout(set = 4, binding = 2) uniform ForwardPlusInfo {
-    uvec2 numTiles;
-    uint tileSize;
-    uint _padding;
-} fpInfo;
+layout(push_constant) uniform PushConstants {
+    // Vertex stage (0-127)
+    layout(offset = 0) mat4 model;
+    layout(offset = 64) uint joint_offset;
+    layout(offset = 68) uint use_instancing;
+    layout(offset = 72) uint instance_buffer_index;
+    layout(offset = 76) uint joint_buffer_index;
 
-#endif // ENABLE_POINT_LIGHTS
+    // Fragment stage (128-255)
+    layout(offset = 128) uint material_index;
+    layout(offset = 132) uint _material_padding[3];
+} push;
+
+// Set 2: Environment (ShadowMap + IBL)
+layout(set = 2, binding = 0) uniform sampler2D shadowMap;
 
 const float PI = 3.14159265359;
 
+// Convert sRGB color to linear space for proper color handling
+vec3 srgb_to_linear(vec3 color) {
+    return mix(
+        color / 12.92,
+        pow((color + 0.055) / 1.055, vec3(2.4)),
+        greaterThan(color, vec3(0.04045))
+    );
+}
+
 float ShadowCalculation(vec4 fragPosLightSpace, vec3 normal, vec3 lightDir) {
-    // perform perspective divide
     vec3 projCoords = fragPosLightSpace.xyz / fragPosLightSpace.w;
-    // transform to [0,1] range
     projCoords = projCoords * 0.5 + 0.5;
-    // get depth of current fragment from light's perspective
+    
+    // CRITICAL FIX: Clamp projCoords to [0,1] range to prevent edge artifacts from PCF sampling
+    // Without this, textureGather at boundaries reads outside the shadow map, causing glitchy overlaps
+    projCoords = clamp(projCoords, vec3(0.0), vec3(1.0));
+    
     float currentDepth = projCoords.z;
     
-    // slope-aware bias
-    float bias = max(0.05 * (1.0 - dot(normal, lightDir)), 0.005);
+    // Adaptive bias based on surface slope relative to light direction
+    float cosAngle = clamp(dot(normal, lightDir), 0.0, 1.0);
+    float minBias = 0.0005;
+    float maxBias = 0.005;
+    float bias = max(maxBias * (1.0 - cosAngle), minBias);
     
-    // Keep the shadow at 0.0 when outside the far_plane region of the light's frustum.
     if(projCoords.z > 1.0)
         return 0.0;
     
-    // OPTIMIZED PCF: 4x4 using textureGather (4 samples per call = 4 gathers for 16 samples)
-    // ~2.5x faster than previous 9-gather implementation
     vec2 texelSize = 1.0 / textureSize(shadowMap, 0);
     vec2 uv = projCoords.xy;
     
     float shadow = 0.0;
-    
-    // Sample 4 gather points to cover 4x4 area
-    // Each gather returns depths from a 2x2 quad
     vec4 g0 = textureGather(shadowMap, uv + vec2(-1.0, -1.0) * texelSize);
     vec4 g1 = textureGather(shadowMap, uv + vec2( 1.0, -1.0) * texelSize);
     vec4 g2 = textureGather(shadowMap, uv + vec2(-1.0,  1.0) * texelSize);
     vec4 g3 = textureGather(shadowMap, uv + vec2( 1.0,  1.0) * texelSize);
     
-    // Compare each gathered depth against currentDepth - bias
     float compareDepth = currentDepth - bias;
-    
-    // Count samples in shadow from each gather (4 comparisons per gather)
     shadow += dot(vec4(greaterThan(vec4(compareDepth), g0)), vec4(1.0));
     shadow += dot(vec4(greaterThan(vec4(compareDepth), g1)), vec4(1.0));
     shadow += dot(vec4(greaterThan(vec4(compareDepth), g2)), vec4(1.0));
     shadow += dot(vec4(greaterThan(vec4(compareDepth), g3)), vec4(1.0));
     
-    // 4 gathers * 4 samples = 16 samples
     return shadow / 16.0;
 }
 
@@ -128,69 +123,72 @@ float distribution_ggx(float NdotH, float roughness) {
     return a2 / (PI * denom * denom);
 }
 
-// Optimized: Schlick-GGX with fast reciprocal approximation
 float geometry_schlick_ggx_fast(float NdotX, float k) {
     return NdotX / (NdotX * (1.0 - k) + k);
 }
 
 float geometry_smith(float NdotV, float NdotL, float roughness) {
     float r = roughness + 1.0;
-    float k = (r * r) * 0.125; // (r*r)/8 = (r*r)*0.125
+    float k = (r * r) * 0.125;
     return geometry_schlick_ggx_fast(NdotV, k) * geometry_schlick_ggx_fast(NdotL, k);
 }
 
-// Optimized: Fresnel-Schlick with spherical gaussian approximation (faster pow)
 vec3 fresnel_schlick_fast(float cosTheta, vec3 F0) {
-    // Spherical Gaussian approximation: exp2(-5.55473 * x - 6.98316 * x) ≈ (1-x)^5
     float t = clamp(1.0 - cosTheta, 0.0, 1.0);
     float t2 = t * t;
-    float t5 = t2 * t2 * t; // t^5 without pow()
+    float t5 = t2 * t2 * t;
     return F0 + (1.0 - F0) * t5;
 }
 
 void main() {
+    MaterialUniform mat = material_buffer.materials[push.material_index];
+
     vec3 lightColor = mvp.light_color.xyz;
     vec3 ambientColor = mvp.ambient_color.xyz;
 
     vec3 viewDir = normalize(mvp.camera_pos.xyz - fragWorldPos);
     vec3 lightDir = normalize(-mvp.light_direction.xyz);
 
-    // Sample base color (bindless)
-    vec4 baseSample = material.base_color_index >= 0
-        ? texture(textures[nonuniformEXT(material.base_color_index)], fragUV)
+    // Sample base color
+    int base_color_idx = mat.texture_indices.x;
+    vec4 base_color_factor = mat.base_color_factor;
+
+    vec4 baseSample = base_color_idx >= 0
+        ? texture(textures[nonuniformEXT(base_color_idx)], fragUV)
         : vec4(1.0);
-    vec3 baseColor = baseSample.rgb * material.base_color_factor.rgb;
-    float alpha = baseSample.a * material.base_color_factor.a;
+    // Apply sRGB-to-linear conversion for physically-based color handling
+    vec3 baseSampleLinear = srgb_to_linear(baseSample.rgb);
+    vec3 baseColor = baseSampleLinear * base_color_factor.rgb * fragColor;
     
-    // Alpha handling happens in pipeline blending for transparent objects.
+    // Alpha discard
+    if (baseSample.a * base_color_factor.a < mat.alpha_cutoff) {
+        discard;
+    }
 
     // Tangent-based Normal Mapping
     vec3 N = normalize(fragNormal);
     vec3 T_raw = fragTangent.xyz;
-    vec3 T = length(T_raw) > 0.001 ? normalize(T_raw) : vec3(1.0, 0.0, 0.0); // Safe fallback
+    vec3 T = length(T_raw) > 0.001 ? normalize(T_raw) : vec3(1.0, 0.0, 0.0);
     
-    // Gram-Schmidt orthogonalization
     T = normalize(T - dot(T, N) * N);
     
-    // Flip normal for backfaces to support double-sided rendering correctly
     if (!gl_FrontFacing) {
         N = -N;
         T = -T;
     }
     
-    // Bitangent with handedness
     vec3 B = cross(N, T) * fragTangent.w;
-    
     mat3 TBN = mat3(T, B, N);
     
     vec3 normal = N;
-    if (material.normal_map_index >= 0) {
-        vec3 mapSample = texture(textures[nonuniformEXT(material.normal_map_index)], fragUV).xyz;
-        // Check for validity (e.g. if mipmapping averages to 0)
+    int normal_idx = mat.texture_indices.y;
+    float normal_scale = mat.parameters.w;
+
+    if (normal_idx >= 0) {
+        vec3 mapSample = texture(textures[nonuniformEXT(normal_idx)], fragUV).xyz;
         if (length(mapSample) > 0.001) {
             vec3 mapNormal = mapSample * 2.0 - 1.0;
-            mapNormal.xy *= material.parameters.w;
-            // Safe normalize result
+            mapNormal.xy *= normal_scale;
             vec3 mapDir = TBN * mapNormal;
             if (length(mapDir) > 0.001) {
                 normal = normalize(mapDir);
@@ -201,19 +199,24 @@ void main() {
     float NdotL = max(dot(normal, lightDir), 0.0);
 
     // Material parameters
-    float metallic = material.parameters.x;
-    float roughness = max(material.parameters.y, 0.04); // Min roughness to prevent fireflies
+    float metallic = mat.parameters.x;
+    float roughness = mat.parameters.y;
+    roughness = max(roughness, 0.04);
     
-    if (material.metallic_roughness_index >= 0) {
-        vec4 mrSample = texture(textures[nonuniformEXT(material.metallic_roughness_index)], fragUV);
+    int mr_idx = mat.texture_indices.z;
+    if (mr_idx >= 0) {
+        vec4 mrSample = texture(textures[nonuniformEXT(mr_idx)], fragUV);
         metallic = metallic * mrSample.b;
         roughness = max(roughness * mrSample.g, 0.04);
     }
 
-    // Ambient occlusion (bindless)
+    // Ambient occlusion
     float occlusion = 1.0;
-    if (material.occlusion_index >= 0) {
-        occlusion = mix(1.0, texture(textures[nonuniformEXT(material.occlusion_index)], fragUV).r, material.parameters.z);
+    int occ_idx = mat.texture_indices.w;
+    float occ_strength = mat.parameters.z;
+
+    if (occ_idx >= 0) {
+        occlusion = mix(1.0, texture(textures[nonuniformEXT(occ_idx)], fragUV).r, occ_strength);
     }
 
     // PBR
@@ -232,99 +235,30 @@ void main() {
     float denom = 4.0 * NdotV * NdotL + 0.001;
     vec3 specular = numerator / denom;
     
-    // Firefly suppression via max component clamping (preserves hue unlike hard clamp)
     float specularMax = max(max(specular.r, specular.g), specular.b);
     if (specularMax > 100.0) {
-        specular *= 100.0 / specularMax;  // Scale down while preserving color ratios
+        specular *= 100.0 / specularMax;
     }
 
     vec3 kD = (1.0 - F) * (1.0 - metallic);
     vec3 diffuse = kD * baseColor / PI;
     
-    // Calculate Shadow
-    // Calculate Shadow
-    // Use geometric normal (N) for shadow bias to avoid self-shadowing on flat surfaces
     float shadow = ShadowCalculation(fragPosLightSpace, N, lightDir);
 
-    // Direct lighting with shadow (Directional Sun Light)
     vec3 Lo = (diffuse + specular) * lightColor * NdotL * (1.0 - shadow);
-    
-#ifdef ENABLE_POINT_LIGHTS
-    // ========================================================================
-    // Forward+ Point Light Accumulation
-    // ========================================================================
-    
-    // Calculate which tile this fragment belongs to
-    uint tileX = uint(gl_FragCoord.x) / fpInfo.tileSize;
-    uint tileY = uint(gl_FragCoord.y) / fpInfo.tileSize;
-    uint tileIndex = tileY * fpInfo.numTiles.x + tileX;
-    uint tileOffset = tileIndex * (MAX_LIGHTS_PER_TILE + 1);
-    
-    // First element is light count for this tile
-    uint tileLightCount = min(tileData[tileOffset], MAX_LIGHTS_PER_PIXEL);
-    
-    // Accumulate contributions from all point lights affecting this tile
-    for (uint i = 0; i < tileLightCount; i++) {
-        uint lightIdx = tileData[tileOffset + 1 + i];
-        Light light = lights[lightIdx];
-        
-        // Skip disabled lights
-        if (light.params.w < 0.5) continue;
-        
-        vec3 toLight = light.position.xyz - fragWorldPos;
-        float distSq = dot(toLight, toLight);
-        float radius = light.position.w;
-        float radiusSq = radius * radius;
-        
-        // Skip if outside radius
-        if (distSq > radiusSq) continue;
-        
-        // Distance attenuation (inverse square with smooth falloff at radius edge)
-        float att = max(0.0, 1.0 - (distSq / radiusSq));
-        att *= att;  // Quadratic falloff for softer edges
-        
-        vec3 L = normalize(toLight);
-        float NdotL_local = max(dot(normal, L), 0.0);
-        
-        if (NdotL_local <= 0.0) continue;  // Early-out for back-facing
-        
-        // Recompute PBR terms for this light direction
-        vec3 H_local = normalize(viewDir + L);
-        float NdotH_local = max(dot(normal, H_local), 0.0);
-        float VdotH_local = max(dot(viewDir, H_local), 0.0);
-        
-        float D_local = distribution_ggx(NdotH_local, roughness);
-        float G_local = geometry_smith(NdotV, NdotL_local, roughness);
-        vec3 F_local = fresnel_schlick_fast(VdotH_local, F0);
-        
-        vec3 spec_local = (D_local * G_local * F_local) / max(4.0 * NdotV * NdotL_local, 0.001);
-        
-        // Firefly clamp for point lights too
-        float specMax_local = max(max(spec_local.r, spec_local.g), spec_local.b);
-        if (specMax_local > 100.0) {
-            spec_local *= 100.0 / specMax_local;
-        }
-        
-        vec3 diff_local = kD * baseColor / PI;
-        
-        // Accumulate with light color and intensity
-        Lo += (diff_local + spec_local) * light.color.rgb * light.color.a * NdotL_local * att;
-    }
-#endif // ENABLE_POINT_LIGHTS
-    
-    // Ambient
     vec3 ambient = ambientColor * baseColor * occlusion;
     
-    // Emissive (bindless)
-    vec3 emissive = material.emissive_factor.rgb;
-    if (material.emissive_index >= 0) {
-        emissive *= texture(textures[nonuniformEXT(material.emissive_index)], fragUV).rgb;
+    // Emissive
+    int emissive_idx = mat.emissive_texture_index;
+    vec3 emissive = mat.emissive_factor.rgb;
+    if (emissive_idx >= 0) {
+        emissive *= texture(textures[nonuniformEXT(emissive_idx)], fragUV).rgb;
     }
 
     vec3 color = ambient + Lo + emissive;
     
-    // Reinhard tonemapping
-    color = color / (color + vec3(1.0));
-
     outColor = vec4(color, 1.0);
+    outNormal = vec4(normal, 1.0);
+    outAlbedo = vec4(baseColor, 1.0);
+    outMotion = motionVector;
 }

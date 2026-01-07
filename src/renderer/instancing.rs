@@ -9,68 +9,14 @@
 //! - Frustum culling of instances
 //! - Statistics tracking
 
-use glam::{Mat4, Vec3, Vec4};
+use crate::renderer::occlusion_culling::CullObjectData;
+use glam::Vec3;
 use std::collections::HashMap;
 
 /// Maximum instances per draw call
 pub const MAX_INSTANCES_PER_BATCH: usize = 65536;
 
-/// Per-instance data (GPU layout)
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Default, bytemuck::Pod, bytemuck::Zeroable)]
-pub struct InstanceData {
-    /// Model matrix row 0
-    pub model_row0: [f32; 4],
-    /// Model matrix row 1
-    pub model_row1: [f32; 4],
-    /// Model matrix row 2
-    pub model_row2: [f32; 4],
-    /// Model matrix row 3
-    pub model_row3: [f32; 4],
-    /// Instance color multiplier (RGBA)
-    pub color: [f32; 4],
-    /// Custom data (user-defined, e.g. animation frame, variation ID)
-    pub custom: [f32; 4],
-}
-
-impl InstanceData {
-    /// Create from transform matrix
-    pub fn from_matrix(model: Mat4) -> Self {
-        let cols = model.to_cols_array_2d();
-        Self {
-            model_row0: cols[0],
-            model_row1: cols[1],
-            model_row2: cols[2],
-            model_row3: cols[3],
-            color: [1.0, 1.0, 1.0, 1.0],
-            custom: [0.0; 4],
-        }
-    }
-
-    /// Create with transform and color
-    pub fn new(model: Mat4, color: Vec4) -> Self {
-        let cols = model.to_cols_array_2d();
-        Self {
-            model_row0: cols[0],
-            model_row1: cols[1],
-            model_row2: cols[2],
-            model_row3: cols[3],
-            color: color.to_array(),
-            custom: [0.0; 4],
-        }
-    }
-
-    /// Set custom data
-    pub fn with_custom(mut self, custom: [f32; 4]) -> Self {
-        self.custom = custom;
-        self
-    }
-
-    /// Get position from matrix
-    pub fn position(&self) -> Vec3 {
-        Vec3::new(self.model_row3[0], self.model_row3[1], self.model_row3[2])
-    }
-}
+pub type InstanceData = CullObjectData;
 
 /// Batch key for grouping instances
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -292,6 +238,7 @@ impl Default for InstancingManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use glam::Mat4;
 
     #[test]
     fn test_instance_data() {

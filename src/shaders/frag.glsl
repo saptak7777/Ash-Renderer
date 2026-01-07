@@ -22,21 +22,31 @@ layout(set = 0, binding = 0) uniform MVP {
     vec4 ambient_color;
 } mvp;
 
-layout(set = 1, binding = 0) uniform Material {
-    vec4 base_color_factor;
-    vec4 emissive_factor;
-    vec4 parameters; // x: metallic, y: roughness, z: occlusion strength, w: normal scale
-    vec4 texture_flags; // x: base color, y: normal, z: metallic-roughness, w: occlusion
-    float emissive_texture_flag;
+// Material properties via push constants
+layout(push_constant) uniform Material {
+    layout(offset = 128) vec4 base_color_factor;
+    float metallic_factor;
+    float roughness_factor;
+    float normal_scale;
+    float occlusion_strength;
     float alpha_cutoff;
-    vec2 _material_padding;
+    int alpha_mode;
+    int base_color_texture_set;
+    int normal_texture_set;
+    int metallic_roughness_texture_set;
+    int occlusion_texture_set;
+    int emissive_texture_set;
+    int tint_index;
+    // Padding to 16-byte align emissive_factor
+    vec4 emissive_factor;
 } material;
 
-layout(set = 2, binding = 0) uniform sampler2D baseTexture;
-layout(set = 2, binding = 1) uniform sampler2D normalTexture;
-layout(set = 2, binding = 2) uniform sampler2D metallicRoughnessTexture;
-layout(set = 2, binding = 3) uniform sampler2D occlusionTexture;
-layout(set = 2, binding = 4) uniform sampler2D emissiveTexture;
+// Bindless texture array
+#extension GL_EXT_nonuniform_qualifier : require
+layout(set = 2, binding = 0) uniform sampler2D textures[];
+layout(set = 2, binding = 2) readonly buffer Tints {
+    vec4 colors[];
+} tints[];
 
 
 layout(set = 3, binding = 0) uniform sampler2D shadowMap;
@@ -138,11 +148,17 @@ void main() {
     vec3 lightDir = normalize(-mvp.light_direction.xyz);
 
     // Sample base color
-    vec4 baseSample = material.texture_flags.x > 0.0
-        ? texture(baseTexture, fragUV)
+    // Sample base color (bindless)
+    vec4 baseSample = material.base_color_texture_set >= 0
+        ? texture(textures[nonuniformEXT(material.base_color_texture_set)], fragUV)
         : vec4(1.0);
     vec3 baseColor = baseSample.rgb * material.base_color_factor.rgb;
     float alpha = baseSample.a * material.base_color_factor.a;
+
+    // Apply bindless tint if present
+    if (material.tint_index >= 0) {
+        baseColor *= tints[nonuniformEXT(material.tint_index)].colors[0].rgb;
+    }
 
     // Alpha testing
     if (alpha < material.alpha_cutoff) {
@@ -169,12 +185,12 @@ void main() {
     mat3 TBN = mat3(T, B, N);
     
     vec3 normal = N;
-    if (material.texture_flags.y > 0.0) {
-        vec3 mapSample = texture(normalTexture, fragUV).xyz;
+    if (material.normal_texture_set >= 0) {
+        vec3 mapSample = texture(textures[nonuniformEXT(material.normal_texture_set)], fragUV).xyz;
         // Check for validity (e.g. if mipmapping averages to 0)
         if (length(mapSample) > 0.001) {
             vec3 mapNormal = mapSample * 2.0 - 1.0;
-            mapNormal.xy *= material.parameters.w;
+            mapNormal.xy *= material.normal_scale;
             // Safe normalize result
             vec3 mapDir = TBN * mapNormal;
             if (length(mapDir) > 0.001) {
@@ -186,19 +202,19 @@ void main() {
     float NdotL = max(dot(normal, lightDir), 0.0);
 
     // Material parameters
-    float metallic = material.parameters.x;
-    float roughness = max(material.parameters.y, 0.04); // Min roughness to prevent fireflies
+    float metallic = material.metallic_factor;
+    float roughness = max(material.roughness_factor, 0.04); // Min roughness to prevent fireflies
     
-    if (material.texture_flags.z > 0.0) {
-        vec4 mrSample = texture(metallicRoughnessTexture, fragUV);
+    if (material.metallic_roughness_texture_set >= 0) {
+        vec4 mrSample = texture(textures[nonuniformEXT(material.metallic_roughness_texture_set)], fragUV);
         metallic = metallic * mrSample.b;
         roughness = max(roughness * mrSample.g, 0.04);
     }
 
-    // Ambient occlusion
+    // Ambient occlusion (bindless)
     float occlusion = 1.0;
-    if (material.texture_flags.w > 0.0) {
-        occlusion = mix(1.0, texture(occlusionTexture, fragUV).r, material.parameters.z);
+    if (material.occlusion_texture_set >= 0) {
+        occlusion = mix(1.0, texture(textures[nonuniformEXT(material.occlusion_texture_set)], fragUV).r, material.occlusion_strength);
     }
 
     // PBR
@@ -232,10 +248,10 @@ void main() {
     // Ambient
     vec3 ambient = ambientColor * baseColor * occlusion;
     
-    // Emissive
+    // Emissive (bindless)
     vec3 emissive = material.emissive_factor.rgb;
-    if (material.emissive_texture_flag > 0.0) {
-        emissive *= texture(emissiveTexture, fragUV).rgb;
+    if (material.emissive_texture_set >= 0) {
+        emissive *= texture(textures[nonuniformEXT(material.emissive_texture_set)], fragUV).rgb;
     }
 
     vec3 color = ambient + Lo + emissive;

@@ -5,7 +5,7 @@ use bytemuck::{bytes_of, Pod, Zeroable};
 use vk_mem::Alloc;
 
 use crate::renderer::resources::BufferHandle;
-use crate::renderer::{Material, Mesh, SkinnedVertex, Vertex};
+use crate::renderer::{Mesh, SkinnedVertex, Vertex};
 use crate::vulkan::Allocator;
 use crate::{AshError, Result};
 
@@ -19,20 +19,10 @@ pub struct UploadedMesh {
 }
 
 impl MaterialPushConstants {
-    pub fn from_material(material: &Material, base_color_binding: Option<u32>) -> Self {
+    pub fn new(material_index: u32) -> Self {
         Self {
-            base_color_factor: material.color,
-            metallic_factor: material.metallic,
-            roughness_factor: material.roughness,
-            alpha_cutoff: material.alpha_cutoff,
-            alpha_mode: 0,
-            base_color_texture_set: base_color_binding.map(|b| b as i32).unwrap_or(-1),
-            normal_texture_set: -1,
-            metallic_roughness_texture_set: -1,
-            occlusion_texture_set: -1,
-            emissive_texture_set: -1,
-            emissive_factor: material.emissive,
-            _padding: [0; 12],
+            material_index,
+            _padding: [0; 3],
         }
     }
 }
@@ -81,24 +71,36 @@ impl From<glam::Mat4> for Mat4Push {
 pub struct MeshPushConstants {
     pub model: Mat4Push,
     pub joint_offset: u32,
-    pub _padding: [u32; 3],
+    pub use_instancing: u32,
+    pub instance_buffer_index: u32,
+    pub joint_buffer_index: u32,
 }
 
 #[repr(C, align(16))]
-#[derive(Clone, Copy, Pod, Zeroable, Default)]
+#[derive(Clone, Copy, Default, Pod, Zeroable)]
 pub struct MaterialPushConstants {
-    pub base_color_factor: [f32; 4],
-    pub metallic_factor: f32,
-    pub roughness_factor: f32,
-    pub alpha_cutoff: f32,
-    pub alpha_mode: i32,
-    pub base_color_texture_set: i32,
-    pub normal_texture_set: i32,
-    pub metallic_roughness_texture_set: i32,
-    pub occlusion_texture_set: i32,
-    pub emissive_texture_set: i32,
-    pub emissive_factor: [f32; 4],
-    pub _padding: [u8; 12],
+    pub material_index: u32,
+    pub _padding: [u32; 3],
+}
+
+/// Context for draw calls to reduce argument count
+pub struct DrawContext<'a> {
+    pub command_buffer: vk::CommandBuffer,
+    pub pipeline_layout: vk::PipelineLayout,
+    pub uploaded: &'a UploadedMesh,
+    pub material: &'a MaterialPushConstants,
+    pub instance_buffer_index: u32,
+    pub joint_buffer_index: u32,
+}
+
+/// Parameters for indirect draw with count buffer
+pub struct IndirectDrawCountParams {
+    pub indirect_buffer: vk::Buffer,
+    pub indirect_offset: vk::DeviceSize,
+    pub count_buffer: vk::Buffer,
+    pub count_offset: vk::DeviceSize,
+    pub max_draw_count: u32,
+    pub stride: u32,
 }
 
 impl ModelRenderer {
@@ -119,7 +121,9 @@ impl ModelRenderer {
     ) -> Result<&UploadedMesh> {
         // Human Pattern: Assertive on logic that should never happen
         if key.is_empty() {
-            panic!("ModelRenderer: Empty key provided for mesh upload");
+            return Err(AshError::VulkanError(
+                "ModelRenderer: Empty key provided for mesh upload".to_string(),
+            ));
         }
 
         if !self.cache.contains_key(key) {
@@ -330,32 +334,24 @@ impl ModelRenderer {
     /// Caller must ensure the command buffer is recording and that the provided pipeline layout is
     /// compatible with the push constant ranges used here. The referenced mesh buffers must remain
     /// valid for the duration of the call.
-    pub unsafe fn draw_mesh(
-        &self,
-        command_buffer: vk::CommandBuffer,
-        pipeline_layout: vk::PipelineLayout,
-        uploaded: &UploadedMesh,
-        model_matrix: glam::Mat4,
-        joint_offset: u32,
-        _material: &MaterialPushConstants,
-    ) {
-        if command_buffer == vk::CommandBuffer::null() {
+    pub unsafe fn draw_mesh(&self, ctx: &DrawContext, model_matrix: glam::Mat4, joint_offset: u32) {
+        if ctx.command_buffer == vk::CommandBuffer::null() {
             log::error!("ModelRenderer::draw_mesh called with null command buffer");
             return;
         }
 
-        let vertex_buffer = uploaded.vertex_buffer();
+        let vertex_buffer = ctx.uploaded.vertex_buffer();
         if vertex_buffer == vk::Buffer::null() {
             log::warn!("Uploaded mesh missing vertex buffer, skipping draw");
             return;
         }
 
         self.device
-            .cmd_bind_vertex_buffers(command_buffer, 0, &[vertex_buffer], &[0]);
+            .cmd_bind_vertex_buffers(ctx.command_buffer, 0, &[vertex_buffer], &[0]);
 
-        if let Some(index_buffer) = uploaded.index_buffer() {
+        if let Some(index_buffer) = ctx.uploaded.index_buffer() {
             self.device.cmd_bind_index_buffer(
-                command_buffer,
+                ctx.command_buffer,
                 index_buffer,
                 0,
                 vk::IndexType::UINT32,
@@ -365,36 +361,260 @@ impl ModelRenderer {
         let push = MeshPushConstants {
             model: model_matrix.into(),
             joint_offset,
-            _padding: [0; 3],
+            use_instancing: 0, // Direct draw
+            instance_buffer_index: ctx.instance_buffer_index,
+            joint_buffer_index: ctx.joint_buffer_index,
         };
 
         self.device.cmd_push_constants(
-            command_buffer,
-            pipeline_layout,
+            ctx.command_buffer,
+            ctx.pipeline_layout,
             vk::ShaderStageFlags::VERTEX,
             0,
             bytes_of(&push),
         );
 
-        if let Some(index_buffer) = uploaded.index_buffer() {
+        self.device.cmd_push_constants(
+            ctx.command_buffer,
+            ctx.pipeline_layout,
+            vk::ShaderStageFlags::FRAGMENT,
+            128,
+            bytes_of(ctx.material),
+        );
+
+        if let Some(index_buffer) = ctx.uploaded.index_buffer() {
             self.device.cmd_bind_index_buffer(
-                command_buffer,
+                ctx.command_buffer,
                 index_buffer,
                 0,
                 vk::IndexType::UINT32,
             );
 
-            let count = uploaded.index_count();
+            let count = ctx.uploaded.index_count();
+            log::info!(
+                "DEBUG: draw_mesh - index_count={}, vertex_count={}",
+                count,
+                ctx.uploaded.vertex_count()
+            );
             if count == 0 {
+                log::info!(
+                    "DEBUG: Calling cmd_draw with vertex_count={}",
+                    ctx.uploaded.vertex_count()
+                );
                 self.device
-                    .cmd_draw(command_buffer, uploaded.vertex_count(), 1, 0, 0);
+                    .cmd_draw(ctx.command_buffer, ctx.uploaded.vertex_count(), 1, 0, 0);
             } else {
+                log::info!("DEBUG: Calling cmd_draw_indexed with index_count={count}");
                 self.device
-                    .cmd_draw_indexed(command_buffer, count, 1, 0, 0, 0);
+                    .cmd_draw_indexed(ctx.command_buffer, count, 1, 0, 0, 0);
             }
         } else {
+            log::info!(
+                "DEBUG: draw_mesh - NO index_buffer! Calling cmd_draw with vertex_count={}",
+                ctx.uploaded.vertex_count()
+            );
             self.device
-                .cmd_draw(command_buffer, uploaded.vertex_count(), 1, 0, 0);
+                .cmd_draw(ctx.command_buffer, ctx.uploaded.vertex_count(), 1, 0, 0);
+        }
+    }
+
+    /// Draw multiple instances of a mesh
+    ///
+    /// # Safety
+    /// Command buffer must be in recording state and instances must be valid.
+    pub unsafe fn draw_mesh_instanced(
+        &self,
+        ctx: &DrawContext,
+        instance_count: u32,
+        first_instance: u32,
+    ) {
+        if instance_count == 0 {
+            return;
+        }
+
+        let vertex_buffer = ctx.uploaded.vertex_buffer();
+        self.device
+            .cmd_bind_vertex_buffers(ctx.command_buffer, 0, &[vertex_buffer], &[0]);
+
+        let push = MeshPushConstants {
+            model: glam::Mat4::IDENTITY.into(),
+            joint_offset: 0,
+            use_instancing: 1, // Enable instancing path in shader
+            instance_buffer_index: ctx.instance_buffer_index,
+            joint_buffer_index: ctx.joint_buffer_index,
+        };
+
+        self.device.cmd_push_constants(
+            ctx.command_buffer,
+            ctx.pipeline_layout,
+            vk::ShaderStageFlags::VERTEX,
+            0,
+            bytes_of(&push),
+        );
+
+        self.device.cmd_push_constants(
+            ctx.command_buffer,
+            ctx.pipeline_layout,
+            vk::ShaderStageFlags::FRAGMENT,
+            128,
+            bytes_of(ctx.material),
+        );
+
+        if let Some(index_buffer) = ctx.uploaded.index_buffer() {
+            self.device.cmd_bind_index_buffer(
+                ctx.command_buffer,
+                index_buffer,
+                0,
+                vk::IndexType::UINT32,
+            );
+            self.device.cmd_draw_indexed(
+                ctx.command_buffer,
+                ctx.uploaded.index_count(),
+                instance_count,
+                0,
+                0,
+                first_instance,
+            );
+        } else {
+            self.device.cmd_draw(
+                ctx.command_buffer,
+                ctx.uploaded.vertex_count(),
+                instance_count,
+                0,
+                first_instance,
+            );
+        }
+    }
+
+    /// Draw multiple instances using an indirect buffer
+    ///
+    /// # Safety
+    /// Command buffer must be in recording state and indirect buffer must be valid with correct layout.
+    pub unsafe fn draw_mesh_indirect(
+        &self,
+        ctx: &DrawContext,
+        indirect_buffer: vk::Buffer,
+        offset: vk::DeviceSize,
+        draw_count: u32,
+        stride: u32,
+    ) {
+        let vertex_buffer = ctx.uploaded.vertex_buffer();
+        self.device
+            .cmd_bind_vertex_buffers(ctx.command_buffer, 0, &[vertex_buffer], &[0]);
+
+        let push = MeshPushConstants {
+            model: glam::Mat4::IDENTITY.into(),
+            joint_offset: 0,
+            use_instancing: 1, // Indirect draw uses the same shader path as instancing
+            instance_buffer_index: ctx.instance_buffer_index,
+            joint_buffer_index: ctx.joint_buffer_index,
+        };
+
+        self.device.cmd_push_constants(
+            ctx.command_buffer,
+            ctx.pipeline_layout,
+            vk::ShaderStageFlags::VERTEX,
+            0,
+            bytes_of(&push),
+        );
+
+        self.device.cmd_push_constants(
+            ctx.command_buffer,
+            ctx.pipeline_layout,
+            vk::ShaderStageFlags::FRAGMENT,
+            128,
+            bytes_of(ctx.material),
+        );
+
+        if let Some(index_buffer) = ctx.uploaded.index_buffer() {
+            self.device.cmd_bind_index_buffer(
+                ctx.command_buffer,
+                index_buffer,
+                0,
+                vk::IndexType::UINT32,
+            );
+            self.device.cmd_draw_indexed_indirect(
+                ctx.command_buffer,
+                indirect_buffer,
+                offset,
+                draw_count,
+                stride,
+            );
+        } else {
+            self.device.cmd_draw_indirect(
+                ctx.command_buffer,
+                indirect_buffer,
+                offset,
+                draw_count,
+                stride,
+            );
+        }
+    }
+
+    /// Draw multiple instances using indirect count buffer
+    ///
+    /// # Safety
+    /// Command buffer must be in recording state and all buffers must be valid for the current frame.
+    pub unsafe fn draw_mesh_indirect_count(
+        &self,
+        ctx: &DrawContext,
+        params: &IndirectDrawCountParams,
+    ) {
+        let vertex_buffer = ctx.uploaded.vertex_buffer();
+        self.device
+            .cmd_bind_vertex_buffers(ctx.command_buffer, 0, &[vertex_buffer], &[0]);
+
+        let push = MeshPushConstants {
+            model: glam::Mat4::IDENTITY.into(),
+            joint_offset: 0,
+            use_instancing: 1, // Indirect draw uses the same shader path as instancing
+            instance_buffer_index: ctx.instance_buffer_index,
+            joint_buffer_index: ctx.joint_buffer_index,
+        };
+
+        self.device.cmd_push_constants(
+            ctx.command_buffer,
+            ctx.pipeline_layout,
+            vk::ShaderStageFlags::VERTEX,
+            0,
+            bytes_of(&push),
+        );
+
+        self.device.cmd_push_constants(
+            ctx.command_buffer,
+            ctx.pipeline_layout,
+            vk::ShaderStageFlags::FRAGMENT,
+            128,
+            bytes_of(ctx.material),
+        );
+
+        if let Some(index_buffer) = ctx.uploaded.index_buffer() {
+            self.device.cmd_bind_index_buffer(
+                ctx.command_buffer,
+                index_buffer,
+                0,
+                vk::IndexType::UINT32,
+            );
+            self.device.cmd_draw_indexed_indirect_count(
+                ctx.command_buffer,
+                params.indirect_buffer,
+                params.indirect_offset,
+                params.count_buffer,
+                params.count_offset,
+                params.max_draw_count,
+                params.stride,
+            );
+        } else {
+            // Non-indexed indirect count draw not typically used for meshes but supported
+            self.device.cmd_draw_indirect_count(
+                ctx.command_buffer,
+                params.indirect_buffer,
+                params.indirect_offset,
+                params.count_buffer,
+                params.count_offset,
+                params.max_draw_count,
+                params.stride,
+            );
         }
     }
 }

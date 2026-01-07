@@ -1,15 +1,16 @@
 //! Simple test for GLB material registration without window
 
-use ash_renderer::prelude::*;
+// Unused import removed
 
-fn main() {
-    env_logger::init();
+#[test]
+fn test_material_access() {
+    let _ = env_logger::builder().is_test(true).try_init();
 
     println!("Testing GLB material registration...");
 
     // Create a test mesh with material properties
     let mut test_mesh = ash_renderer::renderer::resources::mesh::Mesh::create_cube();
-    test_mesh.name = "test_cube".to_string();
+    test_mesh.name = "test_cube".into();
     test_mesh.material_properties = Some(
         ash_renderer::renderer::resources::mesh::MaterialProperties {
             base_color_factor: [0.8, 0.2, 0.2, 1.0],
@@ -36,7 +37,11 @@ fn main() {
     }
 
     // Test that we can access the public field
-    let props = test_mesh.material_properties.unwrap();
+    assert!(
+        test_mesh.material_properties.is_some(),
+        "Material properties should be accessible"
+    );
+    let props = test_mesh.material_properties.as_ref().unwrap();
     assert!(props.metallic_factor > 0.0, "Metallic should be > 0");
     assert!(props.roughness_factor > 0.0, "Roughness should be > 0");
 

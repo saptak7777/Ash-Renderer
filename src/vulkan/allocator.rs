@@ -1,6 +1,7 @@
 use ash::vk;
 use std::collections::HashMap;
 use std::ops::{Deref, DerefMut};
+use std::sync::Arc;
 use vk_mem::Alloc;
 
 #[derive(Clone)]
@@ -13,6 +14,7 @@ struct BufferAllocation {
 
 pub struct Allocator {
     pub vma: vk_mem::Allocator,
+    pub device: Arc<ash::Device>,
     buffer_allocations: parking_lot::Mutex<HashMap<vk::Buffer, BufferAllocation>>,
 }
 
@@ -33,6 +35,7 @@ impl Allocator {
 
         Ok(Self {
             vma,
+            device: Arc::clone(&device.device),
             buffer_allocations: parking_lot::Mutex::new(HashMap::new()),
         })
     }
@@ -240,6 +243,48 @@ impl Allocator {
             .map_err(|e| crate::AshError::VulkanError(format!("Image creation failed: {e:?}")))
     }
 
+    /// Create a Vulkan image and an associated image view in one step.
+    ///
+    /// # Safety
+    /// // SAFETY: Standard Vulkan/VMA restrictions apply.
+    pub unsafe fn create_image_with_view(
+        &self,
+        image_info: vk::ImageCreateInfo,
+        allocation_info: vk_mem::AllocationCreateInfo,
+        view_type: vk::ImageViewType,
+        aspect_mask: vk::ImageAspectFlags,
+    ) -> crate::Result<(vk::Image, vk::ImageView, vk_mem::Allocation)> {
+        let (image, allocation) = self
+            .vma
+            .create_image(&image_info, &allocation_info)
+            .map_err(|e| crate::AshError::VulkanError(format!("Image creation failed: {e:?}")))?;
+
+        let view_info = vk::ImageViewCreateInfo::default()
+            .image(image)
+            .view_type(view_type)
+            .format(image_info.format)
+            .subresource_range(vk::ImageSubresourceRange {
+                aspect_mask,
+                base_mip_level: 0,
+                level_count: image_info.mip_levels,
+                base_array_layer: 0,
+                layer_count: image_info.array_layers,
+            });
+
+        let view = match self.device.create_image_view(&view_info, None) {
+            Ok(view) => view,
+            Err(e) => {
+                let mut allocation = allocation;
+                self.vma.destroy_image(image, &mut allocation);
+                return Err(crate::AshError::VulkanError(format!(
+                    "Image view creation failed: {e:?}"
+                )));
+            }
+        };
+
+        Ok((image, view, allocation))
+    }
+
     /// Deallocate buffer memory.
     ///
     /// # Safety
@@ -438,8 +483,10 @@ mod tests {
     fn test_buffer_validation_logic() {
         // We can test the validate_buffer_params method directly.
         // Since it doesn't actually use the VMA handle, it's safe to call on a "hollow" allocator.
+        #[allow(invalid_value)]
         let allocator = Allocator {
             vma: unsafe { std::mem::zeroed() },
+            device: unsafe { std::mem::zeroed() },
             buffer_allocations: parking_lot::Mutex::new(HashMap::new()),
         };
 

@@ -6,6 +6,7 @@ use ash::vk;
 use std::sync::Arc;
 
 use crate::{AshError, Result};
+use crate::vulkan::utils::find_memory_type;
 
 /// Shadow map configuration
 #[derive(Debug, Clone)]
@@ -285,25 +286,6 @@ impl Drop for ShadowMap {
             log::info!("[ShadowMap] Shadow map destroyed");
         }
     }
-}
-
-/// Find a suitable memory type
-fn find_memory_type(
-    properties: &vk::PhysicalDeviceMemoryProperties,
-    type_filter: u32,
-    required: vk::MemoryPropertyFlags,
-) -> Option<u32> {
-    for i in 0..properties.memory_type_count {
-        let type_bits = 1 << i;
-        let has_properties = properties.memory_types[i as usize]
-            .property_flags
-            .contains(required);
-
-        if (type_filter & type_bits) != 0 && has_properties {
-            return Some(i);
-        }
-    }
-    None
 }
 
 #[cfg(test)]

@@ -213,7 +213,7 @@ impl PipelineBuilder {
             vk::PipelineDepthStencilStateCreateInfo::default()
                 .depth_test_enable(true)
                 .depth_write_enable(true)
-                .depth_compare_op(vk::CompareOp::LESS)
+                .depth_compare_op(vk::CompareOp::LESS_OR_EQUAL) // CRITICAL FIX 3a: Changed from LESS to prevent Z-fighting
                 .depth_bounds_test_enable(false)
                 .stencil_test_enable(false)
                 .min_depth_bounds(0.0)

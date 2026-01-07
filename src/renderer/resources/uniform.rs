@@ -5,6 +5,8 @@ use glam::{IVec4, Mat4, Vec3, Vec4};
 use std::sync::Arc;
 use vk_mem::Alloc;
 
+use crate::renderer::occlusion_culling::CullObjectData;
+
 /// Uniform buffer data for MVP matrices (Phase 5: improved memory management)
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
@@ -35,8 +37,9 @@ pub struct MaterialUniform {
     /// x: base_color, y: normal, z: metallic_roughness, w: occlusion
     pub texture_indices: IVec4,
     pub emissive_texture_index: i32,
+    pub tint_index: i32,
     pub alpha_cutoff: f32,
-    pub _padding: [f32; 2],
+    pub _padding: [f32; 1],
 }
 
 impl Default for MaterialUniform {
@@ -47,8 +50,9 @@ impl Default for MaterialUniform {
             parameters: Vec4::new(0.0, 0.5, 1.0, 1.0),
             texture_indices: IVec4::splat(-1),
             emissive_texture_index: -1,
+            tint_index: -1,
             alpha_cutoff: 0.1,
-            _padding: [0.0; 2],
+            _padding: [0.0; 1],
         }
     }
 }
@@ -86,9 +90,11 @@ impl MaterialUniform {
         metallic_roughness: i32,
         occlusion: i32,
         emissive: i32,
+        tint: i32,
     ) {
         self.texture_indices = IVec4::new(base_color, normal, metallic_roughness, occlusion);
         self.emissive_texture_index = emissive;
+        self.tint_index = tint;
     }
 }
 
@@ -403,5 +409,236 @@ impl Drop for MaterialBuffer {
     fn drop(&mut self) {
         let _ = self.cleanup();
         log::debug!("MaterialBuffer dropped");
+    }
+}
+
+/// GPU storage buffer for per-instance data (matches CullObjectData)
+pub struct InstanceBuffer {
+    pub buffer: vk::Buffer,
+    pub allocation: vk_mem::Allocation,
+    allocator: Arc<crate::vulkan::Allocator>,
+    device: Arc<ash::Device>,
+    destroyed: bool,
+}
+
+impl InstanceBuffer {
+    /// Create a new instance buffer
+    ///
+    /// # Safety
+    /// Allocator and device must be valid.
+    pub unsafe fn new(
+        allocator: Arc<crate::vulkan::Allocator>,
+        device: Arc<ash::Device>,
+        capacity: usize,
+    ) -> crate::Result<Self> {
+        let size = (capacity * std::mem::size_of::<CullObjectData>()) as u64;
+
+        let (buffer, allocation) = allocator
+            .vma
+            .create_buffer(
+                &vk::BufferCreateInfo::default()
+                    .size(size)
+                    .usage(
+                        vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
+                    )
+                    .sharing_mode(vk::SharingMode::EXCLUSIVE),
+                &vk_mem::AllocationCreateInfo {
+                    usage: vk_mem::MemoryUsage::AutoPreferHost,
+                    flags: vk_mem::AllocationCreateFlags::HOST_ACCESS_SEQUENTIAL_WRITE
+                        | vk_mem::AllocationCreateFlags::MAPPED,
+                    ..Default::default()
+                },
+            )
+            .map_err(|e| {
+                crate::AshError::VulkanError(format!("Failed to create instance buffer: {e}"))
+            })?;
+
+        log::info!("Created instance buffer (capacity: {capacity}, size: {size} bytes)");
+
+        Ok(Self {
+            buffer,
+            allocation,
+            allocator,
+            device,
+            destroyed: false,
+        })
+    }
+
+    /// Update instance buffer with new data
+    ///
+    /// # Safety
+    /// Buffer must not be destroyed and data must fit within capacity.
+    pub unsafe fn update(
+        &mut self,
+        data: &[crate::renderer::occlusion_culling::CullObjectData],
+    ) -> crate::Result<()> {
+        if data.is_empty() {
+            return Ok(());
+        }
+
+        let size = std::mem::size_of_val(data) as u64;
+        {
+            let mut guard = self
+                .allocator
+                .map_allocation_guarded(&mut self.allocation, size)?;
+            guard.copy_from_slice(data);
+        }
+
+        self.allocator
+            .vma
+            .flush_allocation(&self.allocation, 0, size)
+            .map_err(|e| {
+                crate::AshError::VulkanError(format!("Failed to flush instance buffer: {e}"))
+            })?;
+
+        Ok(())
+    }
+
+    pub fn cleanup(&mut self) -> crate::Result<()> {
+        if self.destroyed {
+            return Ok(());
+        }
+
+        unsafe {
+            let _ = self.device.device_wait_idle();
+            self.allocator
+                .vma
+                .destroy_buffer(self.buffer, &mut self.allocation);
+        }
+
+        self.buffer = vk::Buffer::null();
+        self.destroyed = true;
+        Ok(())
+    }
+}
+
+impl Drop for InstanceBuffer {
+    fn drop(&mut self) {
+        let _ = self.cleanup();
+    }
+}
+
+/// GPU storage buffer for generic data types
+pub struct StorageBuffer<T: Copy> {
+    pub buffer: vk::Buffer,
+    pub allocation: vk_mem::Allocation,
+    capacity: usize,
+    allocator: Arc<crate::vulkan::Allocator>,
+    device: Arc<ash::Device>,
+    destroyed: bool,
+    _phantom: std::marker::PhantomData<T>,
+}
+
+impl<T: Copy> StorageBuffer<T> {
+    /// Create a new storage buffer with the given capacity
+    ///
+    /// # Safety
+    /// Allocator and device must be valid.
+    pub unsafe fn new(
+        allocator: Arc<crate::vulkan::Allocator>,
+        device: Arc<ash::Device>,
+        capacity: usize,
+        name: &str,
+    ) -> crate::Result<Self> {
+        let size = (capacity * std::mem::size_of::<T>()) as u64;
+
+        let (buffer, allocation) = allocator
+            .vma
+            .create_buffer(
+                &vk::BufferCreateInfo::default()
+                    .size(size)
+                    .usage(
+                        vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
+                    )
+                    .sharing_mode(vk::SharingMode::EXCLUSIVE),
+                &vk_mem::AllocationCreateInfo {
+                    usage: vk_mem::MemoryUsage::AutoPreferHost,
+                    flags: vk_mem::AllocationCreateFlags::HOST_ACCESS_SEQUENTIAL_WRITE
+                        | vk_mem::AllocationCreateFlags::MAPPED,
+                    ..Default::default()
+                },
+            )
+            .map_err(|e| {
+                crate::AshError::VulkanError(format!(
+                    "Failed to create storage buffer '{name}': {e}"
+                ))
+            })?;
+
+        log::debug!(
+            "Created storage buffer '{name}' (capacity: {capacity}, size: {size} bytes)"
+        );
+
+        Ok(Self {
+            buffer,
+            allocation,
+            capacity,
+            allocator,
+            device,
+            destroyed: false,
+            _phantom: std::marker::PhantomData,
+        })
+    }
+
+    /// Update storage buffer with new data and flush to GPU
+    ///
+    /// # Safety
+    /// Buffer must not be destroyed and data must fit within capacity.
+    pub unsafe fn update(&mut self, data: &[T]) -> crate::Result<()> {
+        if data.is_empty() {
+            return Ok(());
+        }
+
+        if data.len() > self.capacity {
+            return Err(crate::AshError::VulkanError(format!(
+                "Storage buffer update size {} exceeds capacity {}",
+                data.len(),
+                self.capacity
+            )));
+        }
+
+        let size = std::mem::size_of_val(data) as u64;
+        {
+            let mut guard = self
+                .allocator
+                .map_allocation_guarded(&mut self.allocation, size)?;
+            guard.copy_from_slice(data);
+        }
+
+        // CRITICAL: Ensure GPU sees the data
+        self.allocator
+            .vma
+            .flush_allocation(&self.allocation, 0, size)
+            .map_err(|e| {
+                crate::AshError::VulkanError(format!("Failed to flush storage buffer: {e}"))
+            })?;
+
+        Ok(())
+    }
+
+    pub fn cleanup(&mut self) -> crate::Result<()> {
+        if self.destroyed {
+            return Ok(());
+        }
+
+        unsafe {
+            let _ = self.device.device_wait_idle();
+            self.allocator
+                .vma
+                .destroy_buffer(self.buffer, &mut self.allocation);
+        }
+
+        self.buffer = vk::Buffer::null();
+        self.destroyed = true;
+        Ok(())
+    }
+
+    pub fn capacity(&self) -> usize {
+        self.capacity
+    }
+}
+
+impl<T: Copy> Drop for StorageBuffer<T> {
+    fn drop(&mut self) {
+        let _ = self.cleanup();
     }
 }

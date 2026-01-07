@@ -27,24 +27,28 @@ layout(set = 0, binding = 0) uniform MVP {
     vec4 ambient_color;
 } mvp;
 
+#extension GL_EXT_nonuniform_qualifier : enable
+
 layout(push_constant) uniform PushConstants {
     mat4 model;
     uint joint_offset;
-    uint _padding;
+    uint use_instancing;
+    uint instance_buffer_index;
+    uint joint_buffer_index;
 } push;
 
-layout(set = 5, binding = 0) readonly buffer JointMatrices {
+layout(set = 2, binding = 2) readonly buffer JointBuffers {
     mat4 joints[];
-};
+} joint_buffers[];
 
 void main() {
     // Linear Blend Skinning
     mat4 skinMatrix = mat4(0.0);
     uint base_offset = push.joint_offset;
-    skinMatrix += inJointWeights.x * joints[inJointIndices.x + base_offset];
-    skinMatrix += inJointWeights.y * joints[inJointIndices.y + base_offset];
-    skinMatrix += inJointWeights.z * joints[inJointIndices.z + base_offset];
-    skinMatrix += inJointWeights.w * joints[inJointIndices.w + base_offset];
+    skinMatrix += inJointWeights.x * joint_buffers[nonuniformEXT(push.joint_buffer_index)].joints[inJointIndices.x + base_offset];
+    skinMatrix += inJointWeights.y * joint_buffers[nonuniformEXT(push.joint_buffer_index)].joints[inJointIndices.y + base_offset];
+    skinMatrix += inJointWeights.z * joint_buffers[nonuniformEXT(push.joint_buffer_index)].joints[inJointIndices.z + base_offset];
+    skinMatrix += inJointWeights.w * joint_buffers[nonuniformEXT(push.joint_buffer_index)].joints[inJointIndices.w + base_offset];
 
     vec4 skinnedPosition = skinMatrix * vec4(inPosition, 1.0);
     vec3 skinnedNormal = mat3(skinMatrix) * inNormal;

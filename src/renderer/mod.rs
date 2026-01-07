@@ -44,7 +44,7 @@ pub use instancing::{InstanceData, InstancingManager};
 pub use lod_system::{LodManager, LodMesh, LodSelection};
 pub use model_renderer::{MaterialPushConstants, ModelRenderer};
 pub use msaa_targets::{MsaaColorTarget, MsaaDepthTarget};
-pub use occlusion_culling::{CullBoundingBox, OcclusionCulling};
+pub use occlusion_culling::{CullBoundingBox, CullObjectData, OcclusionCulling};
 pub use pipeline_cache::PipelineCache;
 pub use render_stats::{RenderStats, StatsCollector};
 pub use renderer::{RenderCommand, Renderer};
@@ -55,7 +55,8 @@ pub use temporal_upscaling::{VsrPass, VsrQuality};
 // Re-export from resources submodule
 pub use resources::{
     BufferAllocation, BufferHandle, BufferPool, Camera, CascadedShadowMap, DepthBuffer,
-    DescriptorSetHandle, ImageHandle, Material, Mesh, MvpMatrices, PipelineHandle, Texture,
-    TextureData, Transform, UniformBuffer, Vertex, VertexBuffer, MVP,
+    DescriptorSetHandle, ImageHandle, InstanceBuffer, Material, MaterialRegistry, Mesh,
+    MvpMatrices, PipelineHandle, Texture, TextureData, Transform, UniformBuffer, Vertex,
+    VertexBuffer, MVP,
 };
 pub use skinned_vertex::SkinnedVertex;

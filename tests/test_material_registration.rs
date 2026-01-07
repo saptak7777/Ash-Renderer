@@ -1,11 +1,10 @@
 //! Test GLB material registration with renderer
 
-use ash::vk;
-use ash_renderer::prelude::*;
-use glam::{Mat4, Vec3};
+// Unused imports removed
 
-fn main() {
-    env_logger::init();
+#[test]
+fn test_material_registration() {
+    let _ = env_logger::builder().is_test(true).try_init();
 
     println!("Testing GLB material registration with renderer...");
 
@@ -15,7 +14,7 @@ fn main() {
 
     // Create a test mesh with material properties
     let mut test_mesh = ash_renderer::renderer::resources::mesh::Mesh::create_cube();
-    test_mesh.name = "metallic_cube".to_string();
+    test_mesh.name = "test_cube".into();
     test_mesh.material_properties = Some(
         ash_renderer::renderer::resources::mesh::MaterialProperties {
             base_color_factor: [0.2, 0.2, 0.8, 1.0], // Blue color
@@ -47,6 +46,7 @@ fn main() {
             occlusion_strength: props.occlusion_strength,
             normal_scale: props.normal_scale,
             alpha_cutoff: props.alpha_cutoff,
+            tint_index: -1,
         };
 
         println!("✅ Created Material from properties:");
@@ -87,6 +87,7 @@ fn main() {
             occlusion_strength: props.occlusion_strength,
             normal_scale: props.normal_scale,
             alpha_cutoff: props.alpha_cutoff,
+            tint_index: -1,
         };
         material_registry.insert(mesh_handle, material);
     }

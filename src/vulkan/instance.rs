@@ -11,12 +11,12 @@ use crate::{AshError, Result};
 /// Vulkan instance wrapper that owns the global instance, optional validation
 /// layers, and the window surface.
 pub struct VulkanInstance {
-    entry: Entry,
     instance: Instance,
     surface_loader: surface::Instance,
     surface: vk::SurfaceKHR,
     debug_utils: Option<debug_utils::Instance>,
     debug_messenger: Option<vk::DebugUtilsMessengerEXT>,
+    entry: Entry,
 }
 
 impl VulkanInstance {
@@ -36,25 +36,36 @@ impl VulkanInstance {
                 Vec::new()
             };
 
-            let mut extensions = surface_provider.required_extensions();
-            if enable_validation {
-                extensions.push(debug_utils::NAME.as_ptr());
+            let available_extensions = entry
+                .enumerate_instance_extension_properties(None)
+                .map_err(|e| {
+                    AshError::DeviceInitFailed(format!(
+                        "Failed to enumerate instance extensions: {e:?}"
+                    ))
+                })?;
 
-                // Verify support for validation features extension.
-                let available_extensions = entry
-                    .enumerate_instance_extension_properties(None)
-                    .map_err(|e| {
-                        AshError::DeviceInitFailed(format!(
-                            "Failed to enumerate instance extensions: {e:?}"
-                        ))
-                    })?;
+            let available_extension_names: Vec<_> = available_extensions
+                .iter()
+                .map(|ext| CStr::from_ptr(ext.extension_name.as_ptr()))
+                .collect();
+
+            let mut extensions = Vec::new();
+            for &ext_ptr in &surface_provider.required_extensions() {
+                let name = CStr::from_ptr(ext_ptr);
+                if available_extension_names.contains(&name) {
+                    extensions.push(ext_ptr);
+                } else {
+                    debug!("Optional extension {name:?} not supported by instance.");
+                }
+            }
+
+            if enable_validation {
+                if available_extension_names.contains(&CStr::from_ptr(debug_utils::NAME.as_ptr())) {
+                    extensions.push(debug_utils::NAME.as_ptr());
+                }
 
                 let validation_features_name = CStr::from_ptr(validation_features::NAME.as_ptr());
-                let has_validation_features = available_extensions.iter().any(|ext| {
-                    CStr::from_ptr(ext.extension_name.as_ptr()) == validation_features_name
-                });
-
-                if has_validation_features {
+                if available_extension_names.contains(&validation_features_name) {
                     extensions.push(validation_features::NAME.as_ptr());
                 } else {
                     warn!("VK_EXT_validation_features not supported; GPU-assisted validation disabled.");
@@ -195,8 +206,10 @@ impl VulkanInstance {
 impl Drop for VulkanInstance {
     fn drop(&mut self) {
         unsafe {
-            if let (Some(utils), Some(messenger)) = (&self.debug_utils, self.debug_messenger) {
-                utils.destroy_debug_utils_messenger(messenger, None);
+            if let Some(messenger) = self.debug_messenger {
+                if let Some(ref utils) = self.debug_utils {
+                    utils.destroy_debug_utils_messenger(messenger, None);
+                }
             }
 
             if self.surface != vk::SurfaceKHR::null() {
@@ -205,6 +218,7 @@ impl Drop for VulkanInstance {
             }
 
             self.instance.destroy_instance(None);
+            log::info!("Vulkan instance destroyed");
         }
     }
 }

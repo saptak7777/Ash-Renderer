@@ -25,13 +25,37 @@ impl BufferHandle {
         memory_usage: vk_mem::MemoryUsage,
         name: Option<String>,
     ) -> crate::Result<Self> {
+        Self::new_with_flags(
+            allocator,
+            size,
+            usage,
+            memory_usage,
+            vk_mem::AllocationCreateFlags::empty(),
+            name,
+        )
+    }
+
+    /// Creates a new GPU buffer with custom allocation flags.
+    ///
+    /// # Safety
+    ///
+    /// The allocator must outlive this buffer handle. The buffer is automatically
+    /// destroyed when this handle is dropped.
+    pub unsafe fn new_with_flags(
+        allocator: Arc<Allocator>,
+        size: u64,
+        usage: vk::BufferUsageFlags,
+        memory_usage: vk_mem::MemoryUsage,
+        flags: vk_mem::AllocationCreateFlags,
+        name: Option<String>,
+    ) -> crate::Result<Self> {
         if let Some(ref n) = name {
             log::info!("Creating buffer '{n}' ({size}B)");
         } else {
             log::info!("Creating buffer ({size}B)");
         }
 
-        let (buffer, allocation) = allocator.create_buffer(size, usage, memory_usage)?;
+        let (buffer, allocation) = allocator.create_buffer_with_flags(size, usage, memory_usage, flags)?;
 
         Ok(Self {
             buffer,
@@ -55,6 +79,17 @@ impl BufferHandle {
     /// Returns the buffer name if set
     pub fn name(&self) -> Option<&str> {
         self.name.as_deref()
+    }
+
+    /// Returns the allocation (internal use)
+    pub fn allocation(&self) -> &vk_mem::Allocation {
+        &self.allocation
+    }
+
+    /// Returns the allocation (internal use)
+    pub fn allocation_mut(&mut self) -> &mut vk_mem::Allocation {
+        // log::trace!("Accessing allocation_mut for buffer: {:?}", self.name);
+        &mut self.allocation
     }
 }
 

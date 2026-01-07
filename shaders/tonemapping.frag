@@ -14,7 +14,7 @@ layout(push_constant) uniform PushConstants {
     float exposure;
     float gamma;
     float bloomIntensity;
-    float _padding;
+    float tonemappingEnabled;
 } pc;
 
 // ACES filmic tonemapping curve
@@ -44,11 +44,14 @@ void main() {
     // Apply exposure
     hdr *= pc.exposure;
     
-    // Apply tonemapping (ACES)
-    vec3 ldr = aces(hdr);
+    // Apply tonemapping if enabled
+    vec3 color = hdr;
+    if (pc.tonemappingEnabled > 0.5) {
+        color = aces(hdr);
+    }
     
     // Apply gamma correction
-    ldr = pow(ldr, vec3(1.0 / pc.gamma));
+    color = pow(color, vec3(1.0 / pc.gamma));
     
-    outColor = vec4(ldr, 1.0);
+    outColor = vec4(color, 1.0);
 }

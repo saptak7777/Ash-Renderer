@@ -44,7 +44,7 @@ impl ApplicationHandler for App {
                 // Bottom half (indices 0..3) influenced by Bone 0
                 // Top half (indices 4..7) influenced by Bone 1
                 let mut mesh = Mesh::default();
-                mesh.name = "Arm".to_string();
+                mesh.name = "Arm".into();
                 mesh.skinned_vertices = vec![
                     // Bottom Segment (Stationary)
                     SkinnedVertex {
@@ -114,7 +114,11 @@ impl ApplicationHandler for App {
                     3, 7, 0, 0, 7, 4, // Side
                 ]);
 
-                renderer.set_mesh(mesh);
+                if let Err(e) = renderer.set_mesh(mesh) {
+                    log::error!("Failed to set mesh: {e}");
+                    event_loop.exit();
+                    return;
+                }
                 let green_material = Material {
                     color: [0.2, 0.8, 0.2, 1.0],
                     metallic: 0.1,

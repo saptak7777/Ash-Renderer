@@ -9,3 +9,76 @@ pub fn has_stencil_component(format: vk::Format) -> bool {
             | vk::Format::D16_UNORM_S8_UINT
     )
 }
+
+/// Helper to execute a single-use command buffer on a queue.
+pub fn execute_single_use<F>(
+    device: &ash::Device,
+    command_pool: vk::CommandPool,
+    queue: vk::Queue,
+    recorder: F,
+) -> crate::Result<()>
+where
+    F: FnOnce(vk::CommandBuffer),
+{
+    let alloc_info = vk::CommandBufferAllocateInfo::default()
+        .command_pool(command_pool)
+        .level(vk::CommandBufferLevel::PRIMARY)
+        .command_buffer_count(1);
+
+    unsafe {
+        let command_buffers = device.allocate_command_buffers(&alloc_info).map_err(|e| {
+            crate::AshError::VulkanError(format!("Failed to allocate command buffer: {e}"))
+        })?;
+        let command_buffer = command_buffers[0];
+
+        device
+            .begin_command_buffer(
+                command_buffer,
+                &vk::CommandBufferBeginInfo::default()
+                    .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
+            )
+            .map_err(|e| {
+                crate::AshError::VulkanError(format!("Failed to begin command buffer: {e}"))
+            })?;
+
+        recorder(command_buffer);
+
+        device.end_command_buffer(command_buffer).map_err(|e| {
+            crate::AshError::VulkanError(format!("Failed to end command buffer: {e}"))
+        })?;
+
+        let submit_info =
+            vk::SubmitInfo::default().command_buffers(std::slice::from_ref(&command_buffer));
+
+        device
+            .queue_submit(queue, &[submit_info], vk::Fence::null())
+            .map_err(|e| crate::AshError::VulkanError(format!("Failed to submit queue: {e}")))?;
+
+        device.queue_wait_idle(queue).map_err(|e| {
+            crate::AshError::VulkanError(format!("Failed to wait for queue idle: {e}"))
+        })?;
+
+        device.free_command_buffers(command_pool, &command_buffers);
+    }
+
+    Ok(())
+}
+
+/// Find a suitable memory type
+pub fn find_memory_type(
+    properties: &vk::PhysicalDeviceMemoryProperties,
+    type_filter: u32,
+    required: vk::MemoryPropertyFlags,
+) -> Option<u32> {
+    for i in 0..properties.memory_type_count {
+        let type_bits = 1 << i;
+        let has_properties = properties.memory_types[i as usize]
+            .property_flags
+            .contains(required);
+
+        if (type_filter & type_bits) != 0 && has_properties {
+            return Some(i);
+        }
+    }
+    None
+}

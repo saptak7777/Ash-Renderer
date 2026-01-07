@@ -30,7 +30,7 @@ impl FullscreenPass {
         let color_attachment = vk::AttachmentDescription {
             format: output_format,
             samples: vk::SampleCountFlags::TYPE_1,
-            load_op: vk::AttachmentLoadOp::DONT_CARE,
+            load_op: vk::AttachmentLoadOp::CLEAR,
             store_op: vk::AttachmentStoreOp::STORE,
             stencil_load_op: vk::AttachmentLoadOp::DONT_CARE,
             stencil_store_op: vk::AttachmentStoreOp::DONT_CARE,
@@ -166,6 +166,6 @@ pub struct PostProcessPushConstants {
     pub gamma: f32,
     /// Bloom intensity
     pub bloom_intensity: f32,
-    /// Reserved for future use
-    pub _padding: f32,
+    /// Whether tonemapping is enabled (1.0 = true, 0.0 = false)
+    pub tonemapping_enabled: f32,
 }

@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 use crate::renderer::hiz_pass::HiZPass;
 use crate::renderer::occlusion_culling::{CullObjectData, CullingPushConstants, OcclusionCulling};
+use crate::vulkan::descriptor_bindless::BindlessManager;
 use crate::vulkan::VulkanDevice;
 use crate::Result;
 
@@ -23,6 +24,7 @@ pub struct IndirectDrawPass {
     object_buffer: vk::Buffer,
     object_allocation: Option<vk_mem::Allocation>,
     object_buffer_size: u64,
+    object_buffer_index: Option<u32>,
 
     // Draw commands template buffer (input)
     template_buffer: vk::Buffer,
@@ -60,6 +62,7 @@ impl IndirectDrawPass {
             object_buffer: vk::Buffer::null(),
             object_allocation: None,
             object_buffer_size: 0,
+            object_buffer_index: None,
             template_buffer: vk::Buffer::null(),
             template_allocation: None,
             indirect_buffer: vk::Buffer::null(),
@@ -85,6 +88,8 @@ impl IndirectDrawPass {
         &mut self,
         allocator: &vk_mem::Allocator,
         _vulkan_device: &VulkanDevice,
+        frame_layout: vk::DescriptorSetLayout,
+        bindless_manager: &mut BindlessManager,
         max_objects: usize,
     ) {
         if self.initialized {
@@ -93,9 +98,17 @@ impl IndirectDrawPass {
 
         self.create_buffers(allocator, max_objects)
             .expect("Indirect buffers failed");
+
+        // Register object buffer with BindlessManager
+        let index = bindless_manager
+            .add_storage_buffer(self.object_buffer, 0, vk::WHOLE_SIZE)
+            .expect("Failed to register indirect object buffer");
+        self.object_buffer_index = Some(index);
+
         self.create_descriptors()
             .expect("Indirect descriptors failed");
-        self.create_pipeline().expect("Indirect pipeline failed");
+        self.create_pipeline(frame_layout, bindless_manager.layout())
+            .expect("Indirect pipeline failed");
 
         self.initialized = true;
     }
@@ -187,12 +200,6 @@ impl IndirectDrawPass {
     unsafe fn create_descriptors(&mut self) -> Result<()> {
         // Bindings match occlusion_cull.comp
         let bindings = [
-            // 0: Object data
-            vk::DescriptorSetLayoutBinding::default()
-                .binding(0)
-                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
-                .descriptor_count(1)
-                .stage_flags(vk::ShaderStageFlags::COMPUTE),
             // 1: Hi-Z pyramid
             vk::DescriptorSetLayoutBinding::default()
                 .binding(1)
@@ -233,7 +240,7 @@ impl IndirectDrawPass {
         let pool_sizes = [
             vk::DescriptorPoolSize {
                 ty: vk::DescriptorType::STORAGE_BUFFER,
-                descriptor_count: 5,
+                descriptor_count: 4,
             },
             vk::DescriptorPoolSize {
                 ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
@@ -258,7 +265,11 @@ impl IndirectDrawPass {
     }
 
     /// Create compute pipeline
-    unsafe fn create_pipeline(&mut self) -> Result<()> {
+    unsafe fn create_pipeline(
+        &mut self,
+        frame_layout: vk::DescriptorSetLayout,
+        bindless_layout: vk::DescriptorSetLayout,
+    ) -> Result<()> {
         let shader_code = include_bytes!(concat!(env!("OUT_DIR"), "/occlusion_cull.comp.spv"));
 
         let shader_module_info =
@@ -272,8 +283,9 @@ impl IndirectDrawPass {
             .offset(0)
             .size(std::mem::size_of::<CullingPushConstants>() as u32);
 
+        let layouts = [self.layout, frame_layout, bindless_layout];
         let layout_info = vk::PipelineLayoutCreateInfo::default()
-            .set_layouts(std::slice::from_ref(&self.layout))
+            .set_layouts(&layouts)
             .push_constant_ranges(std::slice::from_ref(&push_constant_range));
 
         self.cull_layout = self.device.create_pipeline_layout(&layout_info, None)?;
@@ -314,9 +326,6 @@ impl IndirectDrawPass {
         };
 
         // Update buffer descriptors
-        let object_info = vk::DescriptorBufferInfo::default()
-            .buffer(self.object_buffer)
-            .range(vk::WHOLE_SIZE);
 
         let template_info = vk::DescriptorBufferInfo::default()
             .buffer(self.template_buffer)
@@ -340,11 +349,6 @@ impl IndirectDrawPass {
             .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL);
 
         let writes = [
-            vk::WriteDescriptorSet::default()
-                .dst_set(self.set)
-                .dst_binding(0)
-                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
-                .buffer_info(std::slice::from_ref(&object_info)),
             vk::WriteDescriptorSet::default()
                 .dst_set(self.set)
                 .dst_binding(1)
@@ -378,25 +382,47 @@ impl IndirectDrawPass {
     /// Upload object data for culling
     ///
     /// # Safety
-    /// Allocator must be valid.
+    /// Allocator must be valid and offset must be within buffer capacity.
     pub unsafe fn upload_objects(
         &self,
         allocator: &vk_mem::Allocator,
-        culling: &OcclusionCulling,
+        objects: &[CullObjectData],
+        offset: usize,
     ) -> Result<()> {
-        if !self.initialized || culling.object_count() == 0 {
+        if !self.initialized || objects.is_empty() {
             return Ok(());
         }
 
-        let obj_data = culling.object_data();
         if let Some(ref alloc) = self.object_allocation {
             let info = allocator.get_allocation_info(alloc);
             if !info.mapped_data.is_null() {
-                std::ptr::copy_nonoverlapping(
-                    obj_data.as_ptr() as *const u8,
-                    info.mapped_data as *mut u8,
-                    std::mem::size_of_val(obj_data),
-                );
+                let dest = (info.mapped_data as *mut CullObjectData).add(offset);
+                std::ptr::copy_nonoverlapping(objects.as_ptr(), dest, objects.len());
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Upload draw command templates
+    ///
+    /// # Safety
+    /// Allocator must be valid.
+    pub unsafe fn upload_templates(
+        &self,
+        allocator: &vk_mem::Allocator,
+        templates: &[vk::DrawIndexedIndirectCommand],
+        offset: usize,
+    ) -> Result<()> {
+        if !self.initialized || templates.is_empty() {
+            return Ok(());
+        }
+
+        if let Some(ref alloc) = self.template_allocation {
+            let info = allocator.get_allocation_info(alloc);
+            if !info.mapped_data.is_null() {
+                let dest = (info.mapped_data as *mut vk::DrawIndexedIndirectCommand).add(offset);
+                std::ptr::copy_nonoverlapping(templates.as_ptr(), dest, templates.len());
             }
         }
 
@@ -406,16 +432,21 @@ impl IndirectDrawPass {
     /// Execute culling pass
     ///
     /// # Safety
-    /// Command buffer must be in recording state.
+    /// Command buffer must be in recording state and all resources must be valid for the current frame.
+    #[allow(clippy::too_many_arguments)]
     pub unsafe fn execute_culling(
         &self,
         cmd: vk::CommandBuffer,
         culling: &OcclusionCulling,
+        bindless_manager: &BindlessManager,
         view_proj: glam::Mat4,
         width: u32,
         height: u32,
+        object_offset: u32,
+        object_count: u32,
+        indirect_offset: u32,
     ) -> Result<()> {
-        if !self.initialized || !culling.is_enabled() || culling.object_count() == 0 {
+        if !self.initialized || !culling.is_enabled() || object_count == 0 {
             return Ok(());
         }
 
@@ -445,7 +476,7 @@ impl IndirectDrawPass {
         self.device
             .cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, self.cull_pipeline);
 
-        // Bind descriptors
+        // Bind descriptors (Set 0)
         self.device.cmd_bind_descriptor_sets(
             cmd,
             vk::PipelineBindPoint::COMPUTE,
@@ -455,8 +486,23 @@ impl IndirectDrawPass {
             &[],
         );
 
+        // Bind bindless descriptors (Set 2)
+        self.device.cmd_bind_descriptor_sets(
+            cmd,
+            vk::PipelineBindPoint::COMPUTE,
+            self.cull_layout,
+            2,
+            &[bindless_manager.descriptor_set()],
+            &[],
+        );
+
         // Push constants
-        let push = culling.push_constants(view_proj, width, height);
+        let mut push = culling.push_constants(view_proj, width, height);
+        push.object_count = object_count;
+        push.base_index = object_offset;
+        push.indirect_start = indirect_offset;
+        push.object_buffer_index = self.object_buffer_index.unwrap_or(0);
+
         self.device.cmd_push_constants(
             cmd,
             self.cull_layout,
@@ -466,7 +512,7 @@ impl IndirectDrawPass {
         );
 
         // Dispatch: 64 threads per workgroup
-        let group_count = (culling.object_count() as u32).div_ceil(64);
+        let group_count = object_count.div_ceil(64);
         self.device.cmd_dispatch(cmd, group_count, 1, 1);
 
         // Barrier for indirect read
@@ -492,13 +538,45 @@ impl IndirectDrawPass {
     }
 
     /// Get indirect buffer for drawing
-    pub fn indirect_buffer(&self) -> vk::Buffer {
-        self.indirect_buffer
+    pub fn object_buffer(&self) -> vk::Buffer {
+        self.object_buffer
+    }
+
+    pub fn object_buffer_index(&self) -> Option<u32> {
+        self.object_buffer_index
     }
 
     /// Get count buffer for indirect count
     pub fn count_buffer(&self) -> vk::Buffer {
         self.count_buffer
+    }
+
+    pub fn indirect_buffer(&self) -> vk::Buffer {
+        self.indirect_buffer
+    }
+
+    pub fn object_buffer_size(&self) -> vk::DeviceSize {
+        self.object_buffer_size
+    }
+
+    /// Read the visible count back to the CPU
+    ///
+    /// # Safety
+    /// Allocator must be valid and the count buffer must have been populated by the GPU.
+    pub unsafe fn read_visible_count(&self, allocator: &vk_mem::Allocator) -> u32 {
+        if !self.initialized {
+            return 0;
+        }
+
+        if let Some(ref alloc) = self.count_allocation {
+            let info = allocator.get_allocation_info(alloc);
+            if !info.mapped_data.is_null() {
+                let ptr = info.mapped_data as *const u32;
+                return *ptr;
+            }
+        }
+
+        0
     }
 
     /// Destroy GPU resources

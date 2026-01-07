@@ -32,7 +32,11 @@ impl PipelineCache {
         self.cache
     }
 
-    #[allow(dead_code)]
+    /// Merge multiple pipeline caches into this cache.
+    /// 
+    /// This is useful for combining pipeline caches from different modules
+    /// or for pre-warming caches with known pipelines.
+    /// Currently unused but preserved for future optimization.
     pub fn merge(&self, caches: &[vk::PipelineCache]) -> Result<()> {
         unsafe {
             self.device
@@ -41,7 +45,11 @@ impl PipelineCache {
         }
     }
 
-    #[allow(dead_code)]
+    /// Get the data from this pipeline cache.
+    /// 
+    /// This can be used to serialize the cache to disk for faster startup
+    /// or to analyze cache performance. Currently unused but preserved
+    /// for future cache persistence features.
     pub fn get_data(&self) -> Result<Vec<u8>> {
         unsafe {
             self.device

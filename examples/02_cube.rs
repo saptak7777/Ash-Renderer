@@ -51,7 +51,11 @@ impl ApplicationHandler for App {
                     ..Default::default()
                 };
 
-                renderer.set_mesh(cube);
+                if let Err(e) = renderer.set_mesh(cube) {
+                    log::error!("Failed to set mesh: {e}");
+                    event_loop.exit();
+                    return;
+                }
                 *renderer.material_mut() = material;
 
                 self.renderer = Some(renderer);

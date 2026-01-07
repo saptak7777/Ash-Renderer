@@ -32,6 +32,16 @@ pub enum AshError {
         available: ash::vk::DeviceSize,
         recommendation: &'static str,
     },
+    /// Render pass not found or not initialized.
+    RenderPassMissing(String),
+    /// Pipeline not found or not initialized.
+    PipelineMissing(String),
+    /// Swapchain not initialized.
+    SwapchainMissing(String),
+    /// Texture not found or invalid.
+    TextureNotFound(String),
+    /// Failed to bind texture to descriptor set.
+    TextureBindingFailed(String),
 }
 
 impl fmt::Display for AshError {
@@ -55,6 +65,11 @@ impl fmt::Display for AshError {
                     "VRAM exhausted: requested {requested} bytes, but only {available} bytes available in budget"
                 )
             }
+            Self::RenderPassMissing(msg) => write!(f, "Render pass missing: {msg}"),
+            Self::PipelineMissing(msg) => write!(f, "Pipeline missing: {msg}"),
+            Self::SwapchainMissing(msg) => write!(f, "Swapchain missing: {msg}"),
+            Self::TextureNotFound(msg) => write!(f, "Texture not found: {msg}"),
+            Self::TextureBindingFailed(msg) => write!(f, "Texture binding failed: {msg}"),
         }
     }
 }

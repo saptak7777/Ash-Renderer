@@ -12,27 +12,22 @@ use super::descriptor_set::DescriptorSet;
 
 const EXTRA_TEXTURE_SETS: u32 = 2048;
 
-/// Manages descriptor layouts and descriptor sets for frame, material, and texture resources.
+/// Manages descriptor layouts and descriptor sets for frame and environment resources.
 pub struct DescriptorManager {
     allocator: DescriptorAllocator,
     frame_layout: super::descriptor_layout::DescriptorSetLayout,
-    material_layout: super::descriptor_layout::DescriptorSetLayout,
-    shadow_layout: super::descriptor_layout::DescriptorSetLayout,
-    joint_layout: super::descriptor_layout::DescriptorSetLayout,
+    environment_layout: super::descriptor_layout::DescriptorSetLayout,
     frame_sets: Vec<DescriptorSet>,
-    m_sets: Vec<DescriptorSet>,
-    shadow_sets: Vec<DescriptorSet>,
-    joint_sets: Vec<DescriptorSet>,
+    environment_sets: Vec<DescriptorSet>,
 }
 
 impl DescriptorManager {
     pub fn new(
         device: Arc<ash::Device>,
         frame_count: u32,
-        material_worker_count: u32,
         resource_registry: Option<Arc<ResourceRegistry>>,
     ) -> Result<Self> {
-        info!("Creating descriptor manager for {frame_count} frames");
+        info!("Creating simplified descriptor manager for {frame_count} frames");
 
         let mut allocator =
             DescriptorAllocator::new(Arc::clone(&device), EXTRA_TEXTURE_SETS, resource_registry)?;
@@ -46,19 +41,32 @@ impl DescriptorManager {
             )
             .build(Arc::clone(&device))?;
 
-        let material_layout = DescriptorSetLayoutBuilder::new()
+        // Environment layout (Set 2)
+        // 0: Shadow Map
+        // 1: Irradiance Map
+        // 2: Prefiltered Map
+        // 3: BRDF LUT
+        let environment_layout = DescriptorSetLayoutBuilder::new()
             .add_binding(
-                0,
-                vk::DescriptorType::UNIFORM_BUFFER,
+                0, // Shadow Map
+                vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
                 vk::ShaderStageFlags::FRAGMENT,
                 1,
             )
-            .build(Arc::clone(&device))?;
-
-        // Shadow map layout (set 3, binding 0 - depth texture sampler)
-        let shadow_layout = DescriptorSetLayoutBuilder::new()
             .add_binding(
-                0,
+                1, // Irradiance Map
+                vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+                vk::ShaderStageFlags::FRAGMENT,
+                1,
+            )
+            .add_binding(
+                2, // Prefiltered Map
+                vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+                vk::ShaderStageFlags::FRAGMENT,
+                1,
+            )
+            .add_binding(
+                3, // BRDF LUT
                 vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
                 vk::ShaderStageFlags::FRAGMENT,
                 1,
@@ -66,39 +74,21 @@ impl DescriptorManager {
             .build(Arc::clone(&device))?;
 
         let frame_sets = Self::create_descriptor_sets(frame_count, &frame_layout, &mut allocator)?;
-        let m_sets =
-            Self::create_descriptor_sets(material_worker_count, &material_layout, &mut allocator)?;
-        let shadow_sets =
-            Self::create_descriptor_sets(frame_count, &shadow_layout, &mut allocator)?;
-
-        // Joint matrices layout (Storage buffer)
-        let joint_layout = DescriptorSetLayoutBuilder::new()
-            .add_binding(
-                0,
-                vk::DescriptorType::STORAGE_BUFFER,
-                vk::ShaderStageFlags::VERTEX,
-                1,
-            )
-            .build(Arc::clone(&device))?;
-
-        let joint_sets = Self::create_descriptor_sets(frame_count, &joint_layout, &mut allocator)?;
+        let environment_sets =
+            Self::create_descriptor_sets(frame_count, &environment_layout, &mut allocator)?;
 
         info!(
-            "Allocated descriptor sets (frame: {}, material: {})",
+            "Allocated descriptor sets (frame: {}, environment: {})",
             frame_sets.len(),
-            m_sets.len()
+            environment_sets.len()
         );
 
         Ok(Self {
             allocator,
             frame_layout,
-            material_layout,
-            shadow_layout,
-            joint_layout,
+            environment_layout,
             frame_sets,
-            m_sets,
-            shadow_sets,
-            joint_sets,
+            environment_sets,
         })
     }
 
@@ -125,42 +115,15 @@ impl DescriptorManager {
         )
     }
 
-    pub fn bind_material_uniform(
-        &self,
-        worker_id: u32,
-        buffer: vk::Buffer,
-        buffer_size: vk::DeviceSize,
-    ) -> Result<()> {
-        let descriptor = self.m_sets.get(worker_id as usize).ok_or_else(|| {
-            AshError::VulkanError("Material descriptor set index out of bounds".into())
-        })?;
-
-        descriptor.update_buffer(
-            0,
-            buffer,
-            0,
-            buffer_size,
-            vk::DescriptorType::UNIFORM_BUFFER,
-        )
-    }
-
-    // Methods bind_material_textures, default_texture_set, default_texture_array_set,
-    // allocate_texture_set, allocate_material_texture_set, material_texture_layout removed.
+    // Materials are now in bindless Set 1, Binding 1 - no material uniform binding needed
+    // Legacy methods removed: bind_material_uniform, bind_material_textures, etc.
 
     pub fn frame_set(&self, index: usize) -> Option<vk::DescriptorSet> {
         self.frame_sets.get(index).map(|set| set.handle())
     }
 
-    pub fn material_set(&self, index: usize) -> Option<vk::DescriptorSet> {
-        self.m_sets.get(index).map(|set| set.handle())
-    }
-
     pub fn frame_set_count(&self) -> usize {
         self.frame_sets.len()
-    }
-
-    pub fn material_set_count(&self) -> usize {
-        self.m_sets.len()
     }
 
     /// Get mutable access to the allocator for external allocation (e.g., bindless)
@@ -168,12 +131,12 @@ impl DescriptorManager {
         &mut self.allocator
     }
 
-    pub fn shadow_layout(&self) -> vk::DescriptorSetLayout {
-        self.shadow_layout.handle()
+    pub fn environment_layout(&self) -> vk::DescriptorSetLayout {
+        self.environment_layout.handle()
     }
 
-    pub fn shadow_set(&self, index: usize) -> Option<vk::DescriptorSet> {
-        self.shadow_sets.get(index).map(|set| set.handle())
+    pub fn environment_set(&self, index: usize) -> Option<vk::DescriptorSet> {
+        self.environment_sets.get(index).map(|set| set.handle())
     }
 
     /// Bind shadow map texture to shadow descriptor set for given frame
@@ -183,8 +146,8 @@ impl DescriptorManager {
         image_view: vk::ImageView,
         sampler: vk::Sampler,
     ) -> Result<()> {
-        let descriptor = self.shadow_sets.get(frame_index).ok_or_else(|| {
-            AshError::VulkanError("Shadow descriptor set index out of bounds".into())
+        let descriptor = self.environment_sets.get(frame_index).ok_or_else(|| {
+            AshError::VulkanError("Environment descriptor set index out of bounds".into())
         })?;
 
         let info = vk::DescriptorImageInfo {
@@ -196,76 +159,36 @@ impl DescriptorManager {
         Ok(())
     }
 
+    /// Bind IBL resources to the environment descriptor set
+    pub fn bind_ibl_resources(
+        &self,
+        frame_index: usize,
+        resources: &crate::vulkan::IBLResources,
+    ) -> Result<()> {
+        let descriptor = self.environment_sets.get(frame_index).ok_or_else(|| {
+            AshError::VulkanError("Environment descriptor set index out of bounds".into())
+        })?;
+
+        crate::vulkan::IBLDescriptorSet::update(descriptor, resources)
+    }
+
     pub fn recreate_frame_sets(&mut self, frame_count: u32) -> Result<()> {
         self.frame_sets =
             Self::create_descriptor_sets(frame_count, &self.frame_layout, &mut self.allocator)?;
         Ok(())
     }
 
-    pub fn recreate_shadow_sets(&mut self, frame_count: u32) -> Result<()> {
-        self.shadow_sets =
-            Self::create_descriptor_sets(frame_count, &self.shadow_layout, &mut self.allocator)?;
+    pub fn recreate_environment_sets(&mut self, frame_count: u32) -> Result<()> {
+        self.environment_sets = Self::create_descriptor_sets(
+            frame_count,
+            &self.environment_layout,
+            &mut self.allocator,
+        )?;
         Ok(())
     }
-
-    pub fn recreate_joint_sets(&mut self, frame_count: u32) -> Result<()> {
-        self.joint_sets =
-            Self::create_descriptor_sets(frame_count, &self.joint_layout, &mut self.allocator)?;
-        Ok(())
-    }
-
-    // material_texture_descriptor method removed.
 
     pub fn frame_layout(&self) -> vk::DescriptorSetLayout {
         self.frame_layout.handle()
-    }
-
-    pub fn material_layout(&self) -> vk::DescriptorSetLayout {
-        self.material_layout.handle()
-    }
-
-    pub fn joint_layout(&self) -> vk::DescriptorSetLayout {
-        self.joint_layout.handle()
-    }
-
-    pub fn joint_set(&self, index: usize) -> Option<vk::DescriptorSet> {
-        self.joint_sets.get(index).map(|set| set.handle())
-    }
-
-    /// Get the descriptor set for joint matrices for a specific frame
-    pub fn get_joint_descriptor_set(&self, frame_index: usize) -> Result<vk::DescriptorSet> {
-        let descriptor_set = self
-            .joint_sets
-            .get(frame_index)
-            .map(|set| set.handle())
-            .ok_or_else(|| {
-                AshError::VulkanError(format!(
-                    "Joint descriptor set index {frame_index} exceeds buffer count {}",
-                    self.joint_sets.len()
-                ))
-            })?;
-
-        if descriptor_set == vk::DescriptorSet::null() {
-            return Err(AshError::VulkanError(format!(
-                "Joint descriptor set is null for frame {frame_index}"
-            )));
-        }
-
-        Ok(descriptor_set)
-    }
-
-    /// Bind joint matrices buffer to joint descriptor set for given frame
-    pub fn bind_joint_buffer(
-        &self,
-        frame_index: usize,
-        buffer: vk::Buffer,
-        size: vk::DeviceSize,
-    ) -> Result<()> {
-        let descriptor = self.joint_sets.get(frame_index).ok_or_else(|| {
-            AshError::VulkanError("Joint descriptor set index out of bounds".into())
-        })?;
-
-        descriptor.update_buffer(0, buffer, 0, size, vk::DescriptorType::STORAGE_BUFFER)
     }
 
     fn create_descriptor_sets(

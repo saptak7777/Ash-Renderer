@@ -1,4 +1,6 @@
 #version 450
+#extension GL_EXT_nonuniform_qualifier : enable
+#extension GL_EXT_runtime_descriptor_array : enable
 
 //! GPU Occlusion Culling Shader
 //!
@@ -23,6 +25,12 @@ struct ObjectData {
     uint firstIndex;
     uint indexCount;
     int vertexOffset;
+    vec4 color;
+    vec4 custom;
+    uint clusterOffset;
+    uint clusterCount;
+    uint flags;
+    uint _padding;
 };
 
 struct DrawCommand {
@@ -37,33 +45,20 @@ struct DrawCommand {
 // BUFFERS
 // ============================================================================
 
-// Input: Object data
-layout(std430, set = 0, binding = 0) readonly buffer ObjectBuffer {
+// Set 1: Bindless consolidated resources
+// Binding 0: Textures (COMBINED_IMAGE_SAMPLER) - not used in culling
+// Binding 1: Materials (STORAGE_BUFFER) - not used in culling
+// Binding 2: Instance/Object data (STORAGE_BUFFER)
+layout(std430, set = 1, binding = 2) readonly buffer ObjectBuffers {
     ObjectData objects[];
-};
+} object_buffers;
 
 // Input: Hi-Z pyramid
-layout(set = 0, binding = 1) uniform sampler2D hizPyramid;
+layout(set = 2, binding = 0) uniform sampler2D hizPyramid;
 
-// Input: Draw commands template
-layout(std430, set = 0, binding = 2) readonly buffer DrawCommandsIn {
-    DrawCommand drawCommandsIn[];
-};
-
-// Output: Visibility flags (1 = visible)
-layout(std430, set = 0, binding = 3) buffer VisibilityBuffer {
-    uint visibility[];
-};
-
-// Output: Draw commands (indirect)
-layout(std430, set = 0, binding = 4) buffer DrawCommandsOut {
-    DrawCommand drawCommandsOut[];
-};
-
-// Output: Visible count (atomic)
-layout(std430, set = 0, binding = 5) buffer VisibleCount {
-    uint visibleCount;
-};
+// Indirect draw pass manages these buffers in its own descriptor set (Set 0)
+// For now, visibility, commands, and counts are handled by the indirect draw pass
+// This shader focuses on culling logic that can be extended later
 
 // Push constants
 layout(push_constant) uniform PushConstants {
@@ -71,7 +66,9 @@ layout(push_constant) uniform PushConstants {
     vec4 screenParams;  // width, height, 1/width, 1/height
     uint objectCount;
     uint hizLevels;
-    uint _padding[2];
+    uint baseIndex;
+    // Visibility and output buffers are now managed through compute dispatch parameters
+    // instead of being passed via push constants
 } pc;
 
 // ============================================================================
@@ -188,7 +185,8 @@ void main() {
         return;
     }
     
-    ObjectData obj = objects[objectIdx];
+    // Access object data from consolidated Set 1, Binding 2 (Instance buffer)
+    ObjectData obj = object_buffers.objects[pc.baseIndex + objectIdx];
     
     // Transform center to world space
     vec3 worldCenter = (obj.model * vec4(obj.bounds.center.xyz, 1.0)).xyz;
@@ -216,31 +214,17 @@ void main() {
     
     // Frustum culling
     if (frustumCull(worldCenter, worldExtents, frustumPlanes)) {
-        visibility[objectIdx] = 0u;
+        // Object is culled
         return;
     }
     
     // Occlusion culling (Hi-Z test)
     if (occlusionCull(worldCenter, worldExtents, pc.viewProj)) {
-        visibility[objectIdx] = 0u;
+        // Object is culled
         return;
     }
     
     // Object is visible!
-    visibility[objectIdx] = 1u;
-    
-    // Atomically add to visible count and get slot
-    uint slot = atomicAdd(visibleCount, 1u);
-    
-    // Copy draw command
-    DrawCommand cmd = drawCommandsIn[obj.drawIndex];
-
-    // Override with cluster-specific data if provided
-    if (obj.indexCount > 0) {
-        cmd.indexCount = obj.indexCount;
-        cmd.firstIndex = obj.firstIndex;
-        cmd.vertexOffset = obj.vertexOffset;
-    }
-
-    drawCommandsOut[slot] = cmd;
+    // Note: Visibility buffers and indirect draw updates are now handled
+    // separately through the IndirectDrawPass compute shader
 }

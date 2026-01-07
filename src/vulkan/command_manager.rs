@@ -201,6 +201,11 @@ impl CommandBufferManager {
         }
     }
 
+    pub fn get_transfer_command_buffer(&self) -> Result<vk::CommandBuffer> {
+        let buffers = self.allocate_primary_buffers(1)?;
+        Ok(buffers[0])
+    }
+
     pub fn upload_command_pool_handle(&self) -> vk::CommandPool {
         self.upload_pool.lock().handle()
     }

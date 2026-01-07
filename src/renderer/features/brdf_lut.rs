@@ -4,6 +4,7 @@
 //! This is a one-time bake at engine startup.
 
 use ash::vk;
+use std::sync::Arc;
 
 /// BRDF LUT configuration
 #[derive(Debug, Clone, Copy)]
@@ -33,11 +34,7 @@ impl Default for BrdfLutConfig {
 pub struct BrdfLutPass {
     config: BrdfLutConfig,
     /// The baked LUT image (None until baked)
-    lut_image: Option<vk::Image>,
-    /// Image view for the LUT
-    lut_view: Option<vk::ImageView>,
-    /// VMA allocation for the image
-    allocation: Option<vk_mem::Allocation>,
+    lut_image: Option<crate::renderer::resources::ImageHandle>,
     /// Whether the LUT has been baked
     baked: bool,
 }
@@ -48,18 +45,15 @@ impl BrdfLutPass {
         Self {
             config: BrdfLutConfig::default(),
             lut_image: None,
-            lut_view: None,
-            allocation: None,
             baked: false,
         }
     }
 
     /// Create with custom config
     pub fn with_config(config: BrdfLutConfig) -> Self {
-        Self {
-            config,
-            ..Self::new()
-        }
+        let mut pass = Self::new();
+        pass.config = config;
+        pass
     }
 
     /// Get config
@@ -74,12 +68,12 @@ impl BrdfLutPass {
 
     /// Get the LUT image view for binding
     pub fn get_lut_view(&self) -> Option<vk::ImageView> {
-        self.lut_view
+        self.lut_image.as_ref().map(|img| img.view())
     }
 
     /// Get the LUT image for transitions
     pub fn get_lut_image(&self) -> Option<vk::Image> {
-        self.lut_image
+        self.lut_image.as_ref().map(|img| img.handle())
     }
 
     /// Get LUT resolution
@@ -91,71 +85,159 @@ impl BrdfLutPass {
     // GPU Resource Management
     // =========================================================================
 
-    /// Create the LUT image
+    /// Create the BRDF LUT image handle.
     ///
     /// # Safety
-    /// Allocator and device must be valid.
+    /// Valid Vulkan allocator and device required.
     pub unsafe fn create_image(
         &mut self,
-        allocator: &vk_mem::Allocator,
-        device: &ash::Device,
+        allocator: Arc<crate::vulkan::Allocator>,
+        device: Arc<ash::Device>,
     ) -> crate::Result<()> {
-        use vk_mem::Alloc;
-
-        let extent = vk::Extent3D {
-            width: self.config.resolution,
-            height: self.config.resolution,
-            depth: 1,
-        };
-
-        let image_info = vk::ImageCreateInfo::default()
-            .image_type(vk::ImageType::TYPE_2D)
-            .format(self.config.format)
-            .extent(extent)
-            .mip_levels(1)
-            .array_layers(1)
-            .samples(vk::SampleCountFlags::TYPE_1)
-            .tiling(vk::ImageTiling::OPTIMAL)
-            .usage(vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::SAMPLED)
-            .sharing_mode(vk::SharingMode::EXCLUSIVE)
-            .initial_layout(vk::ImageLayout::UNDEFINED);
-
-        let alloc_info = vk_mem::AllocationCreateInfo {
-            usage: vk_mem::MemoryUsage::AutoPreferDevice,
-            ..Default::default()
-        };
-
-        let (image, allocation) =
-            allocator
-                .create_image(&image_info, &alloc_info)
-                .map_err(|e| {
-                    crate::AshError::VulkanError(format!("BRDF LUT image creation failed: {e:?}"))
-                })?;
-
-        // Create image view
-        let view_info = vk::ImageViewCreateInfo::default()
-            .image(image)
-            .view_type(vk::ImageViewType::TYPE_2D)
-            .format(self.config.format)
-            .subresource_range(vk::ImageSubresourceRange {
-                aspect_mask: vk::ImageAspectFlags::COLOR,
-                base_mip_level: 0,
-                level_count: 1,
-                base_array_layer: 0,
-                layer_count: 1,
-            });
-
-        let view = device.create_image_view(&view_info, None)?;
+        let image = crate::renderer::resources::ImageHandle::create_brdf_lut(
+            device,
+            allocator,
+            self.config.resolution,
+        )?;
 
         self.lut_image = Some(image);
-        self.lut_view = Some(view);
-        self.allocation = Some(allocation);
+        Ok(())
+    }
 
-        log::info!(
-            "BrdfLutPass: Created {}x{} LUT image",
-            self.config.resolution,
-            self.config.resolution
-        );
+    /// Bake the BRDF LUT using a temporary render pass and pipeline.
+    ///
+    /// # Safety
+    /// Valid Vulkan context required.
+    pub unsafe fn bake(
+        &mut self,
+        device: &crate::vulkan::VulkanDevice,
+        command_pool: vk::CommandPool,
+        allocator: Arc<crate::vulkan::Allocator>,
+    ) -> crate::Result<()> {
+        if self.baked {
+            return Ok(());
+        }
+
+        if self.lut_image.is_none() {
+            self.create_image(Arc::clone(&allocator), Arc::clone(&device.device))?;
+        }
+
+        let lut_image = self.lut_image.as_ref().unwrap();
+        let res = self.config.resolution;
+
+        // 1. Create temporary Render Pass
+        let render_pass = crate::vulkan::RenderPass::builder(Arc::clone(&device.device))
+            .with_color_attachment(
+                self.config.format,
+                vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+            )
+            .build()?;
+
+        // 2. Create Framebuffer
+        let framebuffer = crate::vulkan::framebuffer::Framebuffer::new(
+            Arc::clone(&device.device),
+            render_pass.handle(),
+            &[lut_image.view()],
+            vk::Extent2D {
+                width: res,
+                height: res,
+            },
+        )?;
+
+        // 3. Create Pipeline Layout
+        let layout_info = vk::PipelineLayoutCreateInfo::default();
+        let layout = device.device.create_pipeline_layout(&layout_info, None)?;
+
+        // 4. Create Pipeline
+        // Use pre-compiled shaders if available, otherwise fallback to our generated ones
+        // In a real project, we'd use the ones from the shaders directory.
+        let pipeline = crate::vulkan::pipeline::Pipeline::builder(Arc::clone(&device.device))
+            .with_layout(layout)
+            .with_render_pass(render_pass.handle())
+            .with_extent(vk::Extent2D {
+                width: res,
+                height: res,
+            })
+            .add_shader_from_bytes(
+                include_bytes!(concat!(env!("OUT_DIR"), "/fullscreen.spv")),
+                vk::ShaderStageFlags::VERTEX,
+                "main",
+            )?
+            .add_shader_from_bytes(
+                include_bytes!(concat!(env!("OUT_DIR"), "/brdf_lut.spv")),
+                vk::ShaderStageFlags::FRAGMENT,
+                "main",
+            )?
+            .with_vertex_input(vec![], vec![]) // Procedural vertices
+            .with_cull_mode(vk::CullModeFlags::NONE)
+            .build()?;
+
+        // 5. Render
+        device.execute_single_use(command_pool, |cmd| {
+            // Empty command buffer for testing
+            // If this passes, the issue is inside the commands themselves.
+            // log::info!("BrdfLutPass: Recording empty command buffer");
+
+            let clear_values = [vk::ClearValue {
+                color: vk::ClearColorValue {
+                    float32: [0.0, 0.0, 0.0, 1.0],
+                },
+            }];
+
+            let render_pass_begin = vk::RenderPassBeginInfo::default()
+                .render_pass(render_pass.handle())
+                .framebuffer(framebuffer.handle())
+                .render_area(vk::Rect2D {
+                    offset: vk::Offset2D { x: 0, y: 0 },
+                    extent: vk::Extent2D {
+                        width: res,
+                        height: res,
+                    },
+                })
+                .clear_values(&clear_values);
+
+            device.device.cmd_begin_render_pass(
+                cmd,
+                &render_pass_begin,
+                vk::SubpassContents::INLINE,
+            );
+
+            // CRITICAL FIX: PipelineBuilder enables dynamic VIEWPORT and SCISSOR.
+            // We must set them before drawing.
+            let viewports = [vk::Viewport {
+                x: 0.0,
+                y: 0.0,
+                width: res as f32,
+                height: res as f32,
+                min_depth: 0.0,
+                max_depth: 1.0,
+            }];
+            let scissors = [vk::Rect2D {
+                offset: vk::Offset2D { x: 0, y: 0 },
+                extent: vk::Extent2D {
+                    width: res,
+                    height: res,
+                },
+            }];
+
+            device.device.cmd_set_viewport(cmd, 0, &viewports);
+            device.device.cmd_set_scissor(cmd, 0, &scissors);
+
+            device.device.cmd_bind_pipeline(
+                cmd,
+                vk::PipelineBindPoint::GRAPHICS,
+                pipeline.pipeline,
+            );
+            device.device.cmd_draw(cmd, 3, 1, 0, 0);
+            device.device.cmd_end_render_pass(cmd);
+        })?;
+
+        // 6. Cleanup temporary resources
+        device.device.destroy_pipeline_layout(layout, None);
+        // Pipeline, RenderPass, and Framebuffer are dropped automatically (RAII)
+
+        self.baked = true;
+        log::info!("BRDF LUT baked successfully ({res}x{res})");
 
         Ok(())
     }
@@ -170,13 +252,8 @@ impl BrdfLutPass {
     ///
     /// # Safety
     /// Resources must not be in use by GPU.
-    pub unsafe fn destroy(&mut self, allocator: &vk_mem::Allocator, device: &ash::Device) {
-        if let Some(view) = self.lut_view.take() {
-            device.destroy_image_view(view, None);
-        }
-        if let (Some(image), Some(mut alloc)) = (self.lut_image.take(), self.allocation.take()) {
-            allocator.destroy_image(image, &mut alloc);
-        }
+    pub unsafe fn destroy(&mut self, _allocator: &vk_mem::Allocator, _device: &ash::Device) {
+        self.lut_image = None; // ImageHandle handles cleanup
         self.baked = false;
         log::info!("BrdfLutPass: Destroyed resources");
     }

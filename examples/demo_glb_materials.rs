@@ -47,7 +47,7 @@ impl ApplicationHandler for App {
             Ok(mut renderer) => {
                 // Create a demo mesh with material properties (simulating GLB load)
                 let mut demo_mesh = Mesh::create_cube();
-                demo_mesh.name = "metallic_demo_cube".to_string();
+                demo_mesh.name = "metallic_demo_cube".into();
 
                 // Set material properties like they would come from a GLB file
                 demo_mesh.material_properties = Some(
@@ -70,10 +70,10 @@ impl ApplicationHandler for App {
                     log::info!("✅ Demo mesh registered with handle {}", handle);
 
                     // Check if material was registered
-                    if renderer.material_registry().contains_key(&handle) {
+                    if renderer.material_registry().get(handle).is_some() {
                         log::info!("✅ Material automatically registered for demo mesh");
 
-                        let material = renderer.material_registry().get(&handle).unwrap();
+                        let material = renderer.material_registry().get(handle).unwrap();
                         log::info!("   - Material: {}", material.name);
                         log::info!("   - Metallic: {:.2}", material.metallic);
                         log::info!("   - Roughness: {:.2}", material.roughness);

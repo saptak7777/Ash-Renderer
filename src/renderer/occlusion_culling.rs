@@ -96,6 +96,18 @@ pub struct CullObjectData {
     pub index_count: u32,
     /// Override vertex offset
     pub vertex_offset: i32,
+    /// Instance color multiplier (RGBA)
+    pub color: [f32; 4],
+    /// Custom data (user-defined)
+    pub custom: [f32; 4],
+    /// Cluster offset in global cluster buffer
+    pub cluster_offset: u32,
+    /// Number of clusters for this object
+    pub cluster_count: u32,
+    /// Culling flags (e.g., enabled, shadow-caster)
+    pub flags: u32,
+    /// Padding for 16-byte alignment
+    pub _padding: u32,
 }
 
 impl CullObjectData {
@@ -112,6 +124,12 @@ impl CullObjectData {
             first_index: 0, // 0 = use template
             index_count: 0, // 0 = use template
             vertex_offset: 0,
+            color: [1.0, 1.0, 1.0, 1.0],
+            custom: [0.0; 4],
+            cluster_offset: 0,
+            cluster_count: 0,
+            flags: 1,
+            _padding: 0,
         }
     }
 
@@ -141,7 +159,35 @@ impl CullObjectData {
             first_index,
             index_count,
             vertex_offset: 0,
+            color: [1.0, 1.0, 1.0, 1.0],
+            custom: [0.0; 4],
+            cluster_offset: 0,
+            cluster_count: 0,
+            flags: 1,
+            _padding: 0,
         }
+    }
+
+    /// Set custom data
+    pub fn with_custom(mut self, custom: [f32; 4]) -> Self {
+        self.custom = custom;
+        self
+    }
+
+    /// Set color
+    pub fn with_color(mut self, color: [f32; 4]) -> Self {
+        self.color = color;
+        self
+    }
+
+    /// Get position from matrix
+    pub fn position(&self) -> Vec3 {
+        Vec3::new(self.model_row3[0], self.model_row3[1], self.model_row3[2])
+    }
+
+    /// Create from matrix with default bounds/index
+    pub fn from_matrix(model: Mat4) -> Self {
+        Self::new(CullBoundingBox::default(), model, 0)
     }
 }
 
@@ -168,8 +214,11 @@ pub struct CullingPushConstants {
     pub object_count: u32,
     /// Hi-Z pyramid levels
     pub hiz_levels: u32,
-    /// Padding
-    pub _padding: [u32; 2],
+    /// Base object index
+    pub base_index: u32,
+    /// Indirect command start index
+    pub indirect_start: u32,
+    pub object_buffer_index: u32,
 }
 
 impl Default for CullingPushConstants {
@@ -179,7 +228,9 @@ impl Default for CullingPushConstants {
             screen_params: [1920.0, 1080.0, 1.0 / 1920.0, 1.0 / 1080.0],
             object_count: 0,
             hiz_levels: HIZ_LEVELS as u32,
-            _padding: [0; 2],
+            base_index: 0,
+            indirect_start: 0,
+            object_buffer_index: 0,
         }
     }
 }
@@ -297,7 +348,9 @@ impl OcclusionCulling {
             ],
             object_count: self.objects.len() as u32,
             hiz_levels: HIZ_LEVELS as u32,
-            _padding: [0; 2],
+            base_index: 0,
+            indirect_start: 0,
+            object_buffer_index: 0,
         }
     }
 

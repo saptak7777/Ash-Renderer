@@ -8,9 +8,13 @@ fn main() {
 
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR not set"));
     let shader_dir = Path::new("shaders");
+    let src_shader_dir = Path::new("src/shaders");
 
     if shader_dir.exists() {
         compile_shaders(shader_dir, &out_dir).expect("Failed to compile shaders");
+    }
+    if src_shader_dir.exists() {
+        compile_shaders(src_shader_dir, &out_dir).expect("Failed to compile src shaders");
     }
 }
 
@@ -59,6 +63,7 @@ fn compile_shaders(dir: &Path, out_dir: &Path) -> Result<(), Box<dyn std::error:
                 } else if file_name == "frag.frag" {
                     "frag.spv".to_string()
                 } else {
+                    // Use full filename + .spv (e.g., shader.comp.spv)
                     format!("{file_name}.spv")
                 };
 

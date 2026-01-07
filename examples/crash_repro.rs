@@ -71,7 +71,7 @@ fn main() -> Result<()> {
     let texture_data = vec![255u8; texture_size];
 
     let descriptor = ash_renderer::renderer::resources::mesh::MeshDescriptor {
-        key: "CrashTestMesh".to_string(),
+        key: "CrashTestMesh".into(),
         vertices,
         indices: Some(indices),
         texture: Some(
@@ -88,7 +88,7 @@ fn main() -> Result<()> {
 
     // This is where it reportedly crashes
     log::info!("Attempting to set mesh (uploads to GPU)...");
-    renderer.set_mesh(mesh);
+    renderer.set_mesh(mesh)?;
 
     log::info!("Success! No crash encountered.");
     Ok(())

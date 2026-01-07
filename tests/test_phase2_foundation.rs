@@ -2,7 +2,8 @@
 
 use ash_renderer::renderer::resources::mesh::{Mesh, SubmeshDescriptor};
 
-fn main() {
+#[test]
+fn test_phase2_foundation() {
     println!("Testing Phase 2: Multi-material foundation...");
 
     // Test that Mesh has the new fields
@@ -26,7 +27,7 @@ fn main() {
         start_index: 0,
         index_count: 36,
         material_slot: 0,
-        name: "test_submesh".to_string(),
+        name: "test_submesh".into(),
     };
 
     println!("✅ SubmeshDescriptor created:");

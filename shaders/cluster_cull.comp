@@ -19,9 +19,15 @@ struct ObjectData {
     BoundingBox bounds;
     mat4 model;
     uint drawIndex;
+    uint firstIndex;
+    uint indexCount;
+    int vertexOffset;
+    vec4 color;
+    vec4 custom;
     uint clusterOffset;
     uint clusterCount;
     uint flags;
+    uint _padding;
 };
 
 struct ClusterData {

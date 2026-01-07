@@ -34,15 +34,15 @@
 //! - **`renderer`**: High-level rendering API (public)
 
 // Documentation coverage is a work-in-progress.
-// #[warn(missing_docs)]
-// #![warn(missing_docs)]
-#![allow(missing_docs)]
 #![warn(clippy::all)]
 #![allow(clippy::module_inception)]
 
 mod error;
 pub mod renderer;
 pub mod vulkan;
+
+// Re-export dependencies for convenience/examples
+pub extern crate vk_mem;
 
 // Re-export public API
 pub use error::{AshError, Result};

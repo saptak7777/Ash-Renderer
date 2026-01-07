@@ -1,6 +1,6 @@
 //! Forward+ Descriptor Set Management
 //!
-//! Manages Descriptor Set 4 for Forward+ lighting in fragment shaders.
+//! Manages Descriptor Set 3 for Forward+ lighting in fragment shaders.
 //! This binds the light buffer, tile indices, and forward+ info UBO.
 
 use ash::vk;
@@ -184,7 +184,7 @@ impl ForwardPlusDescriptor {
             command_buffer,
             vk::PipelineBindPoint::GRAPHICS,
             pipeline_layout,
-            4, // Set 4
+            3, // Set 3 (was 4)
             &[self.descriptor_set],
             &[],
         );

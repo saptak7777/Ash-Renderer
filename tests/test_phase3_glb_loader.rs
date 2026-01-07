@@ -2,14 +2,15 @@
 
 use ash_renderer::renderer::resources::mesh::{Mesh, SubmeshDescriptor};
 
-fn main() {
+#[test]
+fn test_phase3_glb_loader() {
     env_logger::init();
 
     println!("Testing Phase 3: GLB Loader Enhancement...");
 
     // Create a test mesh with material properties (simulating GLB load)
     let mut test_mesh = Mesh::create_cube();
-    test_mesh.name = "test_primitive".to_string();
+    test_mesh.name = "test_primitive".into();
     test_mesh.material_properties = Some(
         ash_renderer::renderer::resources::mesh::MaterialProperties {
             base_color_factor: [0.5, 0.8, 0.2, 1.0],
@@ -61,7 +62,7 @@ fn main() {
 
     // Test that we can handle multiple submeshes (future multi-material support)
     let mut multi_mesh = Mesh::create_cube();
-    multi_mesh.name = "multi_material_test".to_string();
+    multi_mesh.name = "multi_material_test".into();
 
     // Add multiple submeshes (simulating a complex GLB model)
     multi_mesh.submeshes = vec![
@@ -69,19 +70,19 @@ fn main() {
             start_index: 0,
             index_count: 12,
             material_slot: 0,
-            name: "body".to_string(),
+            name: "mesh_a".into(),
         },
         SubmeshDescriptor {
             start_index: 12,
             index_count: 12,
             material_slot: 1,
-            name: "wheels".to_string(),
+            name: "mesh_b".into(),
         },
         SubmeshDescriptor {
             start_index: 24,
             index_count: 12,
             material_slot: 2,
-            name: "windows".to_string(),
+            name: "mesh_c".into(),
         },
     ];
 

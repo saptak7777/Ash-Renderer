@@ -6,7 +6,6 @@ use std::sync::Arc;
 use crate::{AshError, Result};
 
 pub struct VulkanDevice {
-    pub instance: Arc<crate::vulkan::VulkanInstance>,
     pub physical_device: vk::PhysicalDevice,
     pub device: Arc<Device>,
     pub graphics_queue: vk::Queue,
@@ -16,11 +15,13 @@ pub struct VulkanDevice {
     /// Timestamp period in nanoseconds (for GPU timing queries)
     pub timestamp_period_ns: f32,
     pub memory_properties: vk::PhysicalDeviceMemoryProperties,
+    pub headless: bool,
+    pub instance: Arc<crate::vulkan::VulkanInstance>,
 }
 
 impl VulkanDevice {
     /// Create a logical device for the provided Vulkan instance.
-    pub fn new(instance: Arc<crate::vulkan::VulkanInstance>) -> Result<Self> {
+    pub fn new(instance: Arc<crate::vulkan::VulkanInstance>, headless: bool) -> Result<Self> {
         unsafe {
             let vk_instance = instance.instance();
 
@@ -36,7 +37,9 @@ impl VulkanDevice {
 
             let mut selected = None;
             for &candidate in &physical_devices {
-                if let Some((graphics, present)) = Self::find_queue_families(&instance, candidate) {
+                if let Some((graphics, present)) =
+                    Self::find_queue_families(&instance, candidate, headless)
+                {
                     selected = Some((candidate, graphics, present));
                     break;
                 }
@@ -72,17 +75,26 @@ impl VulkanDevice {
                 })
                 .collect();
 
-            let device_extension_names = [swapchain::NAME.as_ptr()];
-            let device_features = vk::PhysicalDeviceFeatures::default().sampler_anisotropy(true);
+            let mut device_extension_names = Vec::new();
+            if !headless {
+                device_extension_names.push(swapchain::NAME.as_ptr());
+            }
+
+            let device_features = vk::PhysicalDeviceFeatures::default()
+                .sampler_anisotropy(true)
+                .multi_draw_indirect(true);
 
             let mut vulnerability_features = vk::PhysicalDeviceVulkan12Features::default()
                 .buffer_device_address(false)
                 .descriptor_indexing(true)
+                .draw_indirect_count(true)
                 .shader_sampled_image_array_non_uniform_indexing(true)
+                .shader_storage_buffer_array_non_uniform_indexing(true)
                 .runtime_descriptor_array(true)
                 .descriptor_binding_variable_descriptor_count(true)
                 .descriptor_binding_partially_bound(true)
-                .descriptor_binding_sampled_image_update_after_bind(true);
+                .descriptor_binding_sampled_image_update_after_bind(true)
+                .descriptor_binding_storage_buffer_update_after_bind(true);
 
             let mut features2 = vk::PhysicalDeviceFeatures2::default()
                 .features(device_features)
@@ -113,6 +125,7 @@ impl VulkanDevice {
                 present_queue_family,
                 timestamp_period_ns,
                 memory_properties,
+                headless,
             })
         }
     }
@@ -120,6 +133,7 @@ impl VulkanDevice {
     fn find_queue_families(
         instance: &Arc<crate::vulkan::VulkanInstance>,
         physical_device: vk::PhysicalDevice,
+        headless: bool,
     ) -> Option<(u32, u32)> {
         let vk_instance = instance.instance();
         let surface_loader = instance.surface_loader();
@@ -135,17 +149,23 @@ impl VulkanDevice {
                 graphics_family = Some(index as u32);
             }
 
-            let present_support = unsafe {
-                surface_loader.get_physical_device_surface_support(
-                    physical_device,
-                    index as u32,
-                    surface,
-                )
-            }
-            .unwrap_or(false);
+            if headless {
+                // In headless mode, we can always \"present\" to our offscreen images
+                // using the graphics queue.
+                present_family = graphics_family;
+            } else if surface != vk::SurfaceKHR::null() {
+                let present_support = unsafe {
+                    surface_loader.get_physical_device_surface_support(
+                        physical_device,
+                        index as u32,
+                        surface,
+                    )
+                }
+                .unwrap_or(false);
 
-            if present_support {
-                present_family = Some(index as u32);
+                if present_support {
+                    present_family = Some(index as u32);
+                }
             }
 
             if graphics_family.is_some() && present_family.is_some() {
@@ -157,6 +177,19 @@ impl VulkanDevice {
             (Some(graphics), Some(present)) => Some((graphics, present)),
             _ => None,
         }
+    }
+
+    /// Helper to execute a single-use command buffer on the graphics queue.
+    pub fn execute_single_use<F>(&self, command_pool: vk::CommandPool, recorder: F) -> Result<()>
+    where
+        F: FnOnce(vk::CommandBuffer),
+    {
+        crate::vulkan::utils::execute_single_use(
+            &self.device,
+            command_pool,
+            self.graphics_queue,
+            recorder,
+        )
     }
 }
 

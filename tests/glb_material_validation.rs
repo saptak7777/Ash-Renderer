@@ -2,20 +2,9 @@
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use ash::vk;
     use ash_renderer::renderer::resources::mesh::{MaterialProperties, Mesh};
-    use ash_renderer::renderer::{Material, Renderer};
+    use ash_renderer::renderer::Material;
     use std::collections::HashMap;
-
-    // Helper function to create a test renderer (mock for testing)
-    fn create_test_renderer() -> Renderer {
-        // Note: This would need a surface provider in real tests
-        // For now, we'll test the material registration logic separately
-        panic!(
-            "create_test_renderer needs actual Vulkan setup - use material_registry tests instead"
-        );
-    }
 
     #[test]
     fn test_mesh_material_properties_access() {
@@ -37,7 +26,7 @@ mod tests {
             "Material properties should be accessible"
         );
 
-        let props = mesh.material_properties.unwrap();
+        let props = mesh.material_properties.as_ref().unwrap();
         assert_eq!(props.metallic_factor, 1.0, "Metallic should be 1.0");
         assert_eq!(props.roughness_factor, 0.2, "Roughness should be 0.2");
         assert_eq!(
@@ -69,6 +58,7 @@ mod tests {
             occlusion_strength: props.occlusion_strength,
             normal_scale: props.normal_scale,
             alpha_cutoff: props.alpha_cutoff,
+            tint_index: -1,
         };
 
         // Verify properties were copied correctly
@@ -118,6 +108,10 @@ mod tests {
         );
 
         // Verify material is correct
+        assert!(
+            material_registry.contains_key(&selected_handle),
+            "Material should exist in registry"
+        );
         let selected_material = material_registry.get(&selected_handle).unwrap();
         assert_eq!(
             selected_material.metallic, 0.8,
@@ -129,7 +123,7 @@ mod tests {
     fn test_submesh_creation() {
         // Test submesh descriptor creation (Phase 3)
         let mut mesh = Mesh::create_cube();
-        mesh.name = "test_primitive".to_string();
+        mesh.name = "test_primitive".into();
 
         // Simulate GLB loader creating submesh
         let index_count = mesh.indices.as_ref().map_or(0, |i| i.len()) as u32;
@@ -149,7 +143,7 @@ mod tests {
         assert_eq!(submesh.start_index, 0, "Start index should be 0");
         assert_eq!(submesh.index_count, 36, "Cube should have 36 indices");
         assert_eq!(submesh.material_slot, 0, "Material slot should be 0");
-        assert_eq!(submesh.name, "test_primitive", "Name should match");
+        assert_eq!(&*submesh.name, "test_primitive", "Name should match");
     }
 
     #[test]
@@ -163,19 +157,19 @@ mod tests {
                 start_index: 0,
                 index_count: 12,
                 material_slot: 0,
-                name: "body".to_string(),
+                name: "body".into(),
             },
             ash_renderer::renderer::resources::mesh::SubmeshDescriptor {
                 start_index: 12,
                 index_count: 12,
                 material_slot: 1,
-                name: "wheels".to_string(),
+                name: "wheels".into(),
             },
             ash_renderer::renderer::resources::mesh::SubmeshDescriptor {
                 start_index: 24,
                 index_count: 12,
                 material_slot: 2,
-                name: "windows".to_string(),
+                name: "windows".into(),
             },
         ];
 
@@ -254,7 +248,7 @@ mod tests {
     fn test_glb_loader_simulation() {
         // Simulate what the GLB loader does (Phase 3)
         let mut mesh = Mesh::create_cube();
-        mesh.name = "glb_primitive".to_string();
+        mesh.name = "glb_primitive".into();
 
         // Simulate GLB material properties
         mesh.material_properties = Some(MaterialProperties {
@@ -284,7 +278,7 @@ mod tests {
         );
         assert_eq!(mesh.submeshes.len(), 1, "Should have one submesh");
 
-        let props = mesh.material_properties.unwrap();
+        let props = mesh.material_properties.as_ref().unwrap();
         assert_eq!(props.metallic_factor, 0.6, "Metallic should be 0.6");
         assert_eq!(props.roughness_factor, 0.4, "Roughness should be 0.4");
     }
@@ -320,6 +314,7 @@ mod tests {
             occlusion_strength: props.occlusion_strength,
             normal_scale: props.normal_scale,
             alpha_cutoff: props.alpha_cutoff,
+            tint_index: -1,
         };
 
         material_registry.insert(mesh_handle, material);
@@ -340,6 +335,10 @@ mod tests {
         );
 
         // Test retrieval
+        assert!(
+            material_registry.contains_key(&mesh_handle),
+            "Material should be registered"
+        );
         let registered_material = material_registry.get(&mesh_handle).unwrap();
         assert_eq!(
             registered_material.metallic, 0.95,
@@ -515,6 +514,10 @@ mod tests {
             selected_handle, 50,
             "Fallback failed: should have selected mesh's material"
         );
+        assert!(
+            material_registry.contains_key(&selected_handle),
+            "Material should exist for selected handle"
+        );
         let material = material_registry.get(&selected_handle).unwrap();
         assert_eq!(material.name, "auto_material");
     }
@@ -526,7 +529,7 @@ mod tests {
 
         // 1. Load GLB (simulated)
         let mut mesh = Mesh::create_cube();
-        mesh.name = "test_model".to_string();
+        mesh.name = "test_model".into();
         mesh.material_properties = Some(MaterialProperties {
             base_color_factor: [0.3, 0.6, 0.9, 1.0],
             metallic_factor: 0.7,
@@ -562,6 +565,7 @@ mod tests {
                 occlusion_strength: props.occlusion_strength,
                 normal_scale: props.normal_scale,
                 alpha_cutoff: props.alpha_cutoff,
+                tint_index: -1,
             };
 
             material_registry.insert(mesh_handle, material);

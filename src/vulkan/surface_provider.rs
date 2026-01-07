@@ -20,6 +20,71 @@ pub trait SurfaceProvider {
 
     /// Get the physical size of the surface in pixels.
     fn physical_size(&self) -> (u32, u32);
+
+    /// Returns true if the surface is headless (off-screen).
+    fn is_headless(&self) -> bool {
+        false
+    }
+}
+
+/// Headless surface provider for off-screen rendering
+pub struct HeadlessSurfaceProvider {
+    width: u32,
+    height: u32,
+}
+
+impl HeadlessSurfaceProvider {
+    pub fn new(width: u32, height: u32) -> Self {
+        Self { width, height }
+    }
+}
+
+impl SurfaceProvider for HeadlessSurfaceProvider {
+    fn required_extensions(&self) -> Vec<*const i8> {
+        vec![
+            ash::khr::surface::NAME.as_ptr(),
+            ash::ext::headless_surface::NAME.as_ptr(),
+        ]
+    }
+
+    unsafe fn create_surface(&self, entry: &Entry, instance: &Instance) -> Result<vk::SurfaceKHR> {
+        let available_extensions = entry
+            .enumerate_instance_extension_properties(None)
+            .map_err(|e| {
+                AshError::DeviceInitFailed(format!(
+                    "Failed to enumerate instance extensions: {e:?}"
+                ))
+            })?;
+
+        let has_headless = available_extensions.iter().any(|ext| {
+            std::ffi::CStr::from_ptr(ext.extension_name.as_ptr())
+                == ash::ext::headless_surface::NAME
+        });
+
+        if !has_headless {
+            return Err(AshError::DeviceInitFailed(
+                "VK_EXT_headless_surface extension is required for headless rendering but is not available on this system. \
+                 Please ensure your Vulkan driver supports this extension.".to_string()
+            ));
+        }
+
+        let headless_loader = ash::ext::headless_surface::Instance::new(entry, instance);
+        let create_info = vk::HeadlessSurfaceCreateInfoEXT::default();
+
+        headless_loader
+            .create_headless_surface(&create_info, None)
+            .map_err(|e| {
+                AshError::DeviceInitFailed(format!("Failed to create headless surface: {e:?}"))
+            })
+    }
+
+    fn physical_size(&self) -> (u32, u32) {
+        (self.width, self.height)
+    }
+
+    fn is_headless(&self) -> bool {
+        true
+    }
 }
 
 /// Standard window-based surface provider using `winit`.

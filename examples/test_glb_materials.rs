@@ -65,7 +65,7 @@ impl ApplicationHandler for App {
                                         );
 
                                         // Check if material was registered
-                                        if renderer.material_registry().contains_key(&handle) {
+                                        if renderer.material_registry().get(handle).is_some() {
                                             log::info!(
                                                 "✅ Material registered for mesh '{}' (handle {})",
                                                 mesh.name,
@@ -108,7 +108,7 @@ impl ApplicationHandler for App {
                         log::info!("Test cube registered with material properties");
 
                         // Check if material was registered
-                        if renderer.material_registry().contains_key(&1) {
+                        if renderer.material_registry().get(1).is_some() {
                             log::info!("✅ Material registered for test cube");
                         } else {
                             log::warn!("❌ No material registered for test cube");
@@ -142,7 +142,7 @@ impl ApplicationHandler for App {
             WindowEvent::RedrawRequested => {
                 if let (Some(renderer), Some(window)) = (&mut self.renderer, &self.window) {
                     // Simple camera setup
-                    let elapsed = self.start_time.elapsed().as_secs_f32();
+                    let _elapsed = self.start_time.elapsed().as_secs_f32();
                     let size = window.inner_size();
                     let aspect = size.width as f32 / size.height as f32;
 

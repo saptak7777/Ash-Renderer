@@ -12,6 +12,7 @@ pub mod descriptor_manager;
 pub mod descriptor_set;
 pub mod device;
 pub mod framebuffer;
+pub mod ibl_descriptor;
 pub mod instance;
 pub mod light_culling_pipeline;
 #[cfg(feature = "parallel")]
@@ -25,6 +26,8 @@ pub mod surface_provider;
 pub mod swapchain;
 pub mod sync;
 pub mod utils;
+
+pub use ibl_descriptor::{IBLDescriptorSet, IBLResources};
 
 pub use allocator::Allocator;
 pub use buffer_builder::BufferBuilder;
@@ -45,6 +48,6 @@ pub use pipeline_layout::{PipelineLayout, PipelineLayoutBuilder};
 pub use pipeline_state::PipelineState;
 pub use renderpass::{RenderPass, RenderPassBuilder};
 pub use shader::{ShaderModule, ShaderReflection};
-pub use surface_provider::{SurfaceProvider, WindowSurfaceProvider};
+pub use surface_provider::{HeadlessSurfaceProvider, SurfaceProvider, WindowSurfaceProvider};
 pub use swapchain::SwapchainWrapper;
 pub use sync::FrameSync;

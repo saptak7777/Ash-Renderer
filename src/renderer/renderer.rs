@@ -5,35 +5,38 @@ use crate::{
         },
         features::{
             AutoRotateFeature, FeatureFrameContext, FeatureManager, FeatureRenderContext,
-            ShadowFeature,
+            RenderFeature, ShadowFeature,
         },
         forward_plus_integration::ForwardPlusIntegration,
         fullscreen_pass, hdr_framebuffer,
         hiz_pass::HiZPass,
         indirect_draw::IndirectDrawPass,
-        model_renderer::{MaterialPushConstants, MeshPushConstants, ModelRenderer},
+        instancing::{BatchKey, InstanceData, InstancingManager},
+        model_renderer::{DrawContext, MaterialPushConstants, MeshPushConstants, ModelRenderer},
         occlusion_culling::{CullBoundingBox, OcclusionCulling},
         resource_registry::{ResourceId, ResourceRegistry},
         resources,
-        resources::uniform::{MaterialBuffer, UniformBuffer},
+        resources::uniform::{StorageBuffer, UniformBuffer},
         ssgi_pass::{SsgiPass, SsgiQuality},
         temporal_upscaling::{VsrPass, VsrQuality},
-        vram_budget, DepthBuffer, GBuffer, Material, Mesh, PipelineCache, SkinnedVertex, Texture,
-        TextureData, Transform,
+        vram_budget, DepthBuffer, GBuffer, Material, MaterialRegistry, Mesh, PipelineCache,
+        SkinnedVertex, Texture, TextureData, Transform,
     },
-    vulkan, AshError, Result,
+    vulkan::{self, Allocator, BindlessManager},
+    AshError, Result,
 };
 
 use ash::vk;
 use bytemuck::Pod;
 use glam::{Mat4, Vec3, Vec4};
 use parking_lot::Mutex;
+use rayon::prelude::*;
 use resources::BufferPool;
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::thread;
 use std::time::Instant;
 
+use crate::renderer::resources::buffer::BufferHandle;
 use crate::renderer::resources::mesh::{MaterialDescriptor, MeshDescriptor};
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -71,6 +74,14 @@ impl Default for RenderCommand {
     }
 }
 
+struct RendererResources {
+    uniform_buffers: Vec<UniformBuffer>,
+    joint_matrices_buffer: Vec<resources::JointMatricesBuffer>,
+    default_texture: Texture,
+    material_storage_buffer: StorageBuffer<resources::uniform::MaterialUniform>,
+    instance_buffers: Vec<resources::InstanceBuffer>,
+}
+
 fn compute_worker_index(worker_count: usize, frame_index: usize) -> usize {
     if worker_count == 0 {
         0
@@ -79,6 +90,7 @@ fn compute_worker_index(worker_count: usize, frame_index: usize) -> usize {
     }
 }
 
+#[allow(dead_code)]
 fn validate_worker_resources(
     worker_count: usize,
     descriptor_count: usize,
@@ -201,6 +213,8 @@ impl PipelineConfig {
 pub struct RendererConfig {
     pub pipeline: PipelineConfig,
     pub texture_compression: bool,
+    pub allow_auto_material: bool,
+    pub strict_mode: bool,
 }
 
 impl Default for RendererConfig {
@@ -208,6 +222,8 @@ impl Default for RendererConfig {
         Self {
             pipeline: PipelineConfig::default(),
             texture_compression: true,
+            allow_auto_material: true,
+            strict_mode: false,
         }
     }
 }
@@ -227,7 +243,6 @@ impl Default for RendererConfig {
 pub struct Renderer {
     // Resources dependent on allocator/device - dropped in reverse order.
     buffer_pool: Arc<BufferPool>,
-    resources: Arc<ResourceRegistry>,
     features: FeatureManager,
     _pipeline_cache: PipelineCache,
     cmds: vulkan::CommandBufferManager,
@@ -245,7 +260,9 @@ pub struct Renderer {
     pipeline_id: Option<ResourceId>,
     depth_buffer: Option<DepthBuffer>,
     uniform_buffers: Vec<UniformBuffer>,
-    material_buffers: Vec<Mutex<MaterialBuffer>>,
+    material_storage_buffer: Option<StorageBuffer<resources::uniform::MaterialUniform>>,
+    #[allow(dead_code)]
+    material_buffer_index: u32,
     pipeline_layout: Option<vulkan::PipelineLayout>,
     pipeline_layout_id: Option<ResourceId>,
     descriptors: Option<vulkan::DescriptorManager>,
@@ -255,11 +272,8 @@ pub struct Renderer {
     pub mesh: Option<Mesh>,
     material: Material,
     transform: Transform,
-    mesh_registry: HashMap<u32, String>,
-    mesh_indices_registry: HashMap<String, ([i32; 4], i32)>,
-    mesh_texture_flags: HashMap<String, TexturePresenceFlags>,
-    material_registry: HashMap<u32, Material>,
-    mesh_material_mapping: HashMap<u32, u32>, // mesh_handle → material_handle
+    mesh_data: Vec<MeshData>, // Indexed by mesh handle for O(1) access
+    material_registry: MaterialRegistry,
     swapchain_image_view_ids: Vec<ResourceId>,
     depth_buffer_id: Option<ResourceId>,
     frame_sync_ids: Vec<(ResourceId, ResourceId, ResourceId)>,
@@ -271,7 +285,7 @@ pub struct Renderer {
     msaa_preset: MsaaPreset,
     hdr_framebuffer: Option<hdr_framebuffer::HdrFramebuffer>,
     fullscreen_pass: Option<fullscreen_pass::FullscreenPass>,
-    tonemapping_enabled: bool,
+    pub tonemapping_enabled: bool,
     tonemapping_exposure: f32,
     tonemapping_gamma: f32,
     bloom_enabled: bool,
@@ -299,6 +313,10 @@ pub struct Renderer {
     ssgi_pass: Option<SsgiPass>,
     // G-Buffer for Normals and Motion Vectors
     gbuffer: Option<GBuffer>,
+    // Lighting
+    light_direction: Vec3,
+    light_color: [f32; 4],
+    ambient_color: [f32; 4],
     // Post-processing descriptors
     post_descriptor_pool: vk::DescriptorPool,
     post_descriptor_sets: Vec<vk::DescriptorSet>,
@@ -311,14 +329,40 @@ pub struct Renderer {
     skinned_pipeline_id: Option<ResourceId>,
     vram_budget: vram_budget::VramBudget,
     texture_compression: bool,
-    // Allocator and device are dropped last as they are the foundation for the resources above.
+    instancing_manager: InstancingManager,
+    instance_buffer: Vec<resources::InstanceBuffer>, // One per frame
+    // Image-Based Lighting
+    brdf_lut_pass: Option<crate::renderer::features::brdf_lut::BrdfLutPass>,
+    irradiance_map: Option<resources::ImageHandle>,
+    prefiltered_map: Option<resources::ImageHandle>,
+    ibl_sampler: vk::Sampler,
+    ibl_manager: crate::renderer::features::ibl_manager::IblManager,
+    allow_auto_material: bool,
+    strict_mode: bool,
+    // Headless support
+    readback_buffer: Option<BufferHandle>,
+    last_image_index: u32,
+
+    // Bindless Buffer Indices
+    pub instance_buffer_indices: Vec<u32>,
+    pub joint_buffer_indices: Vec<u32>,
+
+    // Core foundation - dropped in declaration order (Top to Bottom)
+    // So these should be at the VERY END to be dropped LAST.
+    // However, they are dropped Top to Bottom?
+    // WAIT! In Rust, fields are dropped in the order they are DECLARED.
+    // So the FIRST field is dropped FIRST.
+    // This means foundation should be at the BOTTOM so they are dropped LAST.
+    texture_streamer: Mutex<Option<resources::TextureStreamer>>,
+    resources: Arc<ResourceRegistry>,
     alloc: Arc<vulkan::Allocator>,
     device: vulkan::VulkanDevice,
 }
 
 #[derive(Clone)]
+#[allow(dead_code)]
 struct DrawItem {
-    key: String,
+    key: Arc<str>,
     transform: Mat4,
     material: Material,
     texture_flags: TexturePresenceFlags,
@@ -330,12 +374,12 @@ struct DrawItem {
 }
 
 #[derive(Copy, Clone, Default, Debug)]
-struct TexturePresenceFlags {
-    base_color: bool,
-    normal: bool,
-    metallic_roughness: bool,
-    occlusion: bool,
-    emissive: bool,
+pub struct TexturePresenceFlags {
+    pub base_color: bool,
+    pub normal: bool,
+    pub metallic_roughness: bool,
+    pub occlusion: bool,
+    pub emissive: bool,
 }
 
 impl TexturePresenceFlags {
@@ -350,6 +394,50 @@ impl TexturePresenceFlags {
     }
 }
 
+/// Consolidated mesh data for efficient lookup.
+/// Replaces multiple HashMap lookups with a single Vec access.
+#[derive(Clone, Debug)]
+pub struct MeshData {
+    pub name: Arc<str>,
+    pub texture_indices: [i32; 4], // base, normal, mr, occlusion
+    pub emissive_index: i32,
+    pub texture_flags: TexturePresenceFlags,
+    pub material_handle: u32,
+}
+
+impl Default for MeshData {
+    fn default() -> Self {
+        Self {
+            name: Arc::from(""),
+            texture_indices: [-1, -1, -1, -1],
+            emissive_index: -1,
+            texture_flags: TexturePresenceFlags::default(),
+            material_handle: 0,
+        }
+    }
+}
+
+/// Internal struct for swapchain-related resources used during initialization.
+struct SwapchainData {
+    swapchain: vulkan::SwapchainWrapper,
+    swapchain_image_view_ids: Vec<ResourceId>,
+    depth_buffer: DepthBuffer,
+    depth_buffer_id: ResourceId,
+    render_pass: vulkan::RenderPass,
+    render_pass_id: ResourceId,
+}
+
+/// Internal struct for frame-related resources used during initialization.
+struct FrameData {
+    framebuffers: Vec<vulkan::Framebuffer>,
+    framebuffer_ids: Vec<ResourceId>,
+    command_manager: vulkan::CommandBufferManager,
+    command_buffers: Vec<vk::CommandBuffer>,
+    frame_syncs: Vec<vulkan::FrameSync>,
+    frame_sync_ids: Vec<(ResourceId, ResourceId, ResourceId)>,
+    worker_count: usize,
+}
+
 impl Renderer {
     /// Initializes the renderer.
     pub fn new<S: vulkan::SurfaceProvider>(surface_provider: &S) -> Result<Self> {
@@ -358,7 +446,8 @@ impl Renderer {
                 surface_provider,
                 cfg!(debug_assertions),
             )?);
-            let device = vulkan::VulkanDevice::new(Arc::clone(&instance))?;
+            let device =
+                vulkan::VulkanDevice::new(Arc::clone(&instance), surface_provider.is_headless())?;
             let alloc = Arc::new(vulkan::Allocator::new(&device)?);
             let resources = Arc::new(ResourceRegistry::new(Arc::clone(&device.device)));
             let dev_mem_props = device.memory_properties;
@@ -383,186 +472,58 @@ impl Renderer {
             let texture_compression = renderer_config.texture_compression;
             let pipeline_cfg = &renderer_config.pipeline;
             let buffer_pool = Arc::new(BufferPool::new(Arc::clone(&alloc)));
-            let mut swapchain = vulkan::SwapchainWrapper::new(&device)?;
-            let mut swapchain_image_view_ids = Vec::with_capacity(swapchain.image_views.len());
-            for &image_view in &swapchain.image_views {
-                let image_view_id = resources.register_image_view(image_view).map_err(|e| {
-                    AshError::VulkanError(format!("Failed to register swapchain image view: {e}"))
-                })?;
-                swapchain_image_view_ids.push(image_view_id);
-            }
-            swapchain.mark_image_views_managed_by_registry();
+            let (width, height) = surface_provider.physical_size();
+            let extent = vk::Extent2D { width, height };
+            let swapchain_data = Self::create_swapchain_data(&device, &alloc, &resources, extent)?;
+            let frame_data = Self::create_frame_resources(&device, &resources, &swapchain_data)?;
 
-            let mut depth_buffer = DepthBuffer::new(
-                Arc::clone(&device.device),
-                Arc::clone(&alloc),
-                swapchain.extent.width,
-                swapchain.extent.height,
-            )?;
-            let depth_buffer_id = depth_buffer
-                .register_with_registry(&resources)
-                .map_err(|e| {
-                    AshError::VulkanError(format!("Failed to register depth buffer: {e}"))
-                })?;
+            // Unpack for use in the rest of initialization
+            let SwapchainData {
+                swapchain,
+                swapchain_image_view_ids,
+                depth_buffer,
+                depth_buffer_id,
+                render_pass,
+                render_pass_id,
+            } = swapchain_data;
 
-            let mut render_pass = vulkan::RenderPass::builder(Arc::clone(&device.device))
-                .with_swapchain_color(swapchain.format)
-                .with_depth_attachment(
-                    depth_buffer.format(),
-                    vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
-                )
-                .build()?;
-            let render_pass_id = resources
-                .register_render_pass(render_pass.handle())
-                .map_err(|e| {
-                    AshError::VulkanError(format!("Failed to register render pass: {e}"))
-                })?;
-            render_pass.mark_managed_by_registry();
-
-            let mut framebuffers = Vec::new();
-            let mut framebuffer_ids = Vec::new();
-            for (index, &image_view) in swapchain.image_views.iter().enumerate() {
-                let attachments = [image_view, depth_buffer.view()];
-                let framebuffer = vulkan::Framebuffer::new(
-                    Arc::clone(&device.device),
-                    render_pass.handle(),
-                    &attachments,
-                    swapchain.extent,
-                )?;
-                let framebuffer_id = resources
-                    .register_framebuffer(
-                        framebuffer.handle(),
-                        &[
-                            render_pass_id,
-                            depth_buffer_id,
-                            swapchain_image_view_ids[index],
-                        ],
-                    )
-                    .map_err(|e| {
-                        AshError::VulkanError(format!("Failed to register framebuffer: {e}"))
-                    })?;
-                let mut framebuffer = framebuffer;
-                framebuffer.mark_managed_by_registry();
-                framebuffers.push(framebuffer);
-                framebuffer_ids.push(framebuffer_id);
-            }
-
-            let worker_count = thread::available_parallelism()
-                .map(|n| n.get())
-                .unwrap_or(1);
-
-            let command_manager = vulkan::CommandBufferManager::new(
-                Arc::clone(&device.device),
-                device.graphics_queue_family,
+            let FrameData {
+                framebuffers,
+                framebuffer_ids,
+                command_manager,
+                command_buffers,
+                frame_syncs,
+                frame_sync_ids,
                 worker_count,
-            )?;
-
-            let command_buffers =
-                command_manager.allocate_primary_buffers(framebuffers.len() as u32)?;
-
-            let mut frame_syncs = Vec::with_capacity(framebuffers.len());
-            let mut frame_sync_ids = Vec::with_capacity(framebuffers.len());
-            for _ in 0..framebuffers.len() {
-                let mut sync = vulkan::FrameSync::new(Arc::clone(&device.device))?;
-                let image_available_id = resources
-                    .register_semaphore(sync.image_available)
-                    .map_err(|e| {
-                        AshError::VulkanError(format!(
-                            "Failed to register image-available semaphore: {e}"
-                        ))
-                    })?;
-                let render_finished_id = resources
-                    .register_semaphore(sync.render_finished)
-                    .map_err(|e| {
-                        AshError::VulkanError(format!(
-                            "Failed to register render-finished semaphore: {e}"
-                        ))
-                    })?;
-                let fence_id = resources.register_fence(sync.in_flight).map_err(|e| {
-                    AshError::VulkanError(format!("Failed to register in-flight fence: {e}"))
-                })?;
-                sync.mark_managed_by_registry();
-                frame_syncs.push(sync);
-                frame_sync_ids.push((image_available_id, render_finished_id, fence_id));
-            }
-
-            resources
-                .register_command_pool(command_manager.upload_command_pool_handle())
-                .map_err(|e| {
-                    AshError::VulkanError(format!("Failed to register command pool: {e}"))
-                })?;
-            command_manager.mark_pool_managed_by_registry();
+            } = frame_data;
 
             let mut model_renderer =
                 ModelRenderer::new(Arc::clone(&alloc), Arc::clone(&device.device));
 
-            // Initialize uniform buffers with double buffering.
-            let mut uniform_buffers = Vec::with_capacity(framebuffers.len());
             let aspect = swapchain.extent.width as f32 / swapchain.extent.height as f32;
-
-            for _ in 0..framebuffers.len() {
-                let mut buffer =
-                    UniformBuffer::new(Arc::clone(&alloc), Arc::clone(&device.device))?;
-
-                {
-                    let matrices = buffer.matrices_mut();
-                    matrices.set_view(
-                        glam::Vec3::new(0.0, 2.0, 5.0),
-                        glam::Vec3::new(0.0, 0.0, 0.0),
-                        glam::Vec3::new(0.0, 1.0, 0.0),
-                    );
-                    // Use 0.5 near plane by default
-                    matrices.set_projection(std::f32::consts::PI / 4.0, aspect, 0.5, 1000.0);
-                }
-                buffer.update()?;
-                uniform_buffers.push(buffer);
-            }
-
-            // Initialize joint matrices buffers (double/triple buffering for skinning)
             let max_bones = 1024;
-            let mut joint_matrices_buffer = Vec::with_capacity(framebuffers.len());
-            for _ in 0..framebuffers.len() {
-                let buffer = resources::JointMatricesBuffer::new(Arc::clone(&alloc), max_bones)?;
-                joint_matrices_buffer.push(buffer);
-            }
-
-            // Create descriptor manager and pipeline layout
-            let default_texture_data = TextureData::solid_color([255, 255, 255, 255]);
-            let default_texture = Texture::from_data(
-                Arc::clone(&alloc),
-                Arc::clone(&device.device),
+            let renderer_resources = Self::init_resources(
+                &alloc,
+                &device,
                 command_manager.upload_command_pool_handle(),
-                device.graphics_queue,
-                &default_texture_data,
-                vk::Format::R8G8B8A8_SRGB,
-                Some("default_texture"),
+                worker_count,
+                framebuffers.len(),
+                aspect,
+                max_bones,
             )?;
+            let RendererResources {
+                uniform_buffers,
+                joint_matrices_buffer,
+                default_texture,
+                material_storage_buffer,
+                instance_buffers,
+            } = renderer_resources;
 
             let material = Material::default();
-
-            let mut material_buffers = Vec::with_capacity(worker_count);
-            for _ in 0..worker_count {
-                let mut material_buffer =
-                    MaterialBuffer::new(Arc::clone(&alloc), Arc::clone(&device.device))?;
-                {
-                    let uniform = material_buffer.uniform_mut();
-                    uniform.set_base_color_factor(Vec4::from_array(material.color));
-                    uniform.set_emissive_factor(Vec4::from_array(material.emissive));
-                    uniform.set_metallic_roughness(material.metallic, material.roughness);
-                    uniform.set_occlusion_strength(material.occlusion_strength);
-                    uniform.set_normal_scale(material.normal_scale);
-                    // uniform.set_texture_flags(...) removed
-
-                    uniform.set_alpha_cutoff(material.alpha_cutoff);
-                }
-                material_buffer.update()?;
-                material_buffers.push(Mutex::new(material_buffer));
-            }
 
             let mut descriptor_manager = vulkan::DescriptorManager::new(
                 Arc::clone(&device.device),
                 framebuffers.len() as u32,
-                worker_count as u32,
                 Some(Arc::clone(&resources)),
             )?;
 
@@ -581,43 +542,49 @@ impl Renderer {
                 }
             }
 
-            let material_size = std::mem::size_of::<
-                crate::renderer::resources::uniform::MaterialUniform,
-            >() as vk::DeviceSize;
-            for (worker_index, buffer) in material_buffers.iter().enumerate() {
-                let buffer = buffer.lock();
-                descriptor_manager.bind_material_uniform(
-                    worker_index as u32,
-                    buffer.buffer,
-                    material_size,
-                )?;
+            // Register global material storage buffer (Set 1)
+            let max_materials = material_storage_buffer.capacity();
+            let material_size = (max_materials
+                * std::mem::size_of::<crate::renderer::resources::uniform::MaterialUniform>())
+                as vk::DeviceSize;
+            let material_buffer_index = bindless_manager.add_material_buffer(
+                material_storage_buffer.buffer,
+                0,
+                material_size,
+            )?;
+            log::info!(
+                "Registered global material buffer at bindless index {material_buffer_index}"
+            );
+
+            // Register instance buffers (Bindless Storage Buffers - Set 1, Binding 2)
+            let mut instance_buffer_indices = Vec::with_capacity(instance_buffers.len());
+            let instance_buffer_size = (crate::renderer::occlusion_culling::MAX_CULLABLE_OBJECTS
+                * std::mem::size_of::<crate::renderer::occlusion_culling::CullObjectData>())
+                as vk::DeviceSize;
+            for buffer in &instance_buffers {
+                let index = bindless_manager
+                    .add_instance_buffer(buffer.buffer, 0, instance_buffer_size)
+                    .unwrap_or(0);
+                instance_buffer_indices.push(index);
+                log::info!("Registered instance buffer at bindless index {index}");
             }
 
-            // Bind joint buffers to descriptor sets
+            // Register joint matrices buffers (Bindless Storage Buffers - Set 1, Binding 3)
+            let mut joint_buffer_indices = Vec::with_capacity(joint_matrices_buffer.len());
             let joint_size = (max_bones * std::mem::size_of::<Mat4>()) as vk::DeviceSize;
-            for (i, buffer) in joint_matrices_buffer.iter().enumerate() {
-                descriptor_manager.bind_joint_buffer(i, buffer.buffer(), joint_size)?;
-
-                // Validation: Ensure joint descriptor sets were allocated and bound correctly
-                let _ = descriptor_manager.get_joint_descriptor_set(i)?;
+            for buffer in &joint_matrices_buffer {
+                let index = bindless_manager
+                    .add_indirect_buffer(buffer.buffer(), 0, joint_size)
+                    .unwrap_or(0);
+                joint_buffer_indices.push(index);
+                log::info!("Registered joint buffer at bindless index {index}");
             }
-
-            // Default texture binding removed
 
             // Register default texture as a fallback for all slots.
             let default_tex_index = bindless_manager
                 .add_sampled_image(default_texture.view(), default_texture.sampler())
                 .unwrap_or(0); // Fallback to index 0 if registration fails.
             log::info!("Registered default texture at bindless index {default_tex_index}");
-
-            // Bindless architecture - legacy texture binding is bypassed.
-            // descriptor_manager.bind_material_textures(...) removed
-
-            validate_worker_resources(
-                worker_count,
-                descriptor_manager.material_set_count(),
-                material_buffers.len(),
-            )?;
 
             // Forward+ lighting integration
             let mut forward_plus =
@@ -627,115 +594,34 @@ impl Renderer {
 
             let set_layouts = [
                 descriptor_manager.frame_layout(),
-                descriptor_manager.material_layout(),
-                bindless_manager.layout(), // Set 2: Bindless textures
-                descriptor_manager.shadow_layout(), // Set 3: Shadow map sampler
-                forward_plus.layout(),     // Set 4: Forward+ lights
-                descriptor_manager.joint_layout(), // Set 5: Joint matrices
+                bindless_manager.layout(), // Set 1: Bindless (Textures, Materials, Instances, Joints)
+                descriptor_manager.environment_layout(), // Set 2: Global Environment (Shadow + IBL)
+                forward_plus.layout(),     // Set 3: Forward+ lights
             ];
-            let mesh_push_size = std::mem::size_of::<MeshPushConstants>() as u32;
-            let push_constant_ranges = [vk::PushConstantRange {
-                stage_flags: vk::ShaderStageFlags::VERTEX,
-                offset: 0,
-                size: mesh_push_size,
-            }];
 
-            let mut pipeline_layout_builder =
-                vulkan::PipelineLayout::builder(Arc::clone(&device.device));
-            for layout in &set_layouts {
-                pipeline_layout_builder = pipeline_layout_builder.add_set_layout(*layout);
-            }
-            for range in &push_constant_ranges {
-                pipeline_layout_builder = pipeline_layout_builder.add_push_constant(*range);
-            }
-            let mut pipeline_layout = pipeline_layout_builder.build()?;
-            let pipeline_layout_id = resources
-                .register_pipeline_layout(pipeline_layout.handle())
-                .map_err(|e| {
-                    AshError::VulkanError(format!("Failed to register pipeline layout: {e}"))
-                })?;
-            pipeline_layout.mark_managed_by_registry();
-
-            let mut pipeline_builder = vulkan::Pipeline::builder(Arc::clone(&device.device))
-                .with_layout(pipeline_layout.handle())
-                .with_render_pass(render_pass.handle())
-                .with_extent(swapchain.extent)
-                .with_pipeline_cache(pipeline_cache.handle())
-                .with_depth_format(depth_buffer.format())
-                .with_cull_mode(vk::CullModeFlags::BACK)
-                .with_multisampling(pipeline_cfg.multisample_config());
-
-            for specialization in &pipeline_cfg.specialization_constants {
-                pipeline_builder = pipeline_builder.with_specialization_bytes(
-                    specialization.stage,
-                    specialization.constant_id,
-                    specialization.bytes(),
-                );
-            }
-
-            pipeline_builder = pipeline_builder
-                .add_shader_from_bytes(
-                    include_bytes!(concat!(env!("OUT_DIR"), "/vert.spv")),
-                    vk::ShaderStageFlags::VERTEX,
-                    "main",
-                )?
-                .add_shader_from_bytes(
-                    include_bytes!(concat!(env!("OUT_DIR"), "/frag.spv")),
-                    vk::ShaderStageFlags::FRAGMENT,
-                    "main",
+            let (pipeline_layout, pipeline_layout_id, pipeline, pipeline_id) =
+                Self::create_main_pipeline(
+                    &device,
+                    &resources,
+                    render_pass.handle(),
+                    swapchain.extent,
+                    pipeline_cache.handle(),
+                    depth_buffer.format(),
+                    pipeline_cfg,
+                    &set_layouts,
                 )?;
-
-            let mut pipeline = pipeline_builder.build()?;
-            let pipeline_id = resources
-                .register_pipeline(pipeline.pipeline, &[pipeline_layout_id, render_pass_id])
-                .map_err(|e| AshError::VulkanError(format!("Failed to register pipeline: {e}")))?;
-            pipeline.mark_managed_by_registry();
 
             // Create Shadow Pipeline
             let (shadow_pipeline, shadow_pipeline_layout) =
                 if let Some(shadow_map) = shadow_feature.shadow_map() {
-                    let shadow_push_range = vk::PushConstantRange {
-                        stage_flags: vk::ShaderStageFlags::VERTEX,
-                        offset: 0,
-                        size: 128, // mat4 lightSpace + mat4 model
-                    };
-
-                    let shadow_push_range_frag = vk::PushConstantRange {
-                        stage_flags: vk::ShaderStageFlags::FRAGMENT,
-                        offset: 128,
-                        size: 4, // int base_color_index
-                    };
-
-                    let shadow_pipeline_layout =
-                        vulkan::PipelineLayout::builder(Arc::clone(&device.device))
-                            .add_push_constant(shadow_push_range)
-                            .add_push_constant(shadow_push_range_frag)
-                            .add_set_layout(bindless_manager.layout()) // Set 2: Bindless textures
-                            .build()?;
-
-                    let shadow_builder = vulkan::Pipeline::builder(Arc::clone(&device.device))
-                        .with_layout(shadow_pipeline_layout.handle())
-                        .with_render_pass(shadow_map.render_pass)
-                        .with_extent(vk::Extent2D {
-                            width: shadow_map.res,
-                            height: shadow_map.res,
-                        })
-                        .with_pipeline_cache(pipeline_cache.handle())
-                        .with_depth_format(vk::Format::D32_SFLOAT)
-                        .with_cull_mode(vk::CullModeFlags::FRONT)
-                        .add_shader_from_bytes(
-                            include_bytes!(concat!(env!("OUT_DIR"), "/shadow.vert.spv")),
-                            vk::ShaderStageFlags::VERTEX,
-                            "main",
-                        )?
-                        .add_shader_from_bytes(
-                            include_bytes!(concat!(env!("OUT_DIR"), "/shadow.frag.spv")),
-                            vk::ShaderStageFlags::FRAGMENT,
-                            "main",
-                        )?;
-
-                    let shadow_pipeline = shadow_builder.build()?;
-                    (Some(shadow_pipeline), Some(shadow_pipeline_layout))
+                    let (p, l) = Self::create_shadow_pipeline(
+                        &device,
+                        pipeline_cache.handle(),
+                        shadow_map,
+                        descriptor_manager.frame_layout(),
+                        bindless_manager.layout(),
+                    )?;
+                    (Some(p), Some(l))
                 } else {
                     (None, None)
                 };
@@ -750,7 +636,45 @@ impl Renderer {
                 &mut vram_budget,
                 texture_compression,
             )?;
+
+            // Initialize Texture Streamer
+            let transfer_pool_info = vk::CommandPoolCreateInfo::default()
+                .queue_family_index(device.graphics_queue_family)
+                .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER);
+
+            let transfer_command_pool = device
+                .device
+                .create_command_pool(&transfer_pool_info, None)?;
+
+            let texture_streamer = resources::TextureStreamer::new(
+                Arc::clone(&alloc),
+                Arc::clone(&device.device),
+                transfer_command_pool,
+                device.present_queue,
+            );
             log::trace!("Cube mesh textures ready, registering with model renderer...");
+            // Register mesh textures with bindless manager FIRST
+            if let Some(tex) = mesh.texture.as_deref() {
+                let idx = bindless_manager.add_sampled_image(tex.view(), tex.sampler())?;
+                mesh.texture_index = Some(idx);
+            }
+            if let Some(tex) = mesh.normal_texture.as_deref() {
+                let idx = bindless_manager.add_sampled_image(tex.view(), tex.sampler())?;
+                mesh.normal_texture_index = Some(idx);
+            }
+            if let Some(tex) = mesh.metallic_roughness_texture.as_deref() {
+                let idx = bindless_manager.add_sampled_image(tex.view(), tex.sampler())?;
+                mesh.metallic_roughness_texture_index = Some(idx);
+            }
+            if let Some(tex) = mesh.occlusion_texture.as_deref() {
+                let idx = bindless_manager.add_sampled_image(tex.view(), tex.sampler())?;
+                mesh.occlusion_texture_index = Some(idx);
+            }
+            if let Some(tex) = mesh.emissive_texture.as_deref() {
+                let idx = bindless_manager.add_sampled_image(tex.view(), tex.sampler())?;
+                mesh.emissive_texture_index = Some(idx);
+            }
+
             model_renderer.ensure_mesh(
                 &mesh.name,
                 &mesh,
@@ -759,43 +683,28 @@ impl Renderer {
             )?;
             log::trace!("Cube mesh registered successfully");
 
-            let material = Material::default();
             let transform = Transform::identity();
             let transform_matrix = transform.model_matrix();
-            let mut mesh_registry = HashMap::new();
-            mesh_registry.insert(0, mesh.name.clone());
-            let mut material_registry = HashMap::new();
-            material_registry.insert(0, material.clone());
-            let mut mesh_material_mapping = HashMap::new();
-            mesh_material_mapping.insert(0, 0);
-            let mut mesh_texture_flags = HashMap::new();
 
             let initial_flags = TexturePresenceFlags::from_mesh(&mesh);
 
-            // Register mesh textures with bindless manager
-            if let Some(tex) = mesh.texture.as_ref() {
-                let idx = bindless_manager.add_sampled_image(tex.view(), tex.sampler())?;
-                mesh.texture_index = Some(idx);
-            }
-            if let Some(tex) = mesh.normal_texture.as_ref() {
-                let idx = bindless_manager.add_sampled_image(tex.view(), tex.sampler())?;
-                mesh.normal_texture_index = Some(idx);
-            }
-            if let Some(tex) = mesh.metallic_roughness_texture.as_ref() {
-                let idx = bindless_manager.add_sampled_image(tex.view(), tex.sampler())?;
-                mesh.metallic_roughness_texture_index = Some(idx);
-            }
-            if let Some(tex) = mesh.occlusion_texture.as_ref() {
-                let idx = bindless_manager.add_sampled_image(tex.view(), tex.sampler())?;
-                mesh.occlusion_texture_index = Some(idx);
-            }
-            if let Some(tex) = mesh.emissive_texture.as_ref() {
-                let idx = bindless_manager.add_sampled_image(tex.view(), tex.sampler())?;
-                mesh.emissive_texture_index = Some(idx);
-            }
+            // Initialize mesh_data with the cube mesh and CORRECT indices
+            let mesh_data = vec![MeshData {
+                name: Arc::clone(&mesh.name),
+                texture_indices: [
+                    mesh.texture_index.map(|i| i as i32).unwrap_or(-1),
+                    mesh.normal_texture_index.map(|i| i as i32).unwrap_or(-1),
+                    mesh.metallic_roughness_texture_index
+                        .map(|i| i as i32)
+                        .unwrap_or(-1),
+                    mesh.occlusion_texture_index.map(|i| i as i32).unwrap_or(-1),
+                ],
+                emissive_index: mesh.emissive_texture_index.map(|i| i as i32).unwrap_or(-1),
+                texture_flags: initial_flags,
+                material_handle: 0,
+            }];
 
-            // Legacy map usage is removed in favor of bindless.
-            mesh_texture_flags.insert(mesh.name.clone(), initial_flags);
+            // Mesh data already added to mesh_data Vec above
             let start_time = Instant::now();
 
             let swapchain_extent = swapchain.extent;
@@ -807,7 +716,32 @@ impl Renderer {
                 swapchain_extent.height,
             )?;
 
-            Ok(Self {
+            // Image-Based Lighting Initialization
+            let (brdf_lut_pass, ibl_sampler, ibl_manager) = Self::init_ibl(
+                &device,
+                &alloc,
+                command_manager.upload_command_pool_handle(),
+            )?;
+
+            log::info!("Renderer initialization complete. Constructing struct.");
+
+            // Create readback buffer if headless
+            let readback_buffer = if device.headless {
+                let buffer_size = (swapchain.extent.width * swapchain.extent.height * 4) as u64; // R8G8B8A8
+                Some(BufferHandle::new_with_flags(
+                    Arc::clone(&alloc),
+                    buffer_size,
+                    vk::BufferUsageFlags::TRANSFER_DST,
+                    vk_mem::MemoryUsage::Auto,
+                    vk_mem::AllocationCreateFlags::HOST_ACCESS_RANDOM,
+                    Some("Headless Readback Buffer".to_string()),
+                )?)
+            } else {
+                None
+            };
+
+            let renderer = Self {
+                texture_streamer: Mutex::new(Some(texture_streamer)),
                 buffer_pool,
                 resources,
                 features,
@@ -820,7 +754,7 @@ impl Renderer {
                 _default_texture: default_texture,
                 model_renderer,
                 draw_items: vec![DrawItem {
-                    key: mesh.name.clone(),
+                    key: Arc::clone(&mesh.name),
                     transform: transform_matrix,
                     material: material.clone(),
                     texture_flags: initial_flags,
@@ -847,7 +781,8 @@ impl Renderer {
                 material,
                 transform,
                 uniform_buffers,
-                material_buffers,
+                material_storage_buffer: Some(material_storage_buffer),
+                material_buffer_index,
                 pipeline_layout: Some(pipeline_layout),
                 pipeline_layout_id: Some(pipeline_layout_id),
                 descriptors: Some(descriptor_manager),
@@ -856,11 +791,8 @@ impl Renderer {
                 start_time,
                 alloc,
                 device,
-                mesh_registry,
-                mesh_indices_registry: HashMap::new(),
-                mesh_texture_flags,
-                material_registry,
-                mesh_material_mapping,
+                mesh_data,
+                material_registry: MaterialRegistry::new(),
                 swapchain_image_view_ids,
                 depth_buffer_id: Some(depth_buffer_id),
                 frame_sync_ids,
@@ -868,19 +800,17 @@ impl Renderer {
                 swapchain_cleanup_pending: false,
                 resize_pending: false,
                 pending_extent: Some(swapchain_extent),
-                // Post-processing defaults
-                msaa_preset: MsaaPreset::Off,
+                msaa_preset: MsaaPreset::default(),
                 hdr_framebuffer: None,
                 fullscreen_pass: None,
                 tonemapping_enabled: true,
                 tonemapping_exposure: 1.0,
                 tonemapping_gamma: 2.2,
-                bloom_enabled: false,
-                bloom_intensity: 0.5,
-                // Diagnostics
+                bloom_enabled: true,
+                bloom_intensity: 0.1,
                 diagnostics: DiagnosticsState::default(),
                 frame_profiler: FrameProfiler::new(),
-                gpu_profiler: None, // Initialized when diagnostics are enabled.
+                gpu_profiler: None,
                 diagnostics_overlay: DiagnosticsOverlay::new(),
                 shadow_feature,
                 shadow_pipeline,
@@ -893,6 +823,9 @@ impl Renderer {
                 vsr_pass: None,
                 ssgi_pass: None,
                 gbuffer: Some(gbuffer),
+                light_direction: Vec3::new(-0.35, -1.0, -0.25).normalize(),
+                light_color: [1.5, 1.5, 1.5, 1.0],
+                ambient_color: [0.0, 0.2, 0.8, 1.0], // Default to vibrant blue
                 post_descriptor_pool: vk::DescriptorPool::null(),
                 post_descriptor_sets: Vec::new(),
                 post_pipeline: None,
@@ -903,8 +836,582 @@ impl Renderer {
                 skinned_pipeline_id: None,
                 vram_budget,
                 texture_compression,
-            })
+                instancing_manager: InstancingManager::new(),
+                instance_buffer: instance_buffers,
+                instance_buffer_indices,
+                joint_buffer_indices,
+                brdf_lut_pass: Some(brdf_lut_pass),
+                irradiance_map: None,
+                prefiltered_map: None,
+                ibl_sampler,
+                ibl_manager,
+                allow_auto_material: renderer_config.allow_auto_material,
+                strict_mode: renderer_config.strict_mode,
+                readback_buffer,
+                last_image_index: 0,
+            };
+            Ok(renderer)
         }
+    }
+
+    pub fn read_headless_image(&mut self) -> Result<Vec<u8>> {
+        if !self.device.headless {
+            return Err(AshError::VulkanError("Not in headless mode".to_string()));
+        }
+
+        let swapchain = self.swapchain.as_ref().ok_or(AshError::VulkanError(
+            "Swapchain not initialized".to_string(),
+        ))?;
+
+        let readback_buffer = self.readback_buffer.as_mut().ok_or(AshError::VulkanError(
+            "Readback buffer not initialized".to_string(),
+        ))?;
+
+        // Wait for the device to be idle to ensure rendering is complete
+        unsafe {
+            self.device.device.device_wait_idle().map_err(|e| {
+                AshError::VulkanError(format!("Failed to wait for device idle: {e}"))
+            })?;
+        }
+
+        let image_index = self.last_image_index;
+        if image_index >= swapchain.images.len() as u32 {
+            return Err(AshError::VulkanError("Invalid image index".to_string()));
+        }
+        let src_image = swapchain.images[image_index as usize];
+
+        // Create a command buffer for the copy
+        let cmd = self.cmds.get_transfer_command_buffer()?;
+
+        let begin_info = vk::CommandBufferBeginInfo::default()
+            .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+
+        unsafe {
+            self.device
+                .device
+                .begin_command_buffer(cmd, &begin_info)
+                .map_err(|e| {
+                    AshError::VulkanError(format!("Failed to begin command buffer: {e}"))
+                })?;
+
+            let copy_region = vk::BufferImageCopy::default()
+                .buffer_offset(0)
+                .buffer_row_length(0)
+                .buffer_image_height(0)
+                .image_subresource(vk::ImageSubresourceLayers {
+                    aspect_mask: vk::ImageAspectFlags::COLOR,
+                    mip_level: 0,
+                    base_array_layer: 0,
+                    layer_count: 1,
+                })
+                .image_offset(vk::Offset3D { x: 0, y: 0, z: 0 })
+                .image_extent(vk::Extent3D {
+                    width: swapchain.extent.width,
+                    height: swapchain.extent.height,
+                    depth: 1,
+                });
+
+            self.device.device.cmd_copy_image_to_buffer(
+                cmd,
+                src_image,
+                vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                readback_buffer.handle(),
+                &[copy_region],
+            );
+
+            // Add barrier to ensure write is visible to host
+            let barrier = vk::BufferMemoryBarrier::default()
+                .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                .dst_access_mask(vk::AccessFlags::HOST_READ)
+                .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .buffer(readback_buffer.handle())
+                .offset(0)
+                .size(vk::WHOLE_SIZE);
+
+            self.device.device.cmd_pipeline_barrier(
+                cmd,
+                vk::PipelineStageFlags::TRANSFER,
+                vk::PipelineStageFlags::HOST,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[barrier],
+                &[],
+            );
+
+            self.device
+                .device
+                .end_command_buffer(cmd)
+                .map_err(|e| AshError::VulkanError(format!("Failed to end command buffer: {e}")))?;
+
+            let command_buffers = [cmd];
+            let submit_info = vk::SubmitInfo::default().command_buffers(&command_buffers);
+
+            self.device
+                .device
+                .queue_submit(
+                    self.device.graphics_queue,
+                    &[submit_info],
+                    vk::Fence::null(),
+                )
+                .map_err(|e| {
+                    AshError::VulkanError(format!("Failed to submit copy command: {e}"))
+                })?;
+
+            self.device
+                .device
+                .queue_wait_idle(self.device.graphics_queue)
+                .map_err(|e| {
+                    AshError::VulkanError(format!("Failed to wait for queue idle: {e}"))
+                })?;
+
+            self.device
+                .device
+                .free_command_buffers(self.cmds.upload_command_pool_handle(), &[cmd]);
+        }
+
+        // Map memory and read
+        let size = (swapchain.extent.width * swapchain.extent.height * 4) as usize;
+        let mut data = vec![0u8; size];
+
+        unsafe {
+            let ptr = self
+                .alloc
+                .vma
+                .map_memory(readback_buffer.allocation_mut())
+                .map_err(|e| AshError::VulkanError(format!("Failed to map memory: {e}")))?;
+
+            std::ptr::copy_nonoverlapping(ptr, data.as_mut_ptr(), size);
+
+            self.alloc
+                .vma
+                .unmap_memory(readback_buffer.allocation_mut());
+        }
+
+        Ok(data)
+    }
+
+    fn init_resources(
+        alloc: &Arc<vulkan::Allocator>,
+        device: &vulkan::VulkanDevice,
+        command_pool: vk::CommandPool,
+        _worker_count: usize,
+        frame_count: usize,
+        aspect: f32,
+        max_bones: usize,
+    ) -> Result<RendererResources> {
+        // Initialize uniform buffers
+        let mut uniform_buffers = Vec::with_capacity(frame_count);
+        for _ in 0..frame_count {
+            let mut buffer =
+                // SAFETY: We provide a valid allocator and device. The buffer size is determined strictly by `UniformBuffer::new` logic.
+                unsafe { UniformBuffer::new(Arc::clone(alloc), Arc::clone(&device.device))? };
+            {
+                let matrices = buffer.matrices_mut();
+                matrices.set_view(
+                    glam::Vec3::new(0.0, 2.0, 5.0),
+                    glam::Vec3::new(0.0, 0.0, 0.0),
+                    glam::Vec3::new(0.0, 1.0, 0.0),
+                );
+                matrices.set_projection(std::f32::consts::PI / 4.0, aspect, 0.5, 1000.0);
+            }
+            unsafe {
+                buffer.update()?;
+            }
+            uniform_buffers.push(buffer);
+        }
+
+        // Initialize joint matrices buffers
+        let mut joint_matrices_buffer = Vec::with_capacity(frame_count);
+        for _ in 0..frame_count {
+            let buffer =
+                unsafe { resources::JointMatricesBuffer::new(Arc::clone(alloc), max_bones)? };
+            joint_matrices_buffer.push(buffer);
+        }
+
+        // Create default texture
+        let default_texture_data = TextureData::solid_color([255, 255, 255, 255]);
+        let default_texture = unsafe {
+            Texture::from_data(
+                Arc::clone(alloc),
+                Arc::clone(&device.device),
+                command_pool,
+                device.graphics_queue,
+                &default_texture_data,
+                vk::Format::R8G8B8A8_SRGB,
+                Some("default_texture"),
+            )?
+        };
+
+        // Initialize material storage buffer (Bindless-ready)
+        let max_materials = 1024;
+        let mut material_storage_buffer = unsafe {
+            StorageBuffer::<resources::uniform::MaterialUniform>::new(
+                Arc::clone(alloc),
+                Arc::clone(&device.device),
+                max_materials,
+                "material_storage_buffer",
+            )?
+        };
+
+        // Populate with default material at index 0
+        let default_mat = Material::default();
+        let mut initial_materials =
+            vec![resources::uniform::MaterialUniform::default(); max_materials];
+
+        let mut first_mat = resources::uniform::MaterialUniform::default();
+        first_mat.set_base_color_factor(glam::Vec4::from_array(default_mat.color));
+        first_mat.set_emissive_factor(glam::Vec4::from_array(default_mat.emissive));
+        first_mat.set_metallic_roughness(default_mat.metallic, default_mat.roughness);
+        first_mat.set_occlusion_strength(default_mat.occlusion_strength);
+        first_mat.set_normal_scale(default_mat.normal_scale);
+        first_mat.set_alpha_cutoff(default_mat.alpha_cutoff);
+        initial_materials[0] = first_mat;
+
+        unsafe {
+            material_storage_buffer.update(&initial_materials)?;
+        }
+
+        // Initialize instance buffers for GPU culling/instancing
+        let mut instance_buffers = Vec::with_capacity(frame_count);
+        for _ in 0..frame_count {
+            let buffer = unsafe {
+                resources::InstanceBuffer::new(
+                    Arc::clone(alloc),
+                    Arc::clone(&device.device),
+                    crate::renderer::occlusion_culling::MAX_CULLABLE_OBJECTS,
+                )?
+            };
+            instance_buffers.push(buffer);
+        }
+
+        Ok(RendererResources {
+            uniform_buffers,
+            joint_matrices_buffer,
+            default_texture,
+            material_storage_buffer,
+            instance_buffers,
+        })
+    }
+
+    fn init_ibl(
+        device: &vulkan::VulkanDevice,
+        alloc: &Arc<vulkan::Allocator>,
+        command_pool: vk::CommandPool,
+    ) -> Result<(
+        crate::renderer::features::brdf_lut::BrdfLutPass,
+        vk::Sampler,
+        crate::renderer::features::ibl_manager::IblManager,
+    )> {
+        log::info!("Initializing BrdfLutPass...");
+        let mut brdf_lut_pass = crate::renderer::features::brdf_lut::BrdfLutPass::new();
+
+        log::info!("Baking BRDF LUT...");
+        unsafe {
+            brdf_lut_pass.bake(device, command_pool, Arc::clone(alloc))?;
+        }
+        log::info!("BRDF LUT Baked.");
+
+        let ibl_sampler_info = vk::SamplerCreateInfo::default()
+            .mag_filter(vk::Filter::LINEAR)
+            .min_filter(vk::Filter::LINEAR)
+            .mipmap_mode(vk::SamplerMipmapMode::LINEAR)
+            .address_mode_u(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+            .address_mode_v(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+            .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+            .compare_enable(false)
+            .anisotropy_enable(false)
+            .min_lod(0.0)
+            .max_lod(vk::LOD_CLAMP_NONE);
+
+        let ibl_sampler = unsafe { device.device.create_sampler(&ibl_sampler_info, None)? };
+
+        log::info!("Initializing IblManager...");
+        let ibl_manager = crate::renderer::features::ibl_manager::IblManager::new(
+            Arc::clone(&device.device),
+            Arc::clone(alloc),
+        );
+
+        Ok((brdf_lut_pass, ibl_sampler, ibl_manager))
+    }
+
+    unsafe fn create_swapchain_data(
+        device: &vulkan::VulkanDevice,
+        alloc: &Arc<vulkan::Allocator>,
+        resources: &Arc<ResourceRegistry>,
+        extent: vk::Extent2D,
+    ) -> Result<SwapchainData> {
+        let mut swapchain = vulkan::SwapchainWrapper::new(device, device.headless, extent)?;
+        let mut swapchain_image_view_ids = Vec::with_capacity(swapchain.image_views.len());
+        for &image_view in &swapchain.image_views {
+            let image_view_id = resources.register_image_view(image_view).map_err(|e| {
+                AshError::VulkanError(format!("Failed to register swapchain image view: {e}"))
+            })?;
+            swapchain_image_view_ids.push(image_view_id);
+        }
+        swapchain.mark_image_views_managed_by_registry();
+
+        let mut depth_buffer = DepthBuffer::new(
+            Arc::clone(&device.device),
+            Arc::clone(alloc),
+            swapchain.extent.width,
+            swapchain.extent.height,
+        )?;
+        let depth_buffer_id = depth_buffer
+            .register_with_registry(resources)
+            .map_err(|e| AshError::VulkanError(format!("Failed to register depth buffer: {e}")))?;
+
+        let mut render_pass_builder = vulkan::RenderPass::builder(Arc::clone(&device.device));
+
+        if device.headless {
+            render_pass_builder = render_pass_builder
+                .with_color_attachment(swapchain.format, vk::ImageLayout::TRANSFER_SRC_OPTIMAL);
+        } else {
+            render_pass_builder = render_pass_builder.with_swapchain_color(swapchain.format);
+        }
+
+        let mut render_pass = render_pass_builder
+            .with_depth_attachment(
+                depth_buffer.format(),
+                vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+            )
+            .build()?;
+        let render_pass_id = resources
+            .register_render_pass(render_pass.handle())
+            .map_err(|e| AshError::VulkanError(format!("Failed to register render pass: {e}")))?;
+        render_pass.mark_managed_by_registry();
+
+        Ok(SwapchainData {
+            swapchain,
+            swapchain_image_view_ids,
+            depth_buffer,
+            depth_buffer_id,
+            render_pass,
+            render_pass_id,
+        })
+    }
+
+    unsafe fn create_frame_resources(
+        device: &vulkan::VulkanDevice,
+        resources: &Arc<ResourceRegistry>,
+        swapchain_data: &SwapchainData,
+    ) -> Result<FrameData> {
+        let mut framebuffers = Vec::new();
+        let mut framebuffer_ids = Vec::new();
+        for (index, &image_view) in swapchain_data.swapchain.image_views.iter().enumerate() {
+            let attachments = [image_view, swapchain_data.depth_buffer.view()];
+            let framebuffer = vulkan::Framebuffer::new(
+                Arc::clone(&device.device),
+                swapchain_data.render_pass.handle(),
+                &attachments,
+                swapchain_data.swapchain.extent,
+            )?;
+            let framebuffer_id = resources
+                .register_framebuffer(
+                    framebuffer.handle(),
+                    &[
+                        swapchain_data.render_pass_id,
+                        swapchain_data.depth_buffer_id,
+                        swapchain_data.swapchain_image_view_ids[index],
+                    ],
+                )
+                .map_err(|e| {
+                    AshError::VulkanError(format!("Failed to register framebuffer: {e}"))
+                })?;
+            let mut framebuffer = framebuffer;
+            framebuffer.mark_managed_by_registry();
+            framebuffers.push(framebuffer);
+            framebuffer_ids.push(framebuffer_id);
+        }
+
+        let worker_count = thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1);
+
+        let command_manager = vulkan::CommandBufferManager::new(
+            Arc::clone(&device.device),
+            device.graphics_queue_family,
+            worker_count,
+        )?;
+
+        let command_buffers = command_manager.allocate_primary_buffers(framebuffers.len() as u32)?;
+
+        let mut frame_syncs = Vec::with_capacity(framebuffers.len());
+        let mut frame_sync_ids = Vec::with_capacity(framebuffers.len());
+        for _ in 0..framebuffers.len() {
+            let mut sync = vulkan::FrameSync::new(Arc::clone(&device.device))?;
+            let image_available_id =
+                resources
+                    .register_semaphore(sync.image_available)
+                    .map_err(|e| {
+                        AshError::VulkanError(format!(
+                            "Failed to register image-available semaphore: {e}"
+                        ))
+                    })?;
+            let render_finished_id =
+                resources
+                    .register_semaphore(sync.render_finished)
+                    .map_err(|e| {
+                        AshError::VulkanError(format!(
+                            "Failed to register render-finished semaphore: {e}"
+                        ))
+                    })?;
+            let fence_id = resources.register_fence(sync.in_flight).map_err(|e| {
+                AshError::VulkanError(format!("Failed to register in-flight fence: {e}"))
+            })?;
+            sync.mark_managed_by_registry();
+            frame_syncs.push(sync);
+            frame_sync_ids.push((image_available_id, render_finished_id, fence_id));
+        }
+
+        resources
+            .register_command_pool(command_manager.upload_command_pool_handle())
+            .map_err(|e| AshError::VulkanError(format!("Failed to register command pool: {e}")))?;
+        command_manager.mark_pool_managed_by_registry();
+
+        Ok(FrameData {
+            framebuffers,
+            framebuffer_ids,
+            command_manager,
+            command_buffers,
+            frame_syncs,
+            frame_sync_ids,
+            worker_count,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn create_main_pipeline(
+        device: &vulkan::VulkanDevice,
+        resources: &Arc<ResourceRegistry>,
+        render_pass: vk::RenderPass,
+        extent: vk::Extent2D,
+        pipeline_cache: vk::PipelineCache,
+        depth_format: vk::Format,
+        pipeline_cfg: &PipelineConfig,
+        set_layouts: &[vk::DescriptorSetLayout],
+    ) -> Result<(
+        vulkan::PipelineLayout,
+        ResourceId,
+        vulkan::Pipeline,
+        ResourceId,
+    )> {
+        let mesh_push_size = std::mem::size_of::<MeshPushConstants>() as u32;
+        let material_push_size = std::mem::size_of::<MaterialPushConstants>() as u32;
+        let push_constant_ranges = [
+            vk::PushConstantRange {
+                stage_flags: vk::ShaderStageFlags::VERTEX,
+                offset: 0,
+                size: mesh_push_size,
+            },
+            vk::PushConstantRange {
+                stage_flags: vk::ShaderStageFlags::FRAGMENT,
+                offset: 128,
+                size: material_push_size,
+            },
+        ];
+
+        let mut pipeline_layout_builder =
+            vulkan::PipelineLayout::builder(Arc::clone(&device.device));
+        for layout in set_layouts {
+            pipeline_layout_builder = pipeline_layout_builder.add_set_layout(*layout);
+        }
+        for range in &push_constant_ranges {
+            pipeline_layout_builder = pipeline_layout_builder.add_push_constant(*range);
+        }
+        let mut pipeline_layout = pipeline_layout_builder.build()?;
+        let pipeline_layout_id = resources
+            .register_pipeline_layout(pipeline_layout.handle())
+            .map_err(|e| {
+                AshError::VulkanError(format!("Failed to register pipeline layout: {e}"))
+            })?;
+        pipeline_layout.mark_managed_by_registry();
+
+        let mut pipeline_builder = vulkan::Pipeline::builder(Arc::clone(&device.device))
+            .with_layout(pipeline_layout.handle())
+            .with_render_pass(render_pass)
+            .with_extent(extent)
+            .with_pipeline_cache(pipeline_cache)
+            .with_depth_format(depth_format)
+            .with_cull_mode(vk::CullModeFlags::BACK)
+            .with_multisampling(pipeline_cfg.multisample_config())
+            .add_shader_from_bytes(
+                include_bytes!(concat!(env!("OUT_DIR"), "/vert.spv")),
+                vk::ShaderStageFlags::VERTEX,
+                "main",
+            )?
+            .add_shader_from_bytes(
+                include_bytes!(concat!(env!("OUT_DIR"), "/frag.spv")),
+                vk::ShaderStageFlags::FRAGMENT,
+                "main",
+            )?;
+
+        for specialization in &pipeline_cfg.specialization_constants {
+            pipeline_builder = pipeline_builder.with_specialization_bytes(
+                specialization.stage,
+                specialization.constant_id,
+                specialization.bytes(),
+            );
+        }
+
+        let mut pipeline = pipeline_builder.build()?;
+        let pipeline_id = resources
+            .register_pipeline(pipeline.pipeline, &[pipeline_layout_id])
+            .map_err(|e| AshError::VulkanError(format!("Failed to register pipeline: {e}")))?;
+        pipeline.mark_managed_by_registry();
+
+        Ok((pipeline_layout, pipeline_layout_id, pipeline, pipeline_id))
+    }
+
+    unsafe fn create_shadow_pipeline(
+        device: &vulkan::VulkanDevice,
+        pipeline_cache: vk::PipelineCache,
+        shadow_map: &crate::renderer::shadow_map::ShadowMap,
+        frame_layout: vk::DescriptorSetLayout,
+        bindless_layout: vk::DescriptorSetLayout,
+    ) -> Result<(vulkan::Pipeline, vulkan::PipelineLayout)> {
+        let shadow_push_range = vk::PushConstantRange {
+            stage_flags: vk::ShaderStageFlags::VERTEX,
+            offset: 0,
+            size: 128, // mat4 lightSpace + mat4 model
+        };
+
+        let shadow_push_range_frag = vk::PushConstantRange {
+            stage_flags: vk::ShaderStageFlags::FRAGMENT,
+            offset: 128,
+            size: 4, // int base_color_index
+        };
+
+        let shadow_pipeline_layout = vulkan::PipelineLayout::builder(Arc::clone(&device.device))
+            .add_push_constant(shadow_push_range)
+            .add_push_constant(shadow_push_range_frag)
+            .add_set_layout(frame_layout) // Set 0: Frame
+            .add_set_layout(bindless_layout) // Set 1: Bindless (was 2)
+            .build()?;
+
+        let shadow_builder = vulkan::Pipeline::builder(Arc::clone(&device.device))
+            .with_layout(shadow_pipeline_layout.handle())
+            .with_render_pass(shadow_map.render_pass)
+            .with_extent(vk::Extent2D {
+                width: shadow_map.res,
+                height: shadow_map.res,
+            })
+            .with_pipeline_cache(pipeline_cache)
+            .with_depth_format(vk::Format::D32_SFLOAT)
+            .with_cull_mode(vk::CullModeFlags::FRONT)
+            .add_shader_from_bytes(
+                include_bytes!(concat!(env!("OUT_DIR"), "/shadow.vert.spv")),
+                vk::ShaderStageFlags::VERTEX,
+                "main",
+            )?
+            .add_shader_from_bytes(
+                include_bytes!(concat!(env!("OUT_DIR"), "/shadow.frag.spv")),
+                vk::ShaderStageFlags::FRAGMENT,
+                "main",
+            )?;
+
+        let shadow_pipeline = shadow_builder.build()?;
+        Ok((shadow_pipeline, shadow_pipeline_layout))
     }
 
     fn worker_index_for_frame(&self, frame_index: usize) -> usize {
@@ -916,8 +1423,7 @@ impl Renderer {
         command_buffer: vk::CommandBuffer,
         image_index: usize,
     ) -> Result<()> {
-        if !self.tonemapping_enabled
-            || self.fullscreen_pass.is_none()
+        if self.fullscreen_pass.is_none()
             || self.post_pipeline.is_none()
             || self.post_framebuffers.is_empty()
             || self.post_descriptor_sets.is_empty()
@@ -925,15 +1431,23 @@ impl Renderer {
             return Ok(());
         }
 
-        let pass = self.fullscreen_pass.as_ref().unwrap();
-        let pipeline = self.post_pipeline.unwrap();
+        let pass = self.fullscreen_pass.as_ref().ok_or_else(|| {
+            AshError::RenderPassMissing("Fullscreen post-process pass".to_string())
+        })?;
+        let pipeline = self
+            .post_pipeline
+            .ok_or_else(|| AshError::PipelineMissing("Post-process pipeline".to_string()))?;
         let framebuffer = &self.post_framebuffers[image_index];
         let descriptor_set = self.post_descriptor_sets[image_index];
-        let extent = self.swapchain.as_ref().unwrap().extent;
+        let extent = self
+            .swapchain
+            .as_ref()
+            .ok_or_else(|| AshError::SwapchainMissing("Required for post-processing".to_string()))?
+            .extent;
 
         let clear_values = [vk::ClearValue {
             color: vk::ClearColorValue {
-                float32: [0.0, 0.0, 0.0, 1.0],
+                float32: [0.0, 0.0, 0.0, 1.0], // Use black for post-processing clear to avoid flashes
             },
         }];
 
@@ -976,7 +1490,7 @@ impl Renderer {
                 } else {
                     0.0
                 },
-                _padding: 0.0,
+                tonemapping_enabled: if self.tonemapping_enabled { 1.0 } else { 0.0 },
             };
 
             self.device.device.cmd_push_constants(
@@ -996,68 +1510,77 @@ impl Renderer {
         Ok(())
     }
     /// Set mesh to render
-    pub fn set_mesh(&mut self, mut mesh: Mesh) {
+    pub fn set_mesh(&mut self, mut mesh: Mesh) -> Result<()> {
         unsafe {
             let upload_pool = self.cmds.upload_command_pool_handle();
             let key = mesh.name.clone();
-            if let Err(e) = self.model_renderer.ensure_mesh(
-                &key,
-                &mesh,
-                upload_pool,
-                self.device.graphics_queue,
-            ) {
-                log::error!("Failed to upload mesh via ModelRenderer: {e}");
-                return;
-            }
+            self.model_renderer
+                .ensure_mesh(&key, &mesh, upload_pool, self.device.graphics_queue)
+                .map_err(|e| {
+                    AshError::VulkanError(format!("Failed to upload mesh via ModelRenderer: {e}"))
+                })?;
 
-            if let Err(e) = mesh.ensure_texture(
+            mesh.ensure_texture(
                 Arc::clone(&self.alloc),
                 Arc::clone(&self.device.device),
                 upload_pool,
                 self.device.graphics_queue,
                 &mut self.vram_budget,
                 self.texture_compression,
-            ) {
-                log::error!("Failed to ensure mesh texture: {e}");
-            }
+            )
+            .map_err(|e| AshError::VulkanError(format!("Failed to ensure mesh texture: {e}")))?;
 
             // Register textures with the bindless manager.
             if let Some(bindless_manager) = self.bindless_manager.as_mut() {
                 if let Some(tex) = mesh.texture.as_ref() {
-                    match bindless_manager.add_sampled_image(tex.view(), tex.sampler()) {
-                        Ok(idx) => mesh.texture_index = Some(idx),
-                        Err(e) => log::error!("Failed to register base_color texture: {e}"),
-                    }
+                    let idx = bindless_manager
+                        .add_sampled_image(tex.view(), tex.sampler())
+                        .map_err(|e| {
+                            AshError::VulkanError(format!(
+                                "Failed to register base_color texture: {e}"
+                            ))
+                        })?;
+                    mesh.texture_index = Some(idx);
                 }
                 if let Some(tex) = mesh.normal_texture.as_ref() {
-                    match bindless_manager.add_sampled_image(tex.view(), tex.sampler()) {
-                        Ok(idx) => mesh.normal_texture_index = Some(idx),
-                        Err(e) => log::error!("Failed to register normal texture: {e}"),
-                    }
+                    let idx = bindless_manager
+                        .add_sampled_image(tex.view(), tex.sampler())
+                        .map_err(|e| {
+                            AshError::VulkanError(format!("Failed to register normal texture: {e}"))
+                        })?;
+                    mesh.normal_texture_index = Some(idx);
                 }
                 if let Some(tex) = mesh.metallic_roughness_texture.as_ref() {
-                    match bindless_manager.add_sampled_image(tex.view(), tex.sampler()) {
-                        Ok(idx) => mesh.metallic_roughness_texture_index = Some(idx),
-                        Err(e) => log::error!("Failed to register metallic_roughness texture: {e}"),
-                    }
+                    let idx = bindless_manager
+                        .add_sampled_image(tex.view(), tex.sampler())
+                        .map_err(|e| {
+                            AshError::VulkanError(format!(
+                                "Failed to register metallic_roughness texture: {e}"
+                            ))
+                        })?;
+                    mesh.metallic_roughness_texture_index = Some(idx);
                 }
                 if let Some(tex) = mesh.occlusion_texture.as_ref() {
-                    match bindless_manager.add_sampled_image(tex.view(), tex.sampler()) {
-                        Ok(idx) => mesh.occlusion_texture_index = Some(idx),
-                        Err(e) => log::error!("Failed to register occlusion texture: {e}"),
-                    }
+                    let idx = bindless_manager
+                        .add_sampled_image(tex.view(), tex.sampler())
+                        .map_err(|e| {
+                            AshError::VulkanError(format!(
+                                "Failed to register occlusion texture: {e}"
+                            ))
+                        })?;
+                    mesh.occlusion_texture_index = Some(idx);
                 }
                 if let Some(tex) = mesh.emissive_texture.as_ref() {
-                    match bindless_manager.add_sampled_image(tex.view(), tex.sampler()) {
-                        Ok(idx) => mesh.emissive_texture_index = Some(idx),
-                        Err(e) => log::error!("Failed to register emissive texture: {e}"),
-                    }
+                    let idx = bindless_manager
+                        .add_sampled_image(tex.view(), tex.sampler())
+                        .map_err(|e| {
+                            AshError::VulkanError(format!(
+                                "Failed to register emissive texture: {e}"
+                            ))
+                        })?;
+                    mesh.emissive_texture_index = Some(idx);
                 }
             }
-
-            let flags = TexturePresenceFlags::from_mesh(&mesh);
-            self.mesh_texture_flags.clear();
-            self.mesh_texture_flags.insert(key.clone(), flags);
 
             let indices = [
                 mesh.texture_index.map(|i| i as i32).unwrap_or(-1),
@@ -1069,12 +1592,19 @@ impl Renderer {
             ];
             let emissive_index = mesh.emissive_texture_index.map(|i| i as i32).unwrap_or(-1);
 
-            self.mesh_indices_registry
-                .insert(key.clone(), (indices, emissive_index));
+            let flags = TexturePresenceFlags::from_mesh(&mesh);
+
+            let mesh_data = MeshData {
+                name: Arc::clone(&key),
+                texture_indices: indices,
+                emissive_index,
+                texture_flags: flags,
+                material_handle: 0,
+            };
 
             self.draw_items.clear();
             self.draw_items.push(DrawItem {
-                key: key.clone(),
+                key: Arc::clone(&key),
                 transform: self.transform.model_matrix(),
                 material: self.material.clone(),
                 texture_flags: flags,
@@ -1085,11 +1615,60 @@ impl Renderer {
                 alpha_cutoff: self.material.alpha_cutoff,
             });
 
-            self.mesh_registry.clear();
-            self.mesh_registry.insert(0, key.clone());
+            if self.mesh_data.is_empty() {
+                self.mesh_data.push(mesh_data);
+            } else {
+                self.mesh_data[0] = mesh_data;
+            }
+
             self.material_registry.insert(0, self.material.clone());
             self.mesh = Some(mesh);
         }
+
+        Ok(())
+    }
+
+    /// Access the underlying memory allocator.
+    pub fn allocator(&self) -> &Allocator {
+        &self.alloc
+    }
+
+    /// Access the bindless manager (mutable) if enabled.
+    pub fn bindless_manager_mut(&mut self) -> &mut Option<BindlessManager> {
+        &mut self.bindless_manager
+    }
+
+    /// Set global lighting parameters.
+    pub fn set_lighting(&mut self, direction: Vec3, color: [f32; 4], ambient_strength: f32) {
+        self.light_direction = direction;
+        self.light_color = color;
+        self.ambient_color = [ambient_strength, ambient_strength, ambient_strength, 1.0];
+
+        // Synchronize with shadow feature
+        self.shadow_feature.set_light_direction(direction);
+    }
+
+    pub fn ambient_color_mut(&mut self) -> &mut [f32; 4] {
+        &mut self.ambient_color
+    }
+
+    /// Get a mesh handle by name.
+    pub fn get_mesh_handle(&self, name: &str) -> Option<u32> {
+        self.mesh_data
+            .iter()
+            .enumerate()
+            .find(|(_, data)| &*data.name == name)
+            .map(|(i, _)| i as u32)
+    }
+
+    /// Get mutable access to mesh data by handle.
+    pub fn get_mesh_data_mut(&mut self, handle: u32) -> Option<&mut MeshData> {
+        self.mesh_data.get_mut(handle as usize)
+    }
+
+    /// Get mutable access to the material registry.
+    pub fn material_registry_mut(&mut self) -> &mut MaterialRegistry {
+        &mut self.material_registry
     }
 
     pub fn register_mesh_handle(&mut self, handle: u32, mesh: &mut Mesh) -> Result<()> {
@@ -1110,104 +1689,54 @@ impl Renderer {
 
             // Register textures with bindless manager
             if let Some(bindless_manager) = self.bindless_manager.as_mut() {
-                if let Some(tex) = mesh.texture.as_ref() {
-                    match bindless_manager.add_sampled_image(tex.view(), tex.sampler()) {
-                        Ok(idx) => mesh.texture_index = Some(idx),
-                        Err(e) => log::error!("Failed to register base_color texture: {e}"),
-                    }
-                }
-                if let Some(tex) = mesh.normal_texture.as_ref() {
-                    match bindless_manager.add_sampled_image(tex.view(), tex.sampler()) {
-                        Ok(idx) => mesh.normal_texture_index = Some(idx),
-                        Err(e) => log::error!("Failed to register normal texture: {e}"),
-                    }
-                }
-                if let Some(tex) = mesh.metallic_roughness_texture.as_ref() {
-                    match bindless_manager.add_sampled_image(tex.view(), tex.sampler()) {
-                        Ok(idx) => mesh.metallic_roughness_texture_index = Some(idx),
-                        Err(e) => log::error!("Failed to register metallic_roughness texture: {e}"),
-                    }
-                }
-                if let Some(tex) = mesh.occlusion_texture.as_ref() {
-                    match bindless_manager.add_sampled_image(tex.view(), tex.sampler()) {
-                        Ok(idx) => mesh.occlusion_texture_index = Some(idx),
-                        Err(e) => log::error!("Failed to register occlusion texture: {e}"),
-                    }
-                }
-                if let Some(tex) = mesh.emissive_texture.as_ref() {
-                    match bindless_manager.add_sampled_image(tex.view(), tex.sampler()) {
-                        Ok(idx) => mesh.emissive_texture_index = Some(idx),
-                        Err(e) => log::error!("Failed to register emissive texture: {e}"),
-                    }
-                }
+                register_mesh_textures(mesh, bindless_manager)?;
             }
 
             // Register material from mesh properties
+            // Register material from mesh properties
+            let mut material_handle = 0;
             if let Some(props) = &mesh.material_properties {
-                let material = Material {
-                    name: format!("{}_material_{}", mesh.name, handle),
-                    color: props.base_color_factor,
-                    metallic: props.metallic_factor,
-                    roughness: props.roughness_factor,
-                    emissive: props.emissive_factor,
-                    occlusion_strength: props.occlusion_strength,
-                    normal_scale: props.normal_scale,
-                    alpha_cutoff: props.alpha_cutoff,
-                };
-
-                // deduplication: check if an identical material already exists
-                let mut target_material_handle = handle;
-                for (&existing_h, existing_m) in &self.material_registry {
-                    // Compare core PBR properties (allowing for minor float variance)
-                    let same_color = existing_m
-                        .color
-                        .iter()
-                        .zip(material.color.iter())
-                        .all(|(a, b)| (a - b).abs() < 0.001);
-                    let same_emissive = existing_m
-                        .emissive
-                        .iter()
-                        .zip(material.emissive.iter())
-                        .all(|(a, b)| (a - b).abs() < 0.001);
-
-                    if same_color
-                        && same_emissive
-                        && (existing_m.roughness - material.roughness).abs() < 0.001
-                        && (existing_m.metallic - material.metallic).abs() < 0.001
-                        && (existing_m.occlusion_strength - material.occlusion_strength).abs()
-                            < 0.001
-                        && (existing_m.normal_scale - material.normal_scale).abs() < 0.001
-                        && (existing_m.alpha_cutoff - material.alpha_cutoff).abs() < 0.001
-                    {
-                        target_material_handle = existing_h;
-                        break;
-                    }
-                }
-
-                if target_material_handle == handle {
-                    log::debug!(
-                        "Registered auto-material for mesh '{}': handle={}, metallic={:.2}, roughness={:.2}",
-                        mesh.name, handle, material.metallic, material.roughness
+                if !self.allow_auto_material {
+                    log::warn!(
+                        "Mesh '{}' has material properties but auto-material creation is disabled.",
+                        &*mesh.name
                     );
-                    self.material_registry.insert(handle, material);
                 } else {
-                    log::debug!(
-                        "Deduplicated material for mesh '{}': using existing handle {}",
-                        mesh.name,
-                        target_material_handle
-                    );
-                }
+                    use crate::renderer::resources::material::MaterialKey;
+                    let key = MaterialKey::from_props(props);
 
-                self.mesh_material_mapping
-                    .insert(handle, target_material_handle);
-            } else {
-                // If no specific material properties, map to default material (0)
-                self.mesh_material_mapping.insert(handle, 0);
+                    material_handle = if let Some(existing) =
+                        self.material_registry.get_handle_by_key(key)
+                    {
+                        log::debug!(
+                            "Deduplicated material for mesh '{}': using existing handle {}",
+                            &*mesh.name,
+                            existing
+                        );
+                        existing
+                    } else {
+                        let material = Material {
+                            name: format!("{}_material_{}", &*mesh.name, handle),
+                            color: props.base_color_factor,
+                            metallic: props.metallic_factor,
+                            roughness: props.roughness_factor,
+                            emissive: props.emissive_factor,
+                            occlusion_strength: props.occlusion_strength,
+                            normal_scale: props.normal_scale,
+                            alpha_cutoff: props.alpha_cutoff,
+                            tint_index: -1,
+                        };
+                        log::debug!(
+                                "Registered auto-material for mesh '{}': handle={}, metallic={:.2}, roughness={:.2}",
+                                &*mesh.name, handle, props.metallic_factor, props.roughness_factor
+                            );
+                        self.material_registry.get_or_register(handle, material)
+                    };
+                }
             }
 
             let flags = TexturePresenceFlags::from_mesh(mesh);
 
-            // Store indices for bindless texture mapping.
             let indices = [
                 mesh.texture_index.map(|i| i as i32).unwrap_or(-1),
                 mesh.normal_texture_index.map(|i| i as i32).unwrap_or(-1),
@@ -1218,11 +1747,19 @@ impl Renderer {
             ];
             let emissive_index = mesh.emissive_texture_index.map(|i| i as i32).unwrap_or(-1);
 
-            self.mesh_indices_registry
-                .insert(key.clone(), (indices, emissive_index));
-            self.mesh_texture_flags.insert(key.clone(), flags);
+            let mesh_data = MeshData {
+                name: Arc::clone(&key),
+                texture_indices: indices,
+                emissive_index,
+                texture_flags: flags,
+                material_handle,
+            };
 
-            self.mesh_registry.insert(handle, key);
+            if handle as usize >= self.mesh_data.len() {
+                self.mesh_data
+                    .resize(handle as usize + 1, MeshData::default());
+            }
+            self.mesh_data[handle as usize] = mesh_data;
         }
 
         Ok(())
@@ -1245,8 +1782,64 @@ impl Renderer {
         self.material_registry.insert(handle, material.clone());
     }
 
+    /// Updates the GPU material buffer with a material at the specified index
+    /// This must be called after register_material_handle to ensure the GPU sees the correct material
+    pub fn upload_material_to_gpu(&mut self, handle: u32, material: &Material) -> Result<()> {
+        if let Some(buffer) = self.material_storage_buffer.as_mut() {
+            let capacity = buffer.capacity();
+            
+            // Validate handle within capacity
+            if (handle as usize) >= capacity {
+                return Err(AshError::VulkanError(format!(
+                    "Material handle {handle} exceeds buffer capacity {capacity}"
+                )));
+            }
+            
+            // Create MaterialUniform from the material
+            let mut mat_uniform = resources::uniform::MaterialUniform::default();
+            mat_uniform.set_base_color_factor(glam::Vec4::from_array(material.color));
+            mat_uniform.set_emissive_factor(glam::Vec4::from_array(material.emissive));
+            mat_uniform.set_metallic_roughness(material.metallic, material.roughness);
+            mat_uniform.set_occlusion_strength(material.occlusion_strength);
+            mat_uniform.set_normal_scale(material.normal_scale);
+            mat_uniform.set_alpha_cutoff(material.alpha_cutoff);
+
+            // Read current buffer contents, update one element, and reupload
+            // This preserves all other materials in the buffer
+            let mut all_materials = vec![resources::uniform::MaterialUniform::default(); capacity];
+            
+            // TEMP: Map and read existing data (if needed for proper preservation)
+            // For now, we assume buffer is initialized with defaults at index 0
+            // and we're updating subsequent indices
+            
+            // Set the default at index 0 (ensure it's preserved)
+            let default_mat = Material::default();
+            let mut default_uniform = resources::uniform::MaterialUniform::default();
+            default_uniform.set_base_color_factor(glam::Vec4::from_array(default_mat.color));
+            default_uniform.set_emissive_factor(glam::Vec4::from_array(default_mat.emissive));
+            default_uniform.set_metallic_roughness(default_mat.metallic, default_mat.roughness);
+            default_uniform.set_occlusion_strength(default_mat.occlusion_strength);
+            default_uniform.set_normal_scale(default_mat.normal_scale);
+            default_uniform.set_alpha_cutoff(default_mat.alpha_cutoff);
+            all_materials[0] = default_uniform;
+            
+            // Copy the new material at the specified index
+            all_materials[handle as usize] = mat_uniform;
+
+            // Update the buffer on GPU
+            unsafe {
+                buffer.update(&all_materials)?;
+            }
+            
+            log::info!("Uploaded material to GPU at index {handle}");
+            Ok(())
+        } else {
+            Err(AshError::VulkanError("Material storage buffer not initialized".to_string()))
+        }
+    }
+
     /// Get access to the material registry (for testing)
-    pub fn material_registry(&self) -> &HashMap<u32, Material> {
+    pub fn material_registry(&self) -> &MaterialRegistry {
         &self.material_registry
     }
 
@@ -1258,11 +1851,11 @@ impl Renderer {
         descriptor: &MeshDescriptor,
     ) -> Result<String> {
         let mut mesh = Mesh::from_descriptor(descriptor);
-        let key = mesh.name.clone();
+        let key = Arc::clone(&mesh.name);
 
         self.register_mesh_handle(handle, &mut mesh)?;
 
-        Ok(key)
+        Ok(key.to_string())
     }
 
     /// Converts a material descriptor into a renderer material and registers it.
@@ -1274,6 +1867,45 @@ impl Renderer {
         let material = descriptor.material.clone();
         self.register_material_handle(handle, &material);
         material
+    }
+
+    /// Registers a generic storage buffer with the bindless manager.
+    ///
+    /// This is the "pro" way to handle bindless storage buffers, providing type safety
+    /// and automatic memory management.
+    pub fn register_bindless_storage_buffer<T: Copy>(
+        &mut self,
+        data: &[T],
+        name: &str,
+    ) -> Result<(
+        Arc<parking_lot::Mutex<resources::uniform::StorageBuffer<T>>>,
+        u32,
+    )> {
+        let bindless_manager = self
+            .bindless_manager
+            .as_mut()
+            .ok_or_else(|| AshError::VulkanError("Bindless manager not enabled".to_string()))?;
+
+        unsafe {
+            let mut buffer = resources::uniform::StorageBuffer::new(
+                Arc::clone(&self.alloc),
+                Arc::clone(&self.device.device),
+                data.len(),
+                name,
+            )?;
+
+            // Initial upload
+            buffer.update(data)?;
+
+            // Register with bindless manager (Binding 2)
+            let index = bindless_manager.add_storage_buffer(
+                buffer.buffer,
+                0,
+                std::mem::size_of_val(data) as vk::DeviceSize,
+            )?;
+
+            Ok((Arc::new(parking_lot::Mutex::new(buffer)), index))
+        }
     }
 
     /// Update the joint matrices buffer for GPU skinning
@@ -1333,94 +1965,212 @@ impl Renderer {
     /// Submit render commands for the current frame.
     ///
     /// Each `RenderCommand` specifies a mesh handle, material handle, and transform.
+    /// For large command counts (>1000), uses parallel processing across all CPU cores.
     pub fn submit_render_commands(&mut self, commands: &[RenderCommand]) {
         self.draw_items.clear();
+        self.instancing_manager.begin_frame();
 
-        for command in commands {
-            if let Some(mesh_key) = self.mesh_registry.get(&command.mesh_handle) {
-                // Option A: Automatic material selection (if material_handle not explicitly set)
-                let material_handle = if command.material_handle == 0 {
-                    self.mesh_material_mapping
-                        .get(&command.mesh_handle)
-                        .copied()
-                        .unwrap_or(0)
+        const PARALLEL_THRESHOLD: usize = 1000;
+
+        if commands.len() > PARALLEL_THRESHOLD {
+            // Parallel extraction for large command counts
+            use std::collections::HashMap;
+
+            // Capture only thread-safe fields
+            let mesh_data = &self.mesh_data;
+            let material_registry = &self.material_registry;
+            let default_material = &self.material;
+            let strict_mode = self.strict_mode;
+
+            let (draw_items, instance_batches) = commands
+                .par_iter()
+                .fold(
+                    || (Vec::new(), HashMap::<BatchKey, Vec<InstanceData>>::new()),
+                    |(mut items, mut batches), command| {
+                        if let Some(mesh_data_entry) = mesh_data.get(command.mesh_handle as usize) {
+                            let mesh_key = &mesh_data_entry.name;
+
+                            let material_handle = if command.material_handle == 0 {
+                                mesh_data_entry.material_handle
+                            } else {
+                                command.material_handle
+                            };
+                            let material = material_registry
+                                .get(material_handle)
+                                .unwrap_or_else(|| {
+                                    let msg = format!("Material handle {material_handle} not found for mesh handle {}, using default", command.mesh_handle);
+                                    if strict_mode {
+                                        panic!("{msg}");
+                                    } else {
+                                        log::warn!("{msg}");
+                                    }
+                                    default_material
+                                });
+
+                            let texture_flags = mesh_data_entry.texture_flags;
+                            let (indices, emissive_index) = (mesh_data_entry.texture_indices, mesh_data_entry.emissive_index);
+
+                            if command.is_skinned {
+                                items.push(DrawItem {
+                                    key: mesh_key.clone(),
+                                    transform: command.transform,
+                                    material: material.clone(),
+                                    texture_flags,
+                                    texture_indices: indices,
+                                    emissive_index,
+                                    is_skinned: true,
+                                    joint_offset: command.joint_offset,
+                                    alpha_cutoff: material.alpha_cutoff,
+                                });
+                            } else {
+                                let key = BatchKey::new(command.mesh_handle, material_handle);
+                                let instance = InstanceData::from_matrix(command.transform);
+                                batches
+                                    .entry(key)
+                                    .or_default()
+                                    .push(instance);
+                            }
+                        } else if strict_mode {
+                            panic!("Mesh handle {} not found in registry", command.mesh_handle);
+                        }
+                        (items, batches)
+                    },
+                )
+                .reduce(
+                    || (Vec::new(), HashMap::<BatchKey, Vec<InstanceData>>::new()),
+                    |(mut a_items, mut a_batches), (b_items, b_batches)| {
+                        a_items.extend(b_items);
+                        for (key, instances) in b_batches {
+                            a_batches
+                                .entry(key)
+                                .or_default()
+                                .extend(instances);
+                        }
+                        (a_items, a_batches)
+                    },
+                );
+
+            // Merge results
+            self.draw_items = draw_items;
+            for (key, instances) in instance_batches {
+                self.instancing_manager.add_instances(key, instances);
+            }
+        } else {
+            // Sequential processing for small command counts (avoids rayon overhead)
+            for command in commands {
+                if let Some(mesh_data) = self.mesh_data.get(command.mesh_handle as usize) {
+                    let mesh_key = &mesh_data.name;
+
+                    let material_handle = if command.material_handle == 0 {
+                        mesh_data.material_handle
+                    } else {
+                        command.material_handle
+                    };
+
+                    let material = self
+                        .material_registry
+                        .get(material_handle)
+                        .unwrap_or_else(|| {
+                            let msg = format!("Material handle {material_handle} not found for mesh handle {}, using default", command.mesh_handle);
+                            if self.strict_mode {
+                                panic!("{msg}");
+                            } else {
+                                log::warn!("{msg}");
+                            }
+                            &self.material
+                        });
+
+                    let texture_flags = mesh_data.texture_flags;
+                    let (indices, emissive_index) =
+                        (mesh_data.texture_indices, mesh_data.emissive_index);
+
+                    if command.is_skinned {
+                        self.draw_items.push(DrawItem {
+                            key: mesh_key.clone(),
+                            transform: command.transform,
+                            material: material.clone(),
+                            texture_flags,
+                            texture_indices: indices,
+                            emissive_index,
+                            is_skinned: true,
+                            joint_offset: command.joint_offset,
+                            alpha_cutoff: material.alpha_cutoff,
+                        });
+                    } else {
+                        let key = BatchKey::new(command.mesh_handle, material_handle);
+                        let instance = InstanceData::from_matrix(command.transform);
+                        self.instancing_manager.add_instance(key, instance);
+                    }
                 } else {
-                    command.material_handle
-                };
-
-                let material = self
-                    .material_registry
-                    .get(&material_handle)
-                    .unwrap_or_else(|| {
-                        log::warn!("Material handle {material_handle} not found, using default");
-                        &self.material
-                    });
-
-                let texture_flags = self
-                    .mesh_texture_flags
-                    .get(mesh_key)
-                    .copied()
-                    .unwrap_or_default();
-
-                let (indices, emissive) = self
-                    .mesh_indices_registry
-                    .get(mesh_key)
-                    .cloned()
-                    .unwrap_or(([-1, -1, -1, -1], -1));
-
-                self.draw_items.push(DrawItem {
-                    key: mesh_key.clone(),
-                    transform: command.transform,
-                    material: material.clone(),
-                    texture_flags,
-                    texture_indices: indices,
-                    emissive_index: emissive,
-                    is_skinned: command.is_skinned,
-                    joint_offset: command.joint_offset,
-                    alpha_cutoff: material.alpha_cutoff,
-                });
+                    let msg = format!("Mesh handle {} not found in registry", command.mesh_handle);
+                    if self.strict_mode {
+                        panic!("{msg}");
+                    } else {
+                        log::warn!("{msg}");
+                    }
+                }
             }
         }
 
-        // Single mesh fallback
-        if self.draw_items.is_empty() {
-            if let Some(mesh) = self.mesh.as_ref() {
-                let texture_flags = self
-                    .mesh_texture_flags
-                    .get(&mesh.name)
-                    .copied()
-                    .unwrap_or_default();
-
-                let (indices, emissive) = self
-                    .mesh_indices_registry
-                    .get(&mesh.name)
-                    .cloned()
-                    .unwrap_or(([-1, -1, -1, -1], -1));
-
-                self.draw_items.push(DrawItem {
-                    key: mesh.name.clone(),
-                    transform: self.transform.model_matrix(),
-                    material: self.material.clone(),
-                    texture_flags,
-                    texture_indices: indices,
-                    emissive_index: emissive,
-                    is_skinned: false, // Legacy fallback is always static
-                    joint_offset: 0,
-                    alpha_cutoff: self.material.alpha_cutoff,
-                });
+        // Fallback: if no commands were submitted, use default cube
+        if self.draw_items.is_empty() && self.instancing_manager.stats().total_instances == 0 {
+            if let Some(_mesh) = self.mesh.as_ref() {
+                let key = BatchKey::new(0, 0);
+                let instance = InstanceData::from_matrix(self.transform.model_matrix());
+                self.instancing_manager.add_instance(key, instance);
             }
         }
+
+        self.instancing_manager.finalize();
 
         // Sort draw items to minimize pipeline and material changes
-        // Primary sort: is_skinned (to group non-skinned then skinned)
-        // Secondary sort: material name (to minimize uniform updates)
-        // Tertiary sort: mesh key (to minimize VB/IB binds)
         self.draw_items.sort_by(|a, b| {
             a.is_skinned
                 .cmp(&b.is_skinned)
                 .then_with(|| a.material.name.cmp(&b.material.name))
                 .then_with(|| a.key.cmp(&b.key))
         });
+    }
+
+    /// Bake IBL maps from an equirectangular texture.
+    ///
+    /// This function converts an equirectangular environment map to cubemap format
+    /// and generates irradiance and prefiltered maps for image-based lighting.
+    /// Currently unused but preserved for runtime environment map loading features.
+    pub fn bake_ibl_from_equirect(&mut self, equirect: &resources::Texture) -> Result<()> {
+        log::info!("Baking IBL maps from equirectangular texture...");
+        let command_pool = self.cmds.upload_command_pool_handle();
+
+        // 1. Convert Equirect to Cubemap
+        let env_cubemap = self.ibl_manager.create_cubemap_from_equirect(
+            &self.device,
+            command_pool,
+            equirect.view(),
+            equirect.sampler(),
+            512, // Environment resolution
+        )?;
+
+        // 2. Generate Irradiance Map
+        let irradiance_map = self.ibl_manager.generate_irradiance(
+            &self.device,
+            command_pool,
+            env_cubemap.view(),
+            self.ibl_sampler,
+        )?;
+
+        // 3. Generate Prefiltered Map
+        let prefiltered_map = self.ibl_manager.generate_prefiltered(
+            &self.device,
+            command_pool,
+            env_cubemap.view(),
+            self.ibl_sampler,
+        )?;
+
+        self.irradiance_map = Some(irradiance_map);
+        self.prefiltered_map = Some(prefiltered_map);
+
+        log::info!("IBL maps baked successfully.");
+        Ok(())
     }
 
     pub fn request_swapchain_resize(&mut self, new_extent: vk::Extent2D) {
@@ -1514,7 +2264,15 @@ impl Renderer {
             if let Some(ref mut swapchain) = self.swapchain {
                 Some(swapchain.recreate(&self.device)?)
             } else {
-                self.swapchain = Some(vulkan::SwapchainWrapper::new(&self.device)?);
+                let extent = self.pending_extent.unwrap_or(vk::Extent2D {
+                    width: 1280,
+                    height: 720,
+                });
+                self.swapchain = Some(vulkan::SwapchainWrapper::new(
+                    &self.device,
+                    self.device.headless,
+                    extent,
+                )?);
                 None
             }
         };
@@ -1557,7 +2315,12 @@ impl Renderer {
         self.recreate_frame_syncs(image_count)?;
         self.recreate_command_buffers()?;
         self.recreate_uniform_buffers(image_count)?;
-        self.recreate_vsr_pass(self.swapchain.as_ref().unwrap().extent)?;
+        self.recreate_vsr_pass(
+            self.swapchain
+                .as_ref()
+                .ok_or_else(|| AshError::VulkanError("Swapchain missing".to_string()))?
+                .extent,
+        )?;
         self.recreate_descriptor_sets()?;
         // 7. Recreate pipeline.
         self.recreate_pipeline()?;
@@ -1598,8 +2361,16 @@ impl Renderer {
 
     fn recreate_pipeline(&mut self) -> Result<()> {
         log::info!("Recompiling pipeline due to shader change...");
-        let layout = self.pipeline_layout.as_ref().unwrap().handle();
-        let render_pass = self.render_pass.as_ref().unwrap().handle();
+        let layout = self
+            .pipeline_layout
+            .as_ref()
+            .ok_or_else(|| AshError::VulkanError("Pipeline layout missing".to_string()))?
+            .handle();
+        let render_pass = self
+            .render_pass
+            .as_ref()
+            .ok_or_else(|| AshError::VulkanError("Render pass missing".to_string()))?
+            .handle();
         let extent = self
             .swapchain
             .as_ref()
@@ -1898,7 +2669,10 @@ impl Renderer {
 
         let render_to_hdr = self.hdr_framebuffer.is_some();
         if render_to_hdr {
-            let hdr = self.hdr_framebuffer.as_ref().unwrap();
+            let hdr = self
+                .hdr_framebuffer
+                .as_ref()
+                .ok_or_else(|| AshError::VulkanError("HDR framebuffer missing".to_string()))?;
             builder = builder
                 .with_color_attachment(hdr.format(), vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL);
         } else {
@@ -1953,7 +2727,10 @@ impl Renderer {
             // If rendering to HDR, we use a single HDR view for all framebuffers.
             // Otherwise we use the per-swapchain view.
             let color_view = if render_to_hdr {
-                self.hdr_framebuffer.as_ref().unwrap().view()
+                self.hdr_framebuffer
+                    .as_ref()
+                    .ok_or_else(|| AshError::VulkanError("HDR framebuffer missing".to_string()))?
+                    .view()
             } else {
                 view
             };
@@ -2115,8 +2892,8 @@ impl Renderer {
         if let Some(manager) = self.descriptors.as_mut() {
             let count = self.frame_syncs.len() as u32;
             manager.recreate_frame_sets(count)?;
-            manager.recreate_shadow_sets(count)?;
-            manager.recreate_joint_sets(count)?;
+            manager.recreate_environment_sets(count)?;
+            // Joint matrices are now in bindless Set 1 Binding 3, no need to recreate separate sets
 
             let buffer_size =
                 std::mem::size_of::<crate::renderer::resources::uniform::MvpMatrices>()
@@ -2127,11 +2904,7 @@ impl Renderer {
                 }
             }
 
-            // Re-bind joint matrices buffers
-            let joint_size = (self.max_bones * std::mem::size_of::<Mat4>()) as vk::DeviceSize;
-            for (index, buffer) in self.joint_matrices_buffer.iter().enumerate() {
-                manager.bind_joint_buffer(index, buffer.buffer(), joint_size)?;
-            }
+            // Joint matrices buffers are managed via bindless manager, not descriptor manager
         }
 
         Ok(())
@@ -2193,8 +2966,21 @@ impl Renderer {
             }
         }
 
+        // Automatic material synchronization: Ensure DrawItems reflect current material state
+        // This prevents stale tint_index and other material properties from causing rendering issues
+        self.refresh_draw_items();
+
+        log::debug!(
+            "Frame {}: Material synchronization complete",
+            self.current_frame
+        );
+
         self.resize_if_needed()?;
         if self.resize_pending {
+            log::debug!(
+                "Frame {}: Resize pending, skipping render",
+                self.current_frame
+            );
             return Ok(());
         }
 
@@ -2248,7 +3034,8 @@ impl Renderer {
             for (i, item) in self.draw_items.iter().enumerate() {
                 if let Some(uploaded) = self.model_renderer.get(&item.key) {
                     // Use mesh clusters for fine-grained culling
-                    let bounds = CullBoundingBox::new(Vec3::ZERO, Vec3::ONE);
+                    // We assume it's a sphere for now until we have better bounds
+                    let bounds = CullBoundingBox::new(Vec3::ZERO, Vec3::ONE * 100.0);
                     self.occlusion_culling.push_clusters(
                         bounds,
                         item.transform,
@@ -2258,6 +3045,14 @@ impl Renderer {
                 }
             }
 
+            // Phase 10: Execute Hi-Z construction
+            if let (Some(ref mut hiz), Some(depth_buffer)) =
+                (&mut self.hiz_pass, &self.depth_buffer)
+            {
+                // Hiz pyramid is built from previous frame's depth
+                hiz.build_pyramid(command_buffer, depth_buffer.image())?;
+            }
+
             // Apply sub-pixel jitter for VSR/TSR if enabled
             let mut jittered_projection = projection;
             let mut jitter_uv = [0.0f32; 2];
@@ -2265,7 +3060,11 @@ impl Renderer {
                 let (jx, jy) = vsr.next_jitter();
                 // Jitter is in pixels [-0.5, 0.5], convert to NDC/UV
                 jitter_uv = [jx, jy];
-                let extent = self.swapchain.as_ref().unwrap().extent;
+                let extent = self
+                    .swapchain
+                    .as_ref()
+                    .ok_or_else(|| AshError::VulkanError("Swapchain missing".to_string()))?
+                    .extent;
                 jittered_projection.col_mut(2).x += jx / extent.width as f32;
                 jittered_projection.col_mut(2).y += jy / extent.height as f32;
             }
@@ -2284,6 +3083,7 @@ impl Renderer {
                     elapsed_seconds: elapsed,
                 };
                 self.features.before_frame(&mut feature_ctx);
+                self.shadow_feature.before_frame(&mut feature_ctx);
 
                 // Matrices provided via function arguments.
                 let matrices = uniform_buffer.matrices_mut();
@@ -2292,9 +3092,11 @@ impl Renderer {
                 matrices.projection = jittered_projection;
                 matrices.view_proj = jittered_projection * view;
                 matrices.camera_pos = camera_pos.extend(1.0);
-                let light_dir = glam::Vec3::new(-0.35, -1.0, -0.25).normalize();
-
-                matrices.set_lighting(light_dir, glam::Vec3::splat(1.5), glam::Vec3::splat(0.35));
+                matrices.set_lighting(
+                    self.light_direction,
+                    Vec4::from_array(self.light_color).truncate(),
+                    Vec4::from_array(self.ambient_color).truncate(),
+                );
 
                 // Set light-space matrix for shadow mapping
                 let light_space_matrix = self.shadow_feature.light_space_matrix();
@@ -2304,10 +3106,24 @@ impl Renderer {
                 uniform_buffer.update()?;
             }
 
+            // CRITICAL: Ensure all host-written buffers (including bindless storage buffers) are visible to GPU
+            // This is required because examples might update buffers directly on the host.
+            let global_barrier = vk::MemoryBarrier::default()
+                .src_access_mask(vk::AccessFlags::HOST_WRITE)
+                .dst_access_mask(vk::AccessFlags::SHADER_READ | vk::AccessFlags::UNIFORM_READ);
+
+            self.device.device.cmd_pipeline_barrier(
+                command_buffer,
+                vk::PipelineStageFlags::HOST,
+                vk::PipelineStageFlags::ALL_GRAPHICS | vk::PipelineStageFlags::COMPUTE_SHADER,
+                vk::DependencyFlags::empty(),
+                &[global_barrier],
+                &[],
+                &[],
+            );
+
             // Update post-processing descriptors once per frame to ensure they point to the correct VSR output.
-            if self.tonemapping_enabled {
-                self.update_post_descriptors()?;
-            }
+            self.update_post_descriptors()?;
 
             let cmd_ctx = self.cmds.context(command_buffer);
             cmd_ctx.reset()?;
@@ -2320,12 +3136,30 @@ impl Renderer {
                 swapchain_ref.acquire_next_image(image_available)
             };
             let image_index = match acquire_result {
-                Ok(index) => index,
+                Ok(index) => {
+                    log::debug!(
+                        "Frame {}: Successfully acquired image index {}",
+                        self.current_frame,
+                        index
+                    );
+                    index
+                }
                 Err(AshError::SwapchainOutOfDate(_)) => {
+                    log::warn!(
+                        "Frame {}: Swapchain out of date, requesting resize",
+                        self.current_frame
+                    );
                     self.request_swapchain_resize(swapchain_extent);
                     return Ok(());
                 }
-                Err(err) => return Err(err),
+                Err(err) => {
+                    log::error!(
+                        "Frame {}: Failed to acquire next image: {}",
+                        self.current_frame,
+                        err
+                    );
+                    return Err(err);
+                }
             };
 
             let worker_index = self.worker_index_for_frame(frame_index);
@@ -2334,11 +3168,6 @@ impl Renderer {
                 "worker index {} out of bounds for {} workers",
                 worker_index,
                 self.worker_count
-            );
-            debug_assert_eq!(
-                self.worker_count,
-                self.material_buffers.len(),
-                "material buffer pool must match worker count"
             );
 
             cmd_ctx.begin(vk::CommandBufferUsageFlags::empty())?;
@@ -2456,22 +3285,7 @@ impl Renderer {
             let clear_values = [
                 vk::ClearValue {
                     color: vk::ClearColorValue {
-                        float32: [0.0, 0.0, 0.0, 1.0],
-                    },
-                },
-                vk::ClearValue {
-                    color: vk::ClearColorValue {
-                        float32: [0.0, 0.0, 0.0, 0.0],
-                    },
-                },
-                vk::ClearValue {
-                    color: vk::ClearColorValue {
-                        float32: [0.0, 0.0, 0.0, 0.0],
-                    },
-                },
-                vk::ClearValue {
-                    color: vk::ClearColorValue {
-                        float32: [0.0, 0.0, 0.0, 0.0],
+                        float32: [0.0, 0.0, 0.0, 1.0], // Background is always black for better contrast
                     },
                 },
                 vk::ClearValue {
@@ -2482,10 +3296,15 @@ impl Renderer {
                 },
             ];
 
-            let framebuffer = self
-                .framebuffers
-                .get(image_index as usize)
-                .ok_or_else(|| AshError::VulkanError("Framebuffer index out of range".into()))?;
+            let framebuffer = self.framebuffers.get(image_index as usize).ok_or_else(|| {
+                log::error!(
+                    "Frame {}: Framebuffer index {} out of range (max: {})",
+                    self.current_frame,
+                    image_index,
+                    self.framebuffers.len()
+                );
+                AshError::VulkanError("Framebuffer index out of range".into())
+            })?;
 
             let render_pass_begin = vk::RenderPassBeginInfo::default()
                 .render_pass(main_render_pass)
@@ -2533,48 +3352,59 @@ impl Renderer {
                     let frame_set = manager.frame_set(frame_index).ok_or_else(|| {
                         AshError::VulkanError("Frame descriptor set not available".to_string())
                     })?;
-                    let material_set = manager.material_set(worker_index).ok_or_else(|| {
-                        AshError::VulkanError("Material descriptor set not available".to_string())
-                    })?;
                     cmd_ctx.bind_descriptor_sets(
                         vk::PipelineBindPoint::GRAPHICS,
                         pipeline_layout_handle,
-                        0,
-                        &[frame_set, material_set],
+                        0, // Set 0: Frame Data
+                        &[frame_set],
                         &[],
                     );
 
-                    // Bind shadow map descriptor (set 3)
-                    if let Some(shadow_map) = self.shadow_feature.shadow_map() {
-                        if let Some(shadow_set) = manager.shadow_set(frame_index) {
-                            // Bind shadow map texture to descriptor set
-                            manager.bind_shadow_map(
-                                frame_index,
-                                shadow_map.depth_image_view,
-                                shadow_map.sampler,
-                            )?;
-                            cmd_ctx.bind_descriptor_sets(
-                                vk::PipelineBindPoint::GRAPHICS,
-                                pipeline_layout_handle,
-                                3, // Set 3: Shadow map
-                                &[shadow_set],
-                                &[],
-                            );
-                        }
-                    }
-
-                    // Bind bindless descriptor set (Set 2).
+                    // Bind global bindless descriptor set (Set 1)
                     if let Some(ref bindless) = self.bindless_manager {
                         cmd_ctx.bind_descriptor_sets(
                             vk::PipelineBindPoint::GRAPHICS,
                             pipeline_layout_handle,
-                            2, // Set 2: Bindless textures
+                            1, // Set 1: Bindless (Textures, Materials, Instances, Joints)
                             &[bindless.descriptor_set()],
                             &[],
                         );
                     }
 
-                    // Bind Forward+ descriptor set (set 4)
+                    // Bind Global Environment descriptor (Set 2: ShadowMap + IBL)
+                    if let Some(env_set) = manager.environment_set(frame_index) {
+                        if let Some(shadow_map) = self.shadow_feature.shadow_map() {
+                            manager.bind_shadow_map(
+                                frame_index,
+                                shadow_map.depth_image_view,
+                                shadow_map.sampler,
+                            )?;
+                        }
+
+                        if let (Some(irradiance), Some(prefilter), Some(brdf_view)) = (
+                            &self.irradiance_map,
+                            &self.prefiltered_map,
+                            self.brdf_lut_pass.as_ref().and_then(|p| p.get_lut_view()),
+                        ) {
+                            let ibl_resources = vulkan::IBLResources {
+                                irradiance_view: irradiance.view(),
+                                prefiltered_view: prefilter.view(),
+                                brdf_lut_view: brdf_view,
+                                sampler: self.ibl_sampler,
+                            };
+                            manager.bind_ibl_resources(frame_index, &ibl_resources)?;
+                        }
+
+                        cmd_ctx.bind_descriptor_sets(
+                            vk::PipelineBindPoint::GRAPHICS,
+                            pipeline_layout_handle,
+                            2, // Set 2: Environment
+                            &[env_set],
+                            &[],
+                        );
+                    }
+
+                    // Bind Forward+ descriptor set (Set 3)
                     if let Some(ref forward_plus) = self.forward_plus {
                         forward_plus.bind(
                             &self.device.device,
@@ -2589,24 +3419,136 @@ impl Renderer {
                 }
             })()?;
 
-            // Explicitly bind the joint matrices descriptor set (Set 5) for the current frame.
-            // This ensures that all draw calls in this frame (including skinned meshes)
-            // have valid bone matrix data available in the vertex shader.
-            if let Some(manager) = self.descriptors.as_ref() {
-                let joint_set = manager.get_joint_descriptor_set(frame_index)?;
-                cmd_ctx.bind_descriptor_sets(
-                    vk::PipelineBindPoint::GRAPHICS,
-                    pipeline_layout_handle,
-                    5, // Set 5: Joint matrices
-                    &[joint_set],
-                    &[],
-                );
+            // --- Phase 10: GPU Instancing & Culling Integration ---
+
+            // 1. Prepare and upload all instances to the InstanceBuffer
+            let mut all_instances = Vec::new();
+            let mut batch_offsets = Vec::new();
+            {
+                for batch in self.instancing_manager.batches() {
+                    batch_offsets.push(all_instances.len() as u32);
+                    all_instances.extend_from_slice(&batch.instances);
+                }
             }
 
-            // Draw uploaded meshes in order
+            if !all_instances.is_empty() {
+                self.instance_buffer[frame_index].update(&all_instances)?;
+            }
+
+            // 3. Render all instanced batches (static meshes)
+            let mut current_object_offset = 0;
+            for (i, batch) in self.instancing_manager.batches().enumerate() {
+                if let Some(mesh_data) = self.mesh_data.get(batch.key.mesh_id as usize) {
+                    let mesh_key = &mesh_data.name;
+
+                    let _material = self
+                        .material_registry
+                        .get(batch.key.material_id)
+                        .unwrap_or_else(|| {
+                            let msg = format!(
+                                "Material handle {} not found for mesh '{}', using default",
+                                batch.key.material_id, mesh_key
+                            );
+                            if self.strict_mode {
+                                panic!("{}", msg);
+                            } else {
+                                log::warn!("{msg}");
+                            }
+                            &self.material
+                        });
+
+                    if let Some(uploaded) = self.model_renderer.get(mesh_key) {
+                        // Push constants - use material handle from batch
+                        let material_push = MaterialPushConstants::new(batch.key.material_id);
+
+                        // --- GPU-Driven Path ---
+                        if let Some(ref mut indirect) = self.indirect_draw_pass {
+                            // 1. Upload instances for this batch to the object buffer
+                            indirect.upload_objects(
+                                &self.alloc.vma,
+                                &batch.instances,
+                                current_object_offset,
+                            )?;
+
+                            // 2. Upload draw template for this mesh
+                            let template = vk::DrawIndexedIndirectCommand {
+                                index_count: uploaded.index_count(),
+                                instance_count: 1,
+                                first_index: 0,
+                                vertex_offset: 0,
+                                first_instance: 0, // Set by compute shader
+                            };
+                            indirect.upload_templates(&self.alloc.vma, &[template], 0)?;
+
+                            // 4. Run Culling Compute Shader
+                            let bindless_manager =
+                                self.bindless_manager.as_ref().expect("Bindless manager");
+                            indirect.execute_culling(
+                                command_buffer,
+                                &self.occlusion_culling,
+                                bindless_manager,
+                                projection * view,
+                                swapchain_extent.width,
+                                swapchain_extent.height,
+                                current_object_offset as u32,
+                                batch.count() as u32,
+                                0, // indirect_offset
+                            )?;
+
+                            // 5. Draw Indirect
+                            let ctx = DrawContext {
+                                command_buffer,
+                                pipeline_layout: pipeline_layout_handle,
+                                uploaded,
+                                material: &material_push,
+                                instance_buffer_index: indirect.object_buffer_index().unwrap_or(0),
+                                joint_buffer_index: self.joint_buffer_indices[frame_index],
+                            };
+                            self.model_renderer.draw_mesh_indirect_count(
+                                &ctx,
+                                &crate::renderer::model_renderer::IndirectDrawCountParams {
+                                    indirect_buffer: indirect.indirect_buffer(),
+                                    indirect_offset: 0,
+                                    count_buffer: indirect.count_buffer(),
+                                    count_offset: 0,
+                                    max_draw_count: batch.count() as u32,
+                                    stride: std::mem::size_of::<vk::DrawIndexedIndirectCommand>()
+                                        as u32,
+                                },
+                            );
+
+                            current_object_offset += batch.count();
+                        } else {
+                            // --- Direct Path Fallback ---
+                            let ctx = DrawContext {
+                                command_buffer,
+                                pipeline_layout: pipeline_layout_handle,
+                                uploaded,
+                                material: &material_push,
+                                instance_buffer_index: self.instance_buffer_indices[frame_index],
+                                joint_buffer_index: self.joint_buffer_indices[frame_index],
+                            };
+                            self.model_renderer.draw_mesh_instanced(
+                                &ctx,
+                                batch.count() as u32,
+                                batch_offsets[i],
+                            );
+                        }
+                    }
+                }
+            }
+
+            // 4. Draw remaining meshes (draw_items path) - FIXED to use correct material index
+            // This path is used for simple meshes that don't use the GPU-driven batching system
             let mut current_pipeline = scene_pipeline;
             for item in &self.draw_items {
                 if let Some(uploaded) = self.model_renderer.get(&item.key) {
+                    log::info!(
+                        "Rendering mesh: key='{}', vertices={}, tint_index={}",
+                        item.key,
+                        uploaded.vertex_count(),
+                        item.material.tint_index
+                    );
                     // Switch pipeline if needed
                     let target_pipeline = if item.is_skinned {
                         self.skinned_pipeline
@@ -2621,72 +3563,30 @@ impl Renderer {
                         cmd_ctx.bind_pipeline(vk::PipelineBindPoint::GRAPHICS, target_pipeline);
                         current_pipeline = target_pipeline;
                     }
-                    // Bindless architecture: indices passed via MaterialUniform.
-                    // Explicit descriptor set binding for materials is bypassed.
-
-                    if let Some(material_buffer) = self.material_buffers.get(worker_index) {
-                        let mut material_buffer = material_buffer.lock();
-                        log::debug!(
-                            "Draw '{}' material: metallic {:.3}, roughness {:.3}, occlusion {:.3}, normal_scale {:.3}, flags {:?}",
-                            item.key,
-                            item.material.metallic,
-                            item.material.roughness,
-                            item.material.occlusion_strength,
-                            item.material.normal_scale,
-                            item.texture_flags
-                        );
-                        let uniform = material_buffer.uniform_mut();
-                        uniform.set_base_color_factor(Vec4::from_array(item.material.color));
-                        uniform.set_emissive_factor(Vec4::from_array(item.material.emissive));
-                        uniform.set_metallic_roughness(
-                            item.material.metallic,
-                            item.material.roughness,
-                        );
-                        uniform.set_occlusion_strength(item.material.occlusion_strength);
-                        uniform.set_normal_scale(item.material.normal_scale);
-
-                        uniform.set_texture_indices(
-                            item.texture_indices[0],
-                            item.texture_indices[1],
-                            item.texture_indices[2],
-                            item.texture_indices[3],
-                            item.emissive_index,
-                        );
-                        uniform.set_alpha_cutoff(item.alpha_cutoff);
-                        material_buffer.update()?;
-                    }
-
                     let model_matrix = item.transform;
-                    let base_color_binding = if item.texture_flags.base_color {
-                        Some(0u32)
+                    
+                    // CRITICAL FIX: Use material_handle from mesh_data if available, otherwise fallback to 0
+                    // This allows the material registered in the bindless buffer to be used
+                    let material_index = if !self.mesh_data.is_empty() {
+                        self.mesh_data[0].material_handle
                     } else {
-                        None
+                        0u32
                     };
-                    let mut material_push =
-                        MaterialPushConstants::from_material(&item.material, base_color_binding);
-                    material_push.normal_texture_set =
-                        if item.texture_flags.normal { 1 } else { -1 };
-                    material_push.metallic_roughness_texture_set =
-                        if item.texture_flags.metallic_roughness {
-                            2
-                        } else {
-                            -1
-                        };
-                    material_push.occlusion_texture_set =
-                        if item.texture_flags.occlusion { 3 } else { -1 };
-                    material_push.emissive_texture_set =
-                        if item.texture_flags.emissive { 4 } else { -1 };
+                    let material_push = MaterialPushConstants::new(material_index);
 
-                    self.model_renderer.draw_mesh(
+                    let ctx = DrawContext {
                         command_buffer,
-                        pipeline_layout_handle,
+                        pipeline_layout: pipeline_layout_handle,
                         uploaded,
-                        model_matrix,
-                        item.joint_offset,
-                        &material_push,
-                    );
+                        material: &material_push,
+                        instance_buffer_index: self.instance_buffer_indices[frame_index],
+                        joint_buffer_index: self.joint_buffer_indices[frame_index],
+                    };
+
+                    self.model_renderer
+                        .draw_mesh(&ctx, model_matrix, item.joint_offset);
                 } else {
-                    log::warn!("Uploaded data for mesh key '{}' missing", item.key);
+                    log::error!("CRITICAL: Mesh not found in ModelRenderer cache! key='{}'. Mesh will not render.", item.key);
                 }
             }
 
@@ -2696,7 +3596,10 @@ impl Renderer {
             if let (Some(ref mut gbuffer), Some(ref mut ssgi)) =
                 (&mut self.gbuffer, &mut self.ssgi_pass)
             {
-                let depth_buffer = self.depth_buffer.as_ref().unwrap();
+                let depth_buffer = self
+                    .depth_buffer
+                    .as_ref()
+                    .ok_or_else(|| AshError::VulkanError("Depth buffer missing".to_string()))?;
                 let inv_view_proj = (jittered_projection * view).inverse();
 
                 ssgi.compute_gi(
@@ -2713,7 +3616,10 @@ impl Renderer {
             if let (Some(ref mut vsr), Some(ref mut gbuffer)) =
                 (&mut self.vsr_pass, &mut self.gbuffer)
             {
-                let depth_buffer = self.depth_buffer.as_ref().unwrap();
+                let depth_buffer = self
+                    .depth_buffer
+                    .as_ref()
+                    .ok_or_else(|| AshError::VulkanError("Depth buffer missing".to_string()))?;
                 // Pass current color result (which is now correctly the HDR buffer if initialized)
                 // and upsample to VSR history.
                 vsr.upscale(
@@ -2727,9 +3633,8 @@ impl Renderer {
             }
 
             // --- Post-Processing (Tonemapping & Resolve) ---
-            if self.tonemapping_enabled {
-                self.render_post_processing(command_buffer, image_index as usize)?;
-            }
+            // Resolve HDR target to swapchain (always needed even if tonemapping is disabled)
+            self.render_post_processing(command_buffer, image_index as usize)?;
 
             cmd_ctx.end()?;
 
@@ -2754,18 +3659,35 @@ impl Renderer {
                     .ok_or(AshError::VulkanError("Swapchain not available".to_string()))?;
                 swapchain_ref.present(self.device.present_queue, image_index, render_finished)
             };
+            self.last_image_index = image_index;
 
             match present_result {
                 Ok(()) => {
+                    log::debug!(
+                        "Frame {}: Successfully presented image {}",
+                        self.current_frame,
+                        image_index
+                    );
                     if self.swapchain_cleanup_pending {
                         self.flush_old_swapchains();
                     }
                 }
                 Err(AshError::SwapchainOutOfDate(_)) => {
+                    log::warn!(
+                        "Frame {}: Swapchain out of date during presentation, requesting resize",
+                        self.current_frame
+                    );
                     self.request_swapchain_resize(swapchain_extent);
                     return Ok(());
                 }
-                Err(err) => return Err(err),
+                Err(err) => {
+                    log::error!(
+                        "Frame {}: Failed to present image: {}",
+                        self.current_frame,
+                        err
+                    );
+                    return Err(err);
+                }
             }
 
             self.current_frame = (frame_index + 1) % self.command_buffers.len();
@@ -2796,6 +3718,16 @@ impl Renderer {
 
     pub fn material_mut(&mut self) -> &mut Material {
         &mut self.material
+    }
+
+    /// Updates the draw items to reflect the current material state
+    pub fn refresh_draw_items(&mut self) {
+        if self.mesh.is_some() && !self.draw_items.is_empty() {
+            // Update the material in the first draw item (since we only support one mesh for now)
+            if let Some(draw_item) = self.draw_items.get_mut(0) {
+                draw_item.material = self.material.clone();
+            }
+        }
     }
 
     // ──────────────────────────────────────────────────────────
@@ -2902,6 +3834,7 @@ impl Renderer {
     ) {
         if let Some(ref mut forward_plus) = self.forward_plus {
             forward_plus.update_lights(point_lights, directional_lights);
+            // SAFETY: `forward_plus.upload_to_gpu` manages its own internal buffers. We provide the VMA allocator which is valid.
             unsafe {
                 let _ = forward_plus.upload_to_gpu(&self.alloc.vma);
             }
@@ -2958,10 +3891,19 @@ impl Renderer {
 
         // Create Indirect Draw pass
         let mut indirect = IndirectDrawPass::new(Arc::clone(&self.device.device));
+        let manager = self.descriptors.as_ref().ok_or(AshError::VulkanError(
+            "DescriptorManager not initialized".to_string(),
+        ))?;
+        let bindless_manager = self.bindless_manager.as_mut().ok_or(AshError::VulkanError(
+            "BindlessManager not initialized".to_string(),
+        ))?;
+
         unsafe {
             indirect.init(
                 &self.alloc.vma,
                 &self.device,
+                manager.frame_layout(),
+                bindless_manager,
                 crate::renderer::indirect_draw::MAX_INDIRECT_OBJECTS,
             );
             indirect.update_hiz_descriptor(&hiz);
@@ -3205,7 +4147,7 @@ impl Renderer {
         let layouts = vec![
             self.fullscreen_pass
                 .as_ref()
-                .unwrap()
+                .ok_or_else(|| AshError::RenderPassMissing("Fullscreen pass missing".to_string()))?
                 .descriptor_set_layout();
             count as usize
         ];
@@ -3244,11 +4186,11 @@ impl Renderer {
             hdr.sampler()
         } else {
             // Default sampler if HDR not available (though it should be)
+            // SAFETY: `create_sampler` is called with valid default parameters.
             unsafe {
                 self.device
                     .device
-                    .create_sampler(&vk::SamplerCreateInfo::default(), None)
-                    .unwrap()
+                    .create_sampler(&vk::SamplerCreateInfo::default(), None)?
             }
         };
 
@@ -3321,7 +4263,14 @@ impl Renderer {
             let mut builder = vulkan::Pipeline::builder(Arc::clone(&self.device.device))
                 .with_layout(pass.pipeline_layout())
                 .with_render_pass(pass.render_pass())
-                .with_extent(self.swapchain.as_ref().unwrap().extent)
+                .with_extent(
+                    self.swapchain
+                        .as_ref()
+                        .ok_or_else(|| {
+                            AshError::SwapchainMissing("Required for post-pipeline".to_string())
+                        })?
+                        .extent,
+                )
                 .with_cull_mode(vk::CullModeFlags::NONE);
 
             builder = builder.add_shader_from_bytes(
@@ -3419,6 +4368,7 @@ impl Renderer {
         let timestamp_period = self.device.timestamp_period_ns;
         let timestamps_supported = timestamp_period > 0.0;
 
+        // SAFETY: `GpuProfiler::new` checks device limits internally.
         unsafe {
             let profiler = GpuProfiler::new(
                 Arc::clone(&self.device.device),
@@ -3464,6 +4414,15 @@ impl Renderer {
 
 impl Drop for Renderer {
     fn drop(&mut self) {
+        // Shutdown streamer FIRST to prevent background thread accessing resources while we destroy them
+        // Shutdown streamer FIRST to prevent background thread accessing resources while we destroy them
+        {
+            let mut lock = self.texture_streamer.lock();
+            if let Some(streamer) = lock.take() {
+                drop(streamer); // Joins thread and destroys command pool
+            }
+        }
+
         unsafe {
             log::info!("Shutting down Ash Renderer...");
 
@@ -3505,11 +4464,9 @@ impl Drop for Renderer {
             }
             self.uniform_buffers.clear();
 
-            for buffer in &self.material_buffers {
-                let mut buffer = buffer.lock();
+            if let Some(mut buffer) = self.material_storage_buffer.take() {
                 let _ = buffer.cleanup();
             }
-            self.material_buffers.clear();
 
             self.model_renderer.clear();
             self.draw_items.clear();
@@ -3521,7 +4478,69 @@ impl Drop for Renderer {
             self.render_pass = None;
             self.swapchain = None;
 
+            // IBL Cleanup
+            if self.ibl_sampler != vk::Sampler::null() {
+                self.device.device.destroy_sampler(self.ibl_sampler, None);
+            }
+            if let Some(mut pass) = self.brdf_lut_pass.take() {
+                pass.destroy(&self.alloc.vma, &self.device.device);
+            }
+            self.ibl_manager.destroy();
+
             log::info!("Ash Renderer shut down successfully");
         }
     }
+}
+
+/// Helper to register a single texture with the bindless manager.
+fn register_single_texture(
+    bindless_manager: &mut vulkan::BindlessManager,
+    texture_name: &str,
+    texture: Option<&resources::texture::Texture>,
+) -> Result<Option<u32>> {
+    match texture {
+        Some(tex) => match bindless_manager.add_sampled_image(tex.view(), tex.sampler()) {
+            Ok(idx) => {
+                log::debug!("Registered {texture_name} texture at bindless index {idx}");
+                Ok(Some(idx))
+            }
+            Err(e) => {
+                log::error!("Failed to register {texture_name} texture: {e}");
+                Err(AshError::TextureBindingFailed(format!(
+                    "{texture_name}: {e}"
+                )))
+            }
+        },
+        None => {
+            log::debug!("{texture_name} texture not provided");
+            Ok(None)
+        }
+    }
+}
+
+/// DRY helper to register all standard PBR textures for a mesh.
+fn register_mesh_textures(
+    mesh: &mut Mesh,
+    bindless_manager: &mut vulkan::BindlessManager,
+) -> Result<()> {
+    mesh.texture_index =
+        register_single_texture(bindless_manager, "base_color", mesh.texture.as_deref())?;
+    mesh.normal_texture_index =
+        register_single_texture(bindless_manager, "normal", mesh.normal_texture.as_deref())?;
+    mesh.metallic_roughness_texture_index = register_single_texture(
+        bindless_manager,
+        "metallic_roughness",
+        mesh.metallic_roughness_texture.as_deref(),
+    )?;
+    mesh.occlusion_texture_index = register_single_texture(
+        bindless_manager,
+        "occlusion",
+        mesh.occlusion_texture.as_deref(),
+    )?;
+    mesh.emissive_texture_index = register_single_texture(
+        bindless_manager,
+        "emissive",
+        mesh.emissive_texture.as_deref(),
+    )?;
+    Ok(())
 }

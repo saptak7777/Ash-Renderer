@@ -1,10 +1,11 @@
 //! Test Phase 4: Smart material selection with mesh-to-material mapping
 
-use ash_renderer::prelude::*;
+// Unused import removed
 use std::collections::HashMap;
 
-fn main() {
-    env_logger::init();
+#[test]
+fn test_phase4_smart_material() {
+    let _ = env_logger::builder().is_test(true).try_init();
 
     println!("Testing Phase 4: Smart Material Selection...");
 
@@ -26,6 +27,7 @@ fn main() {
         occlusion_strength: 1.0,
         normal_scale: 1.0,
         alpha_cutoff: 0.5,
+        tint_index: -1,
     };
 
     // Populate the registries (simulating register_mesh_handle)

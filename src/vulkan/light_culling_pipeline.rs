@@ -27,9 +27,7 @@ pub struct LightCullingPipeline {
     tile_buffer_alloc: vk_mem::Allocation,
     camera_buffer: vk::Buffer,
     camera_buffer_alloc: vk_mem::Allocation,
-    // State
-    #[allow(dead_code)]
-    light_buffer_size: usize,
+    // State tracking for debugging and validation
     tile_buffer_size: usize,
 }
 
@@ -239,7 +237,6 @@ impl LightCullingPipeline {
             tile_buffer_alloc,
             camera_buffer,
             camera_buffer_alloc,
-            light_buffer_size,
             tile_buffer_size,
         })
     }

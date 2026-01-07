@@ -31,7 +31,7 @@ fn main() -> Result<()> {
 
     for i in 0..100 {
         let descriptor = ash_renderer::renderer::resources::mesh::MeshDescriptor {
-            key: format!("StressMesh_{}", i),
+            key: format!("StressMesh_{}", i).into(),
             vertices: vec![], // Empty mesh to focus on texture VRAM
             indices: None,
             texture: Some(

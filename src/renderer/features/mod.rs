@@ -2,6 +2,7 @@ mod auto_rotate;
 pub mod bloom;
 pub mod brdf_lut;
 mod feature_trait;
+pub mod ibl_manager;
 pub mod light_culling;
 pub mod light_manager;
 pub mod lighting;

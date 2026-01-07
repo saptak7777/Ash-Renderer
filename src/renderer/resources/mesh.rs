@@ -1,3 +1,5 @@
+// TODO: Migration Plan - This crate relies on the deprecated `archetype_asset` loader.
+// We plan to migrate to a new asset system in v0.5.0.
 #![allow(deprecated)]
 
 #[cfg(feature = "gltf_loading")]
@@ -33,7 +35,7 @@ pub struct Vertex {
 /// Descriptor describing CPU-side mesh data ready for upload.
 #[derive(Debug, Clone)]
 pub struct MeshDescriptor {
-    pub key: String,
+    pub key: Arc<str>,
     pub vertices: Vec<Vertex>,
     pub indices: Option<Vec<u32>>,
     pub texture: Option<TextureData>,
@@ -129,18 +131,19 @@ pub struct SubmeshDescriptor {
     pub start_index: u32,
     pub index_count: u32,
     pub material_slot: u32, // Index into material_handles
-    pub name: String,
+    pub name: Arc<str>,
 }
 
 /// GPU Mesh with vertex/index buffers uploaded (PHASE 3)
 #[derive(Default)]
 pub struct Mesh {
-    pub name: String,
+    pub name: Arc<str>,
     pub vertices: Vec<Vertex>,
     pub skinned_vertices: Vec<crate::renderer::SkinnedVertex>,
     pub indices: Option<Vec<u32>>,
     pub texture_data: Option<TextureData>,
-    pub texture: Option<Texture>,
+    pub texture: Option<Arc<Texture>>,
+    pub texture_path: Option<std::path::PathBuf>,
 
     // Phase 2: Multi-material support foundation
     pub material_handle: Option<u32>, // Single material (Phase 1)
@@ -148,13 +151,17 @@ pub struct Mesh {
     pub submeshes: Vec<SubmeshDescriptor>, // Future submesh descriptors
 
     pub normal_texture_data: Option<TextureData>,
-    pub normal_texture: Option<Texture>,
+    pub normal_texture: Option<Arc<Texture>>,
+    pub normal_texture_path: Option<std::path::PathBuf>,
     pub metallic_roughness_texture_data: Option<TextureData>,
-    pub metallic_roughness_texture: Option<Texture>,
+    pub metallic_roughness_texture: Option<Arc<Texture>>,
+    pub metallic_roughness_texture_path: Option<std::path::PathBuf>,
     pub occlusion_texture_data: Option<TextureData>,
-    pub occlusion_texture: Option<Texture>,
+    pub occlusion_texture: Option<Arc<Texture>>,
+    pub occlusion_texture_path: Option<std::path::PathBuf>,
     pub emissive_texture_data: Option<TextureData>,
-    pub emissive_texture: Option<Texture>,
+    pub emissive_texture: Option<Arc<Texture>>,
+    pub emissive_texture_path: Option<std::path::PathBuf>,
     pub material_properties: Option<MaterialProperties>,
 
     // Phase 3: GPU buffers
@@ -181,7 +188,7 @@ impl Mesh {
         Self::create_named_cube("Cube")
     }
 
-    pub fn create_named_cube(name: impl Into<String>) -> Self {
+    pub fn create_named_cube(name: impl Into<Arc<str>>) -> Self {
         // Each face has its own set of vertices to ensure correct normals and UVs
         let vertices = vec![
             // Front face (red)
@@ -189,28 +196,28 @@ impl Mesh {
                 position: [-1.0, -1.0, 1.0],
                 normal: [0.0, 0.0, 1.0],
                 uv: [0.0, 0.0],
-                color: [1.0, 0.0, 0.0],
+                color: [1.0, 1.0, 1.0],
                 tangent: [1.0, 0.0, 0.0, 1.0],
             },
             Vertex {
                 position: [1.0, -1.0, 1.0],
                 normal: [0.0, 0.0, 1.0],
                 uv: [1.0, 0.0],
-                color: [1.0, 0.0, 0.0],
+                color: [1.0, 1.0, 1.0],
                 tangent: [1.0, 0.0, 0.0, 1.0],
             },
             Vertex {
                 position: [1.0, 1.0, 1.0],
                 normal: [0.0, 0.0, 1.0],
                 uv: [1.0, 1.0],
-                color: [1.0, 0.0, 0.0],
+                color: [1.0, 1.0, 1.0],
                 tangent: [1.0, 0.0, 0.0, 1.0],
             },
             Vertex {
                 position: [-1.0, 1.0, 1.0],
                 normal: [0.0, 0.0, 1.0],
                 uv: [0.0, 1.0],
-                color: [1.0, 0.0, 0.0],
+                color: [1.0, 1.0, 1.0],
                 tangent: [1.0, 0.0, 0.0, 1.0],
             },
             // Back face (green)
@@ -218,28 +225,28 @@ impl Mesh {
                 position: [1.0, -1.0, -1.0],
                 normal: [0.0, 0.0, -1.0],
                 uv: [0.0, 0.0],
-                color: [0.0, 1.0, 0.0],
+                color: [1.0, 1.0, 1.0],
                 tangent: [-1.0, 0.0, 0.0, 1.0],
             },
             Vertex {
                 position: [-1.0, -1.0, -1.0],
                 normal: [0.0, 0.0, -1.0],
                 uv: [1.0, 0.0],
-                color: [0.0, 1.0, 0.0],
+                color: [1.0, 1.0, 1.0],
                 tangent: [-1.0, 0.0, 0.0, 1.0],
             },
             Vertex {
                 position: [-1.0, 1.0, -1.0],
                 normal: [0.0, 0.0, -1.0],
                 uv: [1.0, 1.0],
-                color: [0.0, 1.0, 0.0],
+                color: [1.0, 1.0, 1.0],
                 tangent: [-1.0, 0.0, 0.0, 1.0],
             },
             Vertex {
                 position: [1.0, 1.0, -1.0],
                 normal: [0.0, 0.0, -1.0],
                 uv: [0.0, 1.0],
-                color: [0.0, 1.0, 0.0],
+                color: [1.0, 1.0, 1.0],
                 tangent: [-1.0, 0.0, 0.0, 1.0],
             },
             // Top face (blue)
@@ -247,28 +254,28 @@ impl Mesh {
                 position: [-1.0, 1.0, 1.0],
                 normal: [0.0, 1.0, 0.0],
                 uv: [0.0, 0.0],
-                color: [0.0, 0.0, 1.0],
+                color: [1.0, 1.0, 1.0],
                 tangent: [1.0, 0.0, 0.0, 1.0],
             },
             Vertex {
                 position: [1.0, 1.0, 1.0],
                 normal: [0.0, 1.0, 0.0],
                 uv: [1.0, 0.0],
-                color: [0.0, 0.0, 1.0],
+                color: [1.0, 1.0, 1.0],
                 tangent: [1.0, 0.0, 0.0, 1.0],
             },
             Vertex {
                 position: [1.0, 1.0, -1.0],
                 normal: [0.0, 1.0, 0.0],
                 uv: [1.0, 1.0],
-                color: [0.0, 0.0, 1.0],
+                color: [1.0, 1.0, 1.0],
                 tangent: [1.0, 0.0, 0.0, 1.0],
             },
             Vertex {
                 position: [-1.0, 1.0, -1.0],
                 normal: [0.0, 1.0, 0.0],
                 uv: [0.0, 1.0],
-                color: [0.0, 0.0, 1.0],
+                color: [1.0, 1.0, 1.0],
                 tangent: [1.0, 0.0, 0.0, 1.0],
             },
             // Bottom face (yellow)
@@ -276,28 +283,28 @@ impl Mesh {
                 position: [-1.0, -1.0, -1.0],
                 normal: [0.0, -1.0, 0.0],
                 uv: [0.0, 0.0],
-                color: [1.0, 1.0, 0.0],
+                color: [1.0, 1.0, 1.0],
                 tangent: [1.0, 0.0, 0.0, 1.0],
             },
             Vertex {
                 position: [1.0, -1.0, -1.0],
                 normal: [0.0, -1.0, 0.0],
                 uv: [1.0, 0.0],
-                color: [1.0, 1.0, 0.0],
+                color: [1.0, 1.0, 1.0],
                 tangent: [1.0, 0.0, 0.0, 1.0],
             },
             Vertex {
                 position: [1.0, -1.0, 1.0],
                 normal: [0.0, -1.0, 0.0],
                 uv: [1.0, 1.0],
-                color: [1.0, 1.0, 0.0],
+                color: [1.0, 1.0, 1.0],
                 tangent: [1.0, 0.0, 0.0, 1.0],
             },
             Vertex {
                 position: [-1.0, -1.0, 1.0],
                 normal: [0.0, -1.0, 0.0],
                 uv: [0.0, 1.0],
-                color: [1.0, 1.0, 0.0],
+                color: [1.0, 1.0, 1.0],
                 tangent: [1.0, 0.0, 0.0, 1.0],
             },
             // Right face (cyan)
@@ -305,28 +312,28 @@ impl Mesh {
                 position: [1.0, -1.0, 1.0],
                 normal: [1.0, 0.0, 0.0],
                 uv: [0.0, 0.0],
-                color: [0.0, 1.0, 1.0],
+                color: [1.0, 1.0, 1.0],
                 tangent: [0.0, 0.0, -1.0, 1.0],
             },
             Vertex {
                 position: [1.0, -1.0, -1.0],
                 normal: [1.0, 0.0, 0.0],
                 uv: [1.0, 0.0],
-                color: [0.0, 1.0, 1.0],
+                color: [1.0, 1.0, 1.0],
                 tangent: [0.0, 0.0, -1.0, 1.0],
             },
             Vertex {
                 position: [1.0, 1.0, -1.0],
                 normal: [1.0, 0.0, 0.0],
                 uv: [1.0, 1.0],
-                color: [0.0, 1.0, 1.0],
+                color: [1.0, 1.0, 1.0],
                 tangent: [0.0, 0.0, -1.0, 1.0],
             },
             Vertex {
                 position: [1.0, 1.0, 1.0],
                 normal: [1.0, 0.0, 0.0],
                 uv: [0.0, 1.0],
-                color: [0.0, 1.0, 1.0],
+                color: [1.0, 1.0, 1.0],
                 tangent: [0.0, 0.0, -1.0, 1.0],
             },
             // Left face (magenta)
@@ -334,28 +341,28 @@ impl Mesh {
                 position: [-1.0, -1.0, -1.0],
                 normal: [-1.0, 0.0, 0.0],
                 uv: [0.0, 0.0],
-                color: [1.0, 0.0, 1.0],
+                color: [1.0, 1.0, 1.0],
                 tangent: [0.0, 0.0, 1.0, 1.0],
             },
             Vertex {
                 position: [-1.0, -1.0, 1.0],
                 normal: [-1.0, 0.0, 0.0],
                 uv: [1.0, 0.0],
-                color: [1.0, 0.0, 1.0],
+                color: [1.0, 1.0, 1.0],
                 tangent: [0.0, 0.0, 1.0, 1.0],
             },
             Vertex {
                 position: [-1.0, 1.0, 1.0],
                 normal: [-1.0, 0.0, 0.0],
                 uv: [1.0, 1.0],
-                color: [1.0, 0.0, 1.0],
+                color: [1.0, 1.0, 1.0],
                 tangent: [0.0, 0.0, 1.0, 1.0],
             },
             Vertex {
                 position: [-1.0, 1.0, -1.0],
                 normal: [-1.0, 0.0, 0.0],
                 uv: [0.0, 1.0],
-                color: [1.0, 0.0, 1.0],
+                color: [1.0, 1.0, 1.0],
                 tangent: [0.0, 0.0, 1.0, 1.0],
             },
         ];
@@ -384,17 +391,22 @@ impl Mesh {
             indices: Some(indices),
             texture_data: None,
             texture: None,
+            texture_path: None,
             material_handle: None,
             material_handles: Vec::new(),
             submeshes: Vec::new(),
             normal_texture_data: None,
             normal_texture: None,
+            normal_texture_path: None,
             metallic_roughness_texture_data: None,
             metallic_roughness_texture: None,
+            metallic_roughness_texture_path: None,
             occlusion_texture_data: None,
             occlusion_texture: None,
+            occlusion_texture_path: None,
             emissive_texture_data: None,
             emissive_texture: None,
+            emissive_texture_path: None,
             material_properties: Some(MaterialProperties::default()),
             vertex_buffer: None,
             vertex_allocation: None,
@@ -498,14 +510,15 @@ impl Mesh {
             }
 
             let indices = Some(mesh_data.indices.clone());
+            const DEFAULT_MODEL_NAME: &str = "model";
             let base_name = path_obj
                 .file_stem()
                 .and_then(|s| s.to_str())
-                .unwrap_or("model");
-            let primitive_name = if model.meshes.len() > 1 {
-                format!("{base_name}_{mesh_idx}")
+                .unwrap_or(DEFAULT_MODEL_NAME);
+            let primitive_name: Arc<str> = if model.meshes.len() > 1 {
+                format!("{base_name}_{mesh_idx}").into()
             } else {
-                base_name.to_string()
+                base_name.into()
             };
 
             let mut material_properties = Some(MaterialProperties::default());
@@ -571,6 +584,7 @@ impl Mesh {
                 indices: indices.clone(),
                 texture_data,
                 texture: None,
+                texture_path: None,
 
                 // Phase 2 fields
                 material_handle: None,
@@ -579,17 +593,21 @@ impl Mesh {
                     start_index: 0,
                     index_count: indices.as_ref().map_or(0, |i| i.len()) as u32,
                     material_slot: 0,
-                    name: primitive_name.clone(),
+                    name: Arc::clone(&primitive_name),
                 }],
 
                 normal_texture_data,
                 normal_texture: None,
+                normal_texture_path: None,
                 metallic_roughness_texture_data,
                 metallic_roughness_texture: None,
+                metallic_roughness_texture_path: None,
                 occlusion_texture_data,
                 occlusion_texture: None,
+                occlusion_texture_path: None,
                 emissive_texture_data,
                 emissive_texture: None,
+                emissive_texture_path: None,
                 material_properties,
                 vertex_buffer: None,
                 vertex_allocation: None,
@@ -661,7 +679,7 @@ impl Mesh {
 
         meshes
             .into_iter()
-            .find(|m| m.name == name)
+            .find(|m| &*m.name == name)
             .ok_or_else(|| crate::AshError::VulkanError(format!("Mesh '{name}' not found in GLB")))
     }
 
@@ -672,9 +690,9 @@ impl Mesh {
     }
 
     /// Lists all mesh names in a GLB file.
-    pub fn list_meshes_in_gltf(path: &str) -> crate::Result<Vec<String>> {
+    pub fn list_meshes_in_gltf(path: &str) -> crate::Result<Vec<Arc<str>>> {
         let meshes = Self::load_all_from_gltf(path)?;
-        Ok(meshes.iter().map(|m| m.name.clone()).collect())
+        Ok(meshes.iter().map(|m| Arc::clone(&m.name)).collect())
     }
 
     /// Builds a mesh from a descriptor without uploading to the GPU.
@@ -691,17 +709,22 @@ impl Mesh {
             indices: descriptor.indices.clone(),
             texture_data: descriptor.texture.clone(),
             texture: None,
+            texture_path: None,
             material_handle: None,
             material_handles: Vec::new(),
             submeshes: Vec::new(),
             normal_texture_data: descriptor.normal_texture.clone(),
             normal_texture: None,
+            normal_texture_path: None,
             metallic_roughness_texture_data: descriptor.metallic_roughness_texture.clone(),
             metallic_roughness_texture: None,
+            metallic_roughness_texture_path: None,
             occlusion_texture_data: descriptor.occlusion_texture.clone(),
             occlusion_texture: None,
+            occlusion_texture_path: None,
             emissive_texture_data: descriptor.emissive_texture.clone(),
             emissive_texture: None,
+            emissive_texture_path: None,
             material_properties: descriptor.material_properties,
             vertex_buffer: None,
             vertex_allocation: None,
@@ -923,7 +946,7 @@ impl Mesh {
                     vk::Format::R8G8B8A8_SRGB,
                     Some(&self.name),
                 )?;
-                self.texture = Some(texture);
+                self.texture = Some(Arc::new(texture));
                 self.texture_data = None;
             }
         }
@@ -957,7 +980,7 @@ impl Mesh {
             device: &Arc<ash::Device>,
             command_pool: vk::CommandPool,
             queue: vk::Queue,
-            texture: &mut Option<Texture>,
+            texture: &mut Option<Arc<Texture>>,
             data: &mut Option<TextureData>,
             srgb: bool,
             compression: CompressionFormat,
@@ -1024,7 +1047,7 @@ impl Mesh {
                             format,
                             Some(&format!("{mesh_name}_{map_name}_fallback")),
                         )?;
-                        *texture = Some(gpu_texture);
+                        *texture = Some(Arc::new(gpu_texture));
                         vram_budget.allocate(4); // Minimal
                     } else {
                         log::info!(
@@ -1040,7 +1063,7 @@ impl Mesh {
                             format,
                             Some(&format!("{mesh_name}_{map_name}")),
                         )?;
-                        *texture = Some(gpu_texture);
+                        *texture = Some(Arc::new(gpu_texture));
                         vram_budget.allocate(estimated_total);
                     }
                 }
@@ -1183,23 +1206,23 @@ impl Mesh {
 
     /// Returns the GPU texture if available
     pub fn texture(&self) -> Option<&Texture> {
-        self.texture.as_ref()
+        self.texture.as_deref()
     }
 
     pub fn normal_texture(&self) -> Option<&Texture> {
-        self.normal_texture.as_ref()
+        self.normal_texture.as_deref()
     }
 
     pub fn metallic_roughness_texture(&self) -> Option<&Texture> {
-        self.metallic_roughness_texture.as_ref()
+        self.metallic_roughness_texture.as_deref()
     }
 
     pub fn occlusion_texture(&self) -> Option<&Texture> {
-        self.occlusion_texture.as_ref()
+        self.occlusion_texture.as_deref()
     }
 
     pub fn emissive_texture(&self) -> Option<&Texture> {
-        self.emissive_texture.as_ref()
+        self.emissive_texture.as_deref()
     }
 
     /// Base color factor extracted from GLTF material if available.
@@ -1211,6 +1234,74 @@ impl Mesh {
 
     pub fn material_properties(&self) -> Option<&MaterialProperties> {
         self.material_properties.as_ref()
+    }
+
+    /// Request loading of textures via the streamer
+    pub fn request_loads(&self, streamer: &crate::renderer::resources::TextureStreamer) {
+        if self.texture.is_none() {
+            if let Some(path) = &self.texture_path {
+                streamer.request_load(path, 0, "base_color");
+            }
+        }
+        if self.normal_texture.is_none() {
+            if let Some(path) = &self.normal_texture_path {
+                streamer.request_load(path, 0, "normal");
+            }
+        }
+        if self.metallic_roughness_texture.is_none() {
+            if let Some(path) = &self.metallic_roughness_texture_path {
+                streamer.request_load(path, 0, "metallic_roughness");
+            }
+        }
+        if self.occlusion_texture.is_none() {
+            if let Some(path) = &self.occlusion_texture_path {
+                streamer.request_load(path, 0, "occlusion");
+            }
+        }
+        if self.emissive_texture.is_none() {
+            if let Some(path) = &self.emissive_texture_path {
+                streamer.request_load(path, 0, "emissive");
+            }
+        }
+    }
+
+    /// Poll the streamer for loaded textures
+    pub fn poll_streaming(&mut self, streamer: &crate::renderer::resources::TextureStreamer) {
+        if self.texture.is_none() {
+            if let Some(path) = &self.texture_path {
+                if let Some(tex) = streamer.try_get(path) {
+                    self.texture = Some(tex);
+                }
+            }
+        }
+        if self.normal_texture.is_none() {
+            if let Some(path) = &self.normal_texture_path {
+                if let Some(tex) = streamer.try_get(path) {
+                    self.normal_texture = Some(tex);
+                }
+            }
+        }
+        if self.metallic_roughness_texture.is_none() {
+            if let Some(path) = &self.metallic_roughness_texture_path {
+                if let Some(tex) = streamer.try_get(path) {
+                    self.metallic_roughness_texture = Some(tex);
+                }
+            }
+        }
+        if self.occlusion_texture.is_none() {
+            if let Some(path) = &self.occlusion_texture_path {
+                if let Some(tex) = streamer.try_get(path) {
+                    self.occlusion_texture = Some(tex);
+                }
+            }
+        }
+        if self.emissive_texture.is_none() {
+            if let Some(path) = &self.emissive_texture_path {
+                if let Some(tex) = streamer.try_get(path) {
+                    self.emissive_texture = Some(tex);
+                }
+            }
+        }
     }
 }
 
@@ -1275,7 +1366,7 @@ mod tests {
         let m2 = Mesh::create_named_cube("Second");
         let mut meshes = vec![m1, m2];
         let first = meshes.remove(0);
-        assert_eq!(first.name, "First");
+        assert_eq!(&*first.name, "First");
     }
 
     #[test]
@@ -1286,16 +1377,59 @@ mod tests {
         ];
 
         // Test index selection
-        assert_eq!(meshes.get(0).unwrap().name, "PartA");
-        assert_eq!(meshes.get(1).unwrap().name, "PartB");
+        assert_eq!(&*meshes.get(0).unwrap().name, "PartA");
+        assert_eq!(&*meshes.get(1).unwrap().name, "PartB");
         assert!(meshes.get(2).is_none());
 
         // Test named selection
-        let part_b = meshes.iter().find(|m| m.name == "PartB");
+        let part_b = meshes.iter().find(|m| &*m.name == "PartB");
         assert!(part_b.is_some());
-        assert_eq!(part_b.unwrap().name, "PartB");
+        assert_eq!(&*part_b.unwrap().name, "PartB");
 
-        let missing = meshes.iter().find(|m| m.name == "Missing");
+        let missing = meshes.iter().find(|m| &*m.name == "Missing");
         assert!(missing.is_none());
+    }
+
+    #[test]
+    fn test_arc_str_clone_cost() {
+        use std::time::Instant;
+        let iterations = 100_000;
+
+        let name_str = "A very long mesh name that would definitely require a heap allocation for každá single clone if it were a String";
+
+        // Benchmark String cloning
+        let s = name_str.to_string();
+        let start = Instant::now();
+        let mut string_clones = Vec::with_capacity(iterations);
+        for _ in 0..iterations {
+            string_clones.push(s.clone());
+        }
+        let string_duration = start.elapsed();
+        println!(
+            "String cloning ({} iterations): {:?}",
+            iterations, string_duration
+        );
+
+        // Benchmark Arc<str> cloning
+        let arc: Arc<str> = name_str.into();
+        let start = Instant::now();
+        let mut arc_clones = Vec::with_capacity(iterations);
+        for _ in 0..iterations {
+            arc_clones.push(Arc::clone(&arc));
+        }
+        let arc_duration = start.elapsed();
+        println!(
+            "Arc<str> cloning ({} iterations): {:?}",
+            iterations, arc_duration
+        );
+
+        assert!(
+            arc_duration < string_duration,
+            "Arc<str> should be faster than String for cloning"
+        );
+        println!(
+            "Speedup factor: {:.2}x",
+            string_duration.as_secs_f64() / arc_duration.as_secs_f64()
+        );
     }
 }

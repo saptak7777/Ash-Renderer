@@ -5,8 +5,6 @@ use std::sync::Arc;
 pub struct DescriptorSetHandle {
     set: vk::DescriptorSet,
     layout: vk::DescriptorSetLayout,
-    #[allow(dead_code)]
-    device: Arc<ash::Device>,
     pool: vk::DescriptorPool,
     name: Option<String>,
 }
@@ -19,7 +17,7 @@ impl DescriptorSetHandle {
     /// The device and pool must remain valid for the lifetime of this handle.
     /// Descriptor sets are freed when the pool is destroyed.
     pub unsafe fn new(
-        device: Arc<ash::Device>,
+        _device: Arc<ash::Device>,
         pool: vk::DescriptorPool,
         layout: vk::DescriptorSetLayout,
         name: Option<String>,
@@ -33,7 +31,6 @@ impl DescriptorSetHandle {
         Ok(Self {
             set: vk::DescriptorSet::null(),
             layout,
-            device,
             pool,
             name,
         })

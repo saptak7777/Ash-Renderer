@@ -28,8 +28,8 @@ glslc overlay.vert -o overlay.vert.spv
 
 # Compile fragment shaders
 Write-Host "Compiling fragment shaders..." -ForegroundColor Yellow
-Write-Host "  - frag.glsl (WITH Forward+ lighting)" -ForegroundColor Cyan
-glslc -fshader-stage=fragment -DENABLE_POINT_LIGHTS frag.glsl -o frag.spv
+Write-Host "  - frag.frag (WITH Forward+ lighting)" -ForegroundColor Cyan
+glslc -fshader-stage=fragment -DENABLE_POINT_LIGHTS frag.frag -o frag.spv
 
 glslc tonemapping.frag -o tonemapping.frag.spv
 glslc shadow.frag -o shadow.frag.spv
@@ -50,7 +50,12 @@ glslc bloom_upsample.frag -o bloom_upsample.frag.spv
 
 # Compile PBR shaders
 Write-Host "Compiling PBR shaders..." -ForegroundColor Yellow
-glslc brdf_lut.frag -o brdf_lut.spv
+glslc ../src/shaders/ibl/brdf_lut.frag -o brdf_lut.spv
+glslc ../src/shaders/ibl/fullscreen.vert -o ibl_fullscreen.vert.spv
+glslc ../src/shaders/ibl/skybox.vert -o ibl_skybox.vert.spv
+glslc ../src/shaders/ibl/equirect_to_cube.frag -o equirect_to_cube.frag.spv
+glslc ../src/shaders/ibl/irradiance.frag -o irradiance.frag.spv
+glslc ../src/shaders/ibl/prefilter.frag -o prefilter.frag.spv
 
 Write-Host ""
 Write-Host "=== Compilation Complete ===" -ForegroundColor Green
