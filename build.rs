@@ -1,113 +1,174 @@
-use std::env;
+// Build script to compile shaders and bake IBL assets
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+use std::process::Command;
 
 fn main() {
+    println!("cargo:rerun-if-changed=assets/textures");
     println!("cargo:rerun-if-changed=shaders");
-    println!("cargo:rerun-if-changed=src/shaders");
 
-    let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR not set"));
-    let shader_dir = Path::new("shaders");
-    let src_shader_dir = Path::new("src/shaders");
+    // Compile shaders
+    compile_shaders();
 
-    if shader_dir.exists() {
-        compile_shaders(shader_dir, &out_dir).expect("Failed to compile shaders");
-    }
-    if src_shader_dir.exists() {
-        compile_shaders(src_shader_dir, &out_dir).expect("Failed to compile src shaders");
+    // Bake IBL assets
+    bake_ibl_assets();
+}
+
+fn compile_shaders() {
+    let out_dir = std::path::PathBuf::from(std::env::var("OUT_DIR").unwrap());
+
+    // Define shaders to compile: (input_path, output_name, kind, defines)
+    let shaders = [
+        // Vertex shaders
+        ("shaders/vert.vert", "vert.vert.spv", "vert", &[] as &[&str]),
+        ("shaders/postprocess.vert", "postprocess.vert.spv", "vert", &[]),
+        ("shaders/shadow.vert", "shadow.vert.spv", "vert", &[]),
+        ("shaders/overlay.vert", "overlay.vert.spv", "vert", &[]),
+        ("shaders/triangle.vert", "triangle.vert.spv", "vert", &[]),
+        ("shaders/skinning.vert", "skinning.vert.spv", "vert", &[]),
+
+        // Fragment shaders
+        ("shaders/frag.frag", "frag.frag.spv", "frag", &["ENABLE_POINT_LIGHTS"]),
+        ("shaders/tonemapping.frag", "tonemapping.frag.spv", "frag", &[]),
+        ("shaders/shadow.frag", "shadow.frag.spv", "frag", &[]),
+        ("shaders/overlay.frag", "overlay.frag.spv", "frag", &[]),
+        ("shaders/triangle.frag", "triangle.frag.spv", "frag", &[]),
+        ("shaders/brdf_lut.frag", "brdf_lut.frag.spv", "frag", &[]),
+        ("shaders/bloom_threshold.frag", "bloom_threshold.frag.spv", "frag", &[]),
+        ("shaders/bloom_prefilter.frag", "bloom_prefilter.frag.spv", "frag", &[]),
+        ("shaders/bloom_downsample.frag", "bloom_downsample.frag.spv", "frag", &[]),
+        ("shaders/bloom_upsample.frag", "bloom_upsample.frag.spv", "frag", &[]),
+
+        // Compute shaders
+        ("shaders/light_culling.comp", "light_culling.comp.spv", "comp", &[]),
+        ("shaders/taa_resolve.comp", "taa_resolve.comp.spv", "comp", &[]),
+        ("shaders/tsr_upscale.comp", "tsr_upscale.comp.spv", "comp", &[]),
+        ("shaders/vsr_upscale.comp", "vsr_upscale.comp.spv", "comp", &[]),
+        ("shaders/occlusion_cull.comp", "occlusion_cull.comp.spv", "comp", &[]),
+        ("shaders/hiz_generate.comp", "hiz_generate.comp.spv", "comp", &[]),
+        ("shaders/ssgi.comp", "ssgi.comp.spv", "comp", &[]),
+        ("shaders/cluster_cull.comp", "cluster_cull.comp.spv", "comp", &[]),
+
+        // IBL shaders
+        ("shaders/ibl/equirect_to_cubemap.comp", "equirect_to_cubemap.comp.spv", "comp", &[]),
+        ("shaders/ibl/irradiance_convolution.comp", "irradiance_convolution.comp.spv", "comp", &[]),
+        ("shaders/ibl/prefilter_envmap.comp", "prefilter_envmap.comp.spv", "comp", &[]),
+    ];
+
+    for (input, output, kind, defines) in shaders {
+        let input_path = Path::new(input);
+        let output_path = out_dir.join(output);
+
+        // Check if recompilation is needed
+        let needs_recompile = !output_path.exists() || {
+            let input_time = fs::metadata(input_path).and_then(|m| m.modified()).ok();
+            let output_time = fs::metadata(&output_path).and_then(|m| m.modified()).ok();
+
+            match (input_time, output_time) {
+                (Some(i), Some(o)) => i > o,
+                _ => true,
+            }
+        };
+
+        if !needs_recompile {
+            continue;
+        }
+
+        // Use glslc for compilation (supports #include directives)
+        let glslc = if cfg!(windows) { "glslc.exe" } else { "glslc" };
+        let mut cmd = Command::new(glslc);
+        cmd.arg(input)
+            .arg("-o")
+            .arg(&output_path)
+            .arg(format!("-fshader-stage={}", kind));
+        
+        // Add defines
+        for define in defines {
+            cmd.arg(format!("-D{}", define));
+        }
+
+        let status = cmd.status();
+
+        match status {
+            Ok(s) if s.success() => {},
+            Ok(s) => {
+                println!("cargo:warning=Failed to compile shader {input}: exit code {:?}", s.code());
+            }
+            Err(e) => {
+                println!("cargo:warning=Failed to run glslc for {input}: {e}");
+            }
+        }
     }
 }
 
-fn compile_shaders(dir: &Path, out_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    let compiler = shaderc::Compiler::new().unwrap();
-    let mut options = shaderc::CompileOptions::new().unwrap();
-    options.set_optimization_level(shaderc::OptimizationLevel::Performance);
+fn bake_ibl_assets() {
 
-    // Add DEBUG_VISUALIZATION macro if feature is enabled
-    let debug_visualization = env::var("CARGO_FEATURE_DEBUG_VISUALIZATION").is_ok();
-    if debug_visualization {
-        options.add_macro_definition("DEBUG_VISUALIZATION", Some("1"));
+    // Check if ibl_baker binary exists
+    let baker_path = if cfg!(windows) {
+        "target/debug/ibl_baker.exe"
+    } else {
+        "target/debug/ibl_baker"
+    };
+
+    // Only bake if the baker tool exists (avoid build failures on first compile)
+    if !Path::new(baker_path).exists() {
+        println!("cargo:warning=ibl_baker not found, skipping asset baking");
+        println!(
+            "cargo:warning=Run 'cargo build -p ibl_baker' first to enable automatic asset baking"
+        );
+        return;
     }
 
-    for entry in fs::read_dir(dir)? {
-        let entry = entry?;
-        let path = entry.path();
+    // List of HDR files to bake
+    let hdr_files = [("assets/textures/skybox.hdr", "assets/textures/skybox.ibl")];
 
-        if path.is_dir() {
-            compile_shaders(&path, out_dir)?;
+    for (input, output) in &hdr_files {
+        let input_path = Path::new(input);
+        let output_path = Path::new(output);
+
+        // Skip if input doesn't exist
+        if !input_path.exists() {
+            println!("cargo:warning=HDR file not found: {input}");
             continue;
         }
 
-        let extension = match path.extension().and_then(|s| s.to_str()) {
-            Some(ext) => ext,
-            None => continue,
+        // Check if we need to rebuild (output missing or input newer)
+        let needs_rebuild = !output_path.exists() || {
+            let input_time = std::fs::metadata(input_path)
+                .and_then(|m| m.modified())
+                .ok();
+            let output_time = std::fs::metadata(output_path)
+                .and_then(|m| m.modified())
+                .ok();
+
+            match (input_time, output_time) {
+                (Some(i), Some(o)) => i > o,
+                _ => true,
+            }
         };
 
-        let kind = match extension {
-            "vert" => shaderc::ShaderKind::Vertex,
-            "frag" => shaderc::ShaderKind::Fragment,
-            "comp" => shaderc::ShaderKind::Compute,
-            _ => continue,
-        };
+        if needs_rebuild {
+            println!("cargo:warning=Baking IBL asset: {input} -> {output}");
 
-        // Skip if it's already an spv file
-        if extension == "spv" {
-            continue;
-        }
+            let status = Command::new(baker_path)
+                .args(["--input", input, "--output", output])
+                .status();
 
-        let mut src_content = fs::read_to_string(&path)?;
-
-        // Manual include resolution (pro coder style: robust and compiler-agnostic)
-        let mut resolved_content = String::new();
-        for line in src_content.lines() {
-            if line.trim().starts_with("#include \"") {
-                let start = line.find('"').unwrap() + 1;
-                let end = line.rfind('"').unwrap();
-                let include_name = &line[start..end];
-                let include_path = dir.join(include_name);
-                if include_path.exists() {
-                    let include_src = fs::read_to_string(&include_path)?;
-                    resolved_content.push_str(&include_src);
-                    resolved_content.push('\n');
-                } else {
-                    return Err(format!("Include file not found: {:?}", include_path).into());
+            match status {
+                Ok(s) if s.success() => {
+                    println!("cargo:warning=Successfully baked {output}");
                 }
-            } else {
-                resolved_content.push_str(line);
-                resolved_content.push('\n');
-            }
-        }
-        src_content = resolved_content;
-
-        // Ensure nonuniform_qualifier is enabled for all shaders if they use it
-        if src_content.contains("nonuniformEXT")
-            && !src_content.contains("GL_EXT_nonuniform_qualifier")
-        {
-            if let Some(version_end) = src_content.find("\n") {
-                let (version, rest) = src_content.split_at(version_end + 1);
-                src_content =
-                    format!("{version}#extension GL_EXT_nonuniform_qualifier : enable\n{rest}");
-            }
-        }
-
-        let file_name = path.file_name().unwrap().to_str().unwrap();
-
-        let binary_result =
-            compiler.compile_into_spirv(&src_content, kind, file_name, "main", Some(&options));
-
-        match binary_result {
-            Ok(binary) => {
-                // Use full filename + .spv (e.g., shader.vert.spv)
-                let new_name = format!("{file_name}.spv");
-
-                let out_path = out_dir.join(new_name);
-                fs::write(&out_path, binary.as_binary_u8())?;
-            }
-            Err(e) => {
-                eprintln!("Failed to compile shader {}: {}", path.display(), e);
-                return Err(Box::new(e));
+                Ok(s) => {
+                    println!(
+                        "cargo:warning=Failed to bake {} (exit code: {:?})",
+                        output,
+                        s.code()
+                    );
+                }
+                Err(e) => {
+                    println!("cargo:warning=Failed to run ibl_baker: {e}");
+                }
             }
         }
     }
-    Ok(())
 }

@@ -1,6 +1,6 @@
 [package]
 name = "ash_renderer"
-version = "0.4.81"
+version = "0.4.82"
 edition = "2021"
 authors = ["Saptak Santra"]
 license = "Apache-2.0"
@@ -10,6 +10,9 @@ documentation = "https://docs.rs/ash_renderer"
 keywords = ["vulkan", "graphics", "rendering", "gpu", "ash"]
 categories = ["graphics", "rendering", "game-development"]
 readme = "README.md"
+
+[workspace]
+members = [".", "tools/ibl_baker"]
 
 [dependencies]
 # Vulkan

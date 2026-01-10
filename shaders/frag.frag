@@ -13,15 +13,9 @@ layout(location = 5) in vec4 fragTangent;
 layout(location = 6) in vec2 motionVector;
 
 // Edge detection helper for adaptive anti-aliasing
+// DISABLED: Was causing darkening and cartoonish appearance
 vec3 edge_denoise(vec3 color, vec3 worldPos) {
-    // Higher gradient = more likely to be an edge
-    vec3 dX = dFdx(worldPos);
-    vec3 dY = dFdy(worldPos);
-    float edge_factor = length(dX) + length(dY);
-    
-    // Smooth high-frequency edges using adaptive blur
-    // This complements hardware sample shading
-    return mix(color, color * 0.95, clamp(edge_factor * 0.1, 0.0, 0.05));
+    return color;
 }
 
 layout(location = 0) out vec4 outColor;
@@ -192,8 +186,8 @@ void main() {
     vec4 baseSample = base_color_idx >= 0
         ? texture(textures[nonuniformEXT(base_color_idx)], fragUV)
         : vec4(1.0);
-    // Apply sRGB-to-linear conversion for physically-based color handling
-    vec3 baseSampleLinear = srgb_to_linear(baseSample.rgb);
+    // Apply sRGB-to-linear conversion only for texture samples (base_color_factor is already linear)
+    vec3 baseSampleLinear = base_color_idx >= 0 ? srgb_to_linear(baseSample.rgb) : baseSample.rgb;
     vec3 baseColor = baseSampleLinear * base_color_factor.rgb * fragColor;
     
     // Alpha discard
@@ -336,7 +330,7 @@ void main() {
         }
         
         vec3 kD = (1.0 - F) * (1.0 - metallic);
-        vec3 diffuse = kD * baseColor / PI;
+        vec3 diffuse = kD * baseColor;
         
         // Accumulate this light's contribution
         vec3 radiance = light.color.rgb * light.color.a; // intensity in alpha
@@ -359,11 +353,14 @@ void main() {
     // 3. Fresnel-Schlick approximation (using roughness-aware fresnel)
     vec3 fresnel_ibl = fresnel_schlick_roughness(NdotV, F0, roughness);
 
+    // IBL intensity multiplier - boosts environment lighting for richer colors
+    const float IBL_INTENSITY = 1.5;
+
     // 4. Diffuse IBL (Irradiance Map - pre-filtered)
     // Convolves radiance around the normal
     vec3 irradiance_ibl = texture(irradianceMap, normal).rgb;
     vec3 kd_ibl = (1.0 - metallic) * (1.0 - fresnel_ibl);  // Diffuse coefficient
-    vec3 diffuseIBL = kd_ibl * irradiance_ibl * baseColor;
+    vec3 diffuseIBL = kd_ibl * irradiance_ibl * baseColor * IBL_INTENSITY;
 
     // 5. Specular IBL (Pre-filtered Environment Map + BRDF LUT)
     // Pre-filtered map: mip level based on roughness
@@ -374,11 +371,11 @@ void main() {
     // BRDF LUT lookup: roughness vs. view angle
     vec2 brdfUv = vec2(NdotV, roughness);
     vec2 brdfSample = texture(brdfLUT, brdfUv).rg;  // Fetch (scale, bias)
-    vec3 specularIBL = specularColor * (fresnel_ibl * brdfSample.x + brdfSample.y);
+    vec3 specularIBL = specularColor * (fresnel_ibl * brdfSample.x + brdfSample.y) * IBL_INTENSITY;
 
     // 6. Combine diffuse + specular IBL
-    // 6. Combine diffuse + specular IBL + Legacy Ambient
-    vec3 ambient = (diffuseIBL + specularIBL) * occlusion + (ambientColor * baseColor * occlusion);
+    // 6. Combine diffuse + specular IBL (no legacy ambient - was adding white tint)
+    vec3 ambient = (diffuseIBL + specularIBL) * occlusion;
     
     // Emissive
     int emissive_idx = mat.emissive_texture_index;

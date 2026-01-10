@@ -85,11 +85,14 @@ impl ApplicationHandler for App {
 
                 // Load environment map for IBL (Image-Based Lighting)
                 // This provides realistic ambient lighting and reflections
-                // You can replace this with your own HDR file
-                if let Err(e) = renderer.load_environment_map("assets/textures/skybox.hdr") {
+                // Using pre-baked .ibl asset for fast loading
+                // TEMPORARILY DISABLED FOR DEBUGGING
+                /*
+                if let Err(e) = renderer.load_environment_map("assets/textures/skybox.ibl") {
                     log::warn!("Failed to load environment map: {e}");
                     log::warn!("Continuing without IBL - cubes will have minimal ambient lighting");
                 }
+                */
 
                 // Create a single red metallic material
                 let material = Material {
@@ -188,7 +191,7 @@ impl ApplicationHandler for App {
                         PointLight {
                             position: p1,
                             color: Vec3::new(1.0, 0.9, 0.8),
-                            intensity: 150.0,
+                            intensity: 30.0,
                             radius: 25.0,
                         },
                     );
@@ -197,7 +200,7 @@ impl ApplicationHandler for App {
                         PointLight {
                             position: p2,
                             color: Vec3::new(0.8, 0.9, 1.0),
-                            intensity: 100.0,
+                            intensity: 20.0,
                             radius: 20.0,
                         },
                     );
@@ -206,7 +209,7 @@ impl ApplicationHandler for App {
                         PointLight {
                             position: p3,
                             color: Vec3::new(1.0, 1.0, 1.0),
-                            intensity: 120.0,
+                            intensity: 25.0,
                             radius: 22.0,
                         },
                     );
@@ -215,7 +218,7 @@ impl ApplicationHandler for App {
                         PointLight {
                             position: p4,
                             color: Vec3::new(1.0, 0.5, 0.5),
-                            intensity: 80.0,
+                            intensity: 15.0,
                             radius: 15.0,
                         },
                     );
