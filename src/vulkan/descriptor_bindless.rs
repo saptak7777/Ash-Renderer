@@ -7,8 +7,25 @@ use super::descriptor_allocator::DescriptorAllocator;
 use super::descriptor_layout::{DescriptorSetLayout, DescriptorSetLayoutBuilder};
 use super::descriptor_set::DescriptorSet;
 
+#[derive(Clone)]
+struct RegisteredImage {
+    index: u32,
+    view: vk::ImageView,
+    sampler: vk::Sampler,
+}
+
+#[derive(Clone)]
+struct RegisteredBuffer {
+    index: u32,
+    buffer: vk::Buffer,
+    offset: vk::DeviceSize,
+    range: vk::DeviceSize,
+}
+
 /// Manages bindless descriptor resources (images/buffers) with variable descriptor counts.
 pub struct BindlessManager {
+    #[allow(dead_code)]
+    device: Arc<ash::Device>,
     layout: DescriptorSetLayout,
     descriptor_set: DescriptorSet,
     max_resources: u32,
@@ -16,6 +33,11 @@ pub struct BindlessManager {
     next_material_index: u32,
     next_instance_index: u32,
     next_indirect_index: u32,
+    // Resource tracking for recreation
+    registered_images: Vec<RegisteredImage>,
+    registered_materials: Vec<RegisteredBuffer>,
+    registered_instances: Vec<RegisteredBuffer>,
+    registered_indirects: Vec<RegisteredBuffer>,
 }
 
 impl BindlessManager {
@@ -59,6 +81,7 @@ impl BindlessManager {
             allocator.allocate_bindless_set(layout.handle(), layout.bindings(), max_resources)?;
 
         Ok(Self {
+            device,
             layout,
             descriptor_set,
             max_resources,
@@ -66,7 +89,99 @@ impl BindlessManager {
             next_material_index: 0,
             next_instance_index: 0,
             next_indirect_index: 0,
+            registered_images: Vec::new(),
+            registered_materials: Vec::new(),
+            registered_instances: Vec::new(),
+            registered_indirects: Vec::new(),
         })
+    }
+
+    /// Recreate the descriptor set (e.g., after swapchain resize)
+    pub fn recreate(&mut self, allocator: &mut DescriptorAllocator) -> Result<()> {
+        log::info!("Recreating bindless descriptor set...");
+
+        // Allocate new descriptor set with same layout
+        let new_descriptor_set = allocator.allocate_bindless_set(
+            self.layout.handle(),
+            self.layout.bindings(),
+            self.max_resources,
+        )?;
+
+        // Free the old descriptor set to prevent memory leaks
+        allocator.free_bindless_set(self.descriptor_set.handle())?;
+
+        // Replace old descriptor set
+        self.descriptor_set = new_descriptor_set;
+
+        // Re-register all previously registered resources
+        self.re_register_all()?;
+
+        log::info!("Bindless descriptor set recreated successfully");
+        Ok(())
+    }
+
+    /// Re-register all previously registered resources
+    fn re_register_all(&mut self) -> Result<()> {
+        // Re-register images
+        for img in &self.registered_images {
+            let info = vk::DescriptorImageInfo {
+                sampler: img.sampler,
+                image_view: img.view,
+                image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+            };
+            self.descriptor_set.update_image_at(
+                0,
+                img.index,
+                info,
+                vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+            )?;
+        }
+
+        // Re-register material buffers
+        for buf in &self.registered_materials {
+            self.descriptor_set.update_buffer_at(
+                1,
+                buf.index,
+                buf.buffer,
+                buf.offset,
+                buf.range,
+                vk::DescriptorType::STORAGE_BUFFER,
+            )?;
+        }
+
+        // Re-register instance buffers
+        for buf in &self.registered_instances {
+            self.descriptor_set.update_buffer_at(
+                2,
+                buf.index,
+                buf.buffer,
+                buf.offset,
+                buf.range,
+                vk::DescriptorType::STORAGE_BUFFER,
+            )?;
+        }
+
+        // Re-register indirect buffers
+        for buf in &self.registered_indirects {
+            self.descriptor_set.update_buffer_at(
+                3,
+                buf.index,
+                buf.buffer,
+                buf.offset,
+                buf.range,
+                vk::DescriptorType::STORAGE_BUFFER,
+            )?;
+        }
+
+        log::debug!(
+            "Re-registered {} images, {} materials, {} instances, {} indirects",
+            self.registered_images.len(),
+            self.registered_materials.len(),
+            self.registered_instances.len(),
+            self.registered_indirects.len()
+        );
+
+        Ok(())
     }
 
     pub fn layout(&self) -> vk::DescriptorSetLayout {
@@ -94,6 +209,14 @@ impl BindlessManager {
             info,
             vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
         )?;
+
+        // Track for recreation
+        self.registered_images.push(RegisteredImage {
+            index,
+            view: image_view,
+            sampler,
+        });
+
         Ok(index)
     }
 
@@ -112,6 +235,15 @@ impl BindlessManager {
             range,
             vk::DescriptorType::STORAGE_BUFFER,
         )?;
+
+        // Track for recreation
+        self.registered_materials.push(RegisteredBuffer {
+            index,
+            buffer,
+            offset,
+            range,
+        });
+
         Ok(index)
     }
 
@@ -130,6 +262,15 @@ impl BindlessManager {
             range,
             vk::DescriptorType::STORAGE_BUFFER,
         )?;
+
+        // Track for recreation
+        self.registered_instances.push(RegisteredBuffer {
+            index,
+            buffer,
+            offset,
+            range,
+        });
+
         Ok(index)
     }
 
@@ -148,6 +289,15 @@ impl BindlessManager {
             range,
             vk::DescriptorType::STORAGE_BUFFER,
         )?;
+
+        // Track for recreation
+        self.registered_indirects.push(RegisteredBuffer {
+            index,
+            buffer,
+            offset,
+            range,
+        });
+
         Ok(index)
     }
 

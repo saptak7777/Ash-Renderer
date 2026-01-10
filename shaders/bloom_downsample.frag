@@ -9,8 +9,6 @@ layout(set = 0, binding = 0) uniform sampler2D sourceTexture;
 
 layout(push_constant) uniform PushConstants {
     vec2 texelSize; // 1.0 / textureSize
-    float _unused1;
-    float _unused2;
 } pc;
 
 void main() {

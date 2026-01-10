@@ -74,6 +74,11 @@ impl ApplicationHandler for App {
                                                     mesh.name,
                                                     mat_handle
                                                 );
+                                                
+                                                // CRITICAL FIX: Upload the automatically registered material to GPU
+                                                let material = renderer.material_manager().get_material(mat_handle).clone();
+                                                let _ = renderer.upload_material_to_gpu(mat_handle.index as u32, &material);
+                                                log::info!("✅ Material uploaded to GPU: {:?}", mat_handle);
                                             } else {
                                                 log::warn!("❌ No material registered for mesh '{}' (handle {:?})", mesh.name, mat_handle);
                                             }
@@ -131,6 +136,9 @@ impl ApplicationHandler for App {
                         is_skinned: false,
                         joint_offset: 0,
                         cast_shadows: true,
+                        receive_shadows: true,
+                        is_transparent: false,
+                        is_hidden: false,
                     }]);
                 }
 

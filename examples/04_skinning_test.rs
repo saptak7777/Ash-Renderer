@@ -128,7 +128,9 @@ impl ApplicationHandler for App {
                     roughness: 0.8,
                     ..Default::default()
                 };
-                let material_handle = renderer.material_manager_mut().register_material(green_material);
+                let material_handle = renderer.material_manager_mut().register_material(green_material.clone());
+                let _ = renderer.upload_material_to_gpu(material_handle.index as u32, &green_material);
+                log::info!("✓ Registered and uploaded green material with handle {:?}", material_handle);
 
                 self.renderer = Some(renderer);
                 self.window = Some(window);

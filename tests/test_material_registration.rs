@@ -47,6 +47,8 @@ fn test_material_registration() {
             normal_scale: props.normal_scale,
             alpha_cutoff: props.alpha_cutoff,
             tint_index: -1,
+            is_transparent: props.base_color_factor[3] < 1.0,
+            ..Default::default()
         };
 
         println!("✅ Created Material from properties:");
@@ -70,7 +72,7 @@ fn test_material_registration() {
     println!("   - If not found, fallback to default material");
 
     // Simulate the logic from submit_render_commands
-    let mesh_handle = 1u32;
+    let _mesh_handle = 1u32;
     let material_handle = ash_renderer::renderer::MaterialHandle::null(); // This would trigger fallback
 
     // Create a material manager
@@ -89,6 +91,8 @@ fn test_material_registration() {
             normal_scale: props.normal_scale,
             alpha_cutoff: props.alpha_cutoff,
             tint_index: -1,
+            is_transparent: props.base_color_factor[3] < 1.0,
+            ..Default::default()
         };
         registered_handle = manager.register_material(material);
     }

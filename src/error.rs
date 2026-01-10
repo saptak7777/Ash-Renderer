@@ -90,6 +90,12 @@ impl From<ash::vk::Result> for AshError {
     }
 }
 
+impl From<crate::renderer::resource_registry::ResourceError> for AshError {
+    fn from(err: crate::renderer::resource_registry::ResourceError) -> Self {
+        Self::ResourceRegistrationFailed(err.to_string())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

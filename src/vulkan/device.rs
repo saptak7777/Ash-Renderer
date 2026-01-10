@@ -54,9 +54,11 @@ impl VulkanDevice {
                 })?;
 
             let device_properties = vk_instance.get_physical_device_properties(physical_device);
-            let device_features_supported = vk_instance.get_physical_device_features(physical_device);
-            let sample_rate_shading_supported = device_features_supported.sample_rate_shading == vk::TRUE;
-            
+            let device_features_supported =
+                vk_instance.get_physical_device_features(physical_device);
+            let sample_rate_shading_supported =
+                device_features_supported.sample_rate_shading == vk::TRUE;
+
             let memory_properties =
                 vk_instance.get_physical_device_memory_properties(physical_device);
             let device_name = CStr::from_ptr(device_properties.device_name.as_ptr());

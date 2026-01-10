@@ -48,63 +48,76 @@ impl Allocator {
         memory_usage: vk_mem::MemoryUsage,
         flags: vk_mem::AllocationCreateFlags,
     ) -> crate::Result<()> {
-        // Check 1: Size > 0
-        if size == 0 {
+        validate_buffer_params_impl(size, usage, memory_usage, flags)
+    }
+}
+
+/// Standalone implementation of buffer validation logic (for testing without Allocator instance)
+fn validate_buffer_params_impl(
+    size: vk::DeviceSize,
+    usage: vk::BufferUsageFlags,
+    memory_usage: vk_mem::MemoryUsage,
+    flags: vk_mem::AllocationCreateFlags,
+) -> crate::Result<()> {
+    // Check 1: Size > 0
+    if size == 0 {
+        return Err(crate::AshError::VulkanError(
+            "Buffer size must be > 0".into(),
+        ));
+    }
+
+    if size > 4 * 1024 * 1024 * 1024 {
+        log::warn!("Buffer size is very large ({size} bytes), may cause issues");
+    }
+
+    // Check 2: GPU-only buffers can't be mapped
+    if memory_usage == vk_mem::MemoryUsage::AutoPreferDevice {
+        if flags.contains(vk_mem::AllocationCreateFlags::MAPPED) {
             return Err(crate::AshError::VulkanError(
-                "Buffer size must be > 0".into(),
+                "Cannot map GPU-only buffer. Use CpuToGpu for CPU access.".into(),
             ));
         }
 
-        if size > 4 * 1024 * 1024 * 1024 {
-            log::warn!("Buffer size is very large ({size} bytes), may cause issues");
+        if flags.contains(vk_mem::AllocationCreateFlags::HOST_ACCESS_SEQUENTIAL_WRITE) {
+            return Err(crate::AshError::VulkanError(
+                "GPU-only buffer cannot be CPU-writable. Use CpuToGpu.".into(),
+            ));
         }
-
-        // Check 2: GPU-only buffers can't be mapped
-        if memory_usage == vk_mem::MemoryUsage::AutoPreferDevice {
-            if flags.contains(vk_mem::AllocationCreateFlags::MAPPED) {
-                return Err(crate::AshError::VulkanError(
-                    "Cannot map GPU-only buffer. Use CpuToGpu for CPU access.".into(),
-                ));
-            }
-
-            if flags.contains(vk_mem::AllocationCreateFlags::HOST_ACCESS_SEQUENTIAL_WRITE) {
-                return Err(crate::AshError::VulkanError(
-                    "GPU-only buffer cannot be CPU-writable. Use CpuToGpu.".into(),
-                ));
-            }
-        }
-
-        // Check 3: Conflicting usage flags
-        let vertex_related =
-            vk::BufferUsageFlags::VERTEX_BUFFER | vk::BufferUsageFlags::INDEX_BUFFER;
-        let storage_related =
-            vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::UNIFORM_BUFFER;
-
-        if usage.contains(vertex_related) && usage.contains(storage_related) {
-            log::warn!("Buffer has conflicting usage flags: vertex + storage. Unusual combo.");
-        }
-
-        // Check 4: Transfer-only buffers (warning)
-        if (usage == vk::BufferUsageFlags::TRANSFER_DST
-            || usage == vk::BufferUsageFlags::TRANSFER_SRC)
-            && usage != (vk::BufferUsageFlags::TRANSFER_DST | vk::BufferUsageFlags::TRANSFER_SRC)
-        {
-            log::warn!("Buffer is ONLY for one-way transfers. Verify this is intentional.");
-        }
-
-        // Check 5: CPU-writable without transfer capability
-        if flags.contains(vk_mem::AllocationCreateFlags::HOST_ACCESS_SEQUENTIAL_WRITE)
-            && !usage.contains(vk::BufferUsageFlags::TRANSFER_DST)
-            && !usage.contains(vk::BufferUsageFlags::STORAGE_BUFFER)
-        {
-            log::warn!(
-                "CPU-writable buffer missing TRANSFER_DST or STORAGE_BUFFER usage. \
-                 VMA might fail or performance will be poor (size={size}, usage={usage:?})."
-            );
-        }
-
-        Ok(())
     }
+
+    // Check 3: Conflicting usage flags
+    let vertex_related =
+        vk::BufferUsageFlags::VERTEX_BUFFER | vk::BufferUsageFlags::INDEX_BUFFER;
+    let storage_related =
+        vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::UNIFORM_BUFFER;
+
+    if usage.contains(vertex_related) && usage.contains(storage_related) {
+        log::warn!("Buffer has conflicting usage flags: vertex + storage. Unusual combo.");
+    }
+
+    // Check 4: Transfer-only buffers (warning)
+    if (usage == vk::BufferUsageFlags::TRANSFER_DST
+        || usage == vk::BufferUsageFlags::TRANSFER_SRC)
+        && usage != (vk::BufferUsageFlags::TRANSFER_DST | vk::BufferUsageFlags::TRANSFER_SRC)
+    {
+        log::warn!("Buffer is ONLY for one-way transfers. Verify this is intentional.");
+    }
+
+    // Check 5: CPU-writable without transfer capability
+    if flags.contains(vk_mem::AllocationCreateFlags::HOST_ACCESS_SEQUENTIAL_WRITE)
+        && !usage.contains(vk::BufferUsageFlags::TRANSFER_DST)
+        && !usage.contains(vk::BufferUsageFlags::STORAGE_BUFFER)
+    {
+        log::warn!(
+            "CPU-writable buffer missing TRANSFER_DST or STORAGE_BUFFER usage. \
+             VMA might fail or performance will be poor (size={size}, usage={usage:?})."
+        );
+    }
+
+    Ok(())
+}
+
+impl Allocator {
 
     /// Allocate a GPU buffer.
     ///
@@ -436,6 +449,24 @@ impl<'a> MapGuard<'a> {
         unsafe { std::slice::from_raw_parts_mut(self.ptr, self.size as usize) }
     }
 
+    /// Access mapped memory as a slice of a specific type.
+    ///
+    /// # Safety
+    /// // SAFETY: Type T must be compatible with the mapped data.
+    pub unsafe fn as_slice<T: Copy>(&self) -> &[T] {
+        let count = self.size as usize / std::mem::size_of::<T>();
+        std::slice::from_raw_parts(self.ptr as *const T, count)
+    }
+
+    /// Access mapped memory as a mutable slice of a specific type.
+    ///
+    /// # Safety
+    /// // SAFETY: Type T must be compatible with the mapped data.
+    pub unsafe fn as_mut_slice_t<T: Copy>(&mut self) -> &mut [T] {
+        let count = self.size as usize / std::mem::size_of::<T>();
+        std::slice::from_raw_parts_mut(self.ptr as *mut T, count)
+    }
+
     /// Copy data from a slice into the mapped memory.
     pub fn copy_from_slice<T: Copy>(&mut self, data: &[T]) {
         let size = std::mem::size_of_val(data);
@@ -481,17 +512,9 @@ mod tests {
 
     #[test]
     fn test_buffer_validation_logic() {
-        // We can test the validate_buffer_params method directly.
-        // Since it doesn't actually use the VMA handle, it's safe to call on a "hollow" allocator.
-        #[allow(invalid_value)]
-        let allocator = Allocator {
-            vma: unsafe { std::mem::zeroed() },
-            device: unsafe { std::mem::zeroed() },
-            buffer_allocations: parking_lot::Mutex::new(HashMap::new()),
-        };
-
+        // Test the standalone validation function directly without needing an Allocator instance
         // Test 1: Size 0 should fail
-        let res = allocator.validate_buffer_params(
+        let res = validate_buffer_params_impl(
             0,
             vk::BufferUsageFlags::VERTEX_BUFFER,
             vk_mem::MemoryUsage::AutoPreferDevice,
@@ -500,7 +523,7 @@ mod tests {
         assert!(res.is_err(), "Size 0 should be rejected");
 
         // Test 2: GPU-only + Mapped should fail
-        let res = allocator.validate_buffer_params(
+        let res = validate_buffer_params_impl(
             1024,
             vk::BufferUsageFlags::VERTEX_BUFFER,
             vk_mem::MemoryUsage::AutoPreferDevice,
@@ -509,7 +532,7 @@ mod tests {
         assert!(res.is_err(), "GPU-only + Mapped should be rejected");
 
         // Test 3: Valid params should pass
-        let res = allocator.validate_buffer_params(
+        let res = validate_buffer_params_impl(
             1024,
             vk::BufferUsageFlags::VERTEX_BUFFER,
             vk_mem::MemoryUsage::AutoPreferDevice,

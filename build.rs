@@ -23,6 +23,12 @@ fn compile_shaders(dir: &Path, out_dir: &Path) -> Result<(), Box<dyn std::error:
     let mut options = shaderc::CompileOptions::new().unwrap();
     options.set_optimization_level(shaderc::OptimizationLevel::Performance);
 
+    // Add DEBUG_VISUALIZATION macro if feature is enabled
+    let debug_visualization = env::var("CARGO_FEATURE_DEBUG_VISUALIZATION").is_ok();
+    if debug_visualization {
+        options.add_macro_definition("DEBUG_VISUALIZATION", Some("1"));
+    }
+
     for entry in fs::read_dir(dir)? {
         let entry = entry?;
         let path = entry.path();
@@ -50,13 +56,38 @@ fn compile_shaders(dir: &Path, out_dir: &Path) -> Result<(), Box<dyn std::error:
         }
 
         let mut src_content = fs::read_to_string(&path)?;
-        
+
+        // Manual include resolution (pro coder style: robust and compiler-agnostic)
+        let mut resolved_content = String::new();
+        for line in src_content.lines() {
+            if line.trim().starts_with("#include \"") {
+                let start = line.find('"').unwrap() + 1;
+                let end = line.rfind('"').unwrap();
+                let include_name = &line[start..end];
+                let include_path = dir.join(include_name);
+                if include_path.exists() {
+                    let include_src = fs::read_to_string(&include_path)?;
+                    resolved_content.push_str(&include_src);
+                    resolved_content.push('\n');
+                } else {
+                    return Err(format!("Include file not found: {:?}", include_path).into());
+                }
+            } else {
+                resolved_content.push_str(line);
+                resolved_content.push('\n');
+            }
+        }
+        src_content = resolved_content;
+
         // Ensure nonuniform_qualifier is enabled for all shaders if they use it
-        if src_content.contains("nonuniformEXT") && !src_content.contains("GL_EXT_nonuniform_qualifier") {
-             if let Some(version_end) = src_content.find("\n") {
-                 let (version, rest) = src_content.split_at(version_end + 1);
-                 src_content = format!("{version}#extension GL_EXT_nonuniform_qualifier : enable\n{rest}");
-             }
+        if src_content.contains("nonuniformEXT")
+            && !src_content.contains("GL_EXT_nonuniform_qualifier")
+        {
+            if let Some(version_end) = src_content.find("\n") {
+                let (version, rest) = src_content.split_at(version_end + 1);
+                src_content =
+                    format!("{version}#extension GL_EXT_nonuniform_qualifier : enable\n{rest}");
+            }
         }
 
         let file_name = path.file_name().unwrap().to_str().unwrap();

@@ -1,315 +1,118 @@
 use crate::renderer::resources::ImageHandle;
-use crate::vulkan::{Allocator, Framebuffer, Pipeline, VulkanDevice};
-use crate::Result;
+use crate::vulkan::{descriptor_layout::DescriptorSetLayoutBuilder, Allocator, VulkanDevice};
+use crate::{AshError, Result};
 use ash::vk;
-use glam::{Mat4, Vec3};
+use std::ffi::CStr;
 use std::sync::Arc;
-
-const CUBE_VERTICES: [f32; 108] = [
-    -1.0, 1.0, -1.0, -1.0, -1.0, -1.0, 1.0, -1.0, -1.0, 1.0, -1.0, -1.0, 1.0, 1.0, -1.0, -1.0, 1.0,
-    -1.0, -1.0, -1.0, 1.0, -1.0, -1.0, -1.0, -1.0, 1.0, -1.0, -1.0, 1.0, -1.0, -1.0, 1.0, 1.0,
-    -1.0, -1.0, 1.0, 1.0, -1.0, -1.0, 1.0, -1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, -1.0,
-    1.0, -1.0, -1.0, -1.0, -1.0, 1.0, -1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, -1.0, 1.0,
-    -1.0, -1.0, 1.0, -1.0, 1.0, -1.0, 1.0, 1.0, -1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, -1.0, 1.0, 1.0,
-    -1.0, 1.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0, 1.0, 1.0, -1.0, -1.0, 1.0, -1.0, -1.0, -1.0,
-    -1.0, 1.0, 1.0, -1.0, 1.0,
-];
 
 pub struct IblManager {
     device: Arc<ash::Device>,
     allocator: Arc<Allocator>,
-    cube_buffer: Option<crate::renderer::resources::BufferHandle>,
-    descriptor_layout: Option<crate::vulkan::descriptor_layout::DescriptorSetLayout>,
+
+    // Compute Pipelines
+    equirect_pipeline: vk::Pipeline,
+    irradiance_pipeline: vk::Pipeline,
+    prefilter_pipeline: vk::Pipeline,
+
     pipeline_layout: vk::PipelineLayout,
-    render_pass: Option<crate::vulkan::RenderPass>,
+    descriptor_layout: crate::vulkan::descriptor_layout::DescriptorSetLayout,
 }
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
-struct IblPushConstants {
-    view: [f32; 16],
-    projection: [f32; 16],
-    roughness: f32,
-    _padding: [f32; 3],
-}
-
-struct IblRenderPassParams<'a> {
-    target: &'a ImageHandle,
-    source_view: vk::ImageView,
-    source_sampler: vk::Sampler,
-    shader_bytes: (&'a [u8], &'a [u8]),
-    mip: u32,
+struct IblComputePushConstants {
+    output_size: u32,
     roughness: f32,
 }
 
 impl IblManager {
-    pub fn new(device: Arc<ash::Device>, allocator: Arc<Allocator>) -> Self {
-        Self {
-            device,
-            allocator,
-            cube_buffer: None,
-            descriptor_layout: None,
-            pipeline_layout: vk::PipelineLayout::null(),
-            render_pass: None,
-        }
-    }
-
-    fn ensure_cube_buffer(&mut self) -> Result<vk::Buffer> {
-        if let Some(ref buffer) = self.cube_buffer {
-            return Ok(buffer.handle());
-        }
-
-        let mut buffer = unsafe {
-            crate::renderer::resources::BufferHandle::new(
-                Arc::clone(&self.allocator),
-                std::mem::size_of_val(&CUBE_VERTICES) as u64,
-                vk::BufferUsageFlags::VERTEX_BUFFER,
-                vk_mem::MemoryUsage::AutoPreferHost,
-                Some("IBL_Cube_Buffer".to_string()),
-            )?
-        };
-
-        unsafe {
-            let allocation = buffer.allocation_mut();
-            let ptr = self.allocator.vma.map_memory(allocation)?;
-            std::ptr::copy_nonoverlapping(CUBE_VERTICES.as_ptr(), ptr.cast(), CUBE_VERTICES.len());
-            self.allocator.vma.unmap_memory(allocation);
-        }
-
-        let handle = buffer.handle();
-        self.cube_buffer = Some(buffer);
-        Ok(handle)
-    }
-
-    fn ensure_resources(&mut self) -> Result<()> {
-        if self.render_pass.is_some() {
-            return Ok(());
-        }
-
-        // 1. Create Render Pass
-        let render_pass = crate::vulkan::RenderPass::builder(Arc::clone(&self.device))
-            .with_color_attachment(
-                vk::Format::R16G16B16A16_SFLOAT,
-                vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-            )
-            .build()?;
-
-        // 2. Descriptor Set Layout
-        let desc_layout = crate::vulkan::descriptor_layout::DescriptorSetLayoutBuilder::new()
+    pub fn new(device: Arc<ash::Device>, allocator: Arc<Allocator>) -> Result<Self> {
+        // 1. Create Descriptor Set Layout
+        let descriptor_layout = DescriptorSetLayoutBuilder::new()
             .add_binding(
                 0,
                 vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-                vk::ShaderStageFlags::FRAGMENT,
+                vk::ShaderStageFlags::COMPUTE,
                 1,
             )
-            .build(Arc::clone(&self.device))?;
+            .add_binding(
+                1,
+                vk::DescriptorType::STORAGE_IMAGE,
+                vk::ShaderStageFlags::COMPUTE,
+                1,
+            )
+            .build(Arc::clone(&device))?;
 
-        // 3. Pipeline Layout
+        // 2. Create Pipeline Layout
         let push_range = vk::PushConstantRange {
-            stage_flags: vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+            stage_flags: vk::ShaderStageFlags::COMPUTE,
             offset: 0,
-            size: std::mem::size_of::<IblPushConstants>() as u32,
+            size: std::mem::size_of::<IblComputePushConstants>() as u32,
         };
-        let layouts = [desc_layout.handle()];
+
+        let layouts = [descriptor_layout.handle()];
         let layout_info = vk::PipelineLayoutCreateInfo::default()
             .set_layouts(&layouts)
             .push_constant_ranges(std::slice::from_ref(&push_range));
-        let pipeline_layout = unsafe { self.device.create_pipeline_layout(&layout_info, None)? };
 
-        self.render_pass = Some(render_pass);
-        self.descriptor_layout = Some(desc_layout);
-        self.pipeline_layout = pipeline_layout;
+        let pipeline_layout = unsafe { device.create_pipeline_layout(&layout_info, None)? };
 
-        Ok(())
+        // 3. Helper to create compute pipelines
+        let create_compute = |shader_bytes: &[u8]| -> Result<vk::Pipeline> {
+            let shader_module = unsafe {
+                device.create_shader_module(
+                    &vk::ShaderModuleCreateInfo::default().code(bytemuck::cast_slice(shader_bytes)),
+                    None,
+                )?
+            };
+
+            let entry_point = unsafe { CStr::from_bytes_with_nul_unchecked(b"main\0") };
+            let stage = vk::PipelineShaderStageCreateInfo::default()
+                .stage(vk::ShaderStageFlags::COMPUTE)
+                .module(shader_module)
+                .name(entry_point);
+
+            let info = vk::ComputePipelineCreateInfo::default()
+                .stage(stage)
+                .layout(pipeline_layout);
+
+            let pipelines = unsafe {
+                device
+                    .create_compute_pipelines(vk::PipelineCache::null(), &[info], None)
+                    .map_err(|(_, e)| {
+                        AshError::VulkanError(format!("Failed to create compute pipeline: {e}"))
+                    })?
+            };
+
+            unsafe { device.destroy_shader_module(shader_module, None) };
+            Ok(pipelines[0])
+        };
+
+        let equirect_pipeline = create_compute(include_bytes!(concat!(
+            env!("OUT_DIR"),
+            "/equirect_to_cubemap.comp.spv"
+        )))?;
+        let irradiance_pipeline = create_compute(include_bytes!(concat!(
+            env!("OUT_DIR"),
+            "/irradiance_convolution.comp.spv"
+        )))?;
+        let prefilter_pipeline = create_compute(include_bytes!(concat!(
+            env!("OUT_DIR"),
+            "/prefilter_envmap.comp.spv"
+        )))?;
+
+        Ok(Self {
+            device,
+            allocator,
+            equirect_pipeline,
+            irradiance_pipeline,
+            prefilter_pipeline,
+            pipeline_layout,
+            descriptor_layout,
+        })
     }
 
-    /// Generic helper to render to each face of a cubemap.
-    fn render_to_cubemap(
-        &mut self,
-        vulkan_device: &VulkanDevice,
-        command_pool: vk::CommandPool,
-        params: IblRenderPassParams,
-    ) -> Result<()> {
-        let IblRenderPassParams {
-            target,
-            source_view,
-            source_sampler,
-            shader_bytes,
-            mip,
-            roughness,
-        } = params;
-        self.ensure_resources()?;
-        let cube_buffer = self.ensure_cube_buffer()?;
-        let resolution = target.extent().width >> mip;
-
-        let render_pass = self.render_pass.as_ref().unwrap();
-        let desc_layout = self.descriptor_layout.as_ref().unwrap();
-
-        // 1. Descriptor Set
-        let mut desc_alloc = crate::vulkan::descriptor_allocator::DescriptorAllocator::new(
-            Arc::clone(&self.device),
-            1,
-            None,
-        )?;
-        let desc_set =
-            desc_alloc.allocate_static_set(&desc_layout.handle(), desc_layout.bindings())?;
-        desc_set.update_image(
-            0,
-            source_view,
-            source_sampler,
-            vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-            vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-        )?;
-
-        // 2. Pipeline
-        let pipeline = Pipeline::builder(Arc::clone(&self.device))
-            .with_layout(self.pipeline_layout)
-            .with_render_pass(render_pass.handle())
-            .with_extent(vk::Extent2D {
-                width: resolution,
-                height: resolution,
-            })
-            .add_shader_from_bytes(shader_bytes.0, vk::ShaderStageFlags::VERTEX, "main")?
-            .add_shader_from_bytes(shader_bytes.1, vk::ShaderStageFlags::FRAGMENT, "main")?
-            .with_vertex_input(
-                vec![vk::VertexInputBindingDescription {
-                    binding: 0,
-                    stride: 12,
-                    input_rate: vk::VertexInputRate::VERTEX,
-                }],
-                vec![vk::VertexInputAttributeDescription {
-                    location: 0,
-                    binding: 0,
-                    format: vk::Format::R32G32B32_SFLOAT,
-                    offset: 0,
-                }],
-            )
-            .with_cull_mode(vk::CullModeFlags::NONE)
-            .build()?;
-
-        // 3. Render to each face
-        let proj = Mat4::perspective_rh(std::f32::consts::FRAC_PI_2, 1.0, 0.1, 10.0);
-        let views = [
-            Mat4::look_at_rh(Vec3::ZERO, Vec3::X, -Vec3::Y),
-            Mat4::look_at_rh(Vec3::ZERO, -Vec3::X, -Vec3::Y),
-            Mat4::look_at_rh(Vec3::ZERO, Vec3::Y, Vec3::Z),
-            Mat4::look_at_rh(Vec3::ZERO, -Vec3::Y, -Vec3::Z),
-            Mat4::look_at_rh(Vec3::ZERO, Vec3::Z, -Vec3::Y),
-            Mat4::look_at_rh(Vec3::ZERO, -Vec3::Z, -Vec3::Y),
-        ];
-
-        for (i, view_mat) in views.iter().enumerate() {
-            let view_info = vk::ImageViewCreateInfo::default()
-                .image(target.handle())
-                .view_type(vk::ImageViewType::TYPE_2D)
-                .format(target.format())
-                .subresource_range(vk::ImageSubresourceRange {
-                    aspect_mask: vk::ImageAspectFlags::COLOR,
-                    base_mip_level: mip,
-                    level_count: 1,
-                    base_array_layer: i as u32,
-                    layer_count: 1,
-                });
-
-            let face_view = unsafe { self.device.create_image_view(&view_info, None)? };
-            let fb = Framebuffer::new(
-                Arc::clone(&self.device),
-                render_pass.handle(),
-                &[face_view],
-                vk::Extent2D {
-                    width: resolution,
-                    height: resolution,
-                },
-            )?;
-
-            vulkan_device.execute_single_use(command_pool, |cmd| {
-                let clear_values = [vk::ClearValue {
-                    color: vk::ClearColorValue {
-                        float32: [0.0, 0.0, 0.0, 1.0],
-                    },
-                }];
-
-                let viewport = vk::Viewport {
-                    x: 0.0,
-                    y: 0.0,
-                    width: resolution as f32,
-                    height: resolution as f32,
-                    min_depth: 0.0,
-                    max_depth: 1.0,
-                };
-                let scissor = vk::Rect2D {
-                    offset: vk::Offset2D { x: 0, y: 0 },
-                    extent: vk::Extent2D {
-                        width: resolution,
-                        height: resolution,
-                    },
-                };
-
-                unsafe {
-                    self.device.cmd_set_viewport(cmd, 0, &[viewport]);
-                    self.device.cmd_set_scissor(cmd, 0, &[scissor]);
-
-                    let begin_info = vk::RenderPassBeginInfo::default()
-                        .render_pass(render_pass.handle())
-                        .framebuffer(fb.handle())
-                        .render_area(vk::Rect2D {
-                            offset: vk::Offset2D { x: 0, y: 0 },
-                            extent: vk::Extent2D {
-                                width: resolution,
-                                height: resolution,
-                            },
-                        })
-                        .clear_values(&clear_values);
-
-                    self.device.cmd_begin_render_pass(
-                        cmd,
-                        &begin_info,
-                        vk::SubpassContents::INLINE,
-                    );
-                    self.device.cmd_bind_pipeline(
-                        cmd,
-                        vk::PipelineBindPoint::GRAPHICS,
-                        pipeline.pipeline,
-                    );
-                    self.device.cmd_bind_descriptor_sets(
-                        cmd,
-                        vk::PipelineBindPoint::GRAPHICS,
-                        self.pipeline_layout,
-                        0,
-                        &[desc_set.handle()],
-                        &[],
-                    );
-
-                    let push = IblPushConstants {
-                        view: view_mat.to_cols_array(),
-                        projection: proj.to_cols_array(),
-                        roughness,
-                        _padding: [0.0; 3],
-                    };
-                    self.device.cmd_push_constants(
-                        cmd,
-                        self.pipeline_layout,
-                        vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
-                        0,
-                        bytemuck::bytes_of(&push),
-                    );
-
-                    self.device
-                        .cmd_bind_vertex_buffers(cmd, 0, &[cube_buffer], &[0]);
-                    self.device.cmd_draw(cmd, 36, 1, 0, 0);
-                    self.device.cmd_end_render_pass(cmd);
-                }
-            })?;
-
-            unsafe {
-                self.device.destroy_image_view(face_view, None);
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Converts an equirectangular environment map to a cubemap.
+    /// Converts an equirectangular environment map to a cubemap using compute shaders.
     pub fn create_cubemap_from_equirect(
         &mut self,
         vulkan_device: &VulkanDevice,
@@ -324,30 +127,27 @@ impl IblManager {
             resolution,
             1,
             vk::Format::R16G16B16A16_SFLOAT,
-            vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::SAMPLED,
+            vk::ImageUsageFlags::STORAGE
+                | vk::ImageUsageFlags::SAMPLED
+                | vk::ImageUsageFlags::TRANSFER_DST,
             Some("EnvironmentCubemap".to_string()),
         )?;
 
-        self.render_to_cubemap(
+        self.dispatch_compute(
             vulkan_device,
             command_pool,
-            IblRenderPassParams {
-                target: &env_cubemap,
-                source_view: equirect_view,
-                source_sampler: equirect_sampler,
-                shader_bytes: (
-                    include_bytes!(concat!(env!("OUT_DIR"), "/skybox.vert.spv")),
-                    include_bytes!(concat!(env!("OUT_DIR"), "/equirect_to_cube.frag.spv")),
-                ),
-                mip: 0,
-                roughness: 0.0,
-            },
+            self.equirect_pipeline,
+            equirect_view,
+            equirect_sampler,
+            &env_cubemap,
+            0,
+            0.0,
         )?;
 
         Ok(env_cubemap)
     }
 
-    /// Generates an irradiance map from an environment cubemap.
+    /// Generates an irradiance map from an environment cubemap using compute shaders.
     pub fn generate_irradiance(
         &mut self,
         vulkan_device: &VulkanDevice,
@@ -362,30 +162,27 @@ impl IblManager {
             resolution,
             1,
             vk::Format::R16G16B16A16_SFLOAT,
-            vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::SAMPLED,
+            vk::ImageUsageFlags::STORAGE
+                | vk::ImageUsageFlags::SAMPLED
+                | vk::ImageUsageFlags::TRANSFER_DST,
             Some("IrradianceMap".to_string()),
         )?;
 
-        self.render_to_cubemap(
+        self.dispatch_compute(
             vulkan_device,
             command_pool,
-            IblRenderPassParams {
-                target: &irradiance_map,
-                source_view: env_view,
-                source_sampler: env_sampler,
-                shader_bytes: (
-                    include_bytes!(concat!(env!("OUT_DIR"), "/skybox.vert.spv")),
-                    include_bytes!(concat!(env!("OUT_DIR"), "/irradiance.frag.spv")),
-                ),
-                mip: 0,
-                roughness: 0.0,
-            },
+            self.irradiance_pipeline,
+            env_view,
+            env_sampler,
+            &irradiance_map,
+            0,
+            0.0,
         )?;
 
         Ok(irradiance_map)
     }
 
-    /// Generates a pre-filtered environment map for specular IBL.
+    /// Generates a pre-filtered environment map for specular IBL using compute shaders.
     pub fn generate_prefiltered(
         &mut self,
         vulkan_device: &VulkanDevice,
@@ -402,43 +199,194 @@ impl IblManager {
             resolution,
             max_mips,
             vk::Format::R16G16B16A16_SFLOAT,
-            vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::SAMPLED,
+            vk::ImageUsageFlags::STORAGE
+                | vk::ImageUsageFlags::SAMPLED
+                | vk::ImageUsageFlags::TRANSFER_DST,
             Some("PrefilteredMap".to_string()),
         )?;
 
         for mip in 0..max_mips {
             let roughness = mip as f32 / (max_mips - 1) as f32;
-            self.render_to_cubemap(
+            self.dispatch_compute(
                 vulkan_device,
                 command_pool,
-                IblRenderPassParams {
-                    target: &prefiltered_map,
-                    source_view: env_view,
-                    source_sampler: env_sampler,
-                    shader_bytes: (
-                        include_bytes!(concat!(env!("OUT_DIR"), "/skybox.vert.spv")),
-                         include_bytes!(concat!(env!("OUT_DIR"), "/prefilter.frag.spv")),
-                     ),
-                     mip,
-                     roughness,
-                },
+                self.prefilter_pipeline,
+                env_view,
+                env_sampler,
+                &prefiltered_map,
+                mip,
+                roughness,
             )?;
         }
 
         Ok(prefiltered_map)
     }
 
-    pub fn destroy(&mut self) {
-        self.render_pass = None;
-        self.descriptor_layout = None;
-        if self.pipeline_layout != vk::PipelineLayout::null() {
+    #[allow(clippy::too_many_arguments)]
+    fn dispatch_compute(
+        &self,
+        vulkan_device: &VulkanDevice,
+        command_pool: vk::CommandPool,
+        pipeline: vk::Pipeline,
+        source_view: vk::ImageView,
+        source_sampler: vk::Sampler,
+        target: &ImageHandle,
+        mip: u32,
+        roughness: f32,
+    ) -> Result<()> {
+        let resolution = target.extent().width >> mip;
+
+        // 1. Descriptor Set
+        let mut desc_alloc = crate::vulkan::descriptor_allocator::DescriptorAllocator::new(
+            Arc::clone(&self.device),
+            1,
+            None,
+        )?;
+        let desc_set = desc_alloc.allocate_static_set(
+            &self.descriptor_layout.handle(),
+            self.descriptor_layout.bindings(),
+        )?;
+
+        desc_set.update_image(
+            0,
+            source_view,
+            source_sampler,
+            vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+            vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+        )?;
+
+        // Image view for the specific mip level (for storage)
+        let view_info = vk::ImageViewCreateInfo::default()
+            .image(target.handle())
+            .view_type(vk::ImageViewType::TYPE_2D_ARRAY)
+            .format(target.format())
+            .subresource_range(vk::ImageSubresourceRange {
+                aspect_mask: vk::ImageAspectFlags::COLOR,
+                base_mip_level: mip,
+                level_count: 1,
+                base_array_layer: 0,
+                layer_count: 6,
+            });
+        let target_view = unsafe { self.device.create_image_view(&view_info, None)? };
+
+        desc_set.update_image(
+            1,
+            target_view,
+            vk::Sampler::null(),
+            vk::ImageLayout::GENERAL,
+            vk::DescriptorType::STORAGE_IMAGE,
+        )?;
+
+        // 2. Execute
+        vulkan_device.execute_single_use(command_pool, |cmd| {
+            // Transition target to GENERAL for writing
+            let barrier_start = vk::ImageMemoryBarrier::default()
+                .old_layout(vk::ImageLayout::UNDEFINED)
+                .new_layout(vk::ImageLayout::GENERAL)
+                .src_access_mask(vk::AccessFlags::empty())
+                .dst_access_mask(vk::AccessFlags::SHADER_WRITE)
+                .image(target.handle())
+                .subresource_range(vk::ImageSubresourceRange {
+                    aspect_mask: vk::ImageAspectFlags::COLOR,
+                    base_mip_level: mip,
+                    level_count: 1,
+                    base_array_layer: 0,
+                    layer_count: 6,
+                });
+
             unsafe {
+                self.device.cmd_pipeline_barrier(
+                    cmd,
+                    vk::PipelineStageFlags::TOP_OF_PIPE,
+                    vk::PipelineStageFlags::COMPUTE_SHADER,
+                    vk::DependencyFlags::empty(),
+                    &[],
+                    &[],
+                    &[barrier_start],
+                );
+
+                self.device
+                    .cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, pipeline);
+
+                self.device.cmd_bind_descriptor_sets(
+                    cmd,
+                    vk::PipelineBindPoint::COMPUTE,
+                    self.pipeline_layout,
+                    0,
+                    &[desc_set.handle()],
+                    &[],
+                );
+
+                let push = IblComputePushConstants {
+                    output_size: resolution,
+                    roughness,
+                };
+                self.device.cmd_push_constants(
+                    cmd,
+                    self.pipeline_layout,
+                    vk::ShaderStageFlags::COMPUTE,
+                    0,
+                    bytemuck::bytes_of(&push),
+                );
+
+                // Dispatch for all 6 faces
+                let groups = (resolution + 7) / 8;
+                self.device.cmd_dispatch(cmd, groups, groups, 6);
+
+                // Transition back to SHADER_READ_ONLY for sampling
+                let barrier_end = vk::ImageMemoryBarrier::default()
+                    .old_layout(vk::ImageLayout::GENERAL)
+                    .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+                    .src_access_mask(vk::AccessFlags::SHADER_WRITE)
+                    .dst_access_mask(vk::AccessFlags::SHADER_READ)
+                    .image(target.handle())
+                    .subresource_range(vk::ImageSubresourceRange {
+                        aspect_mask: vk::ImageAspectFlags::COLOR,
+                        base_mip_level: mip,
+                        level_count: 1,
+                        base_array_layer: 0,
+                        layer_count: 6,
+                    });
+
+                self.device.cmd_pipeline_barrier(
+                    cmd,
+                    vk::PipelineStageFlags::COMPUTE_SHADER,
+                    vk::PipelineStageFlags::FRAGMENT_SHADER,
+                    vk::DependencyFlags::empty(),
+                    &[],
+                    &[],
+                    &[barrier_end],
+                );
+            }
+        })?;
+
+        unsafe {
+            self.device.destroy_image_view(target_view, None);
+        }
+
+        Ok(())
+    }
+
+    pub fn destroy(&mut self) {
+        unsafe {
+            if self.pipeline_layout != vk::PipelineLayout::null() {
                 self.device
                     .destroy_pipeline_layout(self.pipeline_layout, None);
+                self.pipeline_layout = vk::PipelineLayout::null();
             }
-            self.pipeline_layout = vk::PipelineLayout::null();
+            if self.equirect_pipeline != vk::Pipeline::null() {
+                self.device.destroy_pipeline(self.equirect_pipeline, None);
+                self.equirect_pipeline = vk::Pipeline::null();
+            }
+            if self.irradiance_pipeline != vk::Pipeline::null() {
+                self.device.destroy_pipeline(self.irradiance_pipeline, None);
+                self.irradiance_pipeline = vk::Pipeline::null();
+            }
+            if self.prefilter_pipeline != vk::Pipeline::null() {
+                self.device.destroy_pipeline(self.prefilter_pipeline, None);
+                self.prefilter_pipeline = vk::Pipeline::null();
+            }
         }
-        self.cube_buffer = None;
     }
 }
 

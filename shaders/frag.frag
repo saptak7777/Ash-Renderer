@@ -1,5 +1,8 @@
 #version 450
 #extension GL_EXT_nonuniform_qualifier : require
+#extension GL_GOOGLE_include_directive : require
+
+#include "include/structures.glsl"
 
 layout(location = 0) in vec3 fragColor;
 layout(location = 1) in vec2 fragUV;
@@ -55,7 +58,7 @@ struct MaterialUniform {
 layout(set = 1, binding = 0) uniform sampler2D textures[];
 layout(std430, set = 1, binding = 1) readonly buffer MaterialBuffer {
     MaterialUniform materials[];
-} material_buffer;
+} material_buffers[];
 
 // Tint buffer (still used by some parts, but consolidated to Set 1 if needed - 
 // however Renderer doesn't seem to bind separate tint buffers in BindlessManager yet)
@@ -64,23 +67,36 @@ layout(std430, set = 1, binding = 1) readonly buffer MaterialBuffer {
 // Tints SHOULD be in Bindless (Set 1) if they are storage buffers.
 // For now, I'll rely on MaterialUniform's fields.
 
-layout(push_constant) uniform PushConstants {
-    // Vertex stage (0-127)
-    layout(offset = 0) mat4 model;
-    layout(offset = 64) uint joint_offset;
-    layout(offset = 68) uint use_instancing;
-    layout(offset = 72) uint instance_buffer_index;
-    layout(offset = 76) uint joint_buffer_index;
+// Set 2: Environment (IBL + Skybox + ShadowMap)
+layout(set = 2, binding = 0) uniform samplerCube irradianceMap;   // Diffuse IBL
+layout(set = 2, binding = 1) uniform samplerCube prefilterMap;     // Specular IBL  
+layout(set = 2, binding = 2) uniform sampler2D brdfLUT;            // BRDF LUT texture
+layout(set = 2, binding = 3) uniform samplerCube skyboxMap;        // Optional: Skybox for reflections
+layout(set = 2, binding = 4) uniform sampler2D shadowMap;          // Moved from binding 0
 
-    // Fragment stage (128-255)
-    layout(offset = 128) uint material_index;
-    layout(offset = 132) uint debug_path; // 0: None, 1: GPU-Driven, 2: Legacy
-    layout(offset = 136) uint flags; // bit 0: receive_shadows
-    layout(offset = 140) uint _material_padding;
-} push;
+// Set 3: Forward+ Lighting (Modern tile-based deferred lighting)
+#define MAX_LIGHTS_PER_TILE 256
 
-// Set 2: Environment (ShadowMap + IBL)
-layout(set = 2, binding = 0) uniform sampler2D shadowMap;
+struct Light {
+    vec4 position;   // xyz = position, w = radius
+    vec4 color;      // rgb = color, a = intensity
+    vec4 direction;  // xyz = direction (for spot), w = type (0=point, 1=spot, 2=directional)
+    vec4 params;     // x = innerConeAngle, y = outerConeAngle, z = falloff, w = enabled
+};
+
+layout(set = 3, binding = 0, std430) readonly buffer LightBuffer {
+    Light lights[];
+};
+
+layout(set = 3, binding = 1, std430) readonly buffer TileLightIndices {
+    uint tileData[];
+};
+
+layout(set = 3, binding = 2) uniform ForwardPlusInfo {
+    uvec2 num_tiles;
+    uint tile_size;
+    uint _padding;
+} fpInfo;
 
 const float PI = 3.14159265359;
 
@@ -154,8 +170,14 @@ vec3 fresnel_schlick_fast(float cosTheta, vec3 F0) {
     return F0 + (1.0 - F0) * t5;
 }
 
+vec3 fresnel_schlick_roughness(float cosTheta, vec3 F0, float roughness) {
+    return F0 + (max(vec3(1.0 - roughness), F0) - F0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
+}
+
 void main() {
-    MaterialUniform mat = material_buffer.materials[push.material_index];
+    // Extract actual index from handle (lower 16 bits)
+    uint actual_material_index = push.material_index & 0xFFFFu;
+    MaterialUniform mat = material_buffers[nonuniformEXT(push.material_buffer_index)].materials[actual_material_index];
 
     vec3 lightColor = mvp.light_color.xyz;
     vec3 ambientColor = mvp.ambient_color.xyz;
@@ -210,9 +232,11 @@ void main() {
         }
     }
 
-    float NdotL = max(dot(normal, lightDir), 0.0);
-
-    // Material parameters
+    // ============================================================================
+    // MATERIAL PARAMETERS
+    // ============================================================================
+    
+    // Extract material parameters
     float metallic = mat.parameters.x;
     float roughness = mat.parameters.y;
     roughness = max(roughness, 0.04);
@@ -233,37 +257,128 @@ void main() {
         occlusion = mix(1.0, texture(textures[nonuniformEXT(occ_idx)], fragUV).r, occ_strength);
     }
 
-    // PBR
+    // PBR base reflectance
     vec3 F0 = mix(vec3(0.04), baseColor, metallic);
-
-    vec3 halfDir = normalize(viewDir + lightDir);
     float NdotV = max(dot(normal, viewDir), 0.001);
-    float NdotH = max(dot(normal, halfDir), 0.0);
-    float VdotH = max(dot(viewDir, halfDir), 0.0);
 
-    float D = distribution_ggx(NdotH, roughness);
-    float G = geometry_smith(NdotV, NdotL, roughness);
-    vec3 F = fresnel_schlick_fast(VdotH, F0);
-
-    vec3 numerator = D * G * F;
-    float denom = 4.0 * NdotV * NdotL + 0.001;
-    vec3 specular = numerator / denom;
+    // ============================================================================
+    // MODERN FORWARD+ LIGHTING (Tile-Based Deferred)
+    // ============================================================================
     
-    float specularMax = max(max(specular.r, specular.g), specular.b);
-    if (specularMax > 100.0) {
-        specular *= 100.0 / specularMax;
-    }
-
-    vec3 kD = (1.0 - F) * (1.0 - metallic);
-    vec3 diffuse = kD * baseColor / PI;
+    // Calculate tile index for this fragment
+    uvec2 tileID = uvec2(gl_FragCoord.xy) / fpInfo.tile_size;
+    uint tileIndex = tileID.y * fpInfo.num_tiles.x + tileID.x;
+    uint tileOffset = tileIndex * (MAX_LIGHTS_PER_TILE + 1);
     
-    float shadow = 0.0;
-    if ((push.flags & 1u) != 0u) {
-        shadow = ShadowCalculation(fragPosLightSpace, N, lightDir);
+    // Get light count for this tile (first element)
+    uint lightCount = min(tileData[tileOffset], MAX_LIGHTS_PER_TILE);
+    
+    // Accumulated lighting
+    vec3 Lo = vec3(0.0);
+    
+    // Iterate over all lights affecting this tile
+    for (uint i = 0; i < lightCount; i++) {
+        uint lightIdx = tileData[tileOffset + 1 + i];
+        Light light = lights[lightIdx];
+        
+        // Skip disabled lights
+        if (light.params.w < 0.5) continue;
+        
+        uint lightType = uint(light.direction.w);
+        vec3 L; // Light direction
+        float attenuation = 1.0;
+        
+        // Point Light (type 0)
+        if (lightType == 0u) {
+            vec3 lightVec = light.position.xyz - fragWorldPos;
+            float dist = length(lightVec);
+            float radius = light.position.w;
+            
+            // Skip if outside radius
+            if (dist > radius) continue;
+            
+            L = lightVec / dist;
+            
+            // Inverse square falloff with smooth cutoff
+            float distRatio = dist / radius;
+            attenuation = 1.0 / (dist * dist + 1.0);
+            attenuation *= max(0.0, 1.0 - distRatio * distRatio);
+        }
+        // Directional Light (type 2)
+        else if (lightType == 2u) {
+            L = -normalize(light.direction.xyz);
+            attenuation = 1.0;
+        }
+        // Spot Light (type 1) - TODO if needed
+        else {
+            continue;
+        }
+        
+        // PBR calculation for this light
+        float NdotL = max(dot(normal, L), 0.0);
+        if (NdotL <= 0.0) continue;
+        
+        vec3 H = normalize(viewDir + L);
+        float NdotH = max(dot(normal, H), 0.0);
+        float VdotH = max(dot(viewDir, H), 0.0);
+        
+        // Cook-Torrance BRDF
+        float D = distribution_ggx(NdotH, roughness);
+        float G = geometry_smith(NdotV, NdotL, roughness);
+        vec3 F = fresnel_schlick_fast(VdotH, F0);
+        
+        vec3 specular = (D * G * F) / (4.0 * NdotV * NdotL + 0.001);
+        
+        // Clamp extreme specular highlights
+        float specularMax = max(max(specular.r, specular.g), specular.b);
+        if (specularMax > 100.0) {
+            specular *= 100.0 / specularMax;
+        }
+        
+        vec3 kD = (1.0 - F) * (1.0 - metallic);
+        vec3 diffuse = kD * baseColor / PI;
+        
+        // Accumulate this light's contribution
+        vec3 radiance = light.color.rgb * light.color.a; // intensity in alpha
+        Lo += (diffuse + specular) * radiance * NdotL * attenuation;
     }
+    
+    // ============================================================================
+    // AMBIENT LIGHTING (Image-Based Lighting)
+    // ============================================================================
 
-    vec3 Lo = (diffuse + specular) * lightColor * NdotL * (1.0 - shadow);
-    vec3 ambient = ambientColor * baseColor * occlusion;
+    // ========== PBR IBL CALCULATIONS ==========
+
+    // 1. Normalize vectors
+    vec3 V = normalize(viewDir);             // View direction
+    vec3 R_probe = reflect(-V, normal);      // Reflection vector
+
+    // 2. Calculate angles
+    // NdotV already calculated above
+
+    // 3. Fresnel-Schlick approximation (using roughness-aware fresnel)
+    vec3 fresnel_ibl = fresnel_schlick_roughness(NdotV, F0, roughness);
+
+    // 4. Diffuse IBL (Irradiance Map - pre-filtered)
+    // Convolves radiance around the normal
+    vec3 irradiance_ibl = texture(irradianceMap, normal).rgb;
+    vec3 kd_ibl = (1.0 - metallic) * (1.0 - fresnel_ibl);  // Diffuse coefficient
+    vec3 diffuseIBL = kd_ibl * irradiance_ibl * baseColor;
+
+    // 5. Specular IBL (Pre-filtered Environment Map + BRDF LUT)
+    // Pre-filtered map: mip level based on roughness
+    const float MAX_REFLECTION_LOD = 4.0; // Assuming 5 mip levels (0-4)
+    float lod = roughness * MAX_REFLECTION_LOD;
+    vec3 specularColor = textureLod(prefilterMap, R_probe, lod).rgb;
+
+    // BRDF LUT lookup: roughness vs. view angle
+    vec2 brdfUv = vec2(NdotV, roughness);
+    vec2 brdfSample = texture(brdfLUT, brdfUv).rg;  // Fetch (scale, bias)
+    vec3 specularIBL = specularColor * (fresnel_ibl * brdfSample.x + brdfSample.y);
+
+    // 6. Combine diffuse + specular IBL
+    // 6. Combine diffuse + specular IBL + Legacy Ambient
+    vec3 ambient = (diffuseIBL + specularIBL) * occlusion + (ambientColor * baseColor * occlusion);
     
     // Emissive
     int emissive_idx = mat.emissive_texture_index;
@@ -274,13 +389,17 @@ void main() {
 
     // Apply edge-aware denoising (id Tech style)
     vec3 color = edge_denoise(ambient + Lo + emissive, fragWorldPos);
-    
-    // Debug Path Visualization
-    if (push.debug_path == 1) { // GPU-Driven
-        color = mix(color, vec3(0.0, 0.0, 1.0), 0.3); // Blue tint
-    } else if (push.debug_path == 2) { // Legacy
-        color = mix(color, vec3(0.0, 1.0, 0.0), 0.3); // Green tint
+
+    // Debug Path Visualization - Only compiled when debug_visualization feature is enabled
+    #ifdef DEBUG_VISUALIZATION
+    if (push.debug_visualization_enabled == 1) {
+        if (push.debug_path == 1) { // GPU-Driven
+            color = mix(color, vec3(0.0, 0.0, 1.0), 0.3); // Blue tint
+        } else if (push.debug_path == 2) { // Legacy
+            color = mix(color, vec3(0.0, 1.0, 0.0), 0.3); // Green tint
+        }
     }
+    #endif
     
     outColor = vec4(color, 1.0);
     outNormal = vec4(normal, 1.0);

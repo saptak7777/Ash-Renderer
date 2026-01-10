@@ -1,6 +1,6 @@
 [package]
 name = "ash_renderer"
-version = "0.4.80"
+version = "0.4.81"
 edition = "2021"
 authors = ["Saptak Santra"]
 license = "Apache-2.0"
@@ -39,6 +39,7 @@ raw-window-handle = "0.6"
 image = { version = "0.25", default-features = false, features = [
     "png",
     "jpeg",
+    "hdr",
 ] }
 gltf = { version = "1.4", optional = true }
 archetype_asset = { version = "0.2.0", optional = true }
@@ -69,6 +70,8 @@ shader_compilation = ["shaderc"] # Runtime shader compilation
 shader_reflection = ["spirv-reflect"] # SPIRV reflection support
 profiling = [] # Enable GPU profiling
 parallel = [] # Enable parallel command buffer recording
+debug_visualization = [
+] # Enable debug visualization modes (normals, albedo, roughness, metallic)
 full = [
     "validation",
     "gltf_loading",
@@ -89,6 +92,11 @@ path = "examples/02_cube.rs"
 [[example]]
 name = "03_model_loading"
 path = "examples/03_model_loading.rs"
+required-features = ["gltf_loading"]
+
+[[example]]
+name = "08_car_model"
+path = "examples/08_car_model.rs"
 required-features = ["gltf_loading"]
 
 

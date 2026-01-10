@@ -37,9 +37,9 @@ void main() {
     // Sample SSGI buffer
     vec3 ssgiColor = texture(ssgiBuffer, fragTexCoord).rgb;
     
-    // Add Bloom and SSGI
+    // Add Bloom and SSGI with clamping to prevent overflow
     hdr += bloom * pc.bloomIntensity;
-    hdr += ssgiColor; 
+    hdr += clamp(ssgiColor, 0.0, 10.0); 
     
     // Apply exposure
     hdr *= pc.exposure;

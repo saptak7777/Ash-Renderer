@@ -1,11 +1,14 @@
 #version 450
+// Force recompile for push constant fix
+#extension GL_GOOGLE_include_directive : require
+
+#include "include/structures.glsl"
 
 layout(location = 0) in vec3 inPosition;
 layout(location = 1) in vec3 inNormal;
 layout(location = 2) in vec2 inUV;
 layout(location = 3) in vec3 inColor;
 layout(location = 4) in vec4 inTangent;
-
 layout(location = 0) out vec3 fragColor;
 layout(location = 1) out vec2 fragUV;
 layout(location = 2) centroid out vec3 fragNormal;
@@ -29,41 +32,12 @@ layout(set = 0, binding = 0) uniform MVP {
 } mvp;
 
 // Set 1: Bindless consolidated resources
-struct InstanceData {
-    vec4 bounds_center;
-    vec4 bounds_extents;
-    mat4 model;
-    uint draw_index;
-    uint first_index;
-    uint index_count;
-    int vertex_offset;
-    vec4 color;
-    vec4 custom;
-    uint cluster_offset;
-    uint cluster_count;
-    uint flags;
-    uint _padding;
-};
-
 #extension GL_EXT_nonuniform_qualifier : enable
 
 // Binding 2: Instances
 layout(set = 1, binding = 2) readonly buffer InstanceBuffers {
     InstanceData instances[];
 } instance_buffers[];
-
-layout(push_constant) uniform PushConstants {
-    // Vertex stage (0-127)
-    layout(offset = 0) mat4 model;
-    layout(offset = 64) uint joint_offset;
-    layout(offset = 68) uint use_instancing;
-    layout(offset = 72) uint instance_buffer_index;
-    layout(offset = 76) uint joint_buffer_index;
-
-    // Fragment stage (128-255)
-    layout(offset = 128) uint material_index;
-    layout(offset = 132) uint _material_padding[3];
-} push;
 
 void main() {
     mat4 modelMatrix;

@@ -86,29 +86,33 @@ vec3 cosineWeightedHemisphere(vec3 normal, inout uint seed) {
 vec3 traceRay(vec2 startUV, vec3 worldPos, vec3 rayDir, float startDepth) {
     vec2 rayStep = rayDir.xy / float(pc.stepCount);
     float stepSize = pc.maxDistance / float(pc.stepCount);
-    
+
     vec2 currentUV = startUV;
     float currentDepth = startDepth;
-    
+
+    // Calculate adaptive screen-space scaling based on step size and screen dimensions
+    float maxScreenDim = max(pc.screenSize.x, pc.screenSize.y);
+    float adaptiveScale = stepSize / maxScreenDim;
+
     for (uint i = 0; i < pc.stepCount; i++) {
-        currentUV += rayStep * 0.1;  // Scale step size for screen space
-        
+        currentUV += rayStep * adaptiveScale;  // Proper screen-space scaling
+
         // Check bounds
         if (currentUV.x < 0.0 || currentUV.x > 1.0 || currentUV.y < 0.0 || currentUV.y > 1.0) {
             break;
         }
-        
+
         float sampleDepth = texture(depthBuffer, currentUV).r;
-        
+
         // Hit test: ray is behind surface
         if (sampleDepth < currentDepth && currentDepth - sampleDepth < 0.01) {
             // Return albedo at hit point as indirect lighting
             return texture(albedoBuffer, currentUV).rgb;
         }
-        
+
         currentDepth += stepSize * 0.001;  // Advance ray in depth
     }
-    
+
     return vec3(0.0);  // No hit
 }
 

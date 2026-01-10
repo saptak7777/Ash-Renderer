@@ -54,12 +54,14 @@ pub use renderer::{
     ResourceRegistry, SkinnedVertex, StatsCollector, Texture, TextureData, Transform, Vertex, MVP,
 };
 
-pub use renderer::features::{AutoRotateFeature, FeatureManager, RenderFeature};
+pub use renderer::features::{
+    AutoRotateFeature, DirectionalLight, FeatureManager, PointLight, RenderFeature,
+};
 
 /// Prelude module for convenient imports
 pub mod prelude {
     pub use crate::{
-        AshError, Camera, Material, Mesh, Renderer, Result, SkinnedVertex, Texture, Transform,
-        Vertex,
+        AshError, Camera, DirectionalLight, Material, Mesh, PointLight, Renderer, Result,
+        SkinnedVertex, Texture, Transform, Vertex,
     };
 }

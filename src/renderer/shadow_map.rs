@@ -5,8 +5,8 @@
 use ash::vk;
 use std::sync::Arc;
 
-use crate::{AshError, Result};
 use crate::vulkan::utils::find_memory_type;
+use crate::{AshError, Result};
 
 /// Shadow map configuration
 #[derive(Debug, Clone)]
@@ -26,7 +26,7 @@ pub struct ShadowConfig {
 impl Default for ShadowConfig {
     fn default() -> Self {
         Self {
-            resolution: 2048,
+            resolution: 4096,
             depth_bias: 0.005,
             slope_bias: 1.5,
             pcf_size: 3,

@@ -412,6 +412,219 @@ impl Texture {
         })
     }
 
+    /// Creates a 2D texture from raw bytes and format.
+    ///
+    /// # Safety
+    /// Caller must ensure Vulkan handles are valid.
+    #[allow(clippy::too_many_arguments)]
+    pub unsafe fn from_raw_data(
+        allocator: Arc<vulkan::Allocator>,
+        device: Arc<ash::Device>,
+        command_pool: vk::CommandPool,
+        queue: vk::Queue,
+        raw_data: &[u8],
+        width: u32,
+        height: u32,
+        format: vk::Format,
+        mip_levels: u32,
+        name: Option<&str>,
+    ) -> Result<Self> {
+        let image_size = raw_data.len() as vk::DeviceSize;
+        let (staging_buffer, mut staging_alloc) = allocator.create_buffer_with_flags(
+            image_size,
+            vk::BufferUsageFlags::TRANSFER_SRC,
+            vk_mem::MemoryUsage::AutoPreferHost,
+            vk_mem::AllocationCreateFlags::HOST_ACCESS_SEQUENTIAL_WRITE,
+        )?;
+
+        {
+            let mut guard = allocator.map_allocation_guarded(&mut staging_alloc, image_size)?;
+            guard.copy_from_slice(raw_data);
+        }
+
+        allocator
+            .vma
+            .flush_allocation(&staging_alloc, 0, image_size)
+            .map_err(|e| {
+                AshError::VulkanError(format!("Failed to flush texture staging buffer: {e}"))
+            })?;
+
+        let image_info = vk::ImageCreateInfo::default()
+            .image_type(vk::ImageType::TYPE_2D)
+            .format(format)
+            .extent(vk::Extent3D {
+                width,
+                height,
+                depth: 1,
+            })
+            .mip_levels(mip_levels)
+            .array_layers(1)
+            .samples(vk::SampleCountFlags::TYPE_1)
+            .tiling(vk::ImageTiling::OPTIMAL)
+            .usage(vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::SAMPLED)
+            .sharing_mode(vk::SharingMode::EXCLUSIVE)
+            .initial_layout(vk::ImageLayout::UNDEFINED);
+
+        let (image, allocation) =
+            allocator.create_image(&image_info, vk_mem::MemoryUsage::AutoPreferDevice)?;
+
+        vulkan::utils::execute_single_use(device.as_ref(), command_pool, queue, |cmd| {
+            let barrier = vk::ImageMemoryBarrier::default()
+                .old_layout(vk::ImageLayout::UNDEFINED)
+                .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                .src_access_mask(vk::AccessFlags::empty())
+                .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                .image(image)
+                .subresource_range(vk::ImageSubresourceRange {
+                    aspect_mask: vk::ImageAspectFlags::COLOR,
+                    base_mip_level: 0,
+                    level_count: mip_levels,
+                    base_array_layer: 0,
+                    layer_count: 1,
+                });
+
+            device.cmd_pipeline_barrier(
+                cmd,
+                vk::PipelineStageFlags::TOP_OF_PIPE,
+                vk::PipelineStageFlags::TRANSFER,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[],
+                &[barrier],
+            );
+
+            let region = vk::BufferImageCopy {
+                buffer_offset: 0,
+                buffer_row_length: 0,
+                buffer_image_height: 0,
+                image_subresource: vk::ImageSubresourceLayers {
+                    aspect_mask: vk::ImageAspectFlags::COLOR,
+                    mip_level: 0,
+                    base_array_layer: 0,
+                    layer_count: 1,
+                },
+                image_offset: vk::Offset3D { x: 0, y: 0, z: 0 },
+                image_extent: vk::Extent3D {
+                    width,
+                    height,
+                    depth: 1,
+                },
+            };
+
+            device.cmd_copy_buffer_to_image(
+                cmd,
+                staging_buffer,
+                image,
+                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                &[region],
+            );
+
+            let barrier_done = vk::ImageMemoryBarrier::default()
+                .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+                .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                .dst_access_mask(vk::AccessFlags::SHADER_READ)
+                .image(image)
+                .subresource_range(vk::ImageSubresourceRange {
+                    aspect_mask: vk::ImageAspectFlags::COLOR,
+                    base_mip_level: 0,
+                    level_count: mip_levels,
+                    base_array_layer: 0,
+                    layer_count: 1,
+                });
+
+            device.cmd_pipeline_barrier(
+                cmd,
+                vk::PipelineStageFlags::TRANSFER,
+                vk::PipelineStageFlags::FRAGMENT_SHADER,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[],
+                &[barrier_done],
+            );
+        })?;
+
+        allocator
+            .vma
+            .destroy_buffer(staging_buffer, &mut staging_alloc);
+
+        let view_info = vk::ImageViewCreateInfo::default()
+            .image(image)
+            .view_type(vk::ImageViewType::TYPE_2D)
+            .format(format)
+            .subresource_range(vk::ImageSubresourceRange {
+                aspect_mask: vk::ImageAspectFlags::COLOR,
+                base_mip_level: 0,
+                level_count: mip_levels,
+                base_array_layer: 0,
+                layer_count: 1,
+            });
+
+        let view = device.create_image_view(&view_info, None)?;
+
+        let sampler_info = vk::SamplerCreateInfo::default()
+            .mag_filter(vk::Filter::LINEAR)
+            .min_filter(vk::Filter::LINEAR)
+            .mipmap_mode(vk::SamplerMipmapMode::LINEAR)
+            .address_mode_u(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+            .address_mode_v(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+            .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+            .min_lod(0.0)
+            .max_lod(mip_levels as f32);
+
+        let sampler = device.create_sampler(&sampler_info, None)?;
+
+        if let Some(label) = name {
+            log::info!("Created raw texture '{label}' ({width}x{height})");
+        }
+
+        Ok(Self {
+            image,
+            view,
+            sampler,
+            allocation,
+            allocator,
+            device,
+        })
+    }
+
+    /// Loads an HDR (Radiance) image from disk.
+    pub unsafe fn load_hdr(
+        allocator: Arc<vulkan::Allocator>,
+        device: Arc<ash::Device>,
+        command_pool: vk::CommandPool,
+        queue: vk::Queue,
+        path: &std::path::Path,
+    ) -> Result<Self> {
+        let dynamic_image = image::ImageReader::open(path)
+            .map_err(|e| AshError::VulkanError(format!("Failed to open HDR {path:?}: {e}")))?
+            .decode()
+            .map_err(|e| AshError::VulkanError(format!("Failed to decode HDR {path:?}: {e}")))?;
+
+        let width = dynamic_image.width();
+        let height = dynamic_image.height();
+
+        // Convert to RGBA F32 for Vulkan compatibility (R32G32B32A32_SFLOAT)
+        let rgba32f = dynamic_image.into_rgba32f();
+        let raw_bytes = bytemuck::cast_slice(rgba32f.as_raw());
+
+        Self::from_raw_data(
+            allocator,
+            device,
+            command_pool,
+            queue,
+            raw_bytes,
+            width,
+            height,
+            vk::Format::R32G32B32A32_SFLOAT,
+            1,
+            Some(&format!(
+                "HDR_Equirect_{}",
+                path.file_name().unwrap_or_default().to_string_lossy()
+            )),
+        )
+    }
+
     pub fn view(&self) -> vk::ImageView {
         self.view
     }

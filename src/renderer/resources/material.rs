@@ -14,6 +14,12 @@ pub struct Material {
     pub alpha_cutoff: f32,
     pub tint_index: i32,
     pub is_transparent: bool,
+    // Texture indices (None = -1)
+    pub texture_index: Option<u32>,
+    pub normal_texture_index: Option<u32>,
+    pub metallic_roughness_texture_index: Option<u32>,
+    pub occlusion_texture_index: Option<u32>,
+    pub emissive_texture_index: Option<u32>,
 }
 
 impl Default for Material {
@@ -29,6 +35,11 @@ impl Default for Material {
             alpha_cutoff: 0.1,
             tint_index: -1,
             is_transparent: false,
+            texture_index: None,
+            normal_texture_index: None,
+            metallic_roughness_texture_index: None,
+            occlusion_texture_index: None,
+            emissive_texture_index: None,
         }
     }
 }
@@ -47,6 +58,11 @@ impl Material {
             alpha_cutoff: 0.1,
             tint_index: -1,
             is_transparent: color[3] < 1.0,
+            texture_index: None,
+            normal_texture_index: None,
+            metallic_roughness_texture_index: None,
+            occlusion_texture_index: None,
+            emissive_texture_index: None,
         }
     }
 }
@@ -69,6 +85,12 @@ pub struct MaterialKey {
     alpha_cutoff: u8,
     tint_index: i32,
     is_transparent: bool,
+    // Texture indices for unique identification
+    texture_index: i32,
+    normal_texture_index: i32,
+    metallic_roughness_texture_index: i32,
+    occlusion_texture_index: i32,
+    emissive_texture_index: i32,
 }
 
 impl MaterialKey {
@@ -92,6 +114,11 @@ impl MaterialKey {
             alpha_cutoff: quantize(material.alpha_cutoff),
             tint_index: material.tint_index,
             is_transparent: material.is_transparent,
+            texture_index: material.texture_index.map(|i| i as i32).unwrap_or(-1),
+            normal_texture_index: material.normal_texture_index.map(|i| i as i32).unwrap_or(-1),
+            metallic_roughness_texture_index: material.metallic_roughness_texture_index.map(|i| i as i32).unwrap_or(-1),
+            occlusion_texture_index: material.occlusion_texture_index.map(|i| i as i32).unwrap_or(-1),
+            emissive_texture_index: material.emissive_texture_index.map(|i| i as i32).unwrap_or(-1),
         }
     }
 
@@ -115,6 +142,11 @@ impl MaterialKey {
             alpha_cutoff: quantize(props.alpha_cutoff),
             tint_index: -1,
             is_transparent: props.base_color_factor[3] < 1.0,
+            texture_index: -1,
+            normal_texture_index: -1,
+            metallic_roughness_texture_index: -1,
+            occlusion_texture_index: -1,
+            emissive_texture_index: -1,
         }
     }
 }
@@ -173,6 +205,11 @@ impl MaterialManager {
     pub fn register_material(&mut self, material: Material) -> MaterialHandle {
         let key = MaterialKey::from_material(&material);
         if let Some(&existing_handle) = self.key_to_handle.get(&key) {
+            log::debug!(
+                "Material dedup: {} -> handle {:?}",
+                material.name,
+                existing_handle
+            );
             return existing_handle;
         }
 
@@ -184,7 +221,7 @@ impl MaterialManager {
             self.versions.resize(index as usize + 1, 0);
         }
 
-        self.materials[index as usize] = material;
+        self.materials[index as usize] = material.clone();
         self.versions[index as usize] += 1;
 
         let handle = MaterialHandle {
@@ -192,6 +229,14 @@ impl MaterialManager {
             version: self.versions[index as usize],
         };
         self.key_to_handle.insert(key, handle);
+        
+        log::warn!(
+            "✓ Material Registered: {} -> handle {:?} (idx={})",
+            material.name,
+            handle,
+            index
+        );
+        
         handle
     }
 

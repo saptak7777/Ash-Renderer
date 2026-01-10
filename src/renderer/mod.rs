@@ -56,8 +56,8 @@ pub use temporal_upscaling::{VsrPass, VsrQuality};
 // Re-export from resources submodule
 pub use resources::{
     BufferAllocation, BufferHandle, BufferPool, Camera, CascadedShadowMap, DepthBuffer,
-    DescriptorSetHandle, ImageHandle, InstanceBuffer, Material, MaterialHandle, MaterialManager, Mesh,
-    MvpMatrices, PipelineHandle, Texture, TextureData, Transform, UniformBuffer, Vertex,
+    DescriptorSetHandle, ImageHandle, InstanceBuffer, Material, MaterialHandle, MaterialManager,
+    Mesh, MvpMatrices, PipelineHandle, Texture, TextureData, Transform, UniformBuffer, Vertex,
     VertexBuffer, MVP,
 };
 pub use skinned_vertex::SkinnedVertex;

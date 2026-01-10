@@ -1,7 +1,6 @@
 //! Test Phase 4: Smart material selection with mesh-to-material mapping
 
 // Unused import removed
-use std::collections::HashMap;
 
 #[test]
 fn test_phase4_smart_material() {
@@ -23,6 +22,8 @@ fn test_phase4_smart_material() {
         normal_scale: 1.0,
         alpha_cutoff: 0.5,
         tint_index: -1,
+        is_transparent: false,
+        ..Default::default()
     };
 
     // Register the material
@@ -39,6 +40,9 @@ fn test_phase4_smart_material() {
         is_skinned: false,
         joint_offset: 0,
         cast_shadows: true,
+        receive_shadows: true,
+        is_transparent: false,
+        is_hidden: false,
     };
 
     println!("\n📝 Testing automatic material selection:");
@@ -85,6 +89,9 @@ fn test_phase4_smart_material() {
         is_skinned: false,
         joint_offset: 0,
         cast_shadows: true,
+        receive_shadows: true,
+        is_transparent: false,
+        is_hidden: false,
     };
 
     println!(

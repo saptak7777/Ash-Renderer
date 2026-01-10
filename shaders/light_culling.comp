@@ -93,8 +93,10 @@ void getTileFrustum(uvec2 tileId, float minDepth, float maxDepth, out vec4 plane
     planes[1] = vec4(length(v1) > 0.0001 ? normalize(v1) : vec3(0.0), 0.0); // Right
     planes[2] = vec4(length(v2) > 0.0001 ? normalize(v2) : vec3(0.0), 0.0); // Bottom
     planes[3] = vec4(length(v3) > 0.0001 ? normalize(v3) : vec3(0.0), 0.0); // Top
-    planes[4] = vec4(0.0, 0.0, -1.0, -minDepth); // Near
-    planes[5] = vec4(0.0, 0.0, 1.0, maxDepth);   // Far
+    // FORCE DISABLE Z-CULLING (Fix for missing Depth Pre-Pass)
+    // We set the planes essentially to infinity so checks always pass.
+    planes[4] = vec4(0.0, 0.0, -1.0, 100000.0); // Near
+    planes[5] = vec4(0.0, 0.0, 1.0, 100000.0);  // Far
 }
 
 // Test if a sphere (light) intersects the frustum
@@ -128,6 +130,8 @@ void main() {
     
     // Sample depth buffer to find min/max depth for this tile
     uvec2 pixelCoord = tileId * uvec2(WORKGROUP_SIZE_X, WORKGROUP_SIZE_Y) + localId;
+    // SKIP DEPTH SAMPLING (Fix for undefined behavior reading invalid depth buffer)
+    /*
     if (pixelCoord.x < pc.screenSize.x && pixelCoord.y < pc.screenSize.y) {
         vec2 uv = (vec2(pixelCoord) + 0.5) / vec2(pc.screenSize);
         float depth = texture(depthBuffer, uv).r;
@@ -136,11 +140,12 @@ void main() {
         atomicMin(sharedMinDepthInt, depthInt);
         atomicMax(sharedMaxDepthInt, depthInt);
     }
+    */
     barrier();
     
     // Convert back to float
-    float minDepth = uintBitsToFloat(sharedMinDepthInt);
-    float maxDepth = uintBitsToFloat(sharedMaxDepthInt);
+    float minDepth = 0.0;
+    float maxDepth = 1.0;
     
     // OPTIMIZATION: Only thread 0 computes frustum, others read from shared memory
     // This reduces frustum calculations from 256 per tile to 1 per tile

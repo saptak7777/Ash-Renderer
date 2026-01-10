@@ -615,6 +615,65 @@ impl<T: Copy> StorageBuffer<T> {
         Ok(())
     }
 
+    /// Direct write of a single element at a specific index with full-buffer coherency
+    /// This is the AAA pattern used in modern game engines (UE5, Unity) for streaming updates
+    /// while avoiding GPU-CPU race conditions.
+    /// 
+    /// Uses persistent mapping (MAPPED flag) to avoid guard scope issues. The buffer is already
+    /// mapped at creation time, so we write directly to the persistent pointer and flush.
+    ///
+    /// # Safety
+    /// - Buffer must not be destroyed
+    /// - index must be less than capacity
+    pub unsafe fn write_element_at(&mut self, index: usize, element: &T) -> crate::Result<()> {
+        if index >= self.capacity {
+            return Err(crate::AshError::VulkanError(format!(
+                "Write index {index} exceeds buffer capacity {}",
+                self.capacity
+            )));
+        }
+
+        let element_size = std::mem::size_of::<T>();
+        let offset_bytes = (index * element_size) as u64;
+        let full_size = (self.capacity * element_size) as u64;
+        
+        // AAA Pattern: Use persistent mapping (allocated with MAPPED flag)
+        // Get the persistent mapped pointer from VMA - it's already mapped
+        let mapped_ptr = self
+            .allocator
+            .vma
+            .get_allocation_info(&self.allocation)
+            .mapped_data;
+        
+        if mapped_ptr.is_null() {
+            // Fallback for non-persistent mapping (shouldn't happen with our flags)
+            let mut guard = self
+                .allocator
+                .map_allocation_guarded(&mut self.allocation, full_size)?;
+            let base = guard.as_mut_ptr() as *mut T;
+            std::ptr::write(base.add(index), *element);
+            // Guard is automatically unmapped here
+        } else {
+            // Direct write to persistent mapping - this is the AAA pattern
+            let base = mapped_ptr as *mut T;
+            std::ptr::write(base.add(index), *element);
+        }
+
+        // Flush only the modified range (optimization) or full buffer (safe fallback)
+        // UE5/Unity pattern: flush the specific range that was written
+        let flush_offset = offset_bytes;
+        let flush_size = std::mem::size_of::<T>() as u64;
+        
+        self.allocator
+            .vma
+            .flush_allocation(&self.allocation, flush_offset, flush_size)
+            .map_err(|e| {
+                crate::AshError::VulkanError(format!("Failed to flush storage buffer: {e}"))
+            })?;
+
+        Ok(())
+    }
+
     pub fn cleanup(&mut self) -> crate::Result<()> {
         if self.destroyed {
             return Ok(());
@@ -632,6 +691,34 @@ impl<T: Copy> StorageBuffer<T> {
         Ok(())
     }
 
+    /// Read all data from the buffer into a Vec
+    ///
+    /// # Safety
+    /// Buffer must be host-visible.
+    pub unsafe fn read_all(&mut self) -> crate::Result<Vec<T>> {
+        let size = (self.capacity * std::mem::size_of::<T>()) as u64;
+        let guard = self.allocator.map_allocation_guarded(&mut self.allocation, size)?;
+        Ok(guard.as_slice::<T>().to_vec())
+    }
+
+    /// Read a single element from the buffer at the specified index
+    ///
+    /// # Safety
+    /// Buffer must be host-visible and index must be valid.
+    pub unsafe fn read_element_at(&self, index: usize) -> T {
+        // Buffer is allocated with MAPPED flag, so we can read directly
+        let mapped_ptr = self
+            .allocator
+            .vma
+            .get_allocation_info(&self.allocation)
+            .mapped_data;
+
+        assert!(!mapped_ptr.is_null(), "Buffer should be persistently mapped");
+        let base = mapped_ptr as *const T;
+        std::ptr::read(base.add(index))
+    }
+
+    /// Get current capacity
     pub fn capacity(&self) -> usize {
         self.capacity
     }

@@ -1,0 +1,88 @@
+#version 460
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) uniform samplerCube envMap;
+layout(set = 0, binding = 1, rgba16f) uniform writeonly image2DArray prefilterMap;
+
+layout(push_constant) uniform PushConstants {
+    uint outputSize;
+    float roughness;
+} push;
+
+const float PI = 3.14159265359;
+
+float RadicalInverse_VdC(uint bits) {
+    bits = (bits << 16u) | (bits >> 16u);
+    bits = ((bits & 0x55555555u) << 1u) | ((bits & 0xAAAAAAAAu) >> 1u);
+    bits = ((bits & 0x33333333u) << 2u) | ((bits & 0xCCCCCCCCu) >> 2u);
+    bits = ((bits & 0x0F0F0F0Fu) << 4u) | ((bits & 0xF0F0F0F0u) >> 4u);
+    bits = ((bits & 0x00FF00FFu) << 8u) | ((bits & 0xFF00FF00u) >> 8u);
+    return float(bits) * 2.3283064365386963e-10;
+}
+
+vec2 Hammersley(uint i, uint N) {
+    return vec2(float(i) / float(N), RadicalInverse_VdC(i));
+}
+
+vec3 ImportanceSampleGGX(vec2 xi, vec3 N, float roughness) {
+    float a = roughness * roughness;
+    float phi = 2.0 * PI * xi.x;
+    float cosTheta = sqrt((1.0 - xi.y) / (1.0 + (a * a - 1.0) * xi.y));
+    float sinTheta = sqrt(1.0 - cosTheta * cosTheta);
+    
+    vec3 H;
+    H.x = cos(phi) * sinTheta;
+    H.y = sin(phi) * sinTheta;
+    H.z = cosTheta;
+    
+    vec3 up = abs(N.z) < 0.999 ? vec3(0.0, 0.0, 1.0) : vec3(1.0, 0.0, 0.0);
+    vec3 tangent = normalize(cross(up, N));
+    vec3 bitangent = cross(N, tangent);
+    
+    vec3 sampleVec = tangent * H.x + bitangent * H.y + N * H.z;
+    return normalize(sampleVec);
+}
+
+vec3 getDirection(uvec3 id, float size) {
+    vec2 uv = (vec2(id.xy) + 0.5) / size;
+    uv = uv * 2.0 - 1.0;
+    
+    vec3 dir;
+    uint face = id.z;
+    if(face == 0) dir = vec3(1.0, -uv.y, -uv.x);      // +X
+    else if(face == 1) dir = vec3(-1.0, -uv.y, uv.x); // -X
+    else if(face == 2) dir = vec3(uv.x, 1.0, uv.y);   // +Y
+    else if(face == 3) dir = vec3(uv.x, -1.0, -uv.y); // -Y
+    else if(face == 4) dir = vec3(uv.x, -uv.y, 1.0);  // +Z
+    else dir = vec3(-uv.x, -uv.y, -1.0);              // -Z
+    
+    return normalize(dir);
+}
+
+void main() {
+    if(gl_GlobalInvocationID.x >= push.outputSize || gl_GlobalInvocationID.y >= push.outputSize) return;
+    
+    vec3 N = getDirection(gl_GlobalInvocationID, float(push.outputSize));
+    vec3 R = N;
+    vec3 V = R;
+    
+    const uint SAMPLE_COUNT = 1024u;
+    float totalWeight = 0.0;
+    vec3 prefilteredColor = vec3(0.0);
+    
+    for(uint i = 0u; i < SAMPLE_COUNT; ++i) {
+        vec2 xi = Hammersley(i, SAMPLE_COUNT);
+        vec3 H = ImportanceSampleGGX(xi, N, push.roughness);
+        vec3 L = normalize(2.0 * dot(V, H) * H - V);
+        
+        float NdotL = max(dot(N, L), 0.0);
+        if(NdotL > 0.0) {
+            prefilteredColor += texture(envMap, L).rgb * NdotL;
+            totalWeight += NdotL;
+        }
+    }
+    
+    prefilteredColor = prefilteredColor / totalWeight;
+    imageStore(prefilterMap, ivec3(gl_GlobalInvocationID), vec4(prefilteredColor, 1.0));
+}

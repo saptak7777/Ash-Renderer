@@ -75,8 +75,12 @@ impl ApplicationHandler for App {
                         let mat_handle = mesh_data[0].material_handle;
                         if renderer.material_manager().is_handle_valid(mat_handle) {
                             log::info!("✅ Material automatically registered for demo mesh");
+                            
+                            // CRITICAL FIX: Upload the automatically registered material to GPU
+                            let material = renderer.material_manager().get_material(mat_handle).clone();
+                            let _ = renderer.upload_material_to_gpu(mat_handle.index as u32, &material);
+                            log::info!("✅ Material uploaded to GPU: {:?}", mat_handle);
 
-                            let material = renderer.material_manager().get_material(mat_handle);
                             log::info!("   - Material: {}", material.name);
                             log::info!("   - Metallic: {:.2}", material.metallic);
                             log::info!("   - Roughness: {:.2}", material.roughness);
@@ -100,6 +104,9 @@ impl ApplicationHandler for App {
                         is_skinned: false,
                         joint_offset: 0,
                         cast_shadows: true,
+                        receive_shadows: true,
+                        is_transparent: false,
+                        is_hidden: false,
                     }]);
                     log::info!("✅ Render command submitted with auto material selection");
                 }

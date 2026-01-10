@@ -59,6 +59,8 @@ mod tests {
             normal_scale: props.normal_scale,
             alpha_cutoff: props.alpha_cutoff,
             tint_index: -1,
+            is_transparent: props.base_color_factor[3] < 1.0,
+            ..Default::default()
         };
 
         // Verify properties were copied correctly
@@ -302,6 +304,8 @@ mod tests {
             normal_scale: props.normal_scale,
             alpha_cutoff: props.alpha_cutoff,
             tint_index: -1,
+            is_transparent: props.base_color_factor[3] < 1.0,
+            ..Default::default()
         };
 
         material_registry.insert(mesh_handle, material);
@@ -553,6 +557,8 @@ mod tests {
                 normal_scale: props.normal_scale,
                 alpha_cutoff: props.alpha_cutoff,
                 tint_index: -1,
+                is_transparent: props.base_color_factor[3] < 1.0,
+                ..Default::default()
             };
 
             material_registry.insert(mesh_handle, material);

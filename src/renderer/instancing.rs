@@ -346,7 +346,7 @@ mod tests {
     #[test]
     fn test_duplicate_prevention() {
         let mut manager = InstancingManager::new();
-        let key = BatchKey::new(1, 1);
+        let key = BatchKey::new(1, MaterialHandle { index: 1, version: 1 });
         let model = Mat4::from_translation(Vec3::new(1.0, 2.0, 3.0));
         let instance = InstanceData::from_matrix(model);
 
@@ -366,7 +366,7 @@ mod tests {
     fn test_duplicate_prevention_disabled() {
         let mut manager = InstancingManager::new();
         manager.set_duplicate_prevention(false);
-        let key = BatchKey::new(1, 1);
+        let key = BatchKey::new(1, MaterialHandle { index: 1, version: 1 });
         let model = Mat4::from_translation(Vec3::new(1.0, 2.0, 3.0));
         let instance = InstanceData::from_matrix(model);
 
@@ -387,7 +387,7 @@ mod tests {
         let mut manager = InstancingManager::new();
         manager.begin_frame();
 
-        let key = BatchKey::new(1, 1);
+        let key = BatchKey::new(1, MaterialHandle { index: 1, version: 1 });
         for i in 0..100 {
             let model = Mat4::from_translation(Vec3::new(i as f32, 0.0, 0.0));
             manager.add_instance(key.clone(), InstanceData::from_matrix(model));
@@ -405,7 +405,7 @@ mod tests {
 
         // Different mesh IDs = different batches
         for mesh_id in 0..5 {
-            let key = BatchKey::new(mesh_id, 0);
+            let key = BatchKey::new(mesh_id, MaterialHandle::null());
             manager.add_instance(key, InstanceData::default());
         }
 

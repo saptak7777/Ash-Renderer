@@ -31,6 +31,9 @@ fn main() {
             is_skinned: false,
             joint_offset: 0,
             cast_shadows: true,
+            receive_shadows: true,
+            is_transparent: false,
+            is_hidden: false,
         };
     }
 }

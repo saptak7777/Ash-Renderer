@@ -350,7 +350,7 @@ impl DescriptorAllocator {
         ];
 
         let pool_info = vk::DescriptorPoolCreateInfo::default()
-            .max_sets(1)
+            .max_sets(2) // Allow 2 sets to support recreation (allocate new before freeing old)
             .pool_sizes(&pool_sizes)
             .flags(
                 vk::DescriptorPoolCreateFlags::FREE_DESCRIPTOR_SET
@@ -371,6 +371,21 @@ impl DescriptorAllocator {
         }
 
         self.bindless_pool = Some(pool);
+        Ok(())
+    }
+
+    pub fn free_bindless_set(&self, set: vk::DescriptorSet) -> Result<()> {
+        if let Some(pool) = self.bindless_pool {
+            unsafe {
+                self.device
+                    .free_descriptor_sets(pool, &[set])
+                    .map_err(|e| {
+                        AshError::VulkanError(format!(
+                            "Failed to free bindless descriptor set: {e}"
+                        ))
+                    })?;
+            }
+        }
         Ok(())
     }
 }

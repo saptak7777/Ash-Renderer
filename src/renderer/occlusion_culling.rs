@@ -79,6 +79,7 @@ pub const CULL_FLAG_ENABLED: u32 = 1 << 0;
 pub const CULL_FLAG_CAST_SHADOWS: u32 = 1 << 1;
 pub const CULL_FLAG_TRANSPARENT: u32 = 1 << 2;
 pub const CULL_FLAG_RECEIVE_SHADOWS: u32 = 1 << 3;
+pub const CULL_FLAG_HIDDEN: u32 = 1 << 4;
 
 /// Per-object culling data
 #[repr(C)]
@@ -201,6 +202,12 @@ impl CullObjectData {
     /// Set receive shadows flag
     pub fn with_receive_shadows(mut self, enabled: bool) -> Self {
         self.set_flag(CULL_FLAG_RECEIVE_SHADOWS, enabled);
+        self
+    }
+
+    /// Set hidden flag
+    pub fn with_hidden(mut self, hidden: bool) -> Self {
+        self.set_flag(CULL_FLAG_HIDDEN, hidden);
         self
     }
 

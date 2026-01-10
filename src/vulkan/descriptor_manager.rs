@@ -42,31 +42,38 @@ impl DescriptorManager {
             .build(Arc::clone(&device))?;
 
         // Environment layout (Set 2)
-        // 0: Shadow Map
-        // 1: Irradiance Map
-        // 2: Prefiltered Map
-        // 3: BRDF LUT
+        // 0: Irradiance Map
+        // 1: Prefiltered Map
+        // 2: BRDF LUT
+        // 3: Skybox Map
+        // 4: Shadow Map
         let environment_layout = DescriptorSetLayoutBuilder::new()
             .add_binding(
-                0, // Shadow Map
+                0, // Irradiance Map
                 vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
                 vk::ShaderStageFlags::FRAGMENT,
                 1,
             )
             .add_binding(
-                1, // Irradiance Map
+                1, // Prefiltered Map
                 vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
                 vk::ShaderStageFlags::FRAGMENT,
                 1,
             )
             .add_binding(
-                2, // Prefiltered Map
+                2, // BRDF LUT
                 vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
                 vk::ShaderStageFlags::FRAGMENT,
                 1,
             )
             .add_binding(
-                3, // BRDF LUT
+                3, // Skybox Map
+                vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+                vk::ShaderStageFlags::FRAGMENT,
+                1,
+            )
+            .add_binding(
+                4, // Shadow Map
                 vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
                 vk::ShaderStageFlags::FRAGMENT,
                 1,
@@ -155,7 +162,7 @@ impl DescriptorManager {
             image_view,
             image_layout: vk::ImageLayout::DEPTH_STENCIL_READ_ONLY_OPTIMAL,
         };
-        descriptor.update_image_at(0, 0, info, vk::DescriptorType::COMBINED_IMAGE_SAMPLER)?;
+        descriptor.update_image_at(4, 0, info, vk::DescriptorType::COMBINED_IMAGE_SAMPLER)?;
         Ok(())
     }
 

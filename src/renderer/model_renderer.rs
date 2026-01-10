@@ -22,10 +22,13 @@ impl MaterialPushConstants {
     pub fn new(material_handle: MaterialHandle) -> Self {
         Self {
             material_handle,
-            debug_path: 0,
-            flags: 0,
-            _padding: 0,
+            ..Default::default()
         }
+    }
+
+    pub fn with_material_buffer_index(mut self, index: u32) -> Self {
+        self.material_buffer_index = index;
+        self
     }
 
     pub fn with_debug_path(mut self, path: u32) -> Self {
@@ -39,6 +42,11 @@ impl MaterialPushConstants {
         } else {
             self.flags &= !(1 << 0);
         }
+        self
+    }
+
+    pub fn with_debug_visualization(mut self, enabled: bool) -> Self {
+        self.debug_visualization_enabled = enabled as u32;
         self
     }
 }
@@ -83,22 +91,38 @@ impl From<glam::Mat4> for Mat4Push {
 }
 
 #[repr(C, align(16))]
-#[derive(Clone, Copy, Pod, Zeroable)]
-pub struct MeshPushConstants {
-    pub model: Mat4Push,
-    pub joint_offset: u32,
-    pub use_instancing: u32,
-    pub instance_buffer_index: u32,
-    pub joint_buffer_index: u32,
-}
-
-#[repr(C, align(16))]
 #[derive(Clone, Copy, Default, Pod, Zeroable)]
 pub struct MaterialPushConstants {
     pub material_handle: MaterialHandle,
     pub debug_path: u32, // 0: None, 1: GPU-Driven, 2: Legacy
     pub flags: u32,
-    pub _padding: u32,
+    pub material_buffer_index: u32,
+    pub debug_visualization_enabled: u32, // 0: Disabled, 1: Enabled
+    pub _padding: [u32; 3],
+}
+
+pub const DRAW_PUSH_VERTEX_BYTES: u32 = 128;
+pub const DRAW_PUSH_FRAGMENT_BYTES: u32 = 32;
+
+/// Unified push constants block mirroring the GLSL layout offsets.
+#[repr(C, align(16))]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct DrawPushConstants {
+    // Vertex stage (0-127)
+    model: Mat4Push,
+    joint_offset: u32,
+    use_instancing: u32,
+    instance_buffer_index: u32,
+    joint_buffer_index: u32,
+    _vertex_padding: [u32; 12],
+
+    // Fragment stage (128-159)
+    material_index: u32,
+    debug_path: u32,
+    flags: u32,
+    material_buffer_index: u32,
+    debug_visualization_enabled: u32,
+    _fragment_padding: [u32; 3],
 }
 
 #[repr(C, align(16))]
@@ -389,31 +413,61 @@ impl ModelRenderer {
             );
         }
 
-        let push = MeshPushConstants {
-            model: model_matrix.into(),
-            joint_offset,
-            use_instancing: 0, // Direct draw
-            instance_buffer_index: ctx.instance_buffer_index,
-            joint_buffer_index: ctx.joint_buffer_index,
-        };
-
-        self.device.cmd_push_constants(
-            ctx.command_buffer,
-            ctx.pipeline_layout,
-            vk::ShaderStageFlags::VERTEX,
-            0,
-            bytes_of(&push),
+        let material_handle = ctx.material.material_handle;
+        log::debug!(
+            target: "renderer::push_constants",
+            "draw_mesh: material_handle={:?} (idx={}, ver={}), buffer_index={}, debug_path={}, flags={:#X}",
+            material_handle,
+            material_handle.index,
+            material_handle.version,
+            ctx.material.material_buffer_index,
+            ctx.material.debug_path,
+            ctx.material.flags
         );
 
+        // RAGE pattern: Validate material index, fallback to default if invalid
+        let material_index = if material_handle.index < 1024 {
+            material_handle.index
+        } else {
+            log::warn!(
+                "Invalid material index {}, using default (0)",
+                material_handle.index
+            );
+            0
+        };
+
+        let push = DrawPushConstants {
+            model: model_matrix.into(),
+            joint_offset,
+            use_instancing: 0,
+            instance_buffer_index: ctx.instance_buffer_index,
+            joint_buffer_index: ctx.joint_buffer_index,
+            _vertex_padding: [0; 12],
+            material_index: ((material_handle.version as u32) << 16) | material_index as u32,
+            debug_path: ctx.material.debug_path,
+            flags: ctx.material.flags,
+            material_buffer_index: ctx.material.material_buffer_index,
+            debug_visualization_enabled: ctx.material.debug_visualization_enabled,
+            _fragment_padding: [0; 3],
+        };
+
+        let push_bytes = bytes_of(&push);
+
         self.device.cmd_push_constants(
             ctx.command_buffer,
             ctx.pipeline_layout,
-            vk::ShaderStageFlags::FRAGMENT,
-            128,
-            bytes_of(ctx.material),
+            vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+            0,
+            &push_bytes,
         );
 
         if let Some(index_buffer) = ctx.uploaded.index_buffer() {
+            let count = ctx.uploaded.index_count();
+            // log::debug!(
+            //     "DEBUG: Binding index buffer {:?}, count={}",
+            //     index_buffer,
+            //     count
+            // );
             self.device.cmd_bind_index_buffer(
                 ctx.command_buffer,
                 index_buffer,
@@ -421,29 +475,29 @@ impl ModelRenderer {
                 vk::IndexType::UINT32,
             );
 
-            let count = ctx.uploaded.index_count();
-            log::info!(
-                "DEBUG: draw_mesh - index_count={}, vertex_count={}",
-                count,
-                ctx.uploaded.vertex_count()
-            );
+            // log::info!(
+            //     "DEBUG: draw_mesh - index_count={}, vertex_count={}",
+            //     count,
+            //     ctx.uploaded.vertex_count()
+            // );
             if count == 0 {
-                log::info!(
-                    "DEBUG: Calling cmd_draw with vertex_count={}",
-                    ctx.uploaded.vertex_count()
-                );
+                // log::info!(
+                //     "DEBUG: Calling cmd_draw with vertex_count={}",
+                //     ctx.uploaded.vertex_count()
+                // );
                 self.device
                     .cmd_draw(ctx.command_buffer, ctx.uploaded.vertex_count(), 1, 0, 0);
             } else {
-                log::info!("DEBUG: Calling cmd_draw_indexed with index_count={count}");
+                // log::info!("DEBUG: Calling cmd_draw_indexed with index_count={count}");
                 self.device
                     .cmd_draw_indexed(ctx.command_buffer, count, 1, 0, 0, 0);
+                // log::info!("DEBUG: cmd_draw_indexed completed successfully");
             }
         } else {
-            log::info!(
-                "DEBUG: draw_mesh - NO index_buffer! Calling cmd_draw with vertex_count={}",
-                ctx.uploaded.vertex_count()
-            );
+            // log::info!(
+            //     "DEBUG: draw_mesh - NO index_buffer! Calling cmd_draw with vertex_count={}",
+            //     ctx.uploaded.vertex_count()
+            // );
             self.device
                 .cmd_draw(ctx.command_buffer, ctx.uploaded.vertex_count(), 1, 0, 0);
         }
@@ -467,28 +521,40 @@ impl ModelRenderer {
         self.device
             .cmd_bind_vertex_buffers(ctx.command_buffer, 0, &[vertex_buffer], &[0]);
 
-        let push = MeshPushConstants {
+        let material_handle = ctx.material.material_handle;
+        log::debug!(
+            target: "renderer::push_constants",
+            "draw_mesh_instanced: material_handle={:?} (idx={}, ver={}), buffer_index={}, debug_path={}, flags={:#X}",
+            material_handle,
+            material_handle.index,
+            material_handle.version,
+            ctx.material.material_buffer_index,
+            ctx.material.debug_path,
+            ctx.material.flags
+        );
+        let push = DrawPushConstants {
             model: glam::Mat4::IDENTITY.into(),
             joint_offset: 0,
-            use_instancing: 1, // Enable instancing path in shader
+            use_instancing: 1,
             instance_buffer_index: ctx.instance_buffer_index,
             joint_buffer_index: ctx.joint_buffer_index,
+            _vertex_padding: [0; 12],
+            material_index: ((material_handle.version as u32) << 16) | material_handle.index as u32,
+            debug_path: ctx.material.debug_path,
+            flags: ctx.material.flags,
+            material_buffer_index: ctx.material.material_buffer_index,
+            debug_visualization_enabled: ctx.material.debug_visualization_enabled,
+            _fragment_padding: [0; 3],
         };
 
-        self.device.cmd_push_constants(
-            ctx.command_buffer,
-            ctx.pipeline_layout,
-            vk::ShaderStageFlags::VERTEX,
-            0,
-            bytes_of(&push),
-        );
+        let push_bytes = bytes_of(&push);
 
         self.device.cmd_push_constants(
             ctx.command_buffer,
             ctx.pipeline_layout,
-            vk::ShaderStageFlags::FRAGMENT,
-            128,
-            bytes_of(ctx.material),
+            vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+            0,
+            &push_bytes,
         );
 
         if let Some(index_buffer) = ctx.uploaded.index_buffer() {
@@ -533,28 +599,40 @@ impl ModelRenderer {
         self.device
             .cmd_bind_vertex_buffers(ctx.command_buffer, 0, &[vertex_buffer], &[0]);
 
-        let push = MeshPushConstants {
+        let material_handle = ctx.material.material_handle;
+        log::debug!(
+            target: "renderer::push_constants",
+            "draw_mesh_indirect: material_handle={:?} (idx={}, ver={}), buffer_index={}, debug_path={}, flags={:#X}",
+            material_handle,
+            material_handle.index,
+            material_handle.version,
+            ctx.material.material_buffer_index,
+            ctx.material.debug_path,
+            ctx.material.flags
+        );
+        let push = DrawPushConstants {
             model: glam::Mat4::IDENTITY.into(),
             joint_offset: 0,
-            use_instancing: 1, // Indirect draw uses the same shader path as instancing
+            use_instancing: 1,
             instance_buffer_index: ctx.instance_buffer_index,
             joint_buffer_index: ctx.joint_buffer_index,
+            _vertex_padding: [0; 12],
+            material_index: ((material_handle.version as u32) << 16) | material_handle.index as u32,
+            debug_path: ctx.material.debug_path,
+            flags: ctx.material.flags,
+            material_buffer_index: ctx.material.material_buffer_index,
+            debug_visualization_enabled: ctx.material.debug_visualization_enabled,
+            _fragment_padding: [0; 3],
         };
 
-        self.device.cmd_push_constants(
-            ctx.command_buffer,
-            ctx.pipeline_layout,
-            vk::ShaderStageFlags::VERTEX,
-            0,
-            bytes_of(&push),
-        );
+        let push_bytes = bytes_of(&push);
 
         self.device.cmd_push_constants(
             ctx.command_buffer,
             ctx.pipeline_layout,
-            vk::ShaderStageFlags::FRAGMENT,
-            128,
-            bytes_of(ctx.material),
+            vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+            0,
+            &push_bytes,
         );
 
         if let Some(index_buffer) = ctx.uploaded.index_buffer() {
@@ -595,28 +673,30 @@ impl ModelRenderer {
         self.device
             .cmd_bind_vertex_buffers(ctx.command_buffer, 0, &[vertex_buffer], &[0]);
 
-        let push = MeshPushConstants {
+        let material_handle = ctx.material.material_handle;
+        let push = DrawPushConstants {
             model: glam::Mat4::IDENTITY.into(),
             joint_offset: 0,
-            use_instancing: 1, // Indirect draw uses the same shader path as instancing
+            use_instancing: 1,
             instance_buffer_index: ctx.instance_buffer_index,
             joint_buffer_index: ctx.joint_buffer_index,
+            _vertex_padding: [0; 12],
+            material_index: ((material_handle.version as u32) << 16) | material_handle.index as u32,
+            debug_path: ctx.material.debug_path,
+            flags: ctx.material.flags,
+            material_buffer_index: ctx.material.material_buffer_index,
+            debug_visualization_enabled: ctx.material.debug_visualization_enabled,
+            _fragment_padding: [0; 3],
         };
 
-        self.device.cmd_push_constants(
-            ctx.command_buffer,
-            ctx.pipeline_layout,
-            vk::ShaderStageFlags::VERTEX,
-            0,
-            bytes_of(&push),
-        );
+        let push_bytes = bytes_of(&push);
 
         self.device.cmd_push_constants(
             ctx.command_buffer,
             ctx.pipeline_layout,
-            vk::ShaderStageFlags::FRAGMENT,
-            128,
-            bytes_of(ctx.material),
+            vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+            0,
+            &push_bytes,
         );
 
         if let Some(index_buffer) = ctx.uploaded.index_buffer() {
@@ -684,22 +764,11 @@ impl ModelRenderer {
                 0,
                 vk::IndexType::UINT32,
             );
-            self.device.cmd_draw_indexed(
-                command_buffer,
-                uploaded.index_count(),
-                1,
-                0,
-                0,
-                0,
-            );
+            self.device
+                .cmd_draw_indexed(command_buffer, uploaded.index_count(), 1, 0, 0, 0);
         } else {
-            self.device.cmd_draw(
-                command_buffer,
-                uploaded.vertex_count(),
-                1,
-                0,
-                0,
-            );
+            self.device
+                .cmd_draw(command_buffer, uploaded.vertex_count(), 1, 0, 0);
         }
     }
 

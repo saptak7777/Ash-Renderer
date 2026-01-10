@@ -104,7 +104,17 @@ impl LightManager {
             _padding: 0,
         };
 
+        // CRITICAL: Mark buffers as needing recreation
+        // Tile buffer size depends on screen resolution
         self.dirty = true;
+
+        log::debug!(
+            "LightManager::on_resize: {}x{} -> {}x{} tiles (buffer needs recreation)",
+            width,
+            height,
+            tiles_x,
+            tiles_y
+        );
     }
 
     /// Get the light buffer data for upload
@@ -234,6 +244,72 @@ impl LightManager {
             "LightManager: Created buffers (light: {}KB, tile: {}KB)",
             light_buffer_size / 1024,
             tile_buffer_size / 1024
+        );
+
+        Ok(())
+    }
+
+    /// Recreate tile buffer if screen size changed
+    ///
+    /// # Safety
+    /// GPU must be idle or synchronized. Old buffer must not be in use.
+    pub unsafe fn recreate_tile_buffer_if_needed(
+        &mut self,
+        allocator: &vk_mem::Allocator,
+    ) -> crate::Result<()> {
+        if !self.dirty {
+            return Ok(());
+        }
+
+        let new_tile_buffer_size = self.get_tile_buffer_size().max(1024) as u64;
+
+        // Check if buffer exists and size matches
+        if let Some(ref tile_buffer) = self.tile_buffer {
+            if tile_buffer.size == new_tile_buffer_size {
+                // Size hasn't changed, no need to recreate
+                return Ok(());
+            }
+
+            log::info!(
+                "LightManager: Recreating tile buffer ({}KB -> {}KB)",
+                tile_buffer.size / 1024,
+                new_tile_buffer_size / 1024
+            );
+        }
+
+        // Destroy old buffer if it exists
+        if let Some(mut old_tile_buffer) = self.tile_buffer.take() {
+            allocator.destroy_buffer(old_tile_buffer.buffer, &mut old_tile_buffer.allocation);
+        }
+
+        // Create new tile buffer
+        let tile_buffer_info = vk::BufferCreateInfo::default()
+            .size(new_tile_buffer_size)
+            .usage(vk::BufferUsageFlags::STORAGE_BUFFER)
+            .sharing_mode(vk::SharingMode::EXCLUSIVE);
+
+        let tile_alloc_info = vk_mem::AllocationCreateInfo {
+            usage: vk_mem::MemoryUsage::AutoPreferDevice,
+            ..Default::default()
+        };
+
+        let (tile_buffer, tile_allocation) = allocator
+            .create_buffer(&tile_buffer_info, &tile_alloc_info)
+            .map_err(|e| {
+                crate::AshError::VulkanError(format!(
+                    "LightManager: Tile buffer recreation failed: {e:?}"
+                ))
+            })?;
+
+        self.tile_buffer = Some(TileBuffer {
+            buffer: tile_buffer,
+            allocation: tile_allocation,
+            size: new_tile_buffer_size,
+        });
+
+        log::info!(
+            "LightManager: Tile buffer recreated ({}KB)",
+            new_tile_buffer_size / 1024
         );
 
         Ok(())

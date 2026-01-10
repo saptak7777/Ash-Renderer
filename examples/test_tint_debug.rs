@@ -13,13 +13,12 @@ fn main() -> Result<()> {
     renderer.set_mesh(cube)?;
     
     // Set up material with white base color (for tinting)
-    let material = Material {
+    let mut material = Material {
         color: [1.0, 1.0, 1.0, 1.0], // White base
         metallic: 0.0,
         roughness: 0.5,
         ..Default::default()
     };
-    *renderer.material_mut() = material;
     
     // Register bindless storage buffer with bright orange color
     let tint_colors = [Vec4::new(1.0, 0.5, 0.0, 1.0)]; // Bright orange
@@ -27,7 +26,11 @@ fn main() -> Result<()> {
         .register_bindless_storage_buffer(&tint_colors, "DebugTintBuffer")?;
     
     // Update the material to use the tint
-    renderer.material_mut().tint_index = tint_index as i32;
+    material.tint_index = tint_index as i32;
+    
+    // CRITICAL FIX: Register and upload material
+    let material_handle = renderer.material_manager_mut().register_material(material.clone());
+    renderer.upload_material_to_gpu(material_handle.index as u32, &material)?;
     
     // Refresh draw items to reflect the material change
     renderer.refresh_draw_items();

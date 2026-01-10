@@ -20,27 +20,42 @@
 //! ```
 
 use ash::vk;
+use bytemuck;
 use std::sync::Arc;
 use vk_mem::Alloc;
 
+use crate::renderer::features::light_culling::{CullingCameraData, LightCullingPushConstants};
 use crate::renderer::features::{DirectionalLight, ForwardPlusInfo, LightManager, PointLight};
 use crate::renderer::forward_plus_descriptor::ForwardPlusDescriptor;
-use crate::Result;
+use crate::vulkan::{ComputePipeline, ShaderModule};
+use crate::{AshError, Result};
 
 /// Complete Forward+ integration for the renderer
 ///
 /// This struct manages:
 /// - `LightManager` for CPU-side light logic and GPU buffer management
-/// - `ForwardPlusDescriptor` for Set 4 descriptor binding
+/// - `ForwardPlusDescriptor` for Set 3 descriptor binding (Fragment Shader)
 /// - `ForwardPlusInfo` UBO for shader constants
+/// - Compute Pipeline for Light Culling
 pub struct ForwardPlusIntegration {
     /// Light manager (owns light and tile buffers)
     lights: LightManager,
-    /// Descriptor set for Set 4
+    /// Descriptor set for Set 3 (Fragment)
     descriptor: ForwardPlusDescriptor,
     /// ForwardPlusInfo UBO buffer
     info_buf: vk::Buffer,
     info_alloc: vk_mem::Allocation,
+
+    /// Camera Data UBO for Compute Shader
+    camera_buf: vk::Buffer,
+    camera_alloc: vk_mem::Allocation,
+
+    /// Compute Pipeline Resources
+    compute_pipeline: Option<ComputePipeline>,
+    compute_descriptor_pool: vk::DescriptorPool,
+    compute_descriptor_set: vk::DescriptorSet,
+    compute_descriptor_layout: vk::DescriptorSetLayout,
+
     /// Whether the integration is initialized
     initialized: bool,
     /// Cached info data
@@ -78,14 +93,175 @@ impl ForwardPlusIntegration {
                 ))
             })?;
 
+        // Create Camera Buffer for Compute Shader
+        let camera_size = std::mem::size_of::<CullingCameraData>() as u64;
+        let camera_buffer_info = vk::BufferCreateInfo::default()
+            .size(camera_size)
+            .usage(vk::BufferUsageFlags::UNIFORM_BUFFER)
+            .sharing_mode(vk::SharingMode::EXCLUSIVE);
+
+        let (camera_buf, camera_alloc) = allocator
+            .create_buffer(&camera_buffer_info, &info_alloc_info)
+            .map_err(|e| {
+                crate::AshError::VulkanError(format!("Camera data buffer creation failed: {e:?}"))
+            })?;
+
         Ok(Self {
             lights,
             descriptor,
             info_buf,
             info_alloc,
+
+            camera_buf,
+            camera_alloc,
+            compute_pipeline: None,
+            compute_descriptor_pool: vk::DescriptorPool::null(),
+            compute_descriptor_set: vk::DescriptorSet::null(),
+            compute_descriptor_layout: vk::DescriptorSetLayout::null(),
+
             initialized: false,
             cached_info: ForwardPlusInfo::default(),
         })
+    }
+
+    /// Initialize the compute pipeline.
+    /// Must be called after depth buffer creation.
+    pub unsafe fn init_pipeline(
+        &mut self,
+        device: Arc<ash::Device>,
+        depth_sampler: vk::Sampler,
+        depth_image_view: vk::ImageView,
+    ) -> Result<()> {
+        // Load shader
+        let code = include_bytes!(concat!(env!("OUT_DIR"), "/light_culling.comp.spv"));
+        let shader_module =
+            ShaderModule::load_from_bytes(&device, code, vk::ShaderStageFlags::COMPUTE)?;
+
+        // 1. Create Descriptor Set Layout (Set 0 for Compute)
+        let bindings = [
+            // Binding 0: Light buffer (SSBO)
+            vk::DescriptorSetLayoutBinding {
+                binding: 0,
+                descriptor_type: vk::DescriptorType::STORAGE_BUFFER,
+                descriptor_count: 1,
+                stage_flags: vk::ShaderStageFlags::COMPUTE,
+                ..Default::default()
+            },
+            // Binding 1: Depth buffer (sampler)
+            vk::DescriptorSetLayoutBinding {
+                binding: 1,
+                descriptor_type: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+                descriptor_count: 1,
+                stage_flags: vk::ShaderStageFlags::COMPUTE,
+                ..Default::default()
+            },
+            // Binding 2: Tile light indices (SSBO, writeonly)
+            vk::DescriptorSetLayoutBinding {
+                binding: 2,
+                descriptor_type: vk::DescriptorType::STORAGE_BUFFER,
+                descriptor_count: 1,
+                stage_flags: vk::ShaderStageFlags::COMPUTE,
+                ..Default::default()
+            },
+            // Binding 3: Camera data (UBO)
+            vk::DescriptorSetLayoutBinding {
+                binding: 3,
+                descriptor_type: vk::DescriptorType::UNIFORM_BUFFER,
+                descriptor_count: 1,
+                stage_flags: vk::ShaderStageFlags::COMPUTE,
+                ..Default::default()
+            },
+        ];
+
+        let layout_info = vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings);
+        self.compute_descriptor_layout = device
+            .create_descriptor_set_layout(&layout_info, None)
+            .map_err(|e| {
+                AshError::VulkanError(format!(
+                    "Failed to create compute descriptor set layout: {e}"
+                ))
+            })?;
+
+        // 2. Create Descriptor Pool
+        let pool_sizes = [
+            vk::DescriptorPoolSize {
+                ty: vk::DescriptorType::STORAGE_BUFFER,
+                descriptor_count: 2,
+            },
+            vk::DescriptorPoolSize {
+                ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+                descriptor_count: 1,
+            },
+            vk::DescriptorPoolSize {
+                ty: vk::DescriptorType::UNIFORM_BUFFER,
+                descriptor_count: 1,
+            },
+        ];
+
+        let pool_info = vk::DescriptorPoolCreateInfo::default()
+            .pool_sizes(&pool_sizes)
+            .max_sets(1);
+
+        self.compute_descriptor_pool =
+            device
+                .create_descriptor_pool(&pool_info, None)
+                .map_err(|e| {
+                    AshError::VulkanError(format!("Failed to create compute descriptor pool: {e}"))
+                })?;
+
+        // 3. Allocate Descriptor Set
+        let alloc_info = vk::DescriptorSetAllocateInfo::default()
+            .descriptor_pool(self.compute_descriptor_pool)
+            .set_layouts(std::slice::from_ref(&self.compute_descriptor_layout));
+
+        let sets = device.allocate_descriptor_sets(&alloc_info).map_err(|e| {
+            AshError::VulkanError(format!("Failed to allocate compute descriptor set: {e}"))
+        })?;
+        self.compute_descriptor_set = sets[0];
+
+        // 4. Create Pipeline
+        let push_constant_range = vk::PushConstantRange {
+            stage_flags: vk::ShaderStageFlags::COMPUTE,
+            offset: 0,
+            size: std::mem::size_of::<LightCullingPushConstants>() as u32,
+        };
+
+        // We use the helper ComputePipeline from crate::vulkan which simplifies creation
+        self.compute_pipeline = Some(
+            ComputePipeline::builder(Arc::clone(&device))
+                .with_shader(shader_module.module)
+                .add_set_layout(self.compute_descriptor_layout)
+                .add_push_constant(push_constant_range)
+                .build()?,
+        );
+
+        // Initial Descriptor Update (for immutable parts like Depth Buffer if it doesn't change)
+        // Actually, buffers are created in init(), so we can update them now.
+        // Or do it in upload_to_gpu. The depth buffer might change (resize).
+        // For now, assume depth buffer view follows resize logic.
+        // We'll update descriptors in upload_to_gpu to be safe.
+
+        // Wait, we need to bind the depth buffer NOW or at least store the sampler/view.
+        // We pass depth_sampler/view to this function.
+        // We should update the descriptor set here with the depth buffer.
+        // AND re-update it if depth buffer changes (resize).
+        // Since `init()` creates buffers, we can bind them too.
+
+        let depth_image_info = vk::DescriptorImageInfo {
+            sampler: depth_sampler,
+            image_view: depth_image_view,
+            image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+        };
+
+        let writes = [vk::WriteDescriptorSet::default()
+            .dst_set(self.compute_descriptor_set)
+            .dst_binding(1)
+            .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+            .image_info(std::slice::from_ref(&depth_image_info))];
+        device.update_descriptor_sets(&writes, &[]);
+
+        log::info!("Forward+ Compute Pipeline initialized");
+        Ok(())
     }
 
     /// Initialize GPU resources for Forward+ lighting.
@@ -119,15 +295,49 @@ impl ForwardPlusIntegration {
         self.cached_info = self.lights.get_forward_plus_info();
     }
 
+    pub unsafe fn update_camera(
+        &mut self,
+        allocator: &vk_mem::Allocator,
+        view: &[[f32; 4]; 4],
+        projection: &[[f32; 4]; 4],
+        camera_pos: &[f32; 4],
+    ) -> Result<()> {
+        let inv_projection = glam::Mat4::from_cols_array_2d(projection)
+            .inverse()
+            .to_cols_array_2d();
+        let data = CullingCameraData {
+            view: *view,
+            projection: *projection,
+            inv_projection,
+            camera_pos: *camera_pos,
+        };
+
+        let info = allocator.get_allocation_info(&self.camera_alloc);
+        let ptr = info.mapped_data;
+        if !ptr.is_null() {
+            std::ptr::copy_nonoverlapping(&data, ptr as *mut CullingCameraData, 1);
+        }
+        Ok(())
+    }
+
     /// Upload current light data to GPU buffers.
     ///
     /// # Safety
     /// The caller must ensure that the allocator is valid and that no concurrent
     /// access to the light buffers occurs during this operation.
-    pub unsafe fn upload_to_gpu(&mut self, allocator: &vk_mem::Allocator) -> Result<()> {
+    pub unsafe fn upload_to_gpu(
+        &mut self,
+        allocator: &vk_mem::Allocator,
+        device: &ash::Device,
+    ) -> Result<()> {
         if !self.initialized {
             return Ok(());
         }
+
+        // CRITICAL: Recreate tile buffer if screen size changed
+        // Must happen before upload_lights and descriptor update
+        // This also handles min size 1024 logic internally now
+        self.lights.recreate_tile_buffer_if_needed(allocator)?;
 
         // Upload lights
         self.lights.upload_lights(allocator)?;
@@ -151,17 +361,129 @@ impl ForwardPlusIntegration {
             self.lights.get_tile_buffer(),
         ) {
             let info_size = std::mem::size_of::<ForwardPlusInfo>() as u64;
+            // CRITICAL FIX: Use correct light buffer size (MAX_LIGHTS * 64 bytes)
+            let light_buffer_size = (crate::renderer::features::MAX_LIGHTS
+                * std::mem::size_of::<crate::renderer::features::GpuLight>())
+                as u64;
+
+            // Update Fragment Shader Descriptor (Set 3)
             self.descriptor.update(
                 l_buf,
-                self.lights.get_tile_buffer_size() as u64,
+                light_buffer_size,
                 t_buf,
                 self.lights.get_tile_buffer_size() as u64,
                 self.info_buf,
                 info_size,
             );
+
+            // Update Compute Shader Descriptor (Set 0)
+            // We must ensure the buffers are bound to the compute descriptor set
+            if self.compute_descriptor_set != vk::DescriptorSet::null() {
+                let light_info = vk::DescriptorBufferInfo {
+                    buffer: l_buf,
+                    offset: 0,
+                    range: light_buffer_size,
+                };
+                let tile_info = vk::DescriptorBufferInfo {
+                    buffer: t_buf,
+                    offset: 0,
+                    range: self.lights.get_tile_buffer_size() as u64,
+                };
+                let camera_info = vk::DescriptorBufferInfo {
+                    buffer: self.camera_buf,
+                    offset: 0,
+                    range: std::mem::size_of::<CullingCameraData>() as u64,
+                };
+
+                let writes = [
+                    vk::WriteDescriptorSet::default()
+                        .dst_set(self.compute_descriptor_set)
+                        .dst_binding(0) // Light Buffer
+                        .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                        .buffer_info(std::slice::from_ref(&light_info)),
+                    vk::WriteDescriptorSet::default()
+                        .dst_set(self.compute_descriptor_set)
+                        .dst_binding(2) // Tile Buffer
+                        .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                        .buffer_info(std::slice::from_ref(&tile_info)),
+                    vk::WriteDescriptorSet::default()
+                        .dst_set(self.compute_descriptor_set)
+                        .dst_binding(3) // Camera Buffer
+                        .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+                        .buffer_info(std::slice::from_ref(&camera_info)),
+                ];
+                device.update_descriptor_sets(&writes, &[]);
+            }
         }
 
         Ok(())
+    }
+
+    /// Dispatch light culling compute shader
+    pub unsafe fn dispatch(&self, command_buffer: vk::CommandBuffer, device: &ash::Device) {
+        if let Some(pipeline) = &self.compute_pipeline {
+            if self.compute_descriptor_set == vk::DescriptorSet::null() {
+                return;
+            }
+
+            device.cmd_bind_pipeline(
+                command_buffer,
+                vk::PipelineBindPoint::COMPUTE,
+                pipeline.handle(),
+            );
+            device.cmd_bind_descriptor_sets(
+                command_buffer,
+                vk::PipelineBindPoint::COMPUTE,
+                pipeline.layout(), // Pipeline layout compatible with Set 0
+                0,
+                &[self.compute_descriptor_set],
+                &[],
+            );
+
+            let (tx, ty, tz) = self.lights.get_dispatch_dimensions();
+
+            // Reconstruct screen size for PC
+            // We use the cached ForwardPlusInfo to determine total size
+            let width = self.cached_info.num_tiles[0] * self.cached_info.tile_size;
+            let height = self.cached_info.num_tiles[1] * self.cached_info.tile_size;
+
+            let push_constants = LightCullingPushConstants {
+                screen_size: [width, height],
+                light_count: self.lights.light_count() as u32,
+                _padding: 0,
+            };
+
+            device.cmd_push_constants(
+                command_buffer,
+                pipeline.layout(),
+                vk::ShaderStageFlags::COMPUTE,
+                0,
+                bytemuck::bytes_of(&push_constants),
+            );
+
+            device.cmd_dispatch(command_buffer, tx, ty, tz);
+
+            // Pipeline barrier to ensure writes are visible to fragment shader
+            // LightManager owns tile buffer, used in Set 2 binding 2.
+            if let Some(t_buf) = self.lights.get_tile_buffer() {
+                let barrier = vk::BufferMemoryBarrier::default()
+                    .src_access_mask(vk::AccessFlags::SHADER_WRITE)
+                    .dst_access_mask(vk::AccessFlags::SHADER_READ)
+                    .buffer(t_buf)
+                    .offset(0)
+                    .size(vk::WHOLE_SIZE); // Or proper size
+
+                device.cmd_pipeline_barrier(
+                    command_buffer,
+                    vk::PipelineStageFlags::COMPUTE_SHADER,
+                    vk::PipelineStageFlags::FRAGMENT_SHADER,
+                    vk::DependencyFlags::empty(),
+                    &[],
+                    &[barrier],
+                    &[],
+                );
+            }
+        }
     }
 
     /// Bind Set 4 for rendering
@@ -216,13 +538,22 @@ impl ForwardPlusIntegration {
     /// # Safety
     /// The caller must ensure that no GPU commands using these resources are
     /// currently executing on the device.
-    pub unsafe fn destroy(&mut self, allocator: &vk_mem::Allocator) {
+    pub unsafe fn destroy(&mut self, allocator: &vk_mem::Allocator, device: &ash::Device) {
         if !self.initialized {
             return;
         }
 
+        if self.compute_descriptor_pool != vk::DescriptorPool::null() {
+            device.destroy_descriptor_pool(self.compute_descriptor_pool, None);
+        }
+        if self.compute_descriptor_layout != vk::DescriptorSetLayout::null() {
+            device.destroy_descriptor_set_layout(self.compute_descriptor_layout, None);
+        }
+        // ComputePipeline drops itself
+
         self.lights.destroy_buffers(allocator);
         allocator.destroy_buffer(self.info_buf, &mut self.info_alloc);
+        allocator.destroy_buffer(self.camera_buf, &mut self.camera_alloc);
         self.initialized = false;
     }
 }

@@ -9,6 +9,16 @@ pub struct DirectionalLight {
     pub intensity: f32,
 }
 
+impl DirectionalLight {
+    pub fn new(direction: Vec3, color: [f32; 4]) -> Self {
+        Self {
+            direction,
+            color: Vec3::new(color[0], color[1], color[2]),
+            intensity: color[3],
+        }
+    }
+}
+
 impl Default for DirectionalLight {
     fn default() -> Self {
         Self {
@@ -25,6 +35,17 @@ pub struct PointLight {
     pub color: Vec3,
     pub intensity: f32,
     pub radius: f32,
+}
+
+impl PointLight {
+    pub fn new(position: Vec3, color: [f32; 4], radius: f32) -> Self {
+        Self {
+            position,
+            color: Vec3::new(color[0], color[1], color[2]),
+            intensity: color[3],
+            radius,
+        }
+    }
 }
 
 impl Default for PointLight {

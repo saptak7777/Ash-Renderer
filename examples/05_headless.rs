@@ -32,7 +32,11 @@ fn main() -> Result<()> {
         roughness: 0.9,
         ..Default::default()
     };
-    *renderer.material_mut() = material;
+    
+    // CRITICAL FIX: Register and upload material
+    let material_handle = renderer.material_manager_mut().register_material(material.clone());
+    renderer.upload_material_to_gpu(material_handle.index as u32, &material)?;
+    log::info!("✓ Registered and uploaded green material with handle {:?}", material_handle);
 
     // 4. Set up Camera
     let camera_pos = Vec3::new(3.0, 3.0, 3.0);
