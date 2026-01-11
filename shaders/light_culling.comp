@@ -29,23 +29,24 @@ layout(push_constant) uniform PushConstants {
     uint _padding;
 } pc;
 
-// Input: All scene lights
-layout(set = 0, binding = 0, std430) readonly buffer LightBuffer {
+// Input: All scene lights (from Set 3 to match fragment shader)
+layout(set = 3, binding = 0, std430) readonly buffer LightBuffer {
     Light lights[];
 };
 
 // Input: Depth buffer for frustum culling
-layout(set = 0, binding = 1) uniform sampler2D depthBuffer;
+layout(set = 0, binding = 0) uniform sampler2D depthBuffer;
 
 // Output: Light indices per tile
 // Format: [tileCount][MAX_LIGHTS_PER_TILE + 1]
 // First element of each tile = light count for that tile
-layout(set = 0, binding = 2, std430) writeonly buffer TileLightIndices {
+// NOTE: Writing to Set 3, binding 1 to match fragment shader's read location
+layout(set = 3, binding = 1, std430) writeonly buffer TileLightIndices {
     uint tileData[];
 };
 
 // View-projection matrix for frustum construction
-layout(set = 0, binding = 3) uniform CameraData {
+layout(set = 0, binding = 1) uniform CameraData {
     mat4 view;
     mat4 projection;
     mat4 invProjection;
@@ -69,30 +70,31 @@ vec3 screenToView(vec2 uv, float depth) {
 
 // Construct frustum planes for a tile
 void getTileFrustum(uvec2 tileId, float minDepth, float maxDepth, out vec4 planes[6]) {
-    // Tile corners in NDC (using specialization constants)
+    // Tile corners in UV space [0, 1] (using specialization constants)
     vec2 tileSize = vec2(float(WORKGROUP_SIZE_X), float(WORKGROUP_SIZE_Y));
-    vec2 minNdc = (vec2(tileId) * tileSize) / vec2(pc.screenSize) * 2.0 - 1.0;
-    vec2 maxNdc = (vec2(tileId + 1) * tileSize) / vec2(pc.screenSize) * 2.0 - 1.0;
+    vec2 minUV = vec2(tileId) * tileSize / vec2(pc.screenSize);
+    vec2 maxUV = vec2(tileId + 1) * tileSize / vec2(pc.screenSize);
 
     // View-space corners at near plane
     vec3 corners[4];
-    corners[0] = screenToView(vec2(minNdc.x, minNdc.y) * 0.5 + 0.5, 0.0);
-    corners[1] = screenToView(vec2(maxNdc.x, minNdc.y) * 0.5 + 0.5, 0.0);
-    corners[2] = screenToView(vec2(maxNdc.x, maxNdc.y) * 0.5 + 0.5, 0.0);
-    corners[3] = screenToView(vec2(minNdc.x, maxNdc.y) * 0.5 + 0.5, 0.0);
+    corners[0] = screenToView(vec2(minUV.x, minUV.y), 0.0);
+    corners[1] = screenToView(vec2(maxUV.x, minUV.y), 0.0);
+    corners[2] = screenToView(vec2(maxUV.x, maxUV.y), 0.0);
+    corners[3] = screenToView(vec2(minUV.x, maxUV.y), 0.0);
 
     // Frustum planes (in view space)
     // Left, Right, Bottom, Top, Near, Far
-    // Safe normalization helper
+    // Calculate normals from cross products
     vec3 v0 = cross(corners[3], corners[0]);
     vec3 v1 = cross(corners[1], corners[2]);
     vec3 v2 = cross(corners[0], corners[1]);
     vec3 v3 = cross(corners[2], corners[3]);
 
-    planes[0] = vec4(length(v0) > 0.0001 ? normalize(v0) : vec3(0.0), 0.0); // Left
-    planes[1] = vec4(length(v1) > 0.0001 ? normalize(v1) : vec3(0.0), 0.0); // Right
-    planes[2] = vec4(length(v2) > 0.0001 ? normalize(v2) : vec3(0.0), 0.0); // Bottom
-    planes[3] = vec4(length(v3) > 0.0001 ? normalize(v3) : vec3(0.0), 0.0); // Top
+    // Normalize and calculate plane distances: plane = vec4(normal, -dot(normal, point_on_plane))
+    planes[0] = vec4(length(v0) > 0.0001 ? normalize(v0) : vec3(0.0), -dot(length(v0) > 0.0001 ? normalize(v0) : vec3(0.0), corners[0])); // Left
+    planes[1] = vec4(length(v1) > 0.0001 ? normalize(v1) : vec3(0.0), -dot(length(v1) > 0.0001 ? normalize(v1) : vec3(0.0), corners[1])); // Right
+    planes[2] = vec4(length(v2) > 0.0001 ? normalize(v2) : vec3(0.0), -dot(length(v2) > 0.0001 ? normalize(v2) : vec3(0.0), corners[0])); // Bottom
+    planes[3] = vec4(length(v3) > 0.0001 ? normalize(v3) : vec3(0.0), -dot(length(v3) > 0.0001 ? normalize(v3) : vec3(0.0), corners[3])); // Top
     // FORCE DISABLE Z-CULLING (Fix for missing Depth Pre-Pass)
     // We set the planes essentially to infinity so checks always pass.
     planes[4] = vec4(0.0, 0.0, -1.0, 100000.0); // Near
@@ -181,6 +183,17 @@ void main() {
         
         // Skip disabled lights
         if (light.params.w < 0.5) continue;
+        
+        uint lightType = uint(light.direction.w);
+        
+        // Directional lights (type 2) affect all tiles - skip frustum test
+        if (lightType == 2u) {
+            uint slot = atomicAdd(sharedLightCount, 1);
+            if (slot < MAX_LIGHTS_PER_TILE) {
+                sharedLightIndices[slot] = i;
+            }
+            continue;
+        }
         
         // Transform light to view space
         vec3 lightPosView = (camera.view * vec4(light.position.xyz, 1.0)).xyz;

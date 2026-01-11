@@ -202,10 +202,7 @@ void main() {
     
     T = normalize(T - dot(T, N) * N);
     
-    if (!gl_FrontFacing) {
-        N = -N;
-        T = -T;
-    }
+    // Note: gl_FrontFacing check removed - redundant with backface culling enabled
     
     vec3 B = cross(N, T) * fragTangent.w;
     mat3 TBN = mat3(T, B, N);

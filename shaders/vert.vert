@@ -56,9 +56,9 @@ void main() {
     }
     fragUV = inUV;
     
-    mat3 normalMatrix = mat3(transpose(inverse(modelMatrix)));
-    fragNormal = normalize(normalMatrix * inNormal);
-    fragTangent = vec4(normalize(normalMatrix * inTangent.xyz), inTangent.w);
+    mat3 normalMat = mat3(mvp.normal_matrix);
+    fragNormal = normalize(normalMat * inNormal);
+    fragTangent = vec4(normalize(normalMat * inTangent.xyz), inTangent.w);
     
     fragWorldPos = worldPosition.xyz;
     fragPosLightSpace = mvp.light_space_matrix * worldPosition;

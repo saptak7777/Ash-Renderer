@@ -21,38 +21,120 @@ fn compile_shaders() {
     let shaders = [
         // Vertex shaders
         ("shaders/vert.vert", "vert.vert.spv", "vert", &[] as &[&str]),
-        ("shaders/postprocess.vert", "postprocess.vert.spv", "vert", &[]),
+        (
+            "shaders/postprocess.vert",
+            "postprocess.vert.spv",
+            "vert",
+            &[],
+        ),
         ("shaders/shadow.vert", "shadow.vert.spv", "vert", &[]),
         ("shaders/overlay.vert", "overlay.vert.spv", "vert", &[]),
         ("shaders/triangle.vert", "triangle.vert.spv", "vert", &[]),
         ("shaders/skinning.vert", "skinning.vert.spv", "vert", &[]),
-
         // Fragment shaders
-        ("shaders/frag.frag", "frag.frag.spv", "frag", &["ENABLE_POINT_LIGHTS"]),
-        ("shaders/tonemapping.frag", "tonemapping.frag.spv", "frag", &[]),
+        (
+            "shaders/frag.frag",
+            "frag.frag.spv",
+            "frag",
+            &["ENABLE_POINT_LIGHTS"],
+        ),
+        (
+            "shaders/tonemapping.frag",
+            "tonemapping.frag.spv",
+            "frag",
+            &[],
+        ),
         ("shaders/shadow.frag", "shadow.frag.spv", "frag", &[]),
         ("shaders/overlay.frag", "overlay.frag.spv", "frag", &[]),
         ("shaders/triangle.frag", "triangle.frag.spv", "frag", &[]),
         ("shaders/brdf_lut.frag", "brdf_lut.frag.spv", "frag", &[]),
-        ("shaders/bloom_threshold.frag", "bloom_threshold.frag.spv", "frag", &[]),
-        ("shaders/bloom_prefilter.frag", "bloom_prefilter.frag.spv", "frag", &[]),
-        ("shaders/bloom_downsample.frag", "bloom_downsample.frag.spv", "frag", &[]),
-        ("shaders/bloom_upsample.frag", "bloom_upsample.frag.spv", "frag", &[]),
-
+        (
+            "shaders/bloom_threshold.frag",
+            "bloom_threshold.frag.spv",
+            "frag",
+            &[],
+        ),
+        (
+            "shaders/bloom_prefilter.frag",
+            "bloom_prefilter.frag.spv",
+            "frag",
+            &[],
+        ),
+        (
+            "shaders/bloom_downsample.frag",
+            "bloom_downsample.frag.spv",
+            "frag",
+            &[],
+        ),
+        (
+            "shaders/bloom_upsample.frag",
+            "bloom_upsample.frag.spv",
+            "frag",
+            &[],
+        ),
         // Compute shaders
-        ("shaders/light_culling.comp", "light_culling.comp.spv", "comp", &[]),
-        ("shaders/taa_resolve.comp", "taa_resolve.comp.spv", "comp", &[]),
-        ("shaders/tsr_upscale.comp", "tsr_upscale.comp.spv", "comp", &[]),
-        ("shaders/vsr_upscale.comp", "vsr_upscale.comp.spv", "comp", &[]),
-        ("shaders/occlusion_cull.comp", "occlusion_cull.comp.spv", "comp", &[]),
-        ("shaders/hiz_generate.comp", "hiz_generate.comp.spv", "comp", &[]),
+        (
+            "shaders/light_culling.comp",
+            "light_culling.comp.spv",
+            "comp",
+            &[],
+        ),
+        (
+            "shaders/taa_resolve.comp",
+            "taa_resolve.comp.spv",
+            "comp",
+            &[],
+        ),
+        (
+            "shaders/tsr_upscale.comp",
+            "tsr_upscale.comp.spv",
+            "comp",
+            &[],
+        ),
+        (
+            "shaders/vsr_upscale.comp",
+            "vsr_upscale.comp.spv",
+            "comp",
+            &[],
+        ),
+        (
+            "shaders/occlusion_cull.comp",
+            "occlusion_cull.comp.spv",
+            "comp",
+            &[],
+        ),
+        (
+            "shaders/hiz_generate.comp",
+            "hiz_generate.comp.spv",
+            "comp",
+            &[],
+        ),
         ("shaders/ssgi.comp", "ssgi.comp.spv", "comp", &[]),
-        ("shaders/cluster_cull.comp", "cluster_cull.comp.spv", "comp", &[]),
-
+        (
+            "shaders/cluster_cull.comp",
+            "cluster_cull.comp.spv",
+            "comp",
+            &[],
+        ),
         // IBL shaders
-        ("shaders/ibl/equirect_to_cubemap.comp", "equirect_to_cubemap.comp.spv", "comp", &[]),
-        ("shaders/ibl/irradiance_convolution.comp", "irradiance_convolution.comp.spv", "comp", &[]),
-        ("shaders/ibl/prefilter_envmap.comp", "prefilter_envmap.comp.spv", "comp", &[]),
+        (
+            "shaders/ibl/equirect_to_cubemap.comp",
+            "equirect_to_cubemap.comp.spv",
+            "comp",
+            &[],
+        ),
+        (
+            "shaders/ibl/irradiance_convolution.comp",
+            "irradiance_convolution.comp.spv",
+            "comp",
+            &[],
+        ),
+        (
+            "shaders/ibl/prefilter_envmap.comp",
+            "prefilter_envmap.comp.spv",
+            "comp",
+            &[],
+        ),
     ];
 
     for (input, output, kind, defines) in shaders {
@@ -80,19 +162,22 @@ fn compile_shaders() {
         cmd.arg(input)
             .arg("-o")
             .arg(&output_path)
-            .arg(format!("-fshader-stage={}", kind));
-        
+            .arg(format!("-fshader-stage={kind}"));
+
         // Add defines
         for define in defines {
-            cmd.arg(format!("-D{}", define));
+            cmd.arg(format!("-D{define}"));
         }
 
         let status = cmd.status();
 
         match status {
-            Ok(s) if s.success() => {},
+            Ok(s) if s.success() => {}
             Ok(s) => {
-                println!("cargo:warning=Failed to compile shader {input}: exit code {:?}", s.code());
+                println!(
+                    "cargo:warning=Failed to compile shader {input}: exit code {:?}",
+                    s.code()
+                );
             }
             Err(e) => {
                 println!("cargo:warning=Failed to run glslc for {input}: {e}");
@@ -102,7 +187,6 @@ fn compile_shaders() {
 }
 
 fn bake_ibl_assets() {
-
     // Check if ibl_baker binary exists
     let baker_path = if cfg!(windows) {
         "target/debug/ibl_baker.exe"

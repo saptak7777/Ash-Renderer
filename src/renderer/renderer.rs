@@ -4,8 +4,8 @@ use crate::{
             DiagnosticsMode, DiagnosticsOverlay, DiagnosticsState, FrameProfiler, GpuProfiler,
         },
         features::{
-            AutoRotateFeature, FeatureFrameContext, FeatureManager, FeatureRenderContext,
-            PointLight, RenderFeature, ShadowFeature,
+            AutoRotateFeature, DirectionalLight, FeatureFrameContext, FeatureManager,
+            FeatureRenderContext, PointLight, RenderFeature, ShadowFeature,
         },
         forward_plus_integration::ForwardPlusIntegration,
         fullscreen_pass, hdr_framebuffer,
@@ -158,6 +158,7 @@ struct RendererResources {
     uniform_buffers: Vec<UniformBuffer>,
     joint_matrices_buffer: Vec<resources::JointMatricesBuffer>,
     default_texture: Texture,
+    black_texture: Texture,
     material_storage_buffer: StorageBuffer<resources::uniform::MaterialUniform>,
     instance_buffers: Vec<resources::InstanceBuffer>,
 }
@@ -355,6 +356,7 @@ pub struct Renderer {
     frame_syncs: Vec<vulkan::FrameSync>,
     current_frame: usize,
     _default_texture: Texture,
+    _black_texture: Texture,
     model_renderer: ModelRenderer,
     draw_items: Vec<DrawItem>,
     swapchain: Option<vulkan::SwapchainWrapper>,
@@ -375,9 +377,9 @@ pub struct Renderer {
     framebuffers: Vec<vulkan::Framebuffer>,
     framebuffer_ids: Vec<ResourceId>,
     start_time: Instant,
-    pub mesh: Option<Mesh>,
-    material: Material,
-    pub transform: Transform,
+    // mesh: Option<Mesh>,    // DELETED: Legacy field
+    // material: Material,    // DELETED: Legacy field
+    // transform: Transform,  // DELETED: Legacy field
     mesh_data: Vec<MeshData>, // Indexed by mesh handle for O(1) access
     material_manager: MaterialManager,
     uploaded_material_indices: HashSet<u32>, // Track which materials are GPU-resident (UE5 pattern)
@@ -429,6 +431,7 @@ pub struct Renderer {
     light_color: [f32; 4],
     ambient_color: [f32; 4],
     point_lights: Vec<PointLight>,
+    directional_lights: Vec<DirectionalLight>,
     debug_visualization_enabled: bool,
     // Post-processing descriptors
     post_descriptor_pool: vk::DescriptorPool,
@@ -444,6 +447,7 @@ pub struct Renderer {
     texture_compression: bool,
     instancing_manager: InstancingManager,
     instance_buffer: Vec<resources::InstanceBuffer>, // One per frame
+    transform_system: resources::TransformSystem,
     // Pass management
     pass_manager: RenderPassManager,
     // Image-Based Lighting
@@ -592,7 +596,7 @@ impl Renderer {
             let alloc = Arc::new(vulkan::Allocator::new(&device)?);
             let resources = Arc::new(ResourceRegistry::new(Arc::clone(&device.device)));
             let dev_mem_props = device.memory_properties;
-            let mut vram_budget = vram_budget::VramBudget::new(&dev_mem_props);
+            let vram_budget = vram_budget::VramBudget::new(&dev_mem_props);
 
             let mut features = FeatureManager::new();
             features.set_device(Arc::clone(&device.device));
@@ -645,10 +649,8 @@ impl Renderer {
                 worker_count,
             } = frame_data;
 
-            let mut model_renderer =
+            let model_renderer =
                 ModelRenderer::new(Arc::clone(&alloc), Arc::clone(&device.device));
-
-            let material = Material::default();
 
             let mut descriptor_manager = vulkan::DescriptorManager::new(
                 Arc::clone(&device.device),
@@ -662,16 +664,15 @@ impl Renderer {
                 &alloc,
                 &device,
                 command_manager.upload_command_pool_handle(),
-                worker_count,
                 framebuffers.len(),
                 aspect,
                 max_bones,
-                &material,
             )?;
             let RendererResources {
                 uniform_buffers,
                 joint_matrices_buffer,
                 default_texture,
+                black_texture,
                 material_storage_buffer,
                 instance_buffers,
             } = renderer_resources;
@@ -777,16 +778,9 @@ impl Renderer {
                     (None, None)
                 };
 
-            let mut mesh = Mesh::create_cube();
-            log::trace!("Ensuring cube mesh textures...");
-            mesh.ensure_texture(
-                Arc::clone(&alloc),
-                Arc::clone(&device.device),
-                command_manager.upload_command_pool_handle(),
-                device.graphics_queue,
-                &mut vram_budget,
-                texture_compression,
-            )?;
+            // DELETED: Default cube creation. Renderer now starts empty.
+            // let mut mesh = Mesh::create_cube();
+            // ...
 
             // Initialize Texture Streamer
             let transfer_pool_info = vk::CommandPoolCreateInfo::default()
@@ -803,61 +797,13 @@ impl Renderer {
                 transfer_command_pool,
                 device.present_queue,
             );
-            log::trace!("Cube mesh textures ready, registering with model renderer...");
-            // Register mesh textures with bindless manager FIRST
-            if let Some(tex) = mesh.texture.as_deref() {
-                let idx = bindless_manager.add_sampled_image(tex.view(), tex.sampler())?;
-                mesh.texture_index = Some(idx);
-            }
-            if let Some(tex) = mesh.normal_texture.as_deref() {
-                let idx = bindless_manager.add_sampled_image(tex.view(), tex.sampler())?;
-                mesh.normal_texture_index = Some(idx);
-            }
-            if let Some(tex) = mesh.metallic_roughness_texture.as_deref() {
-                let idx = bindless_manager.add_sampled_image(tex.view(), tex.sampler())?;
-                mesh.metallic_roughness_texture_index = Some(idx);
-            }
-            if let Some(tex) = mesh.occlusion_texture.as_deref() {
-                let idx = bindless_manager.add_sampled_image(tex.view(), tex.sampler())?;
-                mesh.occlusion_texture_index = Some(idx);
-            }
-            if let Some(tex) = mesh.emissive_texture.as_deref() {
-                let idx = bindless_manager.add_sampled_image(tex.view(), tex.sampler())?;
-                mesh.emissive_texture_index = Some(idx);
-            }
+            // DELETED: Legacy texture registration
 
-            model_renderer.ensure_mesh(
-                &mesh.name,
-                &mesh,
-                command_manager.upload_command_pool_handle(),
-                device.graphics_queue,
-            )?;
-            log::trace!("Cube mesh registered successfully");
 
-            let transform = Transform::identity();
-            let transform_matrix = transform.model_matrix();
+            // DELETED: material_manager (unused)
+            // DELETED: Legacy mesh/material initialization
 
-            let initial_flags = TexturePresenceFlags::from_mesh(&mesh);
 
-            let mut material_manager = MaterialManager::new();
-            let initial_material_handle = material_manager.register_material(material.clone());
-
-            // Initialize mesh_data with the cube mesh and CORRECT indices
-            let mesh_data = vec![MeshData {
-                name: Arc::clone(&mesh.name),
-                texture_indices: [
-                    mesh.texture_index.map(|i| i as i32).unwrap_or(-1),
-                    mesh.normal_texture_index.map(|i| i as i32).unwrap_or(-1),
-                    mesh.metallic_roughness_texture_index
-                        .map(|i| i as i32)
-                        .unwrap_or(-1),
-                    mesh.occlusion_texture_index.map(|i| i as i32).unwrap_or(-1),
-                ],
-                emissive_index: mesh.emissive_texture_index.map(|i| i as i32).unwrap_or(-1),
-                texture_flags: initial_flags,
-                material_handle: initial_material_handle,
-                is_hidden: false,
-            }];
 
             // Mesh data already added to mesh_data Vec above
             let start_time = Instant::now();
@@ -903,6 +849,9 @@ impl Renderer {
 
             let pass_manager = RenderPassManager::new(RenderingMode::GPUDriven);
 
+            let mesh_data: Vec<MeshData> = Vec::new();
+            let material_manager = MaterialManager::new();
+
             let mut renderer = Self {
                 texture_streamer: Mutex::new(Some(texture_streamer)),
                 buffer_pool,
@@ -915,30 +864,9 @@ impl Renderer {
                 frame_syncs,
                 current_frame: 0,
                 _default_texture: default_texture,
+                _black_texture: black_texture,
                 model_renderer,
-                draw_items: vec![DrawItem {
-                    key: Arc::clone(&mesh.name),
-                    mesh_id: 0, // Cube mesh is at index 0
-                    transform: transform_matrix,
-                    material: material.clone(),
-                    material_handle: initial_material_handle,
-                    texture_flags: initial_flags,
-                    texture_indices: [
-                        mesh.texture_index.map(|i| i as i32).unwrap_or(-1),
-                        mesh.normal_texture_index.map(|i| i as i32).unwrap_or(-1),
-                        mesh.metallic_roughness_texture_index
-                            .map(|i| i as i32)
-                            .unwrap_or(-1),
-                        mesh.occlusion_texture_index.map(|i| i as i32).unwrap_or(-1),
-                    ],
-                    emissive_index: mesh.emissive_texture_index.map(|i| i as i32).unwrap_or(-1),
-                    is_skinned: false,
-                    joint_offset: 0,
-                    alpha_cutoff: material.alpha_cutoff,
-                    cast_shadows: true,
-                    receive_shadows: true,
-                    is_hidden: false,
-                }],
+                draw_items: Vec::new(),
                 swapchain: Some(swapchain),
                 render_pass: Some(render_pass),
                 render_pass_id: Some(render_pass_id),
@@ -947,9 +875,10 @@ impl Renderer {
                 pipeline: Some(pipeline),
                 pipeline_id: Some(pipeline_id),
                 depth_buffer: Some(depth_buffer),
-                mesh: Some(mesh),
-                material,
-                transform,
+                // DELETED: Legacy fields
+                // mesh: Some(mesh),
+                // material,
+                // transform,
                 uniform_buffers,
                 material_storage_buffer: Some(material_storage_buffer),
                 material_buffer_index,
@@ -976,7 +905,7 @@ impl Renderer {
                 hdr_framebuffer: None,
                 fullscreen_pass: None,
                 tonemapping_enabled: true,
-                tonemapping_exposure: 1.0,
+                tonemapping_exposure: 1.2,
                 tonemapping_gamma: 2.2,
                 bloom_enabled: true,
                 bloom_intensity: 0.1,
@@ -1001,6 +930,7 @@ impl Renderer {
                 light_color: [1.5, 1.5, 1.5, 1.0],
                 ambient_color: [0.1, 0.1, 0.1, 1.0],
                 point_lights: Vec::new(),
+                directional_lights: Vec::new(),
                 debug_visualization_enabled: false,
                 post_descriptor_pool: vk::DescriptorPool::null(),
                 post_descriptor_sets: Vec::new(),
@@ -1014,6 +944,7 @@ impl Renderer {
                 texture_compression,
                 instancing_manager: InstancingManager::new(),
                 instance_buffer: instance_buffers,
+                transform_system: resources::TransformSystem::new(),
                 instance_buffer_indices,
                 joint_buffer_indices,
                 pass_manager,
@@ -1289,11 +1220,9 @@ impl Renderer {
         alloc: &Arc<vulkan::Allocator>,
         device: &vulkan::VulkanDevice,
         command_pool: vk::CommandPool,
-        _worker_count: usize,
         frame_count: usize,
         aspect: f32,
         max_bones: usize,
-        _material: &Material,
     ) -> Result<RendererResources> {
         // Initialize uniform buffers
         let mut uniform_buffers = Vec::with_capacity(frame_count);
@@ -1335,6 +1264,20 @@ impl Renderer {
                 &default_texture_data,
                 vk::Format::R8G8B8A8_SRGB,
                 Some("default_texture"),
+            )?
+        };
+
+        // Create black texture for IBL fallback (no ambient light when IBL not loaded)
+        let black_texture_data = TextureData::solid_color([0, 0, 0, 255]);
+        let black_texture = unsafe {
+            Texture::from_data(
+                Arc::clone(alloc),
+                Arc::clone(&device.device),
+                command_pool,
+                device.graphics_queue,
+                &black_texture_data,
+                vk::Format::R8G8B8A8_SRGB,
+                Some("black_texture"),
             )?
         };
 
@@ -1384,6 +1327,7 @@ impl Renderer {
             uniform_buffers,
             joint_matrices_buffer,
             default_texture,
+            black_texture,
             material_storage_buffer,
             instance_buffers,
         })
@@ -1811,41 +1755,56 @@ impl Renderer {
     /// Loads an HDR environment map and bakes IBL resources.
     pub fn load_environment_map<P: AsRef<std::path::Path>>(&mut self, path: P) -> Result<()> {
         log::info!("Loading and baking environment map: {:?}", path.as_ref());
-        
-        let equirect_tex = unsafe {
-            Texture::load_hdr(
-                Arc::clone(&self.alloc),
+
+        let (irradiance_map, prefiltered_map) = if path.as_ref().extension().and_then(|s| s.to_str()) == Some("ibl") {
+            log::info!("Detected .ibl asset, loading binary...");
+            let asset = resources::ibl_asset::IblAsset::load(path.as_ref())?;
+            let (_env_cubemap, irradiance, prefiltered) = asset.upload_to_gpu(
                 Arc::clone(&self.device.device),
+                Arc::clone(&self.alloc),
                 self.cmds.upload_command_pool_handle(),
                 self.device.graphics_queue,
-                path.as_ref(),
-            )?
+            )?;
+            (irradiance, prefiltered)
+        } else {
+            // Fallback to runtime baking for HDR/LDR
+            let equirect_tex = unsafe {
+                resources::texture::Texture::load_hdr(
+                    Arc::clone(&self.alloc),
+                    Arc::clone(&self.device.device),
+                    self.cmds.upload_command_pool_handle(),
+                    self.device.graphics_queue,
+                    path.as_ref(),
+                )?
+            };
+
+            log::info!("Baking environment cubemap...");
+            let env_cubemap = self.ibl_manager.create_cubemap_from_equirect(
+                &self.device,
+                self.cmds.upload_command_pool_handle(),
+                equirect_tex.view(),
+                equirect_tex.sampler(),
+                512, // Standard resolution
+            )?;
+
+            log::info!("Baking irradiance map...");
+            let irradiance = self.ibl_manager.generate_irradiance(
+                &self.device,
+                self.cmds.upload_command_pool_handle(),
+                env_cubemap.view(),
+                equirect_tex.sampler(),
+            )?;
+
+            log::info!("Baking prefiltered reflection map...");
+            let prefiltered = self.ibl_manager.generate_prefiltered(
+                &self.device,
+                self.cmds.upload_command_pool_handle(),
+                env_cubemap.view(),
+                equirect_tex.sampler(),
+            )?;
+            
+            (irradiance, prefiltered)
         };
-
-        log::info!("Baking environment cubemap...");
-        let env_cubemap = self.ibl_manager.create_cubemap_from_equirect(
-            &self.device,
-            self.cmds.upload_command_pool_handle(),
-            equirect_tex.view(),
-            equirect_tex.sampler(),
-            1024,
-        )?;
-
-        log::info!("Baking irradiance map...");
-        let irradiance_map = self.ibl_manager.generate_irradiance(
-            &self.device,
-            self.cmds.upload_command_pool_handle(),
-            env_cubemap.view(),
-            equirect_tex.sampler(),
-        )?;
-
-        log::info!("Baking prefiltered reflection map...");
-        let prefiltered_map = self.ibl_manager.generate_prefiltered(
-            &self.device,
-            self.cmds.upload_command_pool_handle(),
-            env_cubemap.view(),
-            equirect_tex.sampler(),
-        )?;
 
         // Update renderer state
         self.irradiance_map = Some(irradiance_map);
@@ -1854,146 +1813,24 @@ impl Renderer {
         // Update descriptors
         if let Some(manager) = self.descriptors.as_ref() {
             let res = crate::vulkan::IBLResources {
-            irradiance_view: self.irradiance_map.as_ref().unwrap().view(),
-            prefiltered_view: self.prefiltered_map.as_ref().unwrap().view(),
-            brdf_lut_view: self.brdf_lut_pass.as_ref().unwrap().get_lut_view().unwrap(),
-            skybox_view: self.irradiance_map.as_ref().unwrap().view(), // Use irradiance as dummy skybox if separate skybox not loaded
-            sampler: self.ibl_sampler,
-        };
+                irradiance_view: self.irradiance_map.as_ref().unwrap().view(),
+                prefiltered_view: self.prefiltered_map.as_ref().unwrap().view(),
+                brdf_lut_view: self.brdf_lut_pass.as_ref().unwrap().get_lut_view().unwrap(),
+                skybox_view: self.irradiance_map.as_ref().unwrap().view(), // Use irradiance as dummy skybox if separate skybox not loaded
+                sampler: self.ibl_sampler,
+            };
             for i in 0..manager.frame_set_count() {
                 manager.bind_ibl_resources(i, &res)?;
             }
         }
-
+        
         log::info!("✓ Environment IBL resources successfully baked and bound.");
         Ok(())
     }
 
-    /// Set mesh to render
-    pub fn set_mesh(&mut self, mut mesh: Mesh) -> Result<()> {
-        unsafe {
-            let upload_pool = self.cmds.upload_command_pool_handle();
-            let key = mesh.name.clone();
-            self.model_renderer
-                .ensure_mesh(&key, &mesh, upload_pool, self.device.graphics_queue)
-                .map_err(|e| {
-                    AshError::VulkanError(format!("Failed to upload mesh via ModelRenderer: {e}"))
-                })?;
+    // DELETED: set_mesh() method. Use submit_render_commands instead.
 
-            mesh.ensure_texture(
-                Arc::clone(&self.alloc),
-                Arc::clone(&self.device.device),
-                upload_pool,
-                self.device.graphics_queue,
-                &mut self.vram_budget,
-                self.texture_compression,
-            )
-            .map_err(|e| AshError::VulkanError(format!("Failed to ensure mesh texture: {e}")))?;
-
-            // Register textures with the bindless manager.
-            if let Some(bindless_manager) = self.bindless_manager.as_mut() {
-                if let Some(tex) = mesh.texture.as_ref() {
-                    let idx = bindless_manager
-                        .add_sampled_image(tex.view(), tex.sampler())
-                        .map_err(|e| {
-                            AshError::VulkanError(format!(
-                                "Failed to register base_color texture: {e}"
-                            ))
-                        })?;
-                    mesh.texture_index = Some(idx);
-                }
-                if let Some(tex) = mesh.normal_texture.as_ref() {
-                    let idx = bindless_manager
-                        .add_sampled_image(tex.view(), tex.sampler())
-                        .map_err(|e| {
-                            AshError::VulkanError(format!("Failed to register normal texture: {e}"))
-                        })?;
-                    mesh.normal_texture_index = Some(idx);
-                }
-                if let Some(tex) = mesh.metallic_roughness_texture.as_ref() {
-                    let idx = bindless_manager
-                        .add_sampled_image(tex.view(), tex.sampler())
-                        .map_err(|e| {
-                            AshError::VulkanError(format!(
-                                "Failed to register metallic_roughness texture: {e}"
-                            ))
-                        })?;
-                    mesh.metallic_roughness_texture_index = Some(idx);
-                }
-                if let Some(tex) = mesh.occlusion_texture.as_ref() {
-                    let idx = bindless_manager
-                        .add_sampled_image(tex.view(), tex.sampler())
-                        .map_err(|e| {
-                            AshError::VulkanError(format!(
-                                "Failed to register occlusion texture: {e}"
-                            ))
-                        })?;
-                    mesh.occlusion_texture_index = Some(idx);
-                }
-                if let Some(tex) = mesh.emissive_texture.as_ref() {
-                    let idx = bindless_manager
-                        .add_sampled_image(tex.view(), tex.sampler())
-                        .map_err(|e| {
-                            AshError::VulkanError(format!(
-                                "Failed to register emissive texture: {e}"
-                            ))
-                        })?;
-                    mesh.emissive_texture_index = Some(idx);
-                }
-            }
-
-            let indices = [
-                mesh.texture_index.map(|i| i as i32).unwrap_or(-1),
-                mesh.normal_texture_index.map(|i| i as i32).unwrap_or(-1),
-                mesh.metallic_roughness_texture_index
-                    .map(|i| i as i32)
-                    .unwrap_or(-1),
-                mesh.occlusion_texture_index.map(|i| i as i32).unwrap_or(-1),
-            ];
-            let emissive_index = mesh.emissive_texture_index.map(|i| i as i32).unwrap_or(-1);
-
-            let flags = TexturePresenceFlags::from_mesh(&mesh);
-
-            let material_handle = self.material_manager.register_material(self.material.clone());
-
-            let mesh_data = MeshData {
-                name: Arc::clone(&key),
-                texture_indices: indices,
-                emissive_index,
-                texture_flags: flags,
-                material_handle,
-                is_hidden: false,
-            };
-
-            self.draw_items.clear();
-            self.draw_items.push(DrawItem {
-                key: Arc::clone(&key),
-                mesh_id: 0,
-                transform: self.transform.model_matrix(),
-                material: self.material.clone(),
-                material_handle,
-                texture_flags: flags,
-                texture_indices: indices,
-                emissive_index,
-                is_skinned: false,
-                joint_offset: 0,
-                alpha_cutoff: self.material.alpha_cutoff,
-                cast_shadows: true,
-                receive_shadows: true,
-                is_hidden: false,
-            });
-
-            if self.mesh_data.is_empty() {
-                self.mesh_data.push(mesh_data);
-            } else {
-                self.mesh_data[0] = mesh_data;
-            }
-
-            self.mesh = Some(mesh);
-        }
-
-        Ok(())
-    }
+// DELETED Ok(())
 
     /// Set the rendering mode (GPU-driven, Legacy, or Hybrid).
     pub fn set_rendering_mode(&mut self, mode: RenderingMode) {
@@ -2033,9 +1870,17 @@ impl Renderer {
             intensity: color[3], // Use alpha as intensity
         };
         
-        // We use update_lights which clears point lights, but for simple examples relying on set_lighting
-        // this is expected behavior (simple directional setup).
-        self.update_lights(&[], &[dir_light]);
+        // Store directional light so it's preserved when update_light() is called
+        self.directional_lights = vec![dir_light];
+
+        // Sync with Forward+ if available
+        if let Some(forward_plus) = &mut self.forward_plus {
+            forward_plus.update_lights(&self.point_lights, &self.directional_lights);
+            // Upload to GPU so lights are visible
+            unsafe {
+                let _ = forward_plus.upload_to_gpu(&self.alloc.vma, &self.device.device);
+            }
+        }
     }
 
     pub fn ambient_color_mut(&mut self) -> &mut [f32; 4] {
@@ -2051,7 +1896,11 @@ impl Renderer {
         
         // Sync with Forward+ if available
         if let Some(forward_plus) = &mut self.forward_plus {
-            forward_plus.update_lights(&self.point_lights, &[]);
+            forward_plus.update_lights(&self.point_lights, &self.directional_lights);
+            // Upload to GPU so lights are visible
+            unsafe {
+                let _ = forward_plus.upload_to_gpu(&self.alloc.vma, &self.device.device);
+            }
         }
     }
 
@@ -2085,6 +1934,14 @@ impl Renderer {
     /// Get mutable access to the material manager.
     pub fn material_manager_mut(&mut self) -> &mut MaterialManager {
         &mut self.material_manager
+    }
+
+    /// Uploads a mesh to the GPU and returns its handle.
+    /// This is the modern replacement for `set_mesh`.
+    pub fn upload_mesh(&mut self, mut mesh: Mesh) -> Result<u32> {
+        let handle = self.mesh_data.len() as u32;
+        self.register_mesh_handle(handle, &mut mesh)?;
+        Ok(handle)
     }
 
     pub fn register_mesh_handle(&mut self, handle: u32, mesh: &mut Mesh) -> Result<()> {
@@ -2586,15 +2443,7 @@ impl Renderer {
             }
         }
 
-        // Fallback: if no commands were submitted, use default cube
-        if self.draw_items.is_empty() && self.instancing_manager.stats().total_instances == 0 {
-            if let Some(_mesh) = self.mesh.as_ref() {
-                let key = BatchKey::new(0, self.material_manager.default_material());
-                let instance = InstanceData::from_matrix(self.transform.model_matrix())
-                    .with_cast_shadows(true);
-                self.instancing_manager.add_instance(key, instance);
-            }
-        }
+
 
         self.instancing_manager.finalize();
 
@@ -2616,31 +2465,31 @@ impl Renderer {
     /// Currently unused but preserved for runtime environment map loading features.
     pub fn bake_ibl_from_equirect(&mut self, equirect: &resources::Texture) -> Result<()> {
         log::info!("Baking IBL maps from equirectangular texture...");
-        let command_pool = self.cmds.upload_command_pool_handle();
 
-        // 1. Convert Equirect to Cubemap
+        log::info!("Baking environment cubemap...");
         let env_cubemap = self.ibl_manager.create_cubemap_from_equirect(
             &self.device,
-            command_pool,
+            self.cmds.upload_command_pool_handle(),
             equirect.view(),
             equirect.sampler(),
-            512, // Environment resolution
+            512, // Standard resolution
         )?;
 
-        // 2. Generate Irradiance Map
+        log::info!("Baking irradiance map...");
         let irradiance_map = self.ibl_manager.generate_irradiance(
             &self.device,
-            command_pool,
+            self.cmds.upload_command_pool_handle(),
             env_cubemap.view(),
-            self.ibl_sampler,
+            equirect.sampler(),
         )?;
 
+        log::info!("Baking prefiltered reflection map...");
         // 3. Generate Prefiltered Map
         let prefiltered_map = self.ibl_manager.generate_prefiltered(
             &self.device,
-            command_pool,
+            self.cmds.upload_command_pool_handle(),
             env_cubemap.view(),
-            self.ibl_sampler,
+            equirect.sampler(),
         )?;
 
         self.irradiance_map = Some(irradiance_map);
@@ -3409,7 +3258,7 @@ impl Renderer {
                 {
                     // Initialize with identity matrices. Values are updated during render_frame.
                     let matrices = buffer.matrices_mut();
-                    matrices.model = self.transform.model_matrix();
+                    matrices.model = Mat4::IDENTITY;
                     matrices.view = Mat4::IDENTITY;
                     matrices.projection = Mat4::IDENTITY;
                     matrices.view_proj = Mat4::IDENTITY;
@@ -3468,13 +3317,15 @@ impl Renderer {
                 };
                     manager.bind_ibl_resources(index, &resources)?;
                 } else {
-                    // Fallback: Bind default texture if IBL is not baked yet
-                    // This prevents the shader from reading garbage
+                    // Fallback: Bind BRDF LUT and black textures if IBL is not loaded yet
+                    // Black texture ensures no ambient light is added when IBL is not loaded
                     let dummy_resources = crate::vulkan::IBLResources {
-                    irradiance_view: self._default_texture.view(),
-                    prefiltered_view: self._default_texture.view(),
-                    brdf_lut_view: self._default_texture.view(),
-                    skybox_view: self._default_texture.view(),
+                    irradiance_view: self._black_texture.view(),
+                    prefiltered_view: self._black_texture.view(),
+                    brdf_lut_view: self.brdf_lut_pass.as_ref()
+                        .and_then(|p| p.get_lut_view())
+                        .unwrap_or(self._black_texture.view()),
+                    skybox_view: self._black_texture.view(),
                     sampler: self.ibl_sampler,
                 };
                     manager.bind_ibl_resources(index, &dummy_resources)?;
@@ -3628,11 +3479,11 @@ impl Renderer {
 
             // GPU-Driven Path: Skip if already handled by the high-performance path
             if self.use_gpu_driven && self.culling_manager.gpu_driven_objects.contains(&mesh_index) {
-                log::debug!("Mesh {} skipping shadow legacy path: handled by GPU-driven", mesh_index);
+                log::debug!("Mesh {mesh_index} skipping shadow legacy path: handled by GPU-driven");
                 continue;
             }
 
-            log::debug!("Mesh {} using shadow legacy path", mesh_index);
+            log::debug!("Mesh {mesh_index} using shadow legacy path");
 
             if let Some(uploaded) = self.model_renderer.get(&item.key) {
                 let push = crate::renderer::model_renderer::ShadowPushConstants {
@@ -3684,7 +3535,7 @@ impl Renderer {
                 let mesh_key = &mesh_data.name;
 
                 if let Some(uploaded) = self.model_renderer.get(mesh_key) {
-                    log::debug!("Batch for mesh {} using main GPU-driven/instanced path", mesh_key);
+                    log::debug!("Batch for mesh {mesh_key} using main GPU-driven/instanced path");
 
                     let material_push = MaterialPushConstants::new(batch.key.material_id)
                         .with_material_buffer_index(self.material_buffer_index)
@@ -3859,7 +3710,7 @@ impl Renderer {
                 if let Some(mesh_data) = self.mesh_data.get(batch.key.mesh_id as usize) {
                     let mesh_key = &mesh_data.name;
                     if let Some(uploaded) = self.model_renderer.get(mesh_key) {
-                        log::debug!("Transparent batch for mesh {} using main legacy path", mesh_key);
+                        log::debug!("Transparent batch for mesh {mesh_key} using main legacy path");
 
                         let material_push = MaterialPushConstants::new(batch.key.material_id)
                             .with_material_buffer_index(self.material_buffer_index)
@@ -3951,7 +3802,9 @@ impl Renderer {
         view: Mat4,
         projection: Mat4,
         camera_pos: glam::Vec3,
+        model_matrix: Option<Mat4>,
     ) -> Result<()> {
+        self.transform_system.update();
         self.flush_old_swapchains();
 
         // Recycle per-frame descriptor pools (static pools are unaffected)
@@ -3985,9 +3838,7 @@ impl Renderer {
             }
         }
 
-        // Automatic material synchronization: Ensure DrawItems reflect current material state
-        // This prevents stale tint_index and other material properties from causing rendering issues
-        self.refresh_draw_items();
+
 
         log::debug!(
             "Frame {}: Material synchronization complete",
@@ -4052,10 +3903,10 @@ impl Renderer {
                 .wait_for_fences(&[in_flight_fence], true, u64::MAX)?;
             self.device.device.reset_fences(&[in_flight_fence])?;
 
-            // Sync renderer global transform to the primary draw item (legacy support for single-mesh examples)
-            if let Some(item) = self.draw_items.get_mut(0) {
-                item.transform = self.transform.model_matrix();
-            }
+            // DELETED: Transform overwrite bug (lines 4105-4108)
+            // if let Some(item) = self.draw_items.get_mut(0) {
+            //     item.transform = self.transform.model_matrix();
+            // }
 
             // Build object registry once per frame
             self.culling_manager.build(&self.draw_items, &self.instancing_manager, &self.mesh_data);
@@ -4105,11 +3956,14 @@ impl Renderer {
                 // SAFETY: frame_index validity verified by previous unchecked access logic.
                 let uniform_buffer = self.uniform_buffers.get_unchecked_mut(frame_index);
 
+                // Create dummy transform for legacy feature compatibility
+                let mut dummy_transform = resources::Transform::identity();
+
                 let elapsed = self.start_time.elapsed().as_secs_f32();
                 let mut feature_ctx = FeatureFrameContext {
                     device: self.device.device.as_ref(),
                     descriptor_manager: self.descriptors.as_ref(),
-                    transform: &mut self.transform,
+                    transform: &mut dummy_transform, // Use dummy
                     auto_rotate: false, // Auto-rotate now handled by examples
                     elapsed_seconds: elapsed,
                 };
@@ -4118,7 +3972,13 @@ impl Renderer {
 
                 // Matrices provided via function arguments.
                 let matrices = uniform_buffer.matrices_mut();
-                matrices.model = self.transform.model_matrix();
+                // Use pre-calculated normal matrix for the provided model matrix
+                let model = model_matrix.unwrap_or(Mat4::IDENTITY);
+                let mut transform = resources::Transform::identity();
+                transform.set_model(model);
+                
+                matrices.model = model;
+                matrices.normal_matrix = Mat4::from_mat3(transform.normal_matrix());
                 matrices.view = view;
                 matrices.projection = jittered_projection;
                 matrices.view_proj = jittered_projection * view;
@@ -4325,11 +4185,13 @@ impl Renderer {
             cmd_ctx.set_viewport(0, &[viewport]);
             cmd_ctx.set_scissor(0, &[scissor]);
 
+            let dummy_render_transform = Transform::identity(); // Local dummy for render ctx
+
             let render_ctx = FeatureRenderContext {
                 device: self.device.device.as_ref(),
                 descriptor_manager: self.descriptors.as_ref(),
                 command_buffer,
-                transform: &self.transform,
+                transform: &dummy_render_transform, // Use local dummy
             };
 
             self.features.render(&render_ctx);
@@ -4561,48 +4423,14 @@ impl Renderer {
         }
     }
 
-    pub fn transform(&self) -> &Transform {
-        &self.transform
-    }
-
-    pub fn transform_mut(&mut self) -> &mut Transform {
-        &mut self.transform
-    }
+    // DELETED: transform(), transform_mut() accessors
 
     pub fn buffer_pool(&self) -> Arc<BufferPool> {
         Arc::clone(&self.buffer_pool)
     }
 
-    pub fn mesh_mut(&mut self) -> Option<&mut Mesh> {
-        self.mesh.as_mut()
-    }
+    // DELETED: Legacy accessor methods (mesh_mut, material, material_mut, refresh_draw_items)
 
-    pub fn material(&self) -> &Material {
-        &self.material
-    }
-
-    pub fn material_mut(&mut self) -> &mut Material {
-        &mut self.material
-    }
-
-    /// Updates the draw items to reflect the current material state
-    pub fn refresh_draw_items(&mut self) {
-        if self.mesh.is_some() && !self.draw_items.is_empty() {
-            // Update the material in the first draw item (since we only support one mesh for now)
-            if let Some(draw_item) = self.draw_items.get_mut(0) {
-                draw_item.material = self.material.clone();
-                // CRITICAL FIX: Also update the material_handle to match mesh_data
-                // Without this, the shader still uses the OLD material index even though material struct was updated
-                if let Some(mesh_data) = self.mesh_data.get(0) {
-                    draw_item.material_handle = mesh_data.material_handle;
-                    log::warn!(
-                        "✓ DrawItem[0] Updated: material_handle={:?}",
-                        draw_item.material_handle
-                    );
-                }
-            }
-        }
-    }
 
     // ──────────────────────────────────────────────────────────
     // Post-Processing API
@@ -5096,7 +4924,8 @@ impl Renderer {
         // We use the SSGI view if available (since it might be dark) or just a zero-texture if we had one.
         // For now, let's just use the color_view BUT we will set bloom_intensity push constant to 0.0 later
         // if bloom is disabled.
-        let bloom_view = color_view; 
+        // Fix: Use SSGI view or fallback to default texture instead of color_view to avoid double-exposure
+        let bloom_view = ssgi_view; 
         
         log::debug!("Updating post-processing descriptors (HDR: {}, Bloom: {})", 
             hdr.is_some(), self.bloom_enabled);
@@ -5376,7 +5205,7 @@ impl Drop for Renderer {
             self.model_renderer.clear();
             self.draw_items.clear();
 
-            self.mesh = None;
+            // DELETED: Legacy mesh cleanup
 
             self.depth_buffer = None;
             self.pipeline = None;

@@ -10,6 +10,8 @@ pub struct ImageHandle {
     allocator: Option<Arc<crate::vulkan::Allocator>>,
     extent: vk::Extent2D,
     format: vk::Format,
+    mip_levels: u32,
+    layers: u32,
     name: Option<String>,
 }
 
@@ -27,7 +29,9 @@ impl ImageHandle {
         extent: vk::Extent2D,
         name: Option<String>,
     ) -> crate::Result<Self> {
-        Self::new_with_allocation(device, image, image_view, format, extent, None, None, name)
+        Self::new_with_allocation(
+            device, image, image_view, format, extent, 1, 1, None, None, name,
+        )
     }
 
     /// Creates a new image handle with VMA allocation.
@@ -41,6 +45,8 @@ impl ImageHandle {
         image_view: vk::ImageView,
         format: vk::Format,
         extent: vk::Extent2D,
+        mip_levels: u32,
+        layers: u32,
         allocation: Option<vk_mem::Allocation>,
         allocator: Option<Arc<crate::vulkan::Allocator>>,
         name: Option<String>,
@@ -59,6 +65,8 @@ impl ImageHandle {
             allocator,
             extent,
             format,
+            mip_levels,
+            layers,
             name,
         })
     }
@@ -83,9 +91,179 @@ impl ImageHandle {
         self.format
     }
 
-    /// Returns the name if set
-    pub fn name(&self) -> Option<&str> {
-        self.name.as_deref()
+    /// Returns the number of mip levels
+    pub fn mip_levels(&self) -> u32 {
+        self.mip_levels
+    }
+
+    /// Returns the number of array layers
+    pub fn layers(&self) -> u32 {
+        self.layers
+    }
+
+    /// Returns the allocator if set
+    pub fn allocator(&self) -> Option<Arc<crate::vulkan::Allocator>> {
+        self.allocator.as_ref().map(Arc::clone)
+    }
+
+    /// Returns the device reference
+    pub fn device(&self) -> Arc<ash::Device> {
+        Arc::clone(&self.device)
+    }
+
+    /// Reads the image data back to a CPU-accessible buffer.
+    pub fn read_to_buffer(
+        &self,
+        command_pool: vk::CommandPool,
+        queue: vk::Queue,
+    ) -> crate::Result<Vec<u8>> {
+        let (allocator, name) = match (&self.allocator, &self.name) {
+            (Some(a), Some(n)) => (a, n.as_str()),
+            (Some(a), None) => (a, "unnamed_image"),
+            _ => {
+                return Err(crate::AshError::VulkanError(
+                    "Cannot read back image without allocator".to_string(),
+                ))
+            }
+        };
+
+        let format_size = match self.format {
+            vk::Format::R32G32B32A32_SFLOAT => 16,
+            vk::Format::R16G16B16A16_SFLOAT => 8,
+            vk::Format::R16G16_SFLOAT => 4,
+            vk::Format::R8G8B8A8_UNORM | vk::Format::R8G8B8A8_SRGB => 4,
+            _ => {
+                return Err(crate::AshError::VulkanError(format!(
+                    "Unsupported readback format: {:?}",
+                    self.format
+                )))
+            }
+        };
+
+        // Calculate total size across all mips and layers
+        let mut total_size = 0;
+        for mip in 0..self.mip_levels {
+            let mip_w = (self.extent.width >> mip).max(1);
+            let mip_h = (self.extent.height >> mip).max(1);
+            total_size += mip_w * mip_h * format_size * self.layers;
+        }
+
+        let (readback_buffer, mut readback_alloc) =
+            allocator.create_readback_buffer(total_size as u64)?;
+
+        crate::vulkan::utils::execute_single_use(
+            self.device.as_ref(),
+            command_pool,
+            queue,
+            |cmd| {
+                // Transition to TRANSFER_SRC_OPTIMAL
+                // We use TOP_OF_PIPE and ALL_COMMANDS-ish or at least COMPUTE/FRAGMENT to be safe
+                // since we don't know for sure where it was last used.
+                let barrier = vk::ImageMemoryBarrier::default()
+                    .old_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+                    .new_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
+                    .src_access_mask(vk::AccessFlags::SHADER_READ | vk::AccessFlags::SHADER_WRITE)
+                    .dst_access_mask(vk::AccessFlags::TRANSFER_READ)
+                    .image(self.image)
+                    .subresource_range(vk::ImageSubresourceRange {
+                        aspect_mask: vk::ImageAspectFlags::COLOR,
+                        base_mip_level: 0,
+                        level_count: self.mip_levels,
+                        base_array_layer: 0,
+                        layer_count: self.layers,
+                    });
+
+                unsafe {
+                    self.device.cmd_pipeline_barrier(
+                        cmd,
+                        vk::PipelineStageFlags::ALL_COMMANDS,
+                        vk::PipelineStageFlags::TRANSFER,
+                        vk::DependencyFlags::empty(),
+                        &[],
+                        &[],
+                        &[barrier],
+                    );
+                }
+
+                let mut buffer_offset = 0;
+                for mip in 0..self.mip_levels {
+                    let mip_w = (self.extent.width >> mip).max(1);
+                    let mip_h = (self.extent.height >> mip).max(1);
+
+                    let region = vk::BufferImageCopy {
+                        buffer_offset,
+                        buffer_row_length: 0,
+                        buffer_image_height: 0,
+                        image_subresource: vk::ImageSubresourceLayers {
+                            aspect_mask: vk::ImageAspectFlags::COLOR,
+                            mip_level: mip,
+                            base_array_layer: 0,
+                            layer_count: self.layers,
+                        },
+                        image_offset: vk::Offset3D { x: 0, y: 0, z: 0 },
+                        image_extent: vk::Extent3D {
+                            width: mip_w,
+                            height: mip_h,
+                            depth: 1,
+                        },
+                    };
+
+                    unsafe {
+                        self.device.cmd_copy_image_to_buffer(
+                            cmd,
+                            self.image,
+                            vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                            readback_buffer,
+                            &[region],
+                        );
+                    }
+
+                    buffer_offset +=
+                        mip_w as u64 * mip_h as u64 * format_size as u64 * self.layers as u64;
+                }
+
+                // Transition back to SHADER_READ_ONLY_OPTIMAL
+                let barrier_restore = vk::ImageMemoryBarrier::default()
+                    .old_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
+                    .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+                    .src_access_mask(vk::AccessFlags::TRANSFER_READ)
+                    .dst_access_mask(vk::AccessFlags::SHADER_READ)
+                    .image(self.image)
+                    .subresource_range(vk::ImageSubresourceRange {
+                        aspect_mask: vk::ImageAspectFlags::COLOR,
+                        base_mip_level: 0,
+                        level_count: self.mip_levels,
+                        base_array_layer: 0,
+                        layer_count: self.layers,
+                    });
+
+                unsafe {
+                    self.device.cmd_pipeline_barrier(
+                        cmd,
+                        vk::PipelineStageFlags::TRANSFER,
+                        vk::PipelineStageFlags::ALL_COMMANDS,
+                        vk::DependencyFlags::empty(),
+                        &[],
+                        &[],
+                        &[barrier_restore],
+                    );
+                }
+            },
+        )?;
+
+        let data = unsafe {
+            let guard = allocator.map_allocation_guarded(&mut readback_alloc, total_size as u64)?;
+            guard.to_vec()
+        };
+
+        unsafe {
+            allocator
+                .vma
+                .destroy_buffer(readback_buffer, &mut readback_alloc);
+        }
+
+        log::info!("Read back image '{name}' ({} bytes)", data.len());
+        Ok(data)
     }
 
     /// Creates a 2D image suitable for a BRDF LUT.
@@ -132,6 +310,8 @@ impl ImageHandle {
                 view,
                 format,
                 extent,
+                1,
+                1,
                 Some(allocation),
                 Some(allocator),
                 Some("BRDF_LUT".to_string()),
@@ -187,6 +367,8 @@ impl ImageHandle {
                 view,
                 format,
                 extent,
+                mip_levels,
+                6,
                 Some(allocation),
                 Some(allocator),
                 name,

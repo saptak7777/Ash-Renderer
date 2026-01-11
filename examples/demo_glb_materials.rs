@@ -75,10 +75,12 @@ impl ApplicationHandler for App {
                         let mat_handle = mesh_data[0].material_handle;
                         if renderer.material_manager().is_handle_valid(mat_handle) {
                             log::info!("✅ Material automatically registered for demo mesh");
-                            
+
                             // CRITICAL FIX: Upload the automatically registered material to GPU
-                            let material = renderer.material_manager().get_material(mat_handle).clone();
-                            let _ = renderer.upload_material_to_gpu(mat_handle.index as u32, &material);
+                            let material =
+                                renderer.material_manager().get_material(mat_handle).clone();
+                            let _ =
+                                renderer.upload_material_to_gpu(mat_handle.index as u32, &material);
                             log::info!("✅ Material uploaded to GPU: {:?}", mat_handle);
 
                             log::info!("   - Material: {}", material.name);
@@ -97,17 +99,18 @@ impl ApplicationHandler for App {
 
                 // Submit render command with automatic material selection
                 if let Some(mesh_handle) = self.mesh_handle {
-                    let _ = renderer.submit_render_commands(&[ash_renderer::renderer::RenderCommand {
-                        mesh_handle,
-                        material_handle: ash_renderer::renderer::MaterialHandle::null(), // null = auto-select from mesh material
-                        transform: Mat4::IDENTITY,
-                        is_skinned: false,
-                        joint_offset: 0,
-                        cast_shadows: true,
-                        receive_shadows: true,
-                        is_transparent: false,
-                        is_hidden: false,
-                    }]);
+                    let _ =
+                        renderer.submit_render_commands(&[ash_renderer::renderer::RenderCommand {
+                            mesh_handle,
+                            material_handle: ash_renderer::renderer::MaterialHandle::null(), // null = auto-select from mesh material
+                            transform: Mat4::IDENTITY,
+                            is_skinned: false,
+                            joint_offset: 0,
+                            cast_shadows: true,
+                            receive_shadows: true,
+                            is_transparent: false,
+                            is_hidden: false,
+                        }]);
                     log::info!("✅ Render command submitted with auto material selection");
                 }
 
@@ -144,7 +147,7 @@ impl ApplicationHandler for App {
                     let mut proj = Mat4::perspective_rh(45.0_f32.to_radians(), aspect, 0.5, 100.0);
                     proj.y_axis.y *= -1.0; // Vulkan Y-flip
 
-                    if let Err(e) = renderer.render_frame(view, proj, camera_pos) {
+                    if let Err(e) = renderer.render_frame(view, proj, camera_pos, None) {
                         log::error!("Render error: {e}");
                     }
                 }

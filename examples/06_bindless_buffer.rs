@@ -23,6 +23,7 @@ struct App {
     renderer: Option<Renderer>,
     _start_time: Instant,
     frame_count: u32,
+    render_commands: Vec<ash_renderer::renderer::RenderCommand>,
 }
 
 impl Default for App {
@@ -33,6 +34,7 @@ impl Default for App {
             _start_time: Instant::now(),
             tint_buffer: None,
             frame_count: 0,
+            render_commands: Vec::new(),
         }
     }
 }
@@ -48,50 +50,7 @@ impl ApplicationHandler for App {
 
         match Renderer::new(&surface_provider) {
             Ok(mut renderer) => {
-                // 1. Create a cube with NO texture data initially
-                let mut cube = Mesh::create_cube();
-                // Override vertex colors to WHITE so they don't affect the material color
-                for v in &mut cube.vertices {
-                    v.color = [1.0, 1.0, 1.0];
-                }
-                // RENAMING is critical because the renderer caches meshes by name!
-                cube.name = Arc::from("OrangeCube");
-                cube.texture_data = None;
-                log::info!("✓ Cube mesh created and renamed to 'OrangeCube' for Phase 1");
-
-                // 2. Set up material with MATTE ORANGE color (Phase 3)
-                let material = Material {
-                    color: [1.0, 0.5, 0.0, 1.0], // SOLID ORANGE
-                    metallic: 0.0,               // Non-metallic
-                    roughness: 0.7,              // Matte finish
-                    ..Default::default()
-                };
-                log::info!("✓ Material set to MATTE ORANGE [Metallic 0.0, Roughness 0.7]");
-
-                if let Err(e) = renderer.set_mesh(cube) {
-                    log::error!("Failed to set mesh: {e}");
-                    event_loop.exit();
-                    return;
-                }
-                log::info!("✓ Mesh uploaded to GPU");
-                *renderer.material_mut() = material.clone();
-
-                // CRITICAL FIX 1: Register material with material manager so shader uses orange, not grey
-                let material_handle = renderer.material_manager_mut().register_material(material.clone());
-                
-                // CRITICAL: Upload the material data to GPU so shader can access it
-                if let Err(e) = renderer.upload_material_to_gpu(material_handle.index as u32, &material) {
-                    log::error!("Failed to upload material to GPU: {e}");
-                }
-                
-                // Update mesh_data so the draw_items path uses the correct material
-                if let Some(mesh_data) = renderer.get_mesh_data_mut(0) {
-                    mesh_data.material_handle = material_handle;
-                }
-                
-                log::info!("✓ Registered orange material with handle {:?}", material_handle);
-
-                // 3. Register bindless storage buffer
+                // 1. Register bindless storage buffer FIRST to get the index
                 let tint_colors = [Vec4::new(1.0, 1.0, 1.0, 1.0)];
                 let (tint_buffer_gpu, tint_index) = renderer
                     .register_bindless_storage_buffer(&tint_colors, "CubeTintBuffer")
@@ -99,17 +58,53 @@ impl ApplicationHandler for App {
 
                 log::info!("✓ Registered bindless tint buffer at index {}", tint_index);
 
-                // 4. Phase 2 Settings: Proper HDR + Tonemapping
-                renderer.material_mut().tint_index = -1;
-                // CRITICAL: Must call enable_post_processing() to initialize HDR/Tonemapping pipelines!
+                // 2. Set up material with MATTE ORANGE color (Phase 3)
+                // Use the tint_index we just got!
+                let material = Material {
+                    color: [1.0, 0.5, 0.0, 1.0], // SOLID ORANGE
+                    metallic: 0.0,               // Non-metallic
+                    roughness: 0.7,              // Matte finish
+                    tint_index: tint_index as i32,
+                    ..Default::default()
+                };
+                log::info!("✓ Material set to MATTE ORANGE [Metallic 0.0, Roughness 0.7]");
+
+                // Register and upload material
+                let material_handle = renderer.register_and_upload_material(material).unwrap();
+                log::info!(
+                    "✓ Registered orange material with handle {:?}",
+                    material_handle
+                );
+
+                // 3. Create a cube
+                let mut cube = Mesh::create_cube();
+                for v in &mut cube.vertices {
+                    v.color = [1.0, 1.0, 1.0];
+                }
+                cube.name = Arc::from("OrangeCube");
+                cube.texture_data = None;
+                log::info!("✓ Cube mesh created and renamed to 'OrangeCube' for Phase 1");
+
+                // Upload mesh
+                let mesh_handle = renderer.upload_mesh(cube).unwrap_or(0);
+                log::info!("✓ Mesh uploaded to GPU");
+
+                // 4. Setup render command
+                self.render_commands
+                    .push(ash_renderer::renderer::RenderCommand {
+                        mesh_handle,
+                        material_handle,
+                        transform: Mat4::IDENTITY,
+                        ..Default::default()
+                    });
+
+                // 5. Phase 2 Settings: Proper HDR + Tonemapping
                 if let Err(e) = renderer.enable_post_processing() {
                     log::warn!("Post-processing failed: {e}");
                     renderer.set_tonemapping_enabled(true);
                 }
-                renderer.refresh_draw_items();
 
-                // 5. Setup PHASE 2 Lighting: Balanced HDR
-                // Initial lighting setup (will be updated per frame)
+                // 6. Setup PHASE 2 Lighting: Balanced HDR
                 renderer.set_lighting(
                     Vec3::new(-1.0, -1.0, -1.0).normalize(),
                     [2.5, 2.5, 2.5, 1.0], // Correct: White light with 2.5 brightness
@@ -136,7 +131,6 @@ impl ApplicationHandler for App {
                     let size = window.inner_size();
                     if size.width > 0 && size.height > 0 {
                         let aspect = size.width as f32 / size.height as f32;
-
                         let radius = 5.0;
                         let camera_x = radius * time.sin();
                         let camera_z = radius * time.cos();
@@ -147,18 +141,19 @@ impl ApplicationHandler for App {
                             Mat4::perspective_rh(45.0_f32.to_radians(), aspect, 0.1, 100.0);
                         proj.y_axis.y *= -1.0;
 
-                        // Dynamic Lighting: Rotate light with time for moving shadows
+                        // Dynamic Lighting
                         let light_angle = time * 0.5;
                         let light_dir =
                             Vec3::new(-light_angle.cos(), -1.0, -light_angle.sin()).normalize();
 
-                        renderer.set_lighting(
-                            light_dir,
-                            [2.5, 2.5, 2.5, 1.0], // Balanced white HDR light
-                            0.2,                  // Improved ambient strength for better visibility
-                        );
+                        renderer.set_lighting(light_dir, [2.5, 2.5, 2.5, 1.0], 0.2);
 
-                        if let Err(e) = renderer.render_frame(view, proj, camera_pos) {
+                        // Submit commands
+                        if let Err(e) = renderer.submit_render_commands(&self.render_commands) {
+                            log::error!("Failed to submit render commands: {e}");
+                        }
+
+                        if let Err(e) = renderer.render_frame(view, proj, camera_pos, None) {
                             log::error!("Render error: {e}");
                         }
                         self.frame_count += 1;

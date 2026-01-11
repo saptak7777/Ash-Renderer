@@ -19,6 +19,7 @@ struct App {
     renderer: Option<Renderer>,
     start_time: Instant,
     material_handle: MaterialHandle,
+    mesh_handle: u32,
 }
 
 impl Default for App {
@@ -28,6 +29,7 @@ impl Default for App {
             renderer: None,
             start_time: Instant::now(),
             material_handle: MaterialHandle::default(),
+            mesh_handle: 0,
         }
     }
 }
@@ -117,25 +119,30 @@ impl ApplicationHandler for App {
                     3, 7, 0, 0, 7, 4, // Side
                 ]);
 
-                if let Err(e) = renderer.set_mesh(mesh) {
-                    log::error!("Failed to set mesh: {e}");
-                    event_loop.exit();
-                    return;
-                }
+                // Upload mesh
+                let mesh_handle = renderer.upload_mesh(mesh).unwrap_or(0);
+
                 let green_material = Material {
                     color: [0.2, 0.8, 0.2, 1.0],
                     metallic: 0.1,
                     roughness: 0.8,
                     ..Default::default()
                 };
-                let material_handle = renderer.material_manager_mut().register_material(green_material.clone());
-                let _ = renderer.upload_material_to_gpu(material_handle.index as u32, &green_material);
-                log::info!("✓ Registered and uploaded green material with handle {:?}", material_handle);
+                // Register and upload material
+                let material_handle = renderer
+                    .register_and_upload_material(green_material)
+                    .unwrap();
+
+                log::info!(
+                    "✓ Registered and uploaded green material with handle {:?}",
+                    material_handle
+                );
 
                 self.renderer = Some(renderer);
                 self.window = Some(window);
                 self.start_time = Instant::now();
                 self.material_handle = material_handle;
+                self.mesh_handle = mesh_handle;
                 log::info!("Skinning test initialized!");
             }
             Err(e) => {
@@ -174,8 +181,13 @@ impl ApplicationHandler for App {
                     proj.y_axis.y *= -1.0;
 
                     // Draw
-                    renderer.draw_skinned_mesh(0, self.material_handle, Mat4::IDENTITY, 0);
-                    renderer.render_frame(view, proj, camera_pos).unwrap();
+                    renderer.draw_skinned_mesh(
+                        self.mesh_handle,
+                        self.material_handle,
+                        Mat4::IDENTITY,
+                        0,
+                    );
+                    renderer.render_frame(view, proj, camera_pos, None).unwrap();
                 }
                 if let Some(window) = &self.window {
                     window.request_redraw();

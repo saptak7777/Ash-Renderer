@@ -24,7 +24,7 @@ fn main() -> Result<()> {
 
     // 3. Set up scene (Cube)
     let cube = Mesh::create_cube();
-    renderer.set_mesh(cube)?;
+    let mesh_handle = renderer.upload_mesh(cube)?;
 
     let material = Material {
         color: [0.2, 0.8, 0.2, 1.0], // Green cube
@@ -32,11 +32,13 @@ fn main() -> Result<()> {
         roughness: 0.9,
         ..Default::default()
     };
-    
+
     // CRITICAL FIX: Register and upload material
-    let material_handle = renderer.material_manager_mut().register_material(material.clone());
-    renderer.upload_material_to_gpu(material_handle.index as u32, &material)?;
-    log::info!("✓ Registered and uploaded green material with handle {:?}", material_handle);
+    let material_handle = renderer.register_and_upload_material(material)?;
+    log::info!(
+        "✓ Registered and uploaded green material with handle {:?}",
+        material_handle
+    );
 
     // 4. Set up Camera
     let camera_pos = Vec3::new(3.0, 3.0, 3.0);
@@ -50,7 +52,14 @@ fn main() -> Result<()> {
 
     // 5. Render a single frame
     log::info!("Rendering frame...");
-    renderer.render_frame(view, proj, camera_pos)?;
+    renderer.submit_render_commands(&[ash_renderer::renderer::RenderCommand {
+        mesh_handle,
+        material_handle,
+        transform: Mat4::IDENTITY,
+        ..Default::default()
+    }])?;
+
+    renderer.render_frame(view, proj, camera_pos, None)?;
 
     // 6. Read back the image data
     log::info!("Reading back image data...");

@@ -16,6 +16,7 @@ use winit::{
 struct App {
     window: Option<Window>,
     renderer: Option<Renderer>,
+    render_commands: Vec<ash_renderer::renderer::RenderCommand>,
 }
 
 impl Default for App {
@@ -23,6 +24,7 @@ impl Default for App {
         Self {
             window: None,
             renderer: None,
+            render_commands: Vec::new(),
         }
     }
 }
@@ -49,6 +51,9 @@ impl ApplicationHandler for App {
                 cube.name = Arc::from("BasicCube");
                 cube.texture_data = None;
 
+                // Upload mesh
+                let mesh_handle = renderer.upload_mesh(cube).unwrap_or(0);
+
                 // Simple grey matte material
                 let material = Material {
                     color: [0.5, 0.5, 0.5, 1.0], // Grey
@@ -57,27 +62,17 @@ impl ApplicationHandler for App {
                     ..Default::default()
                 };
 
-                if let Err(e) = renderer.set_mesh(cube) {
-                    log::error!("Failed to set mesh: {e}");
-                    event_loop.exit();
-                    return;
-                }
-
-                *renderer.material_mut() = material.clone();
-
                 // Register and upload material
-                let material_handle = renderer
-                    .material_manager_mut()
-                    .register_material(material.clone());
-                if let Err(e) =
-                    renderer.upload_material_to_gpu(material_handle.index as u32, &material)
-                {
-                    log::error!("Failed to upload material: {e}");
-                }
+                let material_handle = renderer.register_and_upload_material(material).unwrap();
 
-                if let Some(mesh_data) = renderer.get_mesh_data_mut(0) {
-                    mesh_data.material_handle = material_handle;
-                }
+                // Setup render command
+                self.render_commands
+                    .push(ash_renderer::renderer::RenderCommand {
+                        mesh_handle,
+                        material_handle,
+                        transform: Mat4::IDENTITY,
+                        ..Default::default()
+                    });
 
                 // Simple directional lighting (NO Forward+)
                 renderer.set_lighting(
@@ -113,7 +108,12 @@ impl ApplicationHandler for App {
                             Mat4::perspective_rh(45.0_f32.to_radians(), aspect, 0.1, 100.0);
                         proj.y_axis.y *= -1.0;
 
-                        if let Err(e) = renderer.render_frame(view, proj, camera_pos) {
+                        // Submit commands
+                        if let Err(e) = renderer.submit_render_commands(&self.render_commands) {
+                            log::error!("Failed to submit render commands: {e}");
+                        }
+
+                        if let Err(e) = renderer.render_frame(view, proj, camera_pos, None) {
                             log::error!("Render error: {e}");
                         }
                     }

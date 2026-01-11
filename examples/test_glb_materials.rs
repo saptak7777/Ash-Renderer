@@ -67,18 +67,31 @@ impl ApplicationHandler for App {
                                         // Check if material was registered
                                         let mesh_data = renderer.mesh_data();
                                         if (handle as usize) < mesh_data.len() {
-                                            let mat_handle = mesh_data[handle as usize].material_handle;
-                                            if renderer.material_manager().is_handle_valid(mat_handle) {
+                                            let mat_handle =
+                                                mesh_data[handle as usize].material_handle;
+                                            if renderer
+                                                .material_manager()
+                                                .is_handle_valid(mat_handle)
+                                            {
                                                 log::info!(
                                                     "✅ Material registered for mesh '{}' (handle {:?})",
                                                     mesh.name,
                                                     mat_handle
                                                 );
-                                                
+
                                                 // CRITICAL FIX: Upload the automatically registered material to GPU
-                                                let material = renderer.material_manager().get_material(mat_handle).clone();
-                                                let _ = renderer.upload_material_to_gpu(mat_handle.index as u32, &material);
-                                                log::info!("✅ Material uploaded to GPU: {:?}", mat_handle);
+                                                let material = renderer
+                                                    .material_manager()
+                                                    .get_material(mat_handle)
+                                                    .clone();
+                                                let _ = renderer.upload_material_to_gpu(
+                                                    mat_handle.index as u32,
+                                                    &material,
+                                                );
+                                                log::info!(
+                                                    "✅ Material uploaded to GPU: {:?}",
+                                                    mat_handle
+                                                );
                                             } else {
                                                 log::warn!("❌ No material registered for mesh '{}' (handle {:?})", mesh.name, mat_handle);
                                             }
@@ -121,25 +134,32 @@ impl ApplicationHandler for App {
                         if !mesh_data.is_empty() {
                             let mat_handle = mesh_data[0].material_handle;
                             if renderer.material_manager().is_handle_valid(mat_handle) {
-                                log::info!("✅ Material registered for test cube (handle {:?})", mat_handle);
+                                log::info!(
+                                    "✅ Material registered for test cube (handle {:?})",
+                                    mat_handle
+                                );
                             } else {
-                                log::warn!("❌ No material registered for test cube (handle {:?})", mat_handle);
+                                log::warn!(
+                                    "❌ No material registered for test cube (handle {:?})",
+                                    mat_handle
+                                );
                             }
                         }
                     }
 
                     // Submit render command with null handle to test fallback
-                    let _ = renderer.submit_render_commands(&[ash_renderer::renderer::RenderCommand {
-                        mesh_handle: 1,
-                        material_handle: ash_renderer::renderer::MaterialHandle::null(), // Should fallback to mesh's registered material
-                        transform: Mat4::IDENTITY,
-                        is_skinned: false,
-                        joint_offset: 0,
-                        cast_shadows: true,
-                        receive_shadows: true,
-                        is_transparent: false,
-                        is_hidden: false,
-                    }]);
+                    let _ =
+                        renderer.submit_render_commands(&[ash_renderer::renderer::RenderCommand {
+                            mesh_handle: 1,
+                            material_handle: ash_renderer::renderer::MaterialHandle::null(), // Should fallback to mesh's registered material
+                            transform: Mat4::IDENTITY,
+                            is_skinned: false,
+                            joint_offset: 0,
+                            cast_shadows: true,
+                            receive_shadows: true,
+                            is_transparent: false,
+                            is_hidden: false,
+                        }]);
                 }
 
                 self.renderer = Some(renderer);
@@ -172,7 +192,7 @@ impl ApplicationHandler for App {
                     let mut proj = Mat4::perspective_rh(45.0_f32.to_radians(), aspect, 0.5, 100.0);
                     proj.y_axis.y *= -1.0; // Vulkan Y-flip
 
-                    if let Err(e) = renderer.render_frame(view, proj, camera_pos) {
+                    if let Err(e) = renderer.render_frame(view, proj, camera_pos, None) {
                         log::error!("Render error: {e}");
                     }
                 }

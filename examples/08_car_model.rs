@@ -21,6 +21,7 @@ struct App {
     tint_buffer: Option<Arc<parking_lot::Mutex<StorageBuffer<Vec4>>>>,
     renderer: Option<Renderer>,
     start_time: Instant,
+    render_commands: Vec<ash_renderer::renderer::RenderCommand>,
 }
 
 impl Default for App {
@@ -30,6 +31,7 @@ impl Default for App {
             tint_buffer: None,
             renderer: None,
             start_time: Instant::now(),
+            render_commands: Vec::new(),
         }
     }
 }
@@ -47,9 +49,9 @@ impl ApplicationHandler for App {
             Ok(mut renderer) => {
                 // Load the car model from GLB file
                 let glb_path = r"C:\Users\tilok\Downloads\car retro muscle\base_basic_pbr.glb";
-                
+
                 log::info!("Loading car model from: {}", glb_path);
-                
+
                 // Load the first mesh from the GLB file
                 let mesh = match Mesh::from_gltf(glb_path) {
                     Ok(m) => {
@@ -63,23 +65,21 @@ impl ApplicationHandler for App {
                     }
                 };
 
-                // Extract material properties from mesh BEFORE moving it to set_mesh
+                // Extract material properties from mesh BEFORE moving it
                 let material_props = mesh.material_properties;
                 let mesh_name = mesh.name.clone();
                 let texture_indices = [
                     mesh.texture_index.map(|i| i as i32).unwrap_or(-1),
                     mesh.normal_texture_index.map(|i| i as i32).unwrap_or(-1),
-                    mesh.metallic_roughness_texture_index.map(|i| i as i32).unwrap_or(-1),
+                    mesh.metallic_roughness_texture_index
+                        .map(|i| i as i32)
+                        .unwrap_or(-1),
                     mesh.occlusion_texture_index.map(|i| i as i32).unwrap_or(-1),
                 ];
                 let emissive_index = mesh.emissive_texture_index.map(|i| i as i32).unwrap_or(-1);
 
-                // Register mesh with renderer (this also registers the material)
-                if let Err(e) = renderer.set_mesh(mesh) {
-                    log::error!("Failed to set mesh: {e}");
-                    event_loop.exit();
-                    return;
-                }
+                // Upload mesh
+                let mesh_handle = renderer.upload_mesh(mesh).unwrap_or(0);
                 log::info!("✓ Mesh uploaded to GPU");
 
                 // Create material from mesh properties (loaded from GLB)
@@ -96,11 +96,31 @@ impl ApplicationHandler for App {
                         tint_index: -1,
                         is_transparent: props.base_color_factor[3] < 1.0,
                         // Use texture indices extracted from mesh
-                        texture_index: if texture_indices[0] >= 0 { Some(texture_indices[0] as u32) } else { None },
-                        normal_texture_index: if texture_indices[1] >= 0 { Some(texture_indices[1] as u32) } else { None },
-                        metallic_roughness_texture_index: if texture_indices[2] >= 0 { Some(texture_indices[2] as u32) } else { None },
-                        occlusion_texture_index: if texture_indices[3] >= 0 { Some(texture_indices[3] as u32) } else { None },
-                        emissive_texture_index: if emissive_index >= 0 { Some(emissive_index as u32) } else { None },
+                        texture_index: if texture_indices[0] >= 0 {
+                            Some(texture_indices[0] as u32)
+                        } else {
+                            None
+                        },
+                        normal_texture_index: if texture_indices[1] >= 0 {
+                            Some(texture_indices[1] as u32)
+                        } else {
+                            None
+                        },
+                        metallic_roughness_texture_index: if texture_indices[2] >= 0 {
+                            Some(texture_indices[2] as u32)
+                        } else {
+                            None
+                        },
+                        occlusion_texture_index: if texture_indices[3] >= 0 {
+                            Some(texture_indices[3] as u32)
+                        } else {
+                            None
+                        },
+                        emissive_texture_index: if emissive_index >= 0 {
+                            Some(emissive_index as u32)
+                        } else {
+                            None
+                        },
                     }
                 } else {
                     // Fallback default material
@@ -115,31 +135,46 @@ impl ApplicationHandler for App {
                         alpha_cutoff: 0.1,
                         tint_index: -1,
                         is_transparent: false,
-                        texture_index: if texture_indices[0] >= 0 { Some(texture_indices[0] as u32) } else { None },
-                        normal_texture_index: if texture_indices[1] >= 0 { Some(texture_indices[1] as u32) } else { None },
-                        metallic_roughness_texture_index: if texture_indices[2] >= 0 { Some(texture_indices[2] as u32) } else { None },
-                        occlusion_texture_index: if texture_indices[3] >= 0 { Some(texture_indices[3] as u32) } else { None },
-                        emissive_texture_index: if emissive_index >= 0 { Some(emissive_index as u32) } else { None },
+                        texture_index: if texture_indices[0] >= 0 {
+                            Some(texture_indices[0] as u32)
+                        } else {
+                            None
+                        },
+                        normal_texture_index: if texture_indices[1] >= 0 {
+                            Some(texture_indices[1] as u32)
+                        } else {
+                            None
+                        },
+                        metallic_roughness_texture_index: if texture_indices[2] >= 0 {
+                            Some(texture_indices[2] as u32)
+                        } else {
+                            None
+                        },
+                        occlusion_texture_index: if texture_indices[3] >= 0 {
+                            Some(texture_indices[3] as u32)
+                        } else {
+                            None
+                        },
+                        emissive_texture_index: if emissive_index >= 0 {
+                            Some(emissive_index as u32)
+                        } else {
+                            None
+                        },
                     }
                 };
 
-                // Upload the material that set_mesh just registered
-                if let Some(mesh_data) = renderer.mesh_data().first() {
-                    let material_handle = mesh_data.material_handle;
-                    if let Err(e) = renderer.upload_material_to_gpu(material_handle.index as u32, &material) {
-                        log::error!("Failed to upload material to GPU: {e}");
-                        event_loop.exit();
-                        return;
-                    }
-                    log::info!(
-                        "✓ Uploaded material to GPU with handle {:?}",
-                        material_handle
-                    );
-                } else {
-                    log::error!("Mesh data missing after set_mesh; aborting");
-                    event_loop.exit();
-                    return;
-                }
+                // Register and upload material
+                let material_handle = renderer.register_and_upload_material(material).unwrap();
+                log::info!("✓ Registered material with handle {:?}", material_handle);
+
+                // Setup render command
+                self.render_commands
+                    .push(ash_renderer::renderer::RenderCommand {
+                        mesh_handle,
+                        material_handle,
+                        transform: Mat4::IDENTITY,
+                        ..Default::default()
+                    });
 
                 // Register bindless storage buffer (prevents crash like example 06)
                 let tint_colors = [Vec4::new(1.0, 1.0, 1.0, 1.0)];
@@ -150,21 +185,16 @@ impl ApplicationHandler for App {
                     log::info!("✓ Registered default tint buffer");
                 }
 
-                // Update renderer material state once all resources exist
-                *renderer.material_mut() = material.clone();
-                renderer.material_mut().tint_index = -1;
-
                 if let Err(e) = renderer.enable_post_processing() {
                     log::warn!("Post-processing failed: {e}");
                     renderer.set_tonemapping_enabled(true);
                 }
-                renderer.refresh_draw_items();
 
                 // Setup lighting for car model
                 renderer.set_lighting(
                     Vec3::new(-0.5, -1.0, -0.5).normalize(), // Light from top-front-left
-                    [3.0, 3.0, 3.0, 1.0], // Bright white light
-                    0.3, // Moderate ambient
+                    [3.0, 3.0, 3.0, 1.0],                    // Bright white light
+                    0.3,                                     // Moderate ambient
                 );
 
                 self.renderer = Some(renderer);
@@ -194,16 +224,22 @@ impl ApplicationHandler for App {
                         let camera_x = radius * (elapsed * 0.3).sin();
                         let camera_z = radius * (elapsed * 0.3).cos();
                         let camera_y = 3.0 + (elapsed * 0.2).sin() * 1.0;
-                        
+
                         let camera_pos = Vec3::new(camera_x, camera_y, camera_z);
                         let target = Vec3::new(0.0, 0.5, 0.0); // Look slightly above ground
                         let up = Vec3::Y;
 
                         let view = Mat4::look_at_rh(camera_pos, target, up);
-                        let mut proj = Mat4::perspective_rh(45.0_f32.to_radians(), aspect, 0.1, 100.0);
+                        let mut proj =
+                            Mat4::perspective_rh(45.0_f32.to_radians(), aspect, 0.1, 100.0);
                         proj.y_axis.y *= -1.0; // Vulkan Y-flip
 
-                        if let Err(e) = renderer.render_frame(view, proj, camera_pos) {
+                        // Submit commands
+                        if let Err(e) = renderer.submit_render_commands(&self.render_commands) {
+                            log::error!("Failed to submit render commands: {e}");
+                        }
+
+                        if let Err(e) = renderer.render_frame(view, proj, camera_pos, None) {
                             log::error!("Render error: {e}");
                         }
                     }

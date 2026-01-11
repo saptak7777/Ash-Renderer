@@ -109,11 +109,7 @@ impl LightManager {
         self.dirty = true;
 
         log::debug!(
-            "LightManager::on_resize: {}x{} -> {}x{} tiles (buffer needs recreation)",
-            width,
-            height,
-            tiles_x,
-            tiles_y
+            "LightManager::on_resize: {width}x{height} -> {tiles_x}x{tiles_y} tiles (buffer needs recreation)",
         );
     }
 
@@ -220,19 +216,30 @@ impl LightManager {
         // Formula: tiles_x * tiles_y * (MAX_LIGHTS_PER_TILE + 1) * sizeof(u32)
         let tile_buffer_size = self.get_tile_buffer_size().max(1024) as u64; // Minimum 1KB
 
+        // Create tile buffer with host-accessible memory for zero-initialization
         let tile_buffer_info = vk::BufferCreateInfo::default()
             .size(tile_buffer_size)
             .usage(vk::BufferUsageFlags::STORAGE_BUFFER)
             .sharing_mode(vk::SharingMode::EXCLUSIVE);
 
         let tile_alloc_info = vk_mem::AllocationCreateInfo {
-            usage: vk_mem::MemoryUsage::AutoPreferDevice,
+            usage: vk_mem::MemoryUsage::Auto,
+            flags: vk_mem::AllocationCreateFlags::MAPPED
+                | vk_mem::AllocationCreateFlags::HOST_ACCESS_SEQUENTIAL_WRITE,
             ..Default::default()
         };
 
         let (tile_buffer, tile_allocation) = allocator
             .create_buffer(&tile_buffer_info, &tile_alloc_info)
-            .expect("LightManager: Tile buffer allocation failed during initialization");
+            .expect("LightManager: Tile buffer allocation failed");
+
+        // Zero out the tile buffer to prevent garbage data
+        let tile_mapped = allocator.get_allocation_info(&tile_allocation).mapped_data;
+        if !tile_mapped.is_null() {
+            unsafe {
+                std::ptr::write_bytes(tile_mapped as *mut u8, 0, tile_buffer_size as usize);
+            }
+        }
 
         self.tile_buffer = Some(TileBuffer {
             buffer: tile_buffer,
@@ -282,14 +289,16 @@ impl LightManager {
             allocator.destroy_buffer(old_tile_buffer.buffer, &mut old_tile_buffer.allocation);
         }
 
-        // Create new tile buffer
+        // Create new tile buffer with host-accessible memory for zero-initialization
         let tile_buffer_info = vk::BufferCreateInfo::default()
             .size(new_tile_buffer_size)
             .usage(vk::BufferUsageFlags::STORAGE_BUFFER)
             .sharing_mode(vk::SharingMode::EXCLUSIVE);
 
         let tile_alloc_info = vk_mem::AllocationCreateInfo {
-            usage: vk_mem::MemoryUsage::AutoPreferDevice,
+            usage: vk_mem::MemoryUsage::Auto,
+            flags: vk_mem::AllocationCreateFlags::MAPPED
+                | vk_mem::AllocationCreateFlags::HOST_ACCESS_SEQUENTIAL_WRITE,
             ..Default::default()
         };
 
@@ -300,6 +309,14 @@ impl LightManager {
                     "LightManager: Tile buffer recreation failed: {e:?}"
                 ))
             })?;
+
+        // Zero out the tile buffer to prevent garbage data
+        let tile_mapped = allocator.get_allocation_info(&tile_allocation).mapped_data;
+        if !tile_mapped.is_null() {
+            unsafe {
+                std::ptr::write_bytes(tile_mapped as *mut u8, 0, new_tile_buffer_size as usize);
+            }
+        }
 
         self.tile_buffer = Some(TileBuffer {
             buffer: tile_buffer,

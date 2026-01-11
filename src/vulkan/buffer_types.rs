@@ -55,7 +55,9 @@ impl BufferDescriptor {
         let mut flags = vk_mem::AllocationCreateFlags::empty();
 
         if self.mappable {
-            flags |= vk_mem::AllocationCreateFlags::HOST_ACCESS_SEQUENTIAL_WRITE;
+            // For general mappable buffers, we use RANDOM to allow both reading and writing.
+            // SEQUENTIAL_WRITE is an optimization for CPU -> GPU only.
+            flags |= vk_mem::AllocationCreateFlags::HOST_ACCESS_RANDOM;
         }
 
         if self.persistent_mapping {

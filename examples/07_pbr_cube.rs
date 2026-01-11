@@ -61,11 +61,10 @@ impl ApplicationHandler for App {
                 cube.texture_data = None;
 
                 // Set mesh FIRST so mesh_data exists
-                if let Err(e) = renderer.set_mesh(cube) {
-                    log::error!("Failed to set mesh: {e}");
-                    event_loop.exit();
-                    return;
-                }
+                let mesh_handle = renderer.upload_mesh(cube).unwrap_or_else(|e| {
+                    log::error!("Failed to upload mesh: {e}");
+                    0 // Fallback
+                });
                 log::info!("✓ Mesh uploaded to GPU");
 
                 // Register bindless storage buffer (prevents crash)
@@ -104,7 +103,7 @@ impl ApplicationHandler for App {
                 };
 
                 let material_handle = renderer.register_and_upload_material(material).unwrap();
-                let mesh_handle = renderer.get_mesh_handle("PbrCube").unwrap_or(0);
+                // let mesh_handle = renderer.get_mesh_handle("PbrCube").unwrap_or(0); // We already have mesh_handle from upload
 
                 self.render_commands
                     .push(ash_renderer::renderer::RenderCommand {
@@ -155,36 +154,17 @@ impl ApplicationHandler for App {
                 if let (Some(renderer), Some(window)) =
                     (self.renderer.as_mut(), self.window.as_ref())
                 {
-                    // Update camera position to look at the single cube
+                    // Static camera position (player's view)
+                    let camera_pos = Vec3::new(0.0, 3.0, 8.0);
                     let elapsed = self.start_time.elapsed().as_secs_f32();
-                    let camera_radius = 8.0;
-                    let camera_x = camera_radius * (elapsed * 0.2).cos();
-                    let camera_z = camera_radius * (elapsed * 0.2).sin();
-                    let camera_pos = Vec3::new(camera_x, 3.0, camera_z);
 
                     renderer.set_view(camera_pos, Vec3::ZERO, Vec3::Y);
 
-                    // Update light positions (focused around the center cube)
-                    let p1 = Vec3::new(
-                        (elapsed * 0.5).cos() * 4.0,
-                        3.0,
-                        (elapsed * 0.5).sin() * 4.0,
-                    );
-                    let p2 = Vec3::new(
-                        (elapsed * 0.6).sin() * 4.0,
-                        -2.0,
-                        (elapsed * 0.6).cos() * 4.0,
-                    );
-                    let p3 = Vec3::new(
-                        -(elapsed * 0.4).cos() * 4.0,
-                        1.0,
-                        -(elapsed * 0.4).sin() * 4.0,
-                    );
-                    let p4 = Vec3::new(
-                        -(elapsed * 0.7).sin() * 4.0,
-                        -1.0,
-                        -(elapsed * 0.7).cos() * 4.0,
-                    );
+                    // Static light positions (one on each side)
+                    let p1 = Vec3::new(5.0, 2.0, 0.0); // Right side
+                    let p2 = Vec3::new(0.0, 2.0, 5.0); // Front side
+                    let p3 = Vec3::new(-5.0, 2.0, 0.0); // Left side
+                    let p4 = Vec3::new(0.0, 2.0, -5.0); // Back side
 
                     renderer.update_light(
                         0,
@@ -229,15 +209,19 @@ impl ApplicationHandler for App {
                     let mut proj = Mat4::perspective_rh(45.0_f32.to_radians(), aspect, 0.5, 100.0);
                     proj.y_axis.y *= -1.0; // Vulkan Y-flip
 
-                    // Rotate the whole scene slightly
-                    renderer.transform.rotation = glam::Quat::from_rotation_y(elapsed * 0.05);
+                    // Rotate the cube
+                    let rotation = glam::Quat::from_rotation_y(elapsed * 0.5);
+                    let transform = Mat4::from_quat(rotation);
+
+                    // Update render command with rotation
+                    self.render_commands[0].transform = transform;
 
                     // Submit draw calls (Required for Bindless-Only Renderer)
                     if let Err(e) = renderer.submit_render_commands(&self.render_commands) {
                         log::error!("Failed to submit render commands: {e}");
                     }
 
-                    if let Err(e) = renderer.render_frame(view, proj, camera_pos) {
+                    if let Err(e) = renderer.render_frame(view, proj, camera_pos, Some(transform)) {
                         log::error!("Failed to render frame: {e}");
                     }
                 }

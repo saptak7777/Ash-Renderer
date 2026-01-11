@@ -119,9 +119,15 @@ impl RenderFeature for LightingFeature {
         "LightingFeature"
     }
 
-    fn before_frame(&mut self, _ctx: &mut FeatureFrameContext<'_>) {
-        // A future implementation would upload the lighting config to GPU buffers here.
-        self.dirty = false;
+    fn before_frame(&mut self, ctx: &mut FeatureFrameContext<'_>) {
+        // Upload lighting configuration to GPU when dirty
+        if self.dirty {
+            // For now, we'll mark the feature as handled. The actual lighting upload
+            // happens in the main render loop through renderer.set_lighting() and
+            // forward_plus.upload_to_gpu(). This method serves as a coordination point
+            // for future lighting system improvements.
+            self.dirty = false;
+        }
     }
 
     unsafe fn render(&self, _ctx: &FeatureRenderContext<'_>) {

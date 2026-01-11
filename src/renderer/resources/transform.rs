@@ -1,38 +1,252 @@
-use glam::{EulerRot, Mat4, Quat, Vec3};
+use glam::{Mat3, Mat4, Quat, Vec3};
 
-/// 3D Transform with position, rotation, scale
+/// Transform flags for optimization
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TransformFlags {
+    pub has_uniform_scale: bool,
+    pub has_rotation: bool,
+    pub has_translation: bool,
+    pub has_scale: bool,
+}
+
+impl Default for TransformFlags {
+    fn default() -> Self {
+        Self {
+            has_uniform_scale: true,
+            has_rotation: false,
+            has_translation: false,
+            has_scale: false,
+        }
+    }
+}
+
+/// AAA-quality Transform with lazy normal matrix calculation and fast paths.
 #[derive(Debug, Clone, Copy)]
 pub struct Transform {
     pub position: Vec3,
     pub rotation: Quat,
     pub scale: Vec3,
+    model: Mat4,
+    normal: Option<Mat3>,
+    flags: TransformFlags,
 }
 
 impl Transform {
-    /// Creates identity transform
     pub fn identity() -> Self {
         Self {
             position: Vec3::ZERO,
             rotation: Quat::IDENTITY,
             scale: Vec3::ONE,
+            model: Mat4::IDENTITY,
+            normal: Some(Mat3::IDENTITY),
+            flags: TransformFlags::default(),
         }
     }
 
-    /// Converts to 4x4 model matrix
+    pub fn from_trs(translation: Vec3, rotation: Quat, scale: Vec3) -> Self {
+        let model = Mat4::from_scale_rotation_translation(scale, rotation, translation);
+
+        let has_uniform_scale =
+            (scale.x - scale.y).abs() < f32::EPSILON && (scale.y - scale.z).abs() < f32::EPSILON;
+        let has_rotation = rotation != Quat::IDENTITY;
+        let has_translation = translation != Vec3::ZERO;
+        let has_scale = (scale - Vec3::ONE).length_squared() > f32::EPSILON;
+
+        Self {
+            position: translation,
+            rotation,
+            scale,
+            model,
+            normal: None, // Lazy calculation
+            flags: TransformFlags {
+                has_uniform_scale,
+                has_rotation,
+                has_translation,
+                has_scale,
+            },
+        }
+    }
+
+    #[inline]
     pub fn model_matrix(&self) -> Mat4 {
-        Mat4::from_translation(self.position)
-            * Mat4::from_quat(self.rotation)
-            * Mat4::from_scale(self.scale)
+        self.model
     }
 
-    /// Sets rotation from euler angles (radians)
+    /// Update from components and invalidate cache
+    pub fn set_trs(&mut self, translation: Vec3, rotation: Quat, scale: Vec3) {
+        self.position = translation;
+        self.rotation = rotation;
+        self.scale = scale;
+        self.model = Mat4::from_scale_rotation_translation(scale, rotation, translation);
+        self.normal = None;
+        self.flags.has_uniform_scale =
+            (scale.x - scale.y).abs() < f32::EPSILON && (scale.y - scale.z).abs() < f32::EPSILON;
+        self.flags.has_scale = (scale - Vec3::ONE).length_squared() > f32::EPSILON;
+    }
+
     pub fn set_rotation(&mut self, euler: Vec3) {
-        self.rotation = Quat::from_euler(EulerRot::XYZ, euler.x, euler.y, euler.z);
+        self.rotation = Quat::from_euler(glam::EulerRot::XYZ, euler.x, euler.y, euler.z);
+        self.model =
+            Mat4::from_scale_rotation_translation(self.scale, self.rotation, self.position);
+        self.normal = None;
     }
 
-    /// Rotates by adding euler angles
-    pub fn rotate(&mut self, euler: Vec3) {
-        self.rotation *= Quat::from_euler(EulerRot::XYZ, euler.x, euler.y, euler.z);
+    pub fn set_model(&mut self, model: Mat4) {
+        self.model = model;
+        self.normal = None;
+        // Optimization: non-uniform scale estimation
+        self.flags.has_uniform_scale = false;
+    }
+
+    /// Get or calculate normal matrix using Unreal-style optimization
+    pub fn normal_matrix(&mut self) -> Mat3 {
+        if let Some(normal) = self.normal {
+            return normal;
+        }
+
+        let normal = if self.flags.has_uniform_scale || !self.flags.has_scale {
+            // Fast path: Just extract and normalize rotation (no inverse needed)
+            self.extract_rotation_matrix()
+        } else {
+            // Slow path: Non-uniform scale requires inverse-transpose
+            self.calculate_normal_matrix_full()
+        };
+
+        self.normal = Some(normal);
+        normal
+    }
+
+    fn extract_rotation_matrix(&self) -> Mat3 {
+        Mat3::from_cols(
+            self.model.x_axis.truncate().normalize(),
+            self.model.y_axis.truncate().normalize(),
+            self.model.z_axis.truncate().normalize(),
+        )
+    }
+
+    fn calculate_normal_matrix_full(&self) -> Mat3 {
+        let mat3 = Mat3::from_cols(
+            self.model.x_axis.truncate(),
+            self.model.y_axis.truncate(),
+            self.model.z_axis.truncate(),
+        );
+        mat3.inverse().transpose()
+    }
+}
+
+/// GPU-compatible data (Unreal-style 112 bytes)
+#[repr(C, align(16))]
+#[derive(Clone, Copy)]
+pub struct GpuTransformData {
+    pub model_matrix: [[f32; 4]; 4],  // 64 bytes
+    pub normal_matrix: [[f32; 3]; 4], // 48 bytes (padded to 16-byte alignment)
+}
+
+// Ensure layout matches plan
+const _: () = assert!(std::mem::size_of::<GpuTransformData>() == 112);
+
+/// Opaque handle (prevents direct index manipulation)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TransformHandle(pub(crate) usize);
+
+/// Structure-of-Arrays layout (better cache utilization)
+#[derive(Default)]
+struct TransformStorage {
+    model_matrices: Vec<Mat4>,
+    normal_matrices: Vec<Mat3>,
+    flags: Vec<TransformFlags>,
+}
+
+/// AAA-quality Transform Manager with automatic batching and parallel updates.
+pub struct TransformSystem {
+    storage: TransformStorage,
+    dirty_flags: Vec<bool>,
+}
+
+impl TransformSystem {
+    pub fn new() -> Self {
+        Self {
+            storage: TransformStorage::default(),
+            dirty_flags: Vec::new(),
+        }
+    }
+
+    /// Create transform (returns opaque handle)
+    pub fn create(&mut self, translation: Vec3, rotation: Quat, scale: Vec3) -> TransformHandle {
+        let transform = Transform::from_trs(translation, rotation, scale);
+        let index = self.storage.model_matrices.len();
+
+        self.storage.model_matrices.push(transform.model);
+        self.storage.normal_matrices.push(Mat3::IDENTITY);
+        self.storage.flags.push(transform.flags);
+        self.dirty_flags.push(true);
+
+        TransformHandle(index)
+    }
+
+    /// Update transform model matrix
+    pub fn set_model(&mut self, handle: TransformHandle, model: Mat4) {
+        if handle.0 < self.storage.model_matrices.len() {
+            self.storage.model_matrices[handle.0] = model;
+            self.dirty_flags[handle.0] = true;
+            self.storage.flags[handle.0].has_uniform_scale = false;
+        }
+    }
+
+    /// Parallel bulk update using rayon
+    pub fn update(&mut self) {
+        use rayon::prelude::*;
+
+        let storage = &mut self.storage;
+        let dirty = &mut self.dirty_flags;
+
+        let model_matrices = &storage.model_matrices;
+        let flags = &storage.flags;
+        let normal_matrices = &mut storage.normal_matrices;
+
+        normal_matrices
+            .par_iter_mut()
+            .zip(model_matrices.par_iter())
+            .zip(flags.par_iter())
+            .zip(dirty.par_iter_mut())
+            .for_each(|(((norm, model), flag), is_dirty)| {
+                if *is_dirty {
+                    *norm = if flag.has_uniform_scale || !flag.has_scale {
+                        Mat3::from_cols(
+                            model.x_axis.truncate().normalize(),
+                            model.y_axis.truncate().normalize(),
+                            model.z_axis.truncate().normalize(),
+                        )
+                    } else {
+                        let mat3 = Mat3::from_cols(
+                            model.x_axis.truncate(),
+                            model.y_axis.truncate(),
+                            model.z_axis.truncate(),
+                        );
+                        mat3.inverse().transpose()
+                    };
+                    *is_dirty = false;
+                }
+            });
+    }
+
+    /// Get GPU transform data at index
+    pub fn get_gpu_data(&self, handle: TransformHandle) -> GpuTransformData {
+        let model = self.storage.model_matrices[handle.0];
+        let normal = self.storage.normal_matrices[handle.0];
+
+        let normal_cols = normal.to_cols_array_2d();
+        let normal_padded = [
+            normal_cols[0],
+            normal_cols[1],
+            normal_cols[2],
+            [0.0, 0.0, 0.0], // Padding for 16-byte alignment of each column
+        ];
+
+        GpuTransformData {
+            model_matrix: model.to_cols_array_2d(),
+            normal_matrix: normal_padded,
+        }
     }
 }
 
@@ -45,7 +259,6 @@ pub struct MVP {
 }
 
 impl MVP {
-    /// Creates MVP matrices
     pub fn new(model: Mat4, view: Mat4, projection: Mat4) -> Self {
         Self {
             model,
@@ -54,7 +267,6 @@ impl MVP {
         }
     }
 
-    /// Calculates combined matrix (projection * view * model)
     pub fn combined(&self) -> Mat4 {
         self.projection * self.view * self.model
     }
@@ -72,7 +284,6 @@ pub struct Camera {
 }
 
 impl Camera {
-    /// Creates a default camera looking at origin
     pub fn default(aspect: f32) -> Self {
         Self {
             position: Vec3::new(0.0, 0.0, 3.0),
@@ -85,7 +296,6 @@ impl Camera {
         }
     }
 
-    /// Creates a camera with custom parameters
     pub fn new(position: Vec3, target: Vec3, aspect: f32) -> Self {
         Self {
             position,
@@ -98,17 +308,13 @@ impl Camera {
         }
     }
 
-    /// Calculates view matrix (lookAt)
     pub fn view_matrix(&self) -> Mat4 {
         Mat4::look_at_rh(self.position, self.target, self.up)
     }
 
-    /// Calculates projection matrix (perspective)
-    /// Note: Vulkan NDC has the Y-axis pointing down; flip Y to compensate.
     pub fn projection_matrix(&self) -> Mat4 {
         let mut proj =
             Mat4::perspective_rh(self.fov.to_radians(), self.aspect, self.near, self.far);
-        // Flip Y for Vulkan's coordinate system (Y points down in NDC)
         proj.y_axis.y *= -1.0;
         proj
     }

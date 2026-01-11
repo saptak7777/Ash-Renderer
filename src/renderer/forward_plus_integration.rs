@@ -126,6 +126,11 @@ impl ForwardPlusIntegration {
 
     /// Initialize the compute pipeline.
     /// Must be called after depth buffer creation.
+    ///
+    /// # Safety
+    /// All provided Vulkan handles (device, depth_sampler, depth_image_view) must be valid
+    /// and remain valid for the duration of this call. The compute shader bytecode must
+    /// be available in the OUT_DIR.
     pub unsafe fn init_pipeline(
         &mut self,
         device: Arc<ash::Device>,
@@ -138,34 +143,20 @@ impl ForwardPlusIntegration {
             ShaderModule::load_from_bytes(&device, code, vk::ShaderStageFlags::COMPUTE)?;
 
         // 1. Create Descriptor Set Layout (Set 0 for Compute)
+        // NOTE: LightBuffer moved to Set 3 to match fragment shader
+        // Set 0 now only contains DepthBuffer and CameraData
         let bindings = [
-            // Binding 0: Light buffer (SSBO)
+            // Binding 0: Depth buffer (sampler)
             vk::DescriptorSetLayoutBinding {
                 binding: 0,
-                descriptor_type: vk::DescriptorType::STORAGE_BUFFER,
-                descriptor_count: 1,
-                stage_flags: vk::ShaderStageFlags::COMPUTE,
-                ..Default::default()
-            },
-            // Binding 1: Depth buffer (sampler)
-            vk::DescriptorSetLayoutBinding {
-                binding: 1,
                 descriptor_type: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
                 descriptor_count: 1,
                 stage_flags: vk::ShaderStageFlags::COMPUTE,
                 ..Default::default()
             },
-            // Binding 2: Tile light indices (SSBO, writeonly)
+            // Binding 1: Camera data (UBO)
             vk::DescriptorSetLayoutBinding {
-                binding: 2,
-                descriptor_type: vk::DescriptorType::STORAGE_BUFFER,
-                descriptor_count: 1,
-                stage_flags: vk::ShaderStageFlags::COMPUTE,
-                ..Default::default()
-            },
-            // Binding 3: Camera data (UBO)
-            vk::DescriptorSetLayoutBinding {
-                binding: 3,
+                binding: 1,
                 descriptor_type: vk::DescriptorType::UNIFORM_BUFFER,
                 descriptor_count: 1,
                 stage_flags: vk::ShaderStageFlags::COMPUTE,
@@ -186,7 +177,7 @@ impl ForwardPlusIntegration {
         let pool_sizes = [
             vk::DescriptorPoolSize {
                 ty: vk::DescriptorType::STORAGE_BUFFER,
-                descriptor_count: 2,
+                descriptor_count: 1, // Only light buffer now
             },
             vk::DescriptorPoolSize {
                 ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
@@ -194,7 +185,7 @@ impl ForwardPlusIntegration {
             },
             vk::DescriptorPoolSize {
                 ty: vk::DescriptorType::UNIFORM_BUFFER,
-                descriptor_count: 1,
+                descriptor_count: 1, // Camera buffer
             },
         ];
 
@@ -227,10 +218,16 @@ impl ForwardPlusIntegration {
         };
 
         // We use the helper ComputePipeline from crate::vulkan which simplifies creation
+        // NOTE: Set 0 contains DepthBuffer and CameraData
+        // Set 3 contains Forward+ descriptor (LightBuffer, TileLightIndices, ForwardPlusInfo)
+        // We need placeholder sets at 1 and 2 so Set 3 is at the correct index
         self.compute_pipeline = Some(
             ComputePipeline::builder(Arc::clone(&device))
                 .with_shader(shader_module.module)
-                .add_set_layout(self.compute_descriptor_layout)
+                .add_set_layout(self.compute_descriptor_layout) // Set 0: Depth buffer, camera
+                .add_set_layout(vk::DescriptorSetLayout::null()) // Set 1: Placeholder
+                .add_set_layout(vk::DescriptorSetLayout::null()) // Set 2: Placeholder
+                .add_set_layout(self.descriptor.layout()) // Set 3: Forward+ (LightBuffer, TileLightIndices, ForwardPlusInfo)
                 .add_push_constant(push_constant_range)
                 .build()?,
         );
@@ -255,7 +252,7 @@ impl ForwardPlusIntegration {
 
         let writes = [vk::WriteDescriptorSet::default()
             .dst_set(self.compute_descriptor_set)
-            .dst_binding(1)
+            .dst_binding(0)
             .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
             .image_info(std::slice::from_ref(&depth_image_info))];
         device.update_descriptor_sets(&writes, &[]);
@@ -295,6 +292,11 @@ impl ForwardPlusIntegration {
         self.cached_info = self.lights.get_forward_plus_info();
     }
 
+    /// Update camera data for light culling.
+    ///
+    /// # Safety
+    /// Allocator must be valid. The internal camera buffer must have been successfully
+    /// allocated during `new()`.
     pub unsafe fn update_camera(
         &mut self,
         allocator: &vk_mem::Allocator,
@@ -377,41 +379,19 @@ impl ForwardPlusIntegration {
             );
 
             // Update Compute Shader Descriptor (Set 0)
-            // We must ensure the buffers are bound to the compute descriptor set
+            // NOTE: LightBuffer moved to Set 3, so we only update camera buffer here
             if self.compute_descriptor_set != vk::DescriptorSet::null() {
-                let light_info = vk::DescriptorBufferInfo {
-                    buffer: l_buf,
-                    offset: 0,
-                    range: light_buffer_size,
-                };
-                let tile_info = vk::DescriptorBufferInfo {
-                    buffer: t_buf,
-                    offset: 0,
-                    range: self.lights.get_tile_buffer_size() as u64,
-                };
                 let camera_info = vk::DescriptorBufferInfo {
                     buffer: self.camera_buf,
                     offset: 0,
                     range: std::mem::size_of::<CullingCameraData>() as u64,
                 };
 
-                let writes = [
-                    vk::WriteDescriptorSet::default()
-                        .dst_set(self.compute_descriptor_set)
-                        .dst_binding(0) // Light Buffer
-                        .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
-                        .buffer_info(std::slice::from_ref(&light_info)),
-                    vk::WriteDescriptorSet::default()
-                        .dst_set(self.compute_descriptor_set)
-                        .dst_binding(2) // Tile Buffer
-                        .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
-                        .buffer_info(std::slice::from_ref(&tile_info)),
-                    vk::WriteDescriptorSet::default()
-                        .dst_set(self.compute_descriptor_set)
-                        .dst_binding(3) // Camera Buffer
-                        .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
-                        .buffer_info(std::slice::from_ref(&camera_info)),
-                ];
+                let writes = [vk::WriteDescriptorSet::default()
+                    .dst_set(self.compute_descriptor_set)
+                    .dst_binding(1) // Camera Buffer
+                    .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+                    .buffer_info(std::slice::from_ref(&camera_info))];
                 device.update_descriptor_sets(&writes, &[]);
             }
         }
@@ -419,7 +399,12 @@ impl ForwardPlusIntegration {
         Ok(())
     }
 
-    /// Dispatch light culling compute shader
+    /// Dispatch light culling compute shader.
+    ///
+    /// # Safety
+    /// Command buffer must be in recording state. Device must be valid. All internal
+    /// buffers (light, tile, info, camera) must have been initialized via `init()`
+    /// and `upload_to_gpu()`.
     pub unsafe fn dispatch(&self, command_buffer: vk::CommandBuffer, device: &ash::Device) {
         if let Some(pipeline) = &self.compute_pipeline {
             if self.compute_descriptor_set == vk::DescriptorSet::null() {
@@ -431,12 +416,24 @@ impl ForwardPlusIntegration {
                 vk::PipelineBindPoint::COMPUTE,
                 pipeline.handle(),
             );
+
+            // Bind Set 0: Depth buffer, camera buffer
             device.cmd_bind_descriptor_sets(
                 command_buffer,
                 vk::PipelineBindPoint::COMPUTE,
-                pipeline.layout(), // Pipeline layout compatible with Set 0
+                pipeline.layout(),
                 0,
                 &[self.compute_descriptor_set],
+                &[],
+            );
+
+            // Bind Set 3: Forward+ descriptor (LightBuffer, TileLightIndices, ForwardPlusInfo)
+            device.cmd_bind_descriptor_sets(
+                command_buffer,
+                vk::PipelineBindPoint::COMPUTE,
+                pipeline.layout(),
+                3,
+                &[self.descriptor.descriptor_set()],
                 &[],
             );
 

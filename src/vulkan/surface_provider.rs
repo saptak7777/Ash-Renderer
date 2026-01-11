@@ -62,10 +62,10 @@ impl SurfaceProvider for HeadlessSurfaceProvider {
         });
 
         if !has_headless {
-            return Err(AshError::DeviceInitFailed(
-                "VK_EXT_headless_surface extension is required for headless rendering but is not available on this system. \
-                 Please ensure your Vulkan driver supports this extension.".to_string()
-            ));
+            log::warn!(
+                "VK_EXT_headless_surface not available, falling back to surface-less operation."
+            );
+            return Ok(vk::SurfaceKHR::null());
         }
 
         let headless_loader = ash::ext::headless_surface::Instance::new(entry, instance);

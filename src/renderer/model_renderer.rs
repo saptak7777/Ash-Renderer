@@ -458,7 +458,7 @@ impl ModelRenderer {
             ctx.pipeline_layout,
             vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
             0,
-            &push_bytes,
+            push_bytes,
         );
 
         if let Some(index_buffer) = ctx.uploaded.index_buffer() {
@@ -554,7 +554,7 @@ impl ModelRenderer {
             ctx.pipeline_layout,
             vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
             0,
-            &push_bytes,
+            push_bytes,
         );
 
         if let Some(index_buffer) = ctx.uploaded.index_buffer() {
@@ -632,7 +632,7 @@ impl ModelRenderer {
             ctx.pipeline_layout,
             vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
             0,
-            &push_bytes,
+            push_bytes,
         );
 
         if let Some(index_buffer) = ctx.uploaded.index_buffer() {
@@ -696,7 +696,7 @@ impl ModelRenderer {
             ctx.pipeline_layout,
             vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
             0,
-            &push_bytes,
+            push_bytes,
         );
 
         if let Some(index_buffer) = ctx.uploaded.index_buffer() {

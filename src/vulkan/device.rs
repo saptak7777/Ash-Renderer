@@ -85,6 +85,7 @@ impl VulkanDevice {
             if !headless {
                 device_extension_names.push(swapchain::NAME.as_ptr());
             }
+            device_extension_names.push(ash::ext::memory_budget::NAME.as_ptr());
 
             let device_features = vk::PhysicalDeviceFeatures::default()
                 .sampler_anisotropy(true)

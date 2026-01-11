@@ -86,8 +86,7 @@ fn validate_buffer_params_impl(
     }
 
     // Check 3: Conflicting usage flags
-    let vertex_related =
-        vk::BufferUsageFlags::VERTEX_BUFFER | vk::BufferUsageFlags::INDEX_BUFFER;
+    let vertex_related = vk::BufferUsageFlags::VERTEX_BUFFER | vk::BufferUsageFlags::INDEX_BUFFER;
     let storage_related =
         vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::UNIFORM_BUFFER;
 
@@ -96,8 +95,7 @@ fn validate_buffer_params_impl(
     }
 
     // Check 4: Transfer-only buffers (warning)
-    if (usage == vk::BufferUsageFlags::TRANSFER_DST
-        || usage == vk::BufferUsageFlags::TRANSFER_SRC)
+    if (usage == vk::BufferUsageFlags::TRANSFER_DST || usage == vk::BufferUsageFlags::TRANSFER_SRC)
         && usage != (vk::BufferUsageFlags::TRANSFER_DST | vk::BufferUsageFlags::TRANSFER_SRC)
     {
         log::warn!("Buffer is ONLY for one-way transfers. Verify this is intentional.");
@@ -118,7 +116,6 @@ fn validate_buffer_params_impl(
 }
 
 impl Allocator {
-
     /// Allocate a GPU buffer.
     ///
     /// # Safety
@@ -431,6 +428,19 @@ impl Allocator {
             size,
         })
     }
+
+    /*
+    /// Calculate aggregate statistics about memory usage.
+    pub fn get_statistics(&self) -> vk_mem::Statistics {
+        self.vma.calculate_statistics().unwrap_or_default()
+    }
+
+    /// Query current heap budgets.
+    /// Requires VK_EXT_memory_budget to be enabled on the device.
+    pub fn get_heap_budgets(&self) -> Vec<vk_mem::Statistics> {
+        self.vma.get_heap_budgets().unwrap_or_default()
+    }
+    */
 }
 
 /// RAII guard for mapped GPU memory.

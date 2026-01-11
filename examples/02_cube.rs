@@ -20,6 +20,7 @@ struct App {
     tint_buffer: Option<Arc<parking_lot::Mutex<StorageBuffer<Vec4>>>>,
     renderer: Option<Renderer>,
     start_time: Instant,
+    render_commands: Vec<ash_renderer::renderer::RenderCommand>,
 }
 
 impl Default for App {
@@ -29,6 +30,7 @@ impl Default for App {
             tint_buffer: None,
             renderer: None,
             start_time: Instant::now(),
+            render_commands: Vec::new(),
         }
     }
 }
@@ -50,10 +52,11 @@ impl ApplicationHandler for App {
                 for v in &mut cube.vertices {
                     v.color = [1.0, 1.0, 1.0];
                 }
-                // RENAMING is critical because the renderer caches meshes by name!
                 cube.name = Arc::from("TexturedCube");
-                // Clear texture data so material color shows through
                 cube.texture_data = None;
+
+                // Upload mesh
+                let mesh_handle = renderer.upload_mesh(cube).unwrap_or(0);
 
                 // Set up material
                 let material = Material {
@@ -63,34 +66,17 @@ impl ApplicationHandler for App {
                     ..Default::default()
                 };
 
-                if let Err(e) = renderer.set_mesh(cube) {
-                    log::error!("Failed to set mesh: {e}");
-                    event_loop.exit();
-                    return;
-                }
+                // Register and upload material
+                let material_handle = renderer.register_and_upload_material(material).unwrap();
 
-                // CRITICAL FIX: Set renderer material AFTER set_mesh, then register and upload
-                *renderer.material_mut() = material.clone();
-                renderer.material_mut().tint_index = -1; // Disable tint buffer usage
-
-                // Register material with material manager
-                let material_handle = renderer
-                    .material_manager_mut()
-                    .register_material(material.clone());
-
-                // Upload the material to GPU
-                if let Err(e) =
-                    renderer.upload_material_to_gpu(material_handle.index as u32, &material)
-                {
-                    log::error!("Failed to upload material to GPU: {e}");
-                    event_loop.exit();
-                    return;
-                }
-
-                // Update mesh_data so draw_items use the correct material
-                if let Some(mesh_data) = renderer.get_mesh_data_mut(0) {
-                    mesh_data.material_handle = material_handle;
-                }
+                // Setup render command
+                self.render_commands
+                    .push(ash_renderer::renderer::RenderCommand {
+                        mesh_handle,
+                        material_handle,
+                        transform: Mat4::IDENTITY,
+                        ..Default::default()
+                    });
 
                 log::info!(
                     "✓ Uploaded red material to GPU with handle {:?}",
@@ -118,7 +104,6 @@ impl ApplicationHandler for App {
                     log::warn!("Post-processing failed: {e}");
                     renderer.set_tonemapping_enabled(true);
                 }
-                renderer.refresh_draw_items();
 
                 self.renderer = Some(renderer);
                 self.window = Some(window);
@@ -154,7 +139,12 @@ impl ApplicationHandler for App {
                     let mut proj = Mat4::perspective_rh(45.0_f32.to_radians(), aspect, 0.5, 100.0);
                     proj.y_axis.y *= -1.0; // Vulkan Y-flip
 
-                    if let Err(e) = renderer.render_frame(view, proj, camera_pos) {
+                    // Submit commands
+                    if let Err(e) = renderer.submit_render_commands(&self.render_commands) {
+                        log::error!("Failed to submit render commands: {e}");
+                    }
+
+                    if let Err(e) = renderer.render_frame(view, proj, camera_pos, None) {
                         log::error!("Render error: {e}");
                     }
                 }

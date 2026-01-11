@@ -77,7 +77,7 @@ impl ApplicationHandler for App {
                     let mut proj = Mat4::perspective_rh(45.0_f32.to_radians(), aspect, 0.5, 100.0);
                     proj.y_axis.y *= -1.0; // Vulkan Y-flip
 
-                    if let Err(e) = renderer.render_frame(view, proj, camera_pos) {
+                    if let Err(e) = renderer.render_frame(view, proj, camera_pos, None) {
                         log::error!("Render error: {e}");
                     }
                 }

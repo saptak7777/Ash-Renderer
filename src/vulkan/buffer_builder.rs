@@ -66,6 +66,7 @@ impl BufferBuilder {
 
     /// Buffer needs CPU read access
     pub fn cpu_readable(mut self) -> Self {
+        self.descriptor.mappable = true;
         self.descriptor.memory_usage = vk_mem::MemoryUsage::AutoPreferHost;
         self
     }

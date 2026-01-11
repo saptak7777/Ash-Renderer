@@ -159,7 +159,7 @@ impl BrdfLutPass {
                 height: res,
             })
             .add_shader_from_bytes(
-                include_bytes!(concat!(env!("OUT_DIR"), "/fullscreen.vert.spv")),
+                include_bytes!(concat!(env!("OUT_DIR"), "/postprocess.vert.spv")),
                 vk::ShaderStageFlags::VERTEX,
                 "main",
             )?

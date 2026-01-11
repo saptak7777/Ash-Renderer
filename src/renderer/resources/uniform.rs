@@ -123,15 +123,20 @@ impl MvpMatrices {
         self.view_proj = self.projection * self.view;
     }
 
-    /// Update model matrix from position, rotation, scale
-    pub fn set_model(&mut self, position: Vec3, rotation: Vec3, scale: Vec3) {
-        let translation = Mat4::from_translation(position);
-        let rotation_x = Mat4::from_rotation_x(rotation.x);
-        let rotation_y = Mat4::from_rotation_y(rotation.y);
-        let rotation_z = Mat4::from_rotation_z(rotation.z);
-        let scale_mat = Mat4::from_scale(scale);
+    /// Update from a modern Transform object
+    pub fn set_transform(&mut self, transform: &mut super::Transform) {
+        self.model = transform.model_matrix();
+        self.normal_matrix = Mat4::from_mat3(transform.normal_matrix());
+    }
 
-        self.model = translation * rotation_z * rotation_y * rotation_x * scale_mat;
+    /// Update model matrix from position, rotation, scale (Legacy wrapper)
+    pub fn set_model(&mut self, position: Vec3, rotation: Vec3, scale: Vec3) {
+        let mut transform = super::Transform::from_trs(
+            position,
+            glam::Quat::from_euler(glam::EulerRot::XYZ, rotation.x, rotation.y, rotation.z),
+            scale,
+        );
+        self.set_transform(&mut transform);
     }
 
     /// Set view matrix from camera position and look-at target
@@ -564,9 +569,7 @@ impl<T: Copy> StorageBuffer<T> {
                 ))
             })?;
 
-        log::debug!(
-            "Created storage buffer '{name}' (capacity: {capacity}, size: {size} bytes)"
-        );
+        log::debug!("Created storage buffer '{name}' (capacity: {capacity}, size: {size} bytes)");
 
         Ok(Self {
             buffer,
@@ -618,7 +621,7 @@ impl<T: Copy> StorageBuffer<T> {
     /// Direct write of a single element at a specific index with full-buffer coherency
     /// This is the AAA pattern used in modern game engines (UE5, Unity) for streaming updates
     /// while avoiding GPU-CPU race conditions.
-    /// 
+    ///
     /// Uses persistent mapping (MAPPED flag) to avoid guard scope issues. The buffer is already
     /// mapped at creation time, so we write directly to the persistent pointer and flush.
     ///
@@ -636,7 +639,7 @@ impl<T: Copy> StorageBuffer<T> {
         let element_size = std::mem::size_of::<T>();
         let offset_bytes = (index * element_size) as u64;
         let full_size = (self.capacity * element_size) as u64;
-        
+
         // AAA Pattern: Use persistent mapping (allocated with MAPPED flag)
         // Get the persistent mapped pointer from VMA - it's already mapped
         let mapped_ptr = self
@@ -644,7 +647,7 @@ impl<T: Copy> StorageBuffer<T> {
             .vma
             .get_allocation_info(&self.allocation)
             .mapped_data;
-        
+
         if mapped_ptr.is_null() {
             // Fallback for non-persistent mapping (shouldn't happen with our flags)
             let mut guard = self
@@ -663,7 +666,7 @@ impl<T: Copy> StorageBuffer<T> {
         // UE5/Unity pattern: flush the specific range that was written
         let flush_offset = offset_bytes;
         let flush_size = std::mem::size_of::<T>() as u64;
-        
+
         self.allocator
             .vma
             .flush_allocation(&self.allocation, flush_offset, flush_size)
@@ -697,7 +700,9 @@ impl<T: Copy> StorageBuffer<T> {
     /// Buffer must be host-visible.
     pub unsafe fn read_all(&mut self) -> crate::Result<Vec<T>> {
         let size = (self.capacity * std::mem::size_of::<T>()) as u64;
-        let guard = self.allocator.map_allocation_guarded(&mut self.allocation, size)?;
+        let guard = self
+            .allocator
+            .map_allocation_guarded(&mut self.allocation, size)?;
         Ok(guard.as_slice::<T>().to_vec())
     }
 
@@ -713,7 +718,10 @@ impl<T: Copy> StorageBuffer<T> {
             .get_allocation_info(&self.allocation)
             .mapped_data;
 
-        assert!(!mapped_ptr.is_null(), "Buffer should be persistently mapped");
+        assert!(
+            !mapped_ptr.is_null(),
+            "Buffer should be persistently mapped"
+        );
         let base = mapped_ptr as *const T;
         std::ptr::read(base.add(index))
     }

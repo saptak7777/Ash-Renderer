@@ -14,6 +14,7 @@ use winit::{
 struct App {
     window: Option<Window>,
     renderer: Option<Renderer>,
+    render_commands: Vec<ash_renderer::renderer::RenderCommand>,
 }
 
 impl ApplicationHandler for App {
@@ -23,10 +24,59 @@ impl ApplicationHandler for App {
             .with_inner_size(winit::dpi::LogicalSize::new(800, 600));
 
         let window = event_loop.create_window(window_attrs).unwrap();
-        let _size = window.inner_size();
         let surface_provider = ash_renderer::vulkan::WindowSurfaceProvider::new(&window);
         match Renderer::new(&surface_provider) {
-            Ok(renderer) => {
+            Ok(mut renderer) => {
+                // Create a simple triangle mesh
+                let mut mesh = Mesh::default();
+                mesh.name = std::sync::Arc::from("Triangle");
+                mesh.vertices = vec![
+                    Vertex {
+                        position: [0.0, -0.5, 0.0],
+                        color: [1.0, 0.0, 0.0],
+                        uv: [0.5, 0.0],
+                        normal: [0.0, 0.0, 1.0],
+                        tangent: [1.0, 0.0, 0.0, 1.0],
+                    },
+                    Vertex {
+                        position: [0.5, 0.5, 0.0],
+                        color: [0.0, 1.0, 0.0],
+                        uv: [1.0, 1.0],
+                        normal: [0.0, 0.0, 1.0],
+                        tangent: [1.0, 0.0, 0.0, 1.0],
+                    },
+                    Vertex {
+                        position: [-0.5, 0.5, 0.0],
+                        color: [0.0, 0.0, 1.0],
+                        uv: [0.0, 1.0],
+                        normal: [0.0, 0.0, 1.0],
+                        tangent: [1.0, 0.0, 0.0, 1.0],
+                    },
+                ];
+                mesh.indices = Some(vec![0, 1, 2]);
+
+                // Upload mesh
+                let mesh_handle = renderer.upload_mesh(mesh).unwrap_or(0);
+
+                // Create default material
+                let material = Material {
+                    name: "TriangleMat".to_string(),
+                    color: [1.0, 1.0, 1.0, 1.0],
+                    metallic: 0.0,
+                    roughness: 1.0,
+                    ..Default::default()
+                };
+                let material_handle = renderer.register_and_upload_material(material).unwrap();
+
+                // Setup render command
+                self.render_commands
+                    .push(ash_renderer::renderer::RenderCommand {
+                        mesh_handle,
+                        material_handle,
+                        transform: glam::Mat4::IDENTITY,
+                        ..Default::default()
+                    });
+
                 self.renderer = Some(renderer);
                 self.window = Some(window);
                 log::info!("Renderer initialized successfully!");
@@ -53,7 +103,12 @@ impl ApplicationHandler for App {
                         glam::Mat4::perspective_rh(45.0_f32.to_radians(), aspect, 0.5, 100.0);
                     proj.y_axis.y *= -1.0; // Vulkan Y-flip
 
-                    if let Err(e) = renderer.render_frame(view, proj, camera_pos) {
+                    // Submit commands
+                    if let Err(e) = renderer.submit_render_commands(&self.render_commands) {
+                        log::error!("Failed to submit render commands: {e}");
+                    }
+
+                    if let Err(e) = renderer.render_frame(view, proj, camera_pos, None) {
                         log::error!("Render error: {e}");
                     }
                 }

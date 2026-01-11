@@ -2,7 +2,6 @@ use crate::renderer::resources::ImageHandle;
 use crate::vulkan::{descriptor_layout::DescriptorSetLayoutBuilder, Allocator, VulkanDevice};
 use crate::{AshError, Result};
 use ash::vk;
-use std::ffi::CStr;
 use std::sync::Arc;
 
 pub struct IblManager {
@@ -16,13 +15,15 @@ pub struct IblManager {
 
     pipeline_layout: vk::PipelineLayout,
     descriptor_layout: crate::vulkan::descriptor_layout::DescriptorSetLayout,
+    descriptor_allocator: crate::vulkan::descriptor_allocator::DescriptorAllocator,
 }
 
-#[repr(C)]
+#[repr(C, align(16))]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 struct IblComputePushConstants {
     output_size: u32,
     roughness: f32,
+    _padding: [u32; 2],
 }
 
 impl IblManager {
@@ -66,7 +67,7 @@ impl IblManager {
                 )?
             };
 
-            let entry_point = unsafe { CStr::from_bytes_with_nul_unchecked(b"main\0") };
+            let entry_point = c"main";
             let stage = vk::PipelineShaderStageCreateInfo::default()
                 .stage(vk::ShaderStageFlags::COMPUTE)
                 .module(shader_module)
@@ -101,6 +102,12 @@ impl IblManager {
             "/prefilter_envmap.comp.spv"
         )))?;
 
+        let descriptor_allocator = crate::vulkan::descriptor_allocator::DescriptorAllocator::new(
+            Arc::clone(&device),
+            64, // Enough sets for baking passes
+            None,
+        )?;
+
         Ok(Self {
             device,
             allocator,
@@ -109,6 +116,7 @@ impl IblManager {
             prefilter_pipeline,
             pipeline_layout,
             descriptor_layout,
+            descriptor_allocator,
         })
     }
 
@@ -190,7 +198,7 @@ impl IblManager {
         env_view: vk::ImageView,
         env_sampler: vk::Sampler,
     ) -> Result<ImageHandle> {
-        let resolution = 128;
+        let resolution = 256;
         let max_mips = 5;
 
         let prefiltered_map = ImageHandle::create_cubemap(
@@ -224,7 +232,7 @@ impl IblManager {
 
     #[allow(clippy::too_many_arguments)]
     fn dispatch_compute(
-        &self,
+        &mut self,
         vulkan_device: &VulkanDevice,
         command_pool: vk::CommandPool,
         pipeline: vk::Pipeline,
@@ -236,13 +244,8 @@ impl IblManager {
     ) -> Result<()> {
         let resolution = target.extent().width >> mip;
 
-        // 1. Descriptor Set
-        let mut desc_alloc = crate::vulkan::descriptor_allocator::DescriptorAllocator::new(
-            Arc::clone(&self.device),
-            1,
-            None,
-        )?;
-        let desc_set = desc_alloc.allocate_static_set(
+        // 1. Descriptor Set (REUSED)
+        let desc_set = self.descriptor_allocator.allocate_static_set(
             &self.descriptor_layout.handle(),
             self.descriptor_layout.bindings(),
         )?;
@@ -320,6 +323,7 @@ impl IblManager {
                 let push = IblComputePushConstants {
                     output_size: resolution,
                     roughness,
+                    _padding: [0; 2],
                 };
                 self.device.cmd_push_constants(
                     cmd,
@@ -330,7 +334,7 @@ impl IblManager {
                 );
 
                 // Dispatch for all 6 faces
-                let groups = (resolution + 7) / 8;
+                let groups = resolution.div_ceil(8);
                 self.device.cmd_dispatch(cmd, groups, groups, 6);
 
                 // Transition back to SHADER_READ_ONLY for sampling
