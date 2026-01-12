@@ -3,6 +3,7 @@
 //! This module provides the main [`Renderer`] struct and all supporting types
 //! for PBR rendering, materials, meshes, and textures.
 
+pub mod atrous_denoiser;
 pub mod cleanup_traits;
 pub mod diagnostics;
 pub mod features;
@@ -18,6 +19,7 @@ pub mod instancing;
 pub mod light_culling_integration;
 pub mod lod_system;
 pub mod model_renderer;
+pub mod motion_pass;
 pub mod msaa_targets;
 pub mod occlusion_culling;
 pub mod pass_manager;
@@ -43,6 +45,7 @@ pub use indirect_draw::IndirectDrawPass;
 pub use instancing::{InstanceData, InstancingManager};
 pub use lod_system::{LodManager, LodMesh, LodSelection};
 pub use model_renderer::{MaterialPushConstants, ModelRenderer};
+pub use motion_pass::MotionVectorPass;
 pub use msaa_targets::{MsaaColorTarget, MsaaDepthTarget};
 pub use occlusion_culling::{CullBoundingBox, CullObjectData, OcclusionCulling};
 pub use pass_manager::{RenderPassManager, RenderingMode};
@@ -57,7 +60,7 @@ pub use temporal_upscaling::{VsrPass, VsrQuality};
 pub use resources::{
     BufferAllocation, BufferHandle, BufferPool, Camera, CascadedShadowMap, DepthBuffer,
     DescriptorSetHandle, ImageHandle, InstanceBuffer, Material, MaterialHandle, MaterialManager,
-    Mesh, MvpMatrices, PipelineHandle, Texture, TextureData, Transform, UniformBuffer, Vertex,
-    VertexBuffer, MVP,
+    Mesh, MvpMatrices, ObjectMotionData, PipelineHandle, TemporalCamera, Texture, TextureData,
+    Transform, UniformBuffer, Vertex, VertexBuffer, MVP,
 };
 pub use skinned_vertex::SkinnedVertex;

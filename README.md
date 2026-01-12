@@ -8,24 +8,22 @@ A Vulkan rendering library built with [ash](https://github.com/ash-rs/ash). This
 
 > [!NOTE]
 > This is still very much a "work in progress." Expect breaking changes and occasional Vulkan validation errors if you feed it weird data.
-> **Stable Versions:** 0.1.2, 0.3.8, 0.3.9, 0.4.0, 0.4.1, 0.4.2, 0.4.3, 0.4.4, 0.4.9, 0.4.45.
+> **Stable Versions:** 0.1.2, 0.3.8, 0.3.9, 0.4.0-0.4.9, 0.4.45, 0.4.84.
 
 ## Features
 
 - **Core Renderer**: Basic PBR metallic/roughness workflow with automatic GLB material registration.
-- **GLB Support**: Automatic material registration from GLB files with PBR properties (metallic, roughness, emissive).
-- **Multi-Material Foundation**: Data structures ready for multi-material GLB models with submesh descriptors.
+- **Refactored Asset Pipeline**: Decoupled loading using the [`archetype_asset`](https://github.com/saptak7777/Archetype-Asset) crate.
+- **GLB Support**: Robust material registration from GLB files with PBR properties (metallic, roughness, emissive) via the `gltf_loader` utility.
 - **Occlusion Culling**: Hi-Z based visibility testing (GPU driven).
 - **GPU Culling**: Frustum culling and indirect draw call generation.
-- **Lighting**: Cascaded Shadow Mapping (CSM) and Screen-Space Global Illumination (SSGI).
+- **Lighting**: Cascaded Shadow Mapping (CSM), Screen-Space Global Illumination (SSGI), and IBL (Image-Based Lighting).
 - **Bindless Architecture**: Full bindless texture support with 16,384 slots.
-- **Texture Compression**: CPU-side BC7 (albedo) and BC5 (normals) compression for 4x+ VRAM savings.
 - **Post-Processing**: Tonemapping, Bloom, and internal VSR (Temporal upscaling) support.
-- **GPU Skinning**: Linear blend skinning (LBS) with compute-based joint updates and double-buffering.
+- **GPU Skinning**: Linear blend skinning (LBS) with compute-based joint updates.
 - **Buffer Safety**: Type-safe `BufferBuilder` API with runtime validation and allocation tracking.
 - **Headless**: Decoupled from windowing via `SurfaceProvider`.
-- **Advanced Diagnostics**: Real-time VRAM budgeting (prevents OOM crashes) and nanosecond-precision GPU timestamp profiling.
-- **Parallel Rendering**: Multi-threaded command buffer recording support (opt-in via `parallel` feature).
+- **Advanced Diagnostics**: Real-time VRAM budgeting and nanosecond-precision GPU timestamp profiling.
 
 ## Quick Start (Winit 0.30)
 
@@ -62,23 +60,15 @@ impl ApplicationHandler for App {
             WindowEvent::RedrawRequested => {
                 if let (Some(r), Some(w)) = (&mut self.renderer, &self.window) {
                     let size = w.inner_size();
-                    let aspect = size.width as f32 / size.height as f32;
+                    let aspect = size.width as f32 / size.height.max(1) as f32;
                     
-                    // Simple camera setup
-                    let view = glam::Mat4::look_at_rh(
-                        glam::Vec3::new(0.0, 2.0, 5.0),
-                        glam::Vec3::ZERO,
-                        glam::Vec3::Y
-                    );
-                    let mut proj = glam::Mat4::perspective_rh(
-                        45.0_f32.to_radians(),
-                        aspect,
-                        0.1,
-                        100.0
-                    );
+                    let camera_pos = glam::Vec3::new(0.0, 2.0, 5.0);
+                    let view = glam::Mat4::look_at_rh(camera_pos, glam::Vec3::ZERO, glam::Vec3::Y);
+                    let mut proj = glam::Mat4::perspective_rh(45.0_f32.to_radians(), aspect, 0.1, 100.0);
                     proj.y_axis.y *= -1.0; // Vulkan Y-flip
                     
-                    r.render_frame(view, proj, glam::Vec3::new(0.0, 2.0, 5.0)).unwrap();
+                    // Render the frame (no global transform override)
+                    r.render_frame(view, proj, camera_pos, None).unwrap();
                     w.request_redraw();
                 }
             }
@@ -90,6 +80,7 @@ impl ApplicationHandler for App {
                     });
                 }
             }
+            WindowEvent::CloseRequested => _el.exit(),
             _ => {}
         }
     }
@@ -101,12 +92,12 @@ impl ApplicationHandler for App {
 | Feature | Status |
 | :--- | :--- |
 | **Material System** | Functional (Full GLB PBR Support) |
-| **Shadows** | Working, but cascades need tuning |
+| **Shadows** | Working (Cascaded Shadow Maps) |
 | **SSGI** | Experimental (Expect noise) |
-| **VSR (Temporal Upscaling)** | Implemented (basic jitter patterns, needs refinement) |
-| **GPU Skinning** | Stable (Double-buffered, 1024 bone limit) |
-| **GLTF Loading** | Basic support via `gltf` crate |
-| **Stability** | Dev-grade (Validation layers recommended during dev) |
+| **IBL** | Implemented (Supports irradiance and prefiltered maps) |
+| **Temporal Upscaling** | Implemented (VSR/TAA patterns) |
+| **GPU Skinning** | Stable (Double-buffered) |
+| **Asset Loading** | Decoupled via `archetype_asset` and `gltf_loader` |
 
 ## Examples
 
@@ -114,68 +105,47 @@ impl ApplicationHandler for App {
 # Basic cube with PBR
 cargo run --example 02_cube
 
-# GLTF loading (experimental)
-cargo run --example 03_model_loading --features gltf_loading
+# GLTF loading (Default features include gltf_loading)
+cargo run --example 03_model_loading
 ```
 
-## API Usage: Skeletal Animation
+## API Usage: Asset Loading (Dumb Pipe)
 
-The skeletal animation API uses explicit updates for safety and performance. Note the `unsafe` requirement for buffer updates.
-
-```rust
-// 1. Update Joint Matrices (Unsafe because it writes directly to mapped GPU memory)
-let joints: &[glam::Mat4] = ...; // Your calculated joint matrices
-unsafe {
-    renderer.update_joint_ssbo(joints).expect("Failed to update joints");
-}
-
-// 2. Draw Skinned Mesh
-renderer.draw_skinned_mesh(
-    mesh_handle,
-    material_handle,
-    transform_matrix,
-    joint_offset, // Offset into the SSBO where this instance's joints begin
-);
-```
-
-## API Usage: Buffer Creation
-
-The new `BufferBuilder` API makes creating GPU buffers explicit and safe:
+Following the "Dumb Pipe" philosophy, loading is handled outside the core renderer.
 
 ```rust
-// 1. Using a convenient preset (Best Practice)
-let (buffer, allocation) = allocator.create_joint_buffer(size)?;
+// 1. Load meshes from GLB using the utility bridge
+let meshes = gltf_loader::load_model("model.glb")?;
 
-// 2. Using the fluent builder (For manual control)
-let (buffer, allocation) = BufferBuilder::new(size)
-    .storage_buffer()
-    .cpu_writable()
-    .named("My Custom Buffer")
-    .build(&allocator)?;
-```
+// 2. Upload mesh to GPU
+let mesh = meshes.into_iter().next().unwrap();
+let mesh_handle = renderer.upload_mesh(mesh)?;
 
-## API Usage: Material System
-
-Materials from GLB files are now automatically registered and deduplicated.
-
-```rust
-// 1. Loading a GLB model
-let mesh = Mesh::load_from_file("model.glb")?;
-let handle = renderer.register_mesh_handle(&mesh)?;
-
-// 2. Rendering (Material is automatically selected)
-// No need to manually specify material_handle for GLB meshes
+// 3. Register a render command
 renderer.submit_render_commands(&[RenderCommand {
-    mesh_handle: handle,
-    material_handle: 0, // 0 = Auto-detect from mesh registration
+    mesh_handle,
+    material_handle: MaterialHandle::null(), // Use auto-detected material from registration
     transform: glam::Mat4::IDENTITY,
     ..Default::default()
 }])?;
 ```
 
+## API Usage: Buffer Creation
+
+The `BufferBuilder` API makes creating GPU buffers explicit and safe:
+
+```rust
+// Using the fluent builder
+let (buffer, allocation) = BufferBuilder::new(size)
+    .storage_buffer()
+    .cpu_writable()
+    .named("My Custom Buffer")
+    .build(renderer.allocator())?;
+```
+
 ## Requirements
 
-- **Rust**: 1.70+
+- **Rust**: 1.75+
 - **Vulkan**: 1.2+ (Requires support for dynamic indexing and descriptor indexing)
 
 ---

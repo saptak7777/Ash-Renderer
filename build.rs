@@ -31,6 +31,7 @@ fn compile_shaders() {
         ("shaders/overlay.vert", "overlay.vert.spv", "vert", &[]),
         ("shaders/triangle.vert", "triangle.vert.spv", "vert", &[]),
         ("shaders/skinning.vert", "skinning.vert.spv", "vert", &[]),
+        ("shaders/motion.vert", "motion.vert.spv", "vert", &[]),
         // Fragment shaders
         (
             "shaders/frag.frag",
@@ -72,6 +73,7 @@ fn compile_shaders() {
             "frag",
             &[],
         ),
+        ("shaders/motion.frag", "motion.frag.spv", "frag", &[]),
         // Compute shaders
         (
             "shaders/light_culling.comp",
@@ -110,6 +112,12 @@ fn compile_shaders() {
             &[],
         ),
         ("shaders/ssgi.comp", "ssgi.comp.spv", "comp", &[]),
+        (
+            "shaders/atrous_denoise.comp",
+            "atrous_denoise.comp.spv",
+            "comp",
+            &[],
+        ),
         (
             "shaders/cluster_cull.comp",
             "cluster_cull.comp.spv",

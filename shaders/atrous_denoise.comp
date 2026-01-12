@@ -1,0 +1,99 @@
+#version 450
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+// Input textures
+layout(set = 0, binding = 0) uniform sampler2D inputGI;
+layout(set = 0, binding = 1) uniform sampler2D depthTex;
+layout(set = 0, binding = 2) uniform sampler2D normalTex;
+
+// Output image
+layout(set = 0, binding = 3, rgba16f) uniform writeonly image2D outputGI;
+
+// Push constants
+layout(push_constant) uniform PushConstants {
+    uint stepSize;
+    float depthWeight;
+    float normalWeight;
+    float lumaWeight;
+    uint screenWidth;
+    uint screenHeight;
+} pc;
+
+// A-Trous 3x3 kernel offsets
+const ivec2 offsets[9] = ivec2[](
+    ivec2(-1, -1), ivec2(0, -1), ivec2(1, -1),
+    ivec2(-1,  0), ivec2(0,  0), ivec2(1,  0),
+    ivec2(-1,  1), ivec2(0,  1), ivec2(1,  1)
+);
+
+// Gaussian kernel weights (3x3)
+const float gaussianWeights[9] = float[](
+    1.0/16.0, 2.0/16.0, 1.0/16.0,
+    2.0/16.0, 4.0/16.0, 2.0/16.0,
+    1.0/16.0, 2.0/16.0, 1.0/16.0
+);
+
+float luminance(vec3 color) {
+    return dot(color, vec3(0.299, 0.587, 0.114));
+}
+
+void main() {
+    ivec2 pixelCoord = ivec2(gl_GlobalInvocationID.xy);
+    
+    if (pixelCoord.x >= pc.screenWidth || pixelCoord.y >= pc.screenHeight) {
+        return;
+    }
+    
+    vec2 texCoord = (vec2(pixelCoord) + 0.5) / vec2(pc.screenWidth, pc.screenHeight);
+    
+    // Center sample
+    vec3 centerGI = texture(inputGI, texCoord).rgb;
+    float centerDepth = texture(depthTex, texCoord).r;
+    vec3 centerNormal = texture(normalTex, texCoord).xyz;
+    float centerLuma = luminance(centerGI);
+    
+    vec3 sumGI = vec3(0.0);
+    float sumWeight = 0.0;
+    
+    // A-Trous filter: sample 3x3 neighborhood with step size
+    for (int i = 0; i < 9; i++) {
+        ivec2 offset = offsets[i] * int(pc.stepSize);
+        ivec2 sampleCoord = pixelCoord + offset;
+        
+        // Clamp to screen bounds
+        sampleCoord = clamp(sampleCoord, ivec2(0), ivec2(pc.screenWidth - 1, pc.screenHeight - 1));
+        vec2 sampleTexCoord = (vec2(sampleCoord) + 0.5) / vec2(pc.screenWidth, pc.screenHeight);
+        
+        // Sample neighbor
+        vec3 sampleGI = texture(inputGI, sampleTexCoord).rgb;
+        float sampleDepth = texture(depthTex, sampleTexCoord).r;
+        vec3 sampleNormal = texture(normalTex, sampleTexCoord).xyz;
+        float sampleLuma = luminance(sampleGI);
+        
+        // Edge-stopping weights
+        
+        // 1. Depth weight (bilateral filter)
+        float depthDiff = abs(centerDepth - sampleDepth);
+        float wDepth = exp(-depthDiff * pc.depthWeight);
+        
+        // 2. Normal weight (preserve geometric edges)
+        float normalSimilarity = max(0.0, dot(centerNormal, sampleNormal));
+        float wNormal = pow(normalSimilarity, pc.normalWeight);
+        
+        // 3. Luminance weight (preserve detail)
+        float lumaDiff = abs(centerLuma - sampleLuma);
+        float wLuma = exp(-lumaDiff * pc.lumaWeight);
+        
+        // Combined weight
+        float weight = gaussianWeights[i] * wDepth * wNormal * wLuma;
+        
+        sumGI += sampleGI * weight;
+        sumWeight += weight;
+    }
+    
+    // Normalize
+    vec3 denoisedGI = sumWeight > 0.0 ? sumGI / sumWeight : centerGI;
+    
+    imageStore(outputGI, pixelCoord, vec4(denoisedGI, 1.0));
+}

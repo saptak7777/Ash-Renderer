@@ -325,3 +325,126 @@ impl Camera {
         proj
     }
 }
+
+/// Temporal camera for TSR with automatic frame history tracking
+///
+/// Maintains current and previous frame matrices for motion vector generation.
+/// Uses Halton sequence for sub-pixel jitter to improve temporal stability.
+pub struct TemporalCamera {
+    // Camera parameters
+    pub position: Vec3,
+    pub target: Vec3,
+    pub up: Vec3,
+    pub fov: f32,
+    pub aspect: f32,
+    pub near: f32,
+    pub far: f32,
+
+    // Current frame matrices
+    view: Mat4,
+    proj: Mat4,
+    view_proj: Mat4,
+
+    // Previous frame matrices (for motion vectors)
+    prev_view: Mat4,
+    prev_proj: Mat4,
+    prev_view_proj: Mat4,
+
+    // Jitter state
+    halton: crate::renderer::temporal_upscaling::HaltonSequence,
+    current_jitter: (f32, f32),
+}
+
+impl TemporalCamera {
+    pub fn new(position: Vec3, target: Vec3, aspect: f32) -> Self {
+        let view = Mat4::look_at_rh(position, target, Vec3::Y);
+        let mut proj = Mat4::perspective_rh(45.0_f32.to_radians(), aspect, 0.5, 100.0);
+        proj.y_axis.y *= -1.0;
+        let view_proj = proj * view;
+
+        Self {
+            position,
+            target,
+            up: Vec3::Y,
+            fov: 45.0,
+            aspect,
+            near: 0.5,
+            far: 100.0,
+            view,
+            proj,
+            view_proj,
+            prev_view: view,
+            prev_proj: proj,
+            prev_view_proj: view_proj,
+            halton: crate::renderer::temporal_upscaling::HaltonSequence::new(16),
+            current_jitter: (0.0, 0.0),
+        }
+    }
+
+    pub fn default(aspect: f32) -> Self {
+        Self::new(Vec3::new(0.0, 0.0, 3.0), Vec3::ZERO, aspect)
+    }
+
+    /// Begin new frame - swaps previous/current matrices and updates jitter
+    ///
+    /// Call this at the start of each frame before rendering.
+    /// Uses zero-cost `std::mem::swap` for efficient history tracking.
+    pub fn begin_frame(&mut self) {
+        // Zero-cost swap using Rust's ownership system
+        std::mem::swap(&mut self.prev_view, &mut self.view);
+        std::mem::swap(&mut self.prev_proj, &mut self.proj);
+        std::mem::swap(&mut self.prev_view_proj, &mut self.view_proj);
+
+        // Update jitter for this frame
+        self.current_jitter = self.halton.next();
+
+        // Recalculate matrices with new jitter
+        self.update_matrices();
+    }
+
+    fn update_matrices(&mut self) {
+        self.view = Mat4::look_at_rh(self.position, self.target, self.up);
+
+        let mut proj =
+            Mat4::perspective_rh(self.fov.to_radians(), self.aspect, self.near, self.far);
+        proj.y_axis.y *= -1.0; // Vulkan Y-flip
+
+        // Apply sub-pixel jitter for TSR
+        let (jx, jy) = self.current_jitter;
+        let jitter_mat = Mat4::from_translation(Vec3::new(jx * 2.0 / self.aspect, jy * 2.0, 0.0));
+
+        self.proj = jitter_mat * proj;
+        self.view_proj = self.proj * self.view;
+    }
+
+    pub fn view_matrix(&self) -> Mat4 {
+        self.view
+    }
+
+    pub fn projection_matrix(&self) -> Mat4 {
+        self.proj
+    }
+
+    pub fn view_proj_matrix(&self) -> Mat4 {
+        self.view_proj
+    }
+
+    pub fn prev_view_proj_matrix(&self) -> Mat4 {
+        self.prev_view_proj
+    }
+
+    /// Get motion data for an object with the given model matrix
+    pub fn get_motion_data(
+        &self,
+        model: Mat4,
+    ) -> crate::renderer::resources::motion::ObjectMotionData {
+        crate::renderer::resources::motion::ObjectMotionData::new(
+            self.view_proj * model,
+            self.prev_view_proj * model,
+        )
+    }
+
+    pub fn jitter(&self) -> (f32, f32) {
+        self.current_jitter
+    }
+}

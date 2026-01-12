@@ -91,6 +91,9 @@ pub struct SsgiPass {
     denoise_pipeline: vk::Pipeline,
     denoise_layout: vk::PipelineLayout,
 
+    // A-Trous denoiser
+    atrous_denoiser: Option<crate::renderer::atrous_denoiser::ATrousDenoiser>,
+
     // Descriptors
     descriptor_pool: vk::DescriptorPool,
     desc_layout: vk::DescriptorSetLayout,
@@ -123,6 +126,7 @@ impl SsgiPass {
             gi_layout: vk::PipelineLayout::null(),
             denoise_pipeline: vk::Pipeline::null(),
             denoise_layout: vk::PipelineLayout::null(),
+            atrous_denoiser: None,
             descriptor_pool: vk::DescriptorPool::null(),
             desc_layout: vk::DescriptorSetLayout::null(),
             desc_sets: [vk::DescriptorSet::null(); 2],
@@ -131,7 +135,7 @@ impl SsgiPass {
             height: 0,
             quality: SsgiQuality::default(),
             intensity: 1.0,
-            max_distance: 50.0,
+            max_distance: 10.0,
             frame_index: 0,
             initialized: false,
         }
@@ -165,9 +169,17 @@ impl SsgiPass {
         self.create_sampler()
             .expect("SSGI: Sampler creation failed");
         self.create_descriptors()
-            .expect("SSGI: Descriptor setup failed");
+            .expect("SSGI: Descriptor creation failed");
         self.create_pipelines()
-            .expect("SSGI: Pipeline compilation failed");
+            .expect("SSGI: Pipeline creation failed");
+
+        // Initialize A-Trous denoiser
+        let mut denoiser =
+            crate::renderer::atrous_denoiser::ATrousDenoiser::new(Arc::clone(&self.device));
+        denoiser
+            .init(alloc, _vulkan_device, self.width, self.height)
+            .expect("SSGI: A-Trous denoiser initialization failed");
+        self.atrous_denoiser = Some(denoiser);
 
         self.initialized = true;
     }

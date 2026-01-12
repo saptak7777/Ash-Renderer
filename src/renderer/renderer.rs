@@ -16,6 +16,7 @@ use crate::{
             DrawContext, MaterialPushConstants, ModelRenderer, DRAW_PUSH_FRAGMENT_BYTES,
             DRAW_PUSH_VERTEX_BYTES,
         },
+        motion_pass::MotionVectorPass,
         occlusion_culling::{CullBoundingBox, OcclusionCulling},
         pass_manager::{RenderPassManager, RenderingMode},
         resource_registry::{ResourceId, ResourceRegistry},
@@ -422,6 +423,9 @@ pub struct Renderer {
     vsr_pass: Option<VsrPass>,
     // Screen-Space Global Illumination
     ssgi_pass: Option<SsgiPass>,
+    // Motion Vector Pass for TSR/TAA
+    motion_pass: Option<MotionVectorPass>,
+    motion_framebuffer: Option<vk::Framebuffer>,
     // G-Buffer for Normals and Motion Vectors
     gbuffer: Option<GBuffer>,
     // Pipeline optimization
@@ -925,6 +929,8 @@ impl Renderer {
                 occlusion_culling: OcclusionCulling::new(),
                 vsr_pass: None,
                 ssgi_pass: None,
+                motion_pass: None,
+                motion_framebuffer: None,
                 gbuffer: Some(gbuffer),
                 culling_manager: CullingManager::new(),
                 use_gpu_driven: pass_manager.use_gpu_driven(),
@@ -1077,6 +1083,9 @@ impl Renderer {
                 forward_plus.upload_to_gpu(&renderer.alloc.vma, &renderer.device.device)?;
             }
 
+            // Initialize motion vector pass
+            renderer.init_motion_pass()?;
+
             Ok(renderer)
         }
     }
@@ -1216,6 +1225,71 @@ impl Renderer {
         }
 
         Ok(data)
+    }
+
+    /// Initialize motion vector pass for TSR/TAA
+    ///
+    /// # Safety
+    /// Must be called after GBuffer is initialized
+    pub unsafe fn init_motion_pass(&mut self) -> Result<()> {
+        if self.motion_pass.is_some() {
+            return Ok(()); // Already initialized
+        }
+
+        let _gbuffer = self.gbuffer.as_ref().ok_or(AshError::VulkanError(
+            "GBuffer must be initialized before motion pass".to_string(),
+        ))?;
+
+        let mut motion_pass = MotionVectorPass::new(Arc::clone(&self.device.device));
+        
+        // Initialize with G-Buffer motion format
+        let motion_format = vk::Format::R16G16_SFLOAT;
+        motion_pass.init(&self.device, motion_format)?;
+
+        self.motion_pass = Some(motion_pass);
+        
+        // Create motion framebuffer
+        let swapchain = self.swapchain.as_ref().ok_or(AshError::VulkanError(
+            "Swapchain not initialized".to_string(),
+        ))?;
+        self.create_motion_framebuffer(swapchain.extent.width, swapchain.extent.height)?;
+        
+        log::info!("Motion vector pass initialized");
+
+        Ok(())
+    }
+
+    /// Create framebuffer for motion vector pass
+    ///
+    /// # Safety
+    /// GBuffer and motion pass must be initialized
+    unsafe fn create_motion_framebuffer(&mut self, width: u32, height: u32) -> Result<()> {
+        let gbuffer = self.gbuffer.as_ref().ok_or(AshError::VulkanError(
+            "GBuffer not initialized".to_string(),
+        ))?;
+
+        let motion_pass = self.motion_pass.as_ref().ok_or(AshError::VulkanError(
+            "Motion pass not initialized".to_string(),
+        ))?;
+
+        // Destroy old framebuffer if exists
+        if let Some(old_fb) = self.motion_framebuffer.take() {
+            self.device.device.destroy_framebuffer(old_fb, None);
+        }
+
+        let attachments = [gbuffer.motion_view()];
+        let framebuffer_info = vk::FramebufferCreateInfo::default()
+            .render_pass(motion_pass.render_pass())
+            .attachments(&attachments)
+            .width(width)
+            .height(height)
+            .layers(1);
+
+        let framebuffer = self.device.device.create_framebuffer(&framebuffer_info, None)?;
+        self.motion_framebuffer = Some(framebuffer);
+
+        log::debug!("Motion framebuffer created ({width}x{height})");
+        Ok(())
     }
 
     fn init_resources(
