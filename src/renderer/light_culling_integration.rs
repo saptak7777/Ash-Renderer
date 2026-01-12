@@ -71,8 +71,11 @@ impl LightCullingIntegration {
 
     /// Update lights from lighting config
     pub fn update_lights(&mut self, config: &LightingConfig) {
-        self.pass
-            .update_lights(&config.point_lights, &config.directional_lights);
+        self.pass.update_lights(
+            &config.point_lights,
+            &config.directional_lights,
+            &config.spot_lights,
+        );
     }
 
     /// Update lights directly
@@ -81,7 +84,8 @@ impl LightCullingIntegration {
         point_lights: &[PointLight],
         directional_lights: &[DirectionalLight],
     ) {
-        self.pass.update_lights(point_lights, directional_lights);
+        self.pass
+            .update_lights(point_lights, directional_lights, &[]);
     }
 
     /// Get GPU light data for upload

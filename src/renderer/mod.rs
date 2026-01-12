@@ -3,6 +3,7 @@
 //! This module provides the main [`Renderer`] struct and all supporting types
 //! for PBR rendering, materials, meshes, and textures.
 
+pub mod async_readback;
 pub mod atrous_denoiser;
 pub mod cleanup_traits;
 pub mod diagnostics;
@@ -35,6 +36,7 @@ pub mod temporal_upscaling;
 pub mod vram_budget;
 
 // Re-exports for public API
+pub use async_readback::AsyncReadbackManager;
 pub use cleanup_traits::{BufferCleanup, VulkanResourceCleanup};
 pub use features::{AutoRotateFeature, FeatureManager, RenderFeature};
 pub use forward_plus_descriptor::ForwardPlusDescriptor;

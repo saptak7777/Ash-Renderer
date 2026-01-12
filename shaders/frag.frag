@@ -275,12 +275,17 @@ void main() {
         // Skip disabled lights
         if (light.params.w < 0.5) continue;
         
+        // Light type constants (aligned with Rust and compute shader)
+        const uint LIGHT_TYPE_POINT = 0u;
+        const uint LIGHT_TYPE_DIRECTIONAL = 1u;
+        const uint LIGHT_TYPE_SPOT = 2u;
+        
         uint lightType = uint(light.direction.w);
         vec3 L; // Light direction
         float attenuation = 1.0;
         
-        // Point Light (type 0)
-        if (lightType == 0u) {
+        // Point Light
+        if (lightType == LIGHT_TYPE_POINT) {
             vec3 lightVec = light.position.xyz - fragWorldPos;
             float dist = length(lightVec);
             float radius = light.position.w;
@@ -295,12 +300,38 @@ void main() {
             attenuation = 1.0 / (dist * dist + 1.0);
             attenuation *= max(0.0, 1.0 - distRatio * distRatio);
         }
-        // Directional Light (type 2)
-        else if (lightType == 2u) {
+        // Directional Light
+        else if (lightType == LIGHT_TYPE_DIRECTIONAL) {
             L = -normalize(light.direction.xyz);
             attenuation = 1.0;
         }
-        // Spot Light (type 1) - TODO if needed
+        // Spot Light
+        else if (lightType == LIGHT_TYPE_SPOT) {
+            vec3 lightVec = light.position.xyz - fragWorldPos;
+            float dist = length(lightVec);
+            float range = light.position.w;
+            
+            // Skip if outside range
+            if (dist > range) continue;
+            
+            L = lightVec / dist;
+            
+            // Spot attenuation (cone falloff)
+            vec3 lightDir = normalize(light.direction.xyz);
+            float cosAngle = dot(-L, lightDir);
+            float cosInner = light.params.x;
+            float cosOuter = light.params.y;
+            
+            if (cosAngle < cosOuter) continue;
+            
+            float spotAttenuation = smoothstep(cosOuter, cosInner, cosAngle);
+            
+            // Distance attenuation
+            float distRatio = dist / range;
+            attenuation = 1.0 / (dist * dist + 1.0);
+            attenuation *= max(0.0, 1.0 - distRatio * distRatio);
+            attenuation *= spotAttenuation;
+        }
         else {
             continue;
         }

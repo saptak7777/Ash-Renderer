@@ -8,7 +8,7 @@ use ash::vk;
 use vk_mem::Alloc;
 
 use super::light_culling::{GpuLight, LightCullingConfig, LightCullingPass, MAX_LIGHTS};
-use super::lighting::{DirectionalLight, PointLight};
+use super::lighting::{DirectionalLight, PointLight, SpotLight};
 
 /// GPU buffer info for lights
 pub struct LightBuffer {
@@ -85,11 +85,12 @@ impl LightManager {
         &mut self,
         point_lights: &[PointLight],
         directional_lights: &[DirectionalLight],
+        spot_lights: &[SpotLight],
     ) {
         // We assume the incoming slices contain valid, world-space lighting data.
         // The culling pass handles its own internal capacity limits and sanitization.
         self.culling_pass
-            .update_lights(point_lights, directional_lights);
+            .update_lights(point_lights, directional_lights, spot_lights);
         self.dirty = true;
     }
 
@@ -411,7 +412,7 @@ mod tests {
             radius: 10.0,
         }];
 
-        manager.update_lights(&point_lights, &[]);
+        manager.update_lights(&point_lights, &[], &[]);
         assert_eq!(manager.light_count(), 1);
         assert!(manager.needs_buffer_update());
     }

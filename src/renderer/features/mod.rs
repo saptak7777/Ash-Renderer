@@ -18,7 +18,7 @@ pub use light_culling::{
     GpuLight, LightCullingConfig, LightCullingPass, MAX_LIGHTS, MAX_LIGHTS_PER_TILE, TILE_SIZE,
 };
 pub use light_manager::{ForwardPlusInfo, LightManager};
-pub use lighting::{DirectionalLight, LightingConfig, LightingFeature, PointLight};
+pub use lighting::{DirectionalLight, LightingConfig, LightingFeature, PointLight, SpotLight};
 pub use post_processing::{PostProcessingConfig, PostProcessingFeature};
 pub use shadows::ShadowFeature;
 pub use tonemapping::{TonemapOperator, TonemappingConfig, TonemappingFeature};

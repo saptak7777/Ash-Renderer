@@ -59,12 +59,59 @@ impl Default for PointLight {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct SpotLight {
+    pub position: Vec3,
+    pub color: Vec3,
+    pub intensity: f32,
+    pub range: f32,
+    pub direction: Vec3,
+    pub inner_angle: f32,
+    pub outer_angle: f32,
+}
+
+impl SpotLight {
+    pub fn new(
+        position: Vec3,
+        direction: Vec3,
+        color: [f32; 4],
+        range: f32,
+        inner_angle: f32,
+        outer_angle: f32,
+    ) -> Self {
+        Self {
+            position,
+            direction: direction.normalize(),
+            color: Vec3::new(color[0], color[1], color[2]),
+            intensity: color[3],
+            range,
+            inner_angle,
+            outer_angle,
+        }
+    }
+}
+
+impl Default for SpotLight {
+    fn default() -> Self {
+        Self {
+            position: Vec3::ZERO,
+            direction: Vec3::new(0.0, -1.0, 0.0),
+            color: Vec3::splat(1.0),
+            intensity: 1.0,
+            range: 10.0,
+            inner_angle: 0.5,
+            outer_angle: 0.785,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct LightingConfig {
     pub ambient_color: Vec3,
     pub ambient_intensity: f32,
     pub directional_lights: Vec<DirectionalLight>,
     pub point_lights: Vec<PointLight>,
+    pub spot_lights: Vec<SpotLight>,
 }
 
 impl Default for LightingConfig {
@@ -74,6 +121,7 @@ impl Default for LightingConfig {
             ambient_intensity: 1.0,
             directional_lights: vec![DirectionalLight::default()],
             point_lights: Vec::new(),
+            spot_lights: Vec::new(),
         }
     }
 }

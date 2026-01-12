@@ -1,11 +1,12 @@
 use crate::{
     renderer::{
+        async_readback::AsyncReadbackManager,
         diagnostics::{
             DiagnosticsMode, DiagnosticsOverlay, DiagnosticsState, FrameProfiler, GpuProfiler,
         },
         features::{
             AutoRotateFeature, DirectionalLight, FeatureFrameContext, FeatureManager,
-            FeatureRenderContext, PointLight, RenderFeature, ShadowFeature,
+            FeatureRenderContext, PointLight, RenderFeature, ShadowFeature, SpotLight,
         },
         forward_plus_integration::ForwardPlusIntegration,
         fullscreen_pass, hdr_framebuffer,
@@ -406,6 +407,7 @@ pub struct Renderer {
     diagnostics: DiagnosticsState,
     frame_profiler: FrameProfiler,
     gpu_profiler: Option<GpuProfiler>,
+    async_readback: Option<AsyncReadbackManager>,
     diagnostics_overlay: DiagnosticsOverlay,
     // Shadows
     shadow_feature: ShadowFeature,
@@ -437,6 +439,7 @@ pub struct Renderer {
     ambient_color: [f32; 4],
     point_lights: Vec<PointLight>,
     directional_lights: Vec<DirectionalLight>,
+    spot_lights: Vec<SpotLight>,
     debug_visualization_enabled: bool,
     // Post-processing descriptors
     post_descriptor_pool: vk::DescriptorPool,
@@ -918,6 +921,7 @@ impl Renderer {
                 diagnostics: DiagnosticsState::default(),
                 frame_profiler: FrameProfiler::new(),
                 gpu_profiler: None,
+                async_readback: None,
                 diagnostics_overlay: DiagnosticsOverlay::new(),
                 shadow_feature,
                 shadow_pipeline,
@@ -939,6 +943,7 @@ impl Renderer {
                 ambient_color: [0.1, 0.1, 0.1, 1.0],
                 point_lights: Vec::new(),
                 directional_lights: Vec::new(),
+                spot_lights: Vec::new(),
                 debug_visualization_enabled: false,
                 post_descriptor_pool: vk::DescriptorPool::null(),
                 post_descriptor_sets: Vec::new(),
@@ -1085,6 +1090,9 @@ impl Renderer {
 
             // Initialize motion vector pass
             renderer.init_motion_pass()?;
+            
+            // Initialize async readback manager
+            renderer.init_async_readback()?;
 
             Ok(renderer)
         }
@@ -1256,6 +1264,24 @@ impl Renderer {
         
         log::info!("Motion vector pass initialized");
 
+        Ok(())
+    }
+
+    /// Initialize async readback manager
+    ///
+    /// # Safety
+    /// Device must be valid
+    pub unsafe fn init_async_readback(&mut self) -> Result<()> {
+        if self.async_readback.is_some() {
+            return Ok(());
+        }
+
+        let mut manager = AsyncReadbackManager::new(Arc::clone(&self.device.device));
+        manager.init(&self.device)?;
+
+        self.async_readback = Some(manager);
+        
+        log::info!("Async readback system initialized and integrated");
         Ok(())
     }
 
@@ -1920,7 +1946,7 @@ impl Renderer {
 
         // Sync with Forward+ if available
         if let Some(forward_plus) = &mut self.forward_plus {
-            forward_plus.update_lights(&self.point_lights, &self.directional_lights);
+            forward_plus.update_lights(&self.point_lights, &self.directional_lights, &self.spot_lights);
             // Upload to GPU so lights are visible
             unsafe {
                 let _ = forward_plus.upload_to_gpu(&self.alloc.vma, &self.device.device);
@@ -1941,7 +1967,7 @@ impl Renderer {
         
         // Sync with Forward+ if available
         if let Some(forward_plus) = &mut self.forward_plus {
-            forward_plus.update_lights(&self.point_lights, &self.directional_lights);
+            forward_plus.update_lights(&self.point_lights, &self.directional_lights, &self.spot_lights);
             // Upload to GPU so lights are visible
             unsafe {
                 let _ = forward_plus.upload_to_gpu(&self.alloc.vma, &self.device.device);
@@ -3857,6 +3883,14 @@ impl Renderer {
             dm.next_frame();
         }
 
+        // Poll for async GPU readbacks
+        if let Some(readback) = self.async_readback.as_mut() {
+            unsafe {
+                let _ = readback.poll_completed();
+                readback.next_frame();
+            }
+        }
+
         // Hot-reload shaders if changed (throttled to every ~1 second)
         const SHADER_CHECK_INTERVAL: usize = 60;
 
@@ -4561,7 +4595,7 @@ impl Renderer {
     /// Call this each frame to update light positions and properties.
     pub fn update_point_lights(&mut self, lights: &[crate::renderer::features::PointLight]) {
         if let Some(ref mut forward_plus) = self.forward_plus {
-            forward_plus.update_lights(lights, &[]);
+            forward_plus.update_lights(lights, &[], &[]);
             // Upload to GPU
             unsafe {
                 let _ = forward_plus.upload_to_gpu(&self.alloc.vma, &self.device.device);
@@ -4575,7 +4609,17 @@ impl Renderer {
         lights: &[crate::renderer::features::DirectionalLight],
     ) {
         if let Some(ref mut forward_plus) = self.forward_plus {
-            forward_plus.update_lights(&[], lights);
+            forward_plus.update_lights(&[], lights, &[]);
+            unsafe {
+                let _ = forward_plus.upload_to_gpu(&self.alloc.vma, &self.device.device);
+            }
+        }
+    }
+
+    /// Update spot lights for Forward+ rendering
+    pub fn update_spot_lights(&mut self, lights: &[crate::renderer::features::SpotLight]) {
+        if let Some(ref mut forward_plus) = self.forward_plus {
+            forward_plus.update_lights(&[], &[], lights);
             unsafe {
                 let _ = forward_plus.upload_to_gpu(&self.alloc.vma, &self.device.device);
             }
@@ -4589,7 +4633,7 @@ impl Renderer {
         directional_lights: &[crate::renderer::features::DirectionalLight],
     ) {
         if let Some(ref mut forward_plus) = self.forward_plus {
-            forward_plus.update_lights(point_lights, directional_lights);
+            forward_plus.update_lights(point_lights, directional_lights, &[]);
             // SAFETY: `forward_plus.upload_to_gpu` manages its own internal buffers. We provide the VMA allocator which is valid.
             unsafe {
                 let _ = forward_plus.upload_to_gpu(&self.alloc.vma, &self.device.device);
@@ -5237,6 +5281,11 @@ impl Drop for Renderer {
             }
             if let Some(mut ssgi) = self.ssgi_pass.take() {
                 ssgi.destroy(&self.alloc.vma);
+            }
+
+            // Cleanup async readback manager
+            if let Some(mut readback) = self.async_readback.take() {
+                readback.destroy();
             }
 
             for ub in &mut self.uniform_buffers {

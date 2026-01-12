@@ -25,7 +25,9 @@ use std::sync::Arc;
 use vk_mem::Alloc;
 
 use crate::renderer::features::light_culling::{CullingCameraData, LightCullingPushConstants};
-use crate::renderer::features::{DirectionalLight, ForwardPlusInfo, LightManager, PointLight};
+use crate::renderer::features::{
+    DirectionalLight, ForwardPlusInfo, LightManager, PointLight, SpotLight,
+};
 use crate::renderer::forward_plus_descriptor::ForwardPlusDescriptor;
 use crate::vulkan::{ComputePipeline, ShaderModule};
 use crate::{AshError, Result};
@@ -282,9 +284,11 @@ impl ForwardPlusIntegration {
         &mut self,
         point_lights: &[PointLight],
         directional_lights: &[DirectionalLight],
+        spot_lights: &[SpotLight],
     ) {
         // Just forward to light manager - it handles the internal slicing
-        self.lights.update_lights(point_lights, directional_lights);
+        self.lights
+            .update_lights(point_lights, directional_lights, spot_lights);
     }
 
     pub fn on_resize(&mut self, width: u32, height: u32) {

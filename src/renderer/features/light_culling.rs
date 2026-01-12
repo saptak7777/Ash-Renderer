@@ -11,7 +11,7 @@
 
 use glam::Mat4;
 
-use super::lighting::{DirectionalLight, PointLight};
+use super::lighting::{DirectionalLight, PointLight, SpotLight};
 
 /// Maximum number of lights that can be culled
 pub const MAX_LIGHTS: usize = 1024;
@@ -58,8 +58,33 @@ impl GpuLight {
         Self {
             position: [0.0, 0.0, 0.0, f32::MAX], // Infinite radius
             color: [light.color.x, light.color.y, light.color.z, light.intensity],
-            direction: [light.direction.x, light.direction.y, light.direction.z, 2.0],
+            direction: [light.direction.x, light.direction.y, light.direction.z, 1.0],
             params: [0.0, 0.0, 1.0, 1.0],
+        }
+    }
+
+    /// Create from a spotlight
+    pub fn from_spot_light(light: &SpotLight) -> Self {
+        Self {
+            position: [
+                light.position.x,
+                light.position.y,
+                light.position.z,
+                light.range,
+            ],
+            color: [light.color.x, light.color.y, light.color.z, light.intensity],
+            direction: [
+                light.direction.x,
+                light.direction.y,
+                light.direction.z,
+                2.0, // Type = Spot
+            ],
+            params: [
+                light.inner_angle.cos(), // Precompute for shader
+                light.outer_angle.cos(),
+                1.0, // Enabled
+                0.0, // Padding
+            ],
         }
     }
 }
@@ -166,6 +191,7 @@ impl LightCullingPass {
         &mut self,
         point_lights: &[PointLight],
         directional_lights: &[DirectionalLight],
+        spot_lights: &[SpotLight],
     ) {
         self.lights.clear();
 
@@ -201,6 +227,37 @@ impl LightCullingPass {
             }
 
             self.lights.push(GpuLight::from_directional_light(light));
+        }
+
+        // Spotlights
+        for light in spot_lights {
+            if self.lights.len() >= MAX_LIGHTS {
+                break;
+            }
+
+            // Validate spotlight data
+            if !light.position.is_finite()
+                || !light.direction.is_finite()
+                || !light.color.is_finite()
+                || light.range.is_nan()
+                || light.inner_angle.is_nan()
+                || light.outer_angle.is_nan()
+            {
+                log::warn!("LightManager: Skipping malformed spotlight (NaN/Inf detected)");
+                continue;
+            }
+
+            // Validate cone angles
+            if light.inner_angle >= light.outer_angle {
+                log::warn!(
+                    "LightManager: Spotlight inner_angle >= outer_angle, skipping (inner: {}, outer: {})",
+                    light.inner_angle,
+                    light.outer_angle
+                );
+                continue;
+            }
+
+            self.lights.push(GpuLight::from_spot_light(light));
         }
     }
 
@@ -292,5 +349,44 @@ mod tests {
         pass.calculate_tiles(1920, 1080);
         assert_eq!(pass.tiles_x, 120); // 1920/16 = 120
         assert_eq!(pass.tiles_y, 68); // ceil(1080/16) = 68
+    }
+
+    #[test]
+    fn test_gpu_light_from_spot() {
+        let spot = SpotLight {
+            position: Vec3::new(1.0, 2.0, 3.0),
+            direction: Vec3::new(0.0, -1.0, 0.0),
+            color: Vec3::ONE,
+            intensity: 2.0,
+            range: 10.0,
+            inner_angle: 0.5,
+            outer_angle: 0.785,
+        };
+        let gpu = GpuLight::from_spot_light(&spot);
+
+        assert_eq!(gpu.position[3], 10.0); // range
+        assert_eq!(gpu.color[3], 2.0); // intensity
+        assert_eq!(gpu.direction[3], 2.0); // Type = Spot
+        assert!((gpu.params[0] - 0.5f32.cos()).abs() < 0.001);
+        assert!((gpu.params[1] - 0.785f32.cos()).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_spotlight_validation() {
+        let mut pass = LightCullingPass::new();
+
+        // Invalid spotlight (inner >= outer)
+        let invalid_spot = SpotLight {
+            inner_angle: 1.0,
+            outer_angle: 0.5,
+            ..Default::default()
+        };
+        pass.update_lights(&[], &[], &[invalid_spot]);
+        assert_eq!(pass.light_count(), 0);
+
+        // Valid spotlight
+        let valid_spot = SpotLight::default();
+        pass.update_lights(&[], &[], &[valid_spot]);
+        assert_eq!(pass.light_count(), 1);
     }
 }
