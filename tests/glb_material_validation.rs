@@ -295,7 +295,7 @@ mod tests {
 
         // Create and register material
         let material = Material {
-            name: format!("{}_material", mesh_name),
+            name: format!("{mesh_name}_material"),
             color: props.base_color_factor,
             metallic: props.metallic_factor,
             roughness: props.roughness_factor,

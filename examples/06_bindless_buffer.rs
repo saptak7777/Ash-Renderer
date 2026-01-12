@@ -7,7 +7,6 @@
 use ash_renderer::prelude::*;
 use ash_renderer::renderer::resources::uniform::StorageBuffer;
 use glam::{Mat4, Vec3, Vec4};
-use log;
 use std::sync::Arc;
 use std::time::Instant;
 use winit::{
@@ -56,7 +55,7 @@ impl ApplicationHandler for App {
                     .register_bindless_storage_buffer(&tint_colors, "CubeTintBuffer")
                     .expect("Failed to register bindless storage buffer");
 
-                log::info!("✓ Registered bindless tint buffer at index {}", tint_index);
+                log::info!("✓ Registered bindless tint buffer at index {tint_index}");
 
                 // 2. Set up material with MATTE ORANGE color (Phase 3)
                 // Use the tint_index we just got!
@@ -72,8 +71,7 @@ impl ApplicationHandler for App {
                 // Register and upload material
                 let material_handle = renderer.register_and_upload_material(material).unwrap();
                 log::info!(
-                    "✓ Registered orange material with handle {:?}",
-                    material_handle
+                    "✓ Registered orange material with handle {material_handle:?}"
                 );
 
                 // 3. Create a cube

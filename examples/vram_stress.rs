@@ -31,7 +31,7 @@ fn main() -> Result<()> {
 
     for i in 0..100 {
         let descriptor = ash_renderer::renderer::resources::mesh::MeshDescriptor {
-            key: format!("StressMesh_{}", i).into(),
+            key: format!("StressMesh_{i}").into(),
             vertices: vec![], // Empty mesh to focus on texture VRAM
             indices: None,
             texture: Some(
@@ -52,9 +52,9 @@ fn main() -> Result<()> {
         // This will call ensure_texture under the hood
         let mut mesh = Mesh::from_descriptor(&descriptor);
 
-        log::info!("Registering mesh {}...", i);
+        log::info!("Registering mesh {i}...");
         if let Err(e) = renderer.register_mesh_handle(i as u32, &mut mesh) {
-            log::error!("Failed to register mesh {}: {}", i, e);
+            log::error!("Failed to register mesh {i}: {e}");
             break;
         }
 

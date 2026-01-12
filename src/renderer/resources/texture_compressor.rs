@@ -187,7 +187,7 @@ mod tests {
             8 * 8 * 4,
             4 * 4 * 4,
             2 * 2 * 4,
-            1 * 1 * 4,
+            4,
         ];
 
         for (i, mip) in mips.iter().enumerate() {
@@ -220,6 +220,6 @@ mod tests {
         assert_eq!(mips.len(), 6);
 
         // Check level 2 (8x1)
-        assert_eq!(mips[2].len(), 8 * 1 * 4);
+        assert_eq!(mips[2].len(), 8 * 4);
     }
 }

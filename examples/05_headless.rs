@@ -35,10 +35,7 @@ fn main() -> Result<()> {
 
     // CRITICAL FIX: Register and upload material
     let material_handle = renderer.register_and_upload_material(material)?;
-    log::info!(
-        "✓ Registered and uploaded green material with handle {:?}",
-        material_handle
-    );
+    log::info!("✓ Registered and uploaded green material with handle {material_handle:?}");
 
     // 4. Set up Camera
     let camera_pos = Vec3::new(3.0, 3.0, 3.0);
@@ -68,7 +65,7 @@ fn main() -> Result<()> {
 
     // 7. Save to file using the `image` crate
     let output_path = "headless_output.png";
-    log::info!("Saving to file: {}", output_path);
+    log::info!("Saving to file: {output_path}");
     image::save_buffer(
         Path::new(output_path),
         &image_data,
@@ -78,7 +75,7 @@ fn main() -> Result<()> {
     )
     .map_err(|e| AshError::VulkanError(format!("Failed to save image: {e}")))?;
 
-    log::info!("Successfully saved rendered frame to {}", output_path);
+    log::info!("Successfully saved rendered frame to {output_path}");
 
     Ok(())
 }

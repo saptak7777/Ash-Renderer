@@ -3,7 +3,6 @@
 #![allow(deprecated)]
 
 #[cfg(feature = "gltf_loading")]
-use archetype_asset::ModelLoader;
 use ash::vk;
 use std::sync::Arc;
 use vk_mem::Alloc;
@@ -135,7 +134,7 @@ pub struct SubmeshDescriptor {
 }
 
 /// GPU Mesh with vertex/index buffers uploaded (PHASE 3)
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct Mesh {
     pub name: Arc<str>,
     pub vertices: Vec<Vertex>,
@@ -475,227 +474,6 @@ impl Mesh {
         clusters
     }
 
-    /// Loads all meshes found in a GLB file.
-    ///
-    /// This returns a vector of meshes, one for each primitive/mesh found in the GLB.
-    pub fn load_all_from_gltf(path: &str) -> crate::Result<Vec<Self>> {
-        let path_obj = std::path::Path::new(path);
-        let bytes = std::fs::read(path_obj)
-            .map_err(|e| crate::AshError::VulkanError(format!("Failed to read file: {e}")))?;
-
-        let loader = ModelLoader::new();
-        let model = loader.load_glb(&bytes).map_err(|e| {
-            crate::AshError::VulkanError(format!("Archetype asset load error: {e}"))
-        })?;
-
-        let mut results = Vec::new();
-
-        for (mesh_idx, source_mesh) in model.meshes.iter().enumerate() {
-            // Access mesh data
-            let mesh_data = source_mesh.vertices();
-
-            let mut vertices = Vec::with_capacity(mesh_data.vertices.len() / 16);
-            for chunk in mesh_data.vertices.chunks(16) {
-                if chunk.len() < 16 {
-                    break;
-                }
-
-                vertices.push(Vertex {
-                    position: [chunk[0], chunk[1], chunk[2]],
-                    normal: [chunk[3], chunk[4], chunk[5]],
-                    uv: [chunk[6], chunk[7]],
-                    color: [chunk[12], chunk[13], chunk[14]],
-                    tangent: [chunk[8], chunk[9], chunk[10], chunk[11]],
-                });
-            }
-
-            let indices = Some(mesh_data.indices.clone());
-            const DEFAULT_MODEL_NAME: &str = "model";
-            let base_name = path_obj
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or(DEFAULT_MODEL_NAME);
-            let primitive_name: Arc<str> = if model.meshes.len() > 1 {
-                format!("{base_name}_{mesh_idx}").into()
-            } else {
-                base_name.into()
-            };
-
-            let mut material_properties = Some(MaterialProperties::default());
-            let mut texture_data = None;
-            let mut normal_texture_data = None;
-            let mut metallic_roughness_texture_data = None;
-            let mut occlusion_texture_data = None;
-            let mut emissive_texture_data = None;
-
-            if let Some(idx) = source_mesh.material_index {
-                if let Some(mat) = model.materials.get(idx) {
-                    let props = MaterialProperties {
-                        base_color_factor: mat.base_color_factor,
-                        metallic_factor: mat.metallic_factor,
-                        roughness_factor: mat.roughness_factor,
-                        emissive_factor: [
-                            mat.emissive_factor[0],
-                            mat.emissive_factor[1],
-                            mat.emissive_factor[2],
-                            1.0,
-                        ],
-                        occlusion_strength: mat.occlusion_strength,
-                        normal_scale: mat.normal_scale,
-                        alpha_cutoff: mat.alpha_cutoff,
-                    };
-                    material_properties = Some(props);
-
-                    let get_texture = |idx: Option<usize>| -> Option<TextureData> {
-                        let idx = idx?;
-                        let tex = model.textures.get(idx)?;
-                        Some(TextureData {
-                            width: tex.width,
-                            height: tex.height,
-                            pixels: tex.data.clone(),
-                        })
-                    };
-
-                    texture_data = get_texture(mat.base_color_texture);
-                    normal_texture_data = get_texture(mat.normal_texture);
-                    metallic_roughness_texture_data = get_texture(mat.metallic_roughness_texture);
-                    occlusion_texture_data = get_texture(mat.occlusion_texture);
-                    emissive_texture_data = get_texture(mat.emissive_texture);
-                }
-            }
-
-            let clusters = Self::generate_clusters(indices.as_ref().unwrap_or(&vec![]), &vertices);
-
-            // Add logging for material properties
-            if let Some(ref props) = material_properties {
-                log::debug!(
-                    "Loaded GLB primitive '{}': metallic={:.2}, roughness={:.2}, emissive={:?}",
-                    primitive_name,
-                    props.metallic_factor,
-                    props.roughness_factor,
-                    props.emissive_factor
-                );
-            }
-
-            results.push(Self {
-                name: primitive_name.clone(),
-                vertices,
-                skinned_vertices: Vec::new(),
-                indices: indices.clone(),
-                texture_data,
-                texture: None,
-                texture_path: None,
-
-                // Phase 2 fields
-                material_handle: None,
-                material_handles: Vec::new(),
-                submeshes: vec![SubmeshDescriptor {
-                    start_index: 0,
-                    index_count: indices.as_ref().map_or(0, |i| i.len()) as u32,
-                    material_slot: 0,
-                    name: Arc::clone(&primitive_name),
-                }],
-
-                normal_texture_data,
-                normal_texture: None,
-                normal_texture_path: None,
-                metallic_roughness_texture_data,
-                metallic_roughness_texture: None,
-                metallic_roughness_texture_path: None,
-                occlusion_texture_data,
-                occlusion_texture: None,
-                occlusion_texture_path: None,
-                emissive_texture_data,
-                emissive_texture: None,
-                emissive_texture_path: None,
-                material_properties,
-                vertex_buffer: None,
-                vertex_allocation: None,
-                index_buffer: None,
-                index_allocation: None,
-                texture_index: None,
-                normal_texture_index: None,
-                metallic_roughness_texture_index: None,
-                occlusion_texture_index: None,
-                emissive_texture_index: None,
-                clusters,
-                allocator: None,
-            });
-        }
-
-        if results.is_empty() {
-            return Err(crate::AshError::VulkanError(
-                "No meshes found in GLB".to_string(),
-            ));
-        }
-
-        Ok(results)
-    }
-
-    /// Loads a mesh from a GLB file.
-    ///
-    /// If the file contains multiple meshes, they are automatically merged into one.
-    /// Use `load_all_from_gltf()` for explicit control over individual parts.
-    pub fn from_gltf(path: &str) -> crate::Result<Self> {
-        let meshes = Self::load_all_from_gltf(path)?;
-
-        if meshes.len() == 1 {
-            return Ok(meshes.into_iter().next().unwrap());
-        }
-
-        log::info!(
-            "GLB file '{}' contains {} meshes, merging them into a single mesh.",
-            path,
-            meshes.len()
-        );
-        Self::merge(meshes)
-    }
-
-    /// Loads only the first mesh from a GLB file.
-    ///
-    /// Useful when you know the file structure and only need the primary mesh.
-    pub fn from_gltf_first(path: &str) -> crate::Result<Self> {
-        let mut meshes = Self::load_all_from_gltf(path)?;
-        Ok(meshes.remove(0))
-    }
-
-    /// Loads a specific mesh by index from a GLB file.
-    pub fn from_gltf_index(path: &str, index: usize) -> crate::Result<Self> {
-        let meshes = Self::load_all_from_gltf(path)?;
-
-        if index >= meshes.len() {
-            return Err(crate::AshError::VulkanError(format!(
-                "Mesh index {index} out of bounds (file has {} meshes)",
-                meshes.len()
-            )));
-        }
-
-        Ok(meshes.into_iter().nth(index).unwrap())
-    }
-
-    /// Loads a mesh by name from a GLB file.
-    pub fn from_gltf_named(path: &str, name: &str) -> crate::Result<Self> {
-        let meshes = Self::load_all_from_gltf(path)?;
-
-        meshes
-            .into_iter()
-            .find(|m| &*m.name == name)
-            .ok_or_else(|| crate::AshError::VulkanError(format!("Mesh '{name}' not found in GLB")))
-    }
-
-    /// Returns the number of meshes in a GLB file without loading them.
-    pub fn count_meshes_in_gltf(path: &str) -> crate::Result<usize> {
-        let meshes = Self::load_all_from_gltf(path)?;
-        Ok(meshes.len())
-    }
-
-    /// Lists all mesh names in a GLB file.
-    pub fn list_meshes_in_gltf(path: &str) -> crate::Result<Vec<Arc<str>>> {
-        let meshes = Self::load_all_from_gltf(path)?;
-        Ok(meshes.iter().map(|m| Arc::clone(&m.name)).collect())
-    }
-
-    /// Builds a mesh from a descriptor without uploading to the GPU.
     pub fn from_descriptor(descriptor: &MeshDescriptor) -> Self {
         let clusters = Self::generate_clusters(
             descriptor.indices.as_ref().unwrap_or(&vec![]),
@@ -1377,7 +1155,7 @@ mod tests {
         ];
 
         // Test index selection
-        assert_eq!(&*meshes.get(0).unwrap().name, "PartA");
+        assert_eq!(&*meshes.first().unwrap().name, "PartA");
         assert_eq!(&*meshes.get(1).unwrap().name, "PartB");
         assert!(meshes.get(2).is_none());
 
@@ -1406,8 +1184,7 @@ mod tests {
         }
         let string_duration = start.elapsed();
         println!(
-            "String cloning ({} iterations): {:?}",
-            iterations, string_duration
+            "String cloning ({iterations} iterations): {string_duration:?}"
         );
 
         // Benchmark Arc<str> cloning
@@ -1419,8 +1196,7 @@ mod tests {
         }
         let arc_duration = start.elapsed();
         println!(
-            "Arc<str> cloning ({} iterations): {:?}",
-            iterations, arc_duration
+            "Arc<str> cloning ({iterations} iterations): {arc_duration:?}"
         );
 
         assert!(

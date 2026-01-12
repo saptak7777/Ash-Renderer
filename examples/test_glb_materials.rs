@@ -4,6 +4,7 @@
 
 use ash::vk;
 use ash_renderer::prelude::*;
+use ash_renderer::renderer::resources::gltf_loader;
 use glam::{Mat4, Vec3};
 use std::time::Instant;
 use winit::{
@@ -30,6 +31,7 @@ impl Default for App {
 }
 
 impl ApplicationHandler for App {
+    #[allow(clippy::field_reassign_with_default)]
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         let window_attrs = Window::default_attributes()
             .with_title("ASH Renderer - GLB Material Test")
@@ -46,22 +48,21 @@ impl ApplicationHandler for App {
                 let mut loaded_model = false;
                 for path in &glb_paths {
                     if std::path::Path::new(path).exists() {
-                        log::info!("Loading GLB model from: {}", path);
-                        match Mesh::load_all_from_gltf(path) {
+                        log::info!("Loading GLB model from: {path}");
+                        match gltf_loader::load_model(path) {
                             Ok(meshes) => {
                                 log::info!("Loaded {} meshes from GLB", meshes.len());
 
                                 // Register each mesh with the renderer
                                 for (i, mut mesh) in meshes.into_iter().enumerate() {
                                     let handle = (i + 1) as u32; // Use 1-based handles
+                                    let mesh_name = mesh.name.clone();
                                     if let Err(e) = renderer.register_mesh_handle(handle, &mut mesh)
                                     {
-                                        log::error!("Failed to register mesh {}: {}", i, e);
+                                        log::error!("Failed to register mesh {i}: {e}");
                                     } else {
                                         log::info!(
-                                            "Registered mesh '{}' with handle {}",
-                                            mesh.name,
-                                            handle
+                                            "Registered mesh '{mesh_name}' with handle {handle}"
                                         );
 
                                         // Check if material was registered
@@ -74,12 +75,10 @@ impl ApplicationHandler for App {
                                                 .is_handle_valid(mat_handle)
                                             {
                                                 log::info!(
-                                                    "✅ Material registered for mesh '{}' (handle {:?})",
-                                                    mesh.name,
-                                                    mat_handle
+                                                    "✅ Material registered for mesh '{mesh_name}' (handle {mat_handle:?})"
                                                 );
 
-                                                // CRITICAL FIX: Upload the automatically registered material to GPU
+                                                // Upload the automatically registered material to GPU
                                                 let material = renderer
                                                     .material_manager()
                                                     .get_material(mat_handle)
@@ -89,11 +88,10 @@ impl ApplicationHandler for App {
                                                     &material,
                                                 );
                                                 log::info!(
-                                                    "✅ Material uploaded to GPU: {:?}",
-                                                    mat_handle
+                                                    "✅ Material uploaded to GPU: {mat_handle:?}"
                                                 );
                                             } else {
-                                                log::warn!("❌ No material registered for mesh '{}' (handle {:?})", mesh.name, mat_handle);
+                                                log::warn!("❌ No material registered for mesh '{mesh_name}' (handle {mat_handle:?})");
                                             }
                                         }
                                     }
@@ -102,7 +100,7 @@ impl ApplicationHandler for App {
                                 break;
                             }
                             Err(e) => {
-                                log::error!("Failed to load GLB from {}: {}", path, e);
+                                log::error!("Failed to load GLB from {path}: {e}");
                             }
                         }
                     }
@@ -125,7 +123,7 @@ impl ApplicationHandler for App {
                     );
 
                     if let Err(e) = renderer.register_mesh_handle(1, &mut cube) {
-                        log::error!("Failed to register test cube: {}", e);
+                        log::error!("Failed to register test cube: {e}");
                     } else {
                         log::info!("Test cube registered with material properties");
 
@@ -135,31 +133,19 @@ impl ApplicationHandler for App {
                             let mat_handle = mesh_data[0].material_handle;
                             if renderer.material_manager().is_handle_valid(mat_handle) {
                                 log::info!(
-                                    "✅ Material registered for test cube (handle {:?})",
-                                    mat_handle
-                                );
-                            } else {
-                                log::warn!(
-                                    "❌ No material registered for test cube (handle {:?})",
-                                    mat_handle
+                                    "✅ Material registered for test cube (handle {mat_handle:?})"
                                 );
                             }
                         }
                     }
 
                     // Submit render command with null handle to test fallback
-                    let _ =
-                        renderer.submit_render_commands(&[ash_renderer::renderer::RenderCommand {
-                            mesh_handle: 1,
-                            material_handle: ash_renderer::renderer::MaterialHandle::null(), // Should fallback to mesh's registered material
-                            transform: Mat4::IDENTITY,
-                            is_skinned: false,
-                            joint_offset: 0,
-                            cast_shadows: true,
-                            receive_shadows: true,
-                            is_transparent: false,
-                            is_hidden: false,
-                        }]);
+                    let mut cmd = ash_renderer::renderer::RenderCommand::default();
+                    cmd.mesh_handle = 1;
+                    cmd.material_handle = ash_renderer::renderer::MaterialHandle::null();
+                    cmd.transform = Mat4::IDENTITY;
+
+                    let _ = renderer.submit_render_commands(&[cmd]);
                 }
 
                 self.renderer = Some(renderer);
@@ -178,12 +164,9 @@ impl ApplicationHandler for App {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::RedrawRequested => {
                 if let (Some(renderer), Some(window)) = (&mut self.renderer, &self.window) {
-                    // Simple camera setup
-                    let _elapsed = self.start_time.elapsed().as_secs_f32();
                     let size = window.inner_size();
                     let aspect = size.width as f32 / size.height as f32;
 
-                    // Static camera position
                     let camera_pos = Vec3::new(0.0, 0.0, 3.0);
                     let target = Vec3::ZERO;
                     let up = Vec3::Y;

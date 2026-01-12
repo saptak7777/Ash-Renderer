@@ -1,10 +1,25 @@
-use ash_renderer::renderer::resources::texture::{AshTexHeader, TextureData};
+use ash_renderer::renderer::resources::texture::TextureData;
 use ash_renderer::renderer::resources::texture_compressor::{CompressionFormat, TextureCompressor};
+use bytemuck::{Pod, Zeroable};
 use std::env;
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::Path;
 use std::time::Instant;
+
+/// Header for the legacy .ash_tex format, now maintained locally in the cooker.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Pod, Zeroable)]
+pub struct AshTexHeader {
+    pub magic: [u8; 4],
+    pub version: u32,
+    pub width: u32,
+    pub height: u32,
+    pub format: u32,
+    pub mip_levels: u32,
+    pub compression: u32,
+    pub _padding: [u32; 3],
+}
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // env_logger::init();

@@ -85,11 +85,36 @@ impl ApplicationHandler for App {
                 }
 
                 // Load pre-baked IBL environment map for realistic PBR lighting
-                if let Err(e) = renderer.load_environment_map("assets/textures/skybox.ibl") {
-                    log::warn!("Failed to load IBL environment map: {e}");
-                    log::warn!("Continuing without IBL - cubes will have minimal ambient lighting");
+                // Load pre-baked IBL environment map using the new Asset System
+                // We use archetype_asset for Zero-Copy loading!
+                if let Ok(asset) =
+                    archetype_asset::ibl::MappedIblAsset::load("assets/textures/skybox.ibl")
+                {
+                    log::info!("✓ IBL asset loaded via Zero-Copy MappedIblAsset");
+
+                    // Convert header (fields match 1:1)
+                    let header = ash_renderer::renderer::resources::IblAssetHeader {
+                        magic: asset.header.magic,
+                        version: asset.header.version,
+                        cubemap_size: asset.header.cubemap_size,
+                        irradiance_size: asset.header.irradiance_size,
+                        prefiltered_size: asset.header.prefiltered_size,
+                        prefiltered_mips: asset.header.prefiltered_mips,
+                        format: asset.header.format,
+                        _padding: asset.header._padding,
+                    };
+
+                    if let Err(e) = renderer.upload_ibl(
+                        &header,
+                        asset.cubemap_data(),
+                        asset.irradiance_data(),
+                        asset.prefiltered_data(),
+                    ) {
+                        log::warn!("Failed to upload IBL: {e}");
+                    }
                 } else {
-                    log::info!("✓ IBL environment map loaded successfully");
+                    log::warn!("Failed to load IBL asset or file not found");
+                    log::warn!("Continuing without IBL - cubes will have minimal ambient lighting");
                 }
 
                 // Create 5x5 PBR material grid
@@ -110,7 +135,7 @@ impl ApplicationHandler for App {
                         let color = hsl_to_rgb(hue, 0.7, 0.5);
 
                         let material = Material {
-                            name: format!("PBR_M{:.2}_R{:.2}", metallic, roughness),
+                            name: format!("PBR_M{metallic:.2}_R{roughness:.2}"),
                             color: [color.x, color.y, color.z, 1.0],
                             metallic,
                             roughness,

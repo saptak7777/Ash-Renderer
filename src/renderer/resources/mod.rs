@@ -15,6 +15,9 @@ pub mod shadow;
 pub mod texture;
 pub mod texture_compressor;
 pub mod texture_streamer;
+
+#[cfg(feature = "gltf_loading")]
+pub mod gltf_loader;
 pub mod thread_safe_pool;
 pub mod transform;
 pub mod uniform;
@@ -25,7 +28,7 @@ pub use buffer::BufferHandle;
 pub use buffer_pool::{BufferAllocation, BufferPool};
 pub use depth_buffer::DepthBuffer;
 pub use descriptor::DescriptorSetHandle;
-pub use ibl_asset::{IblAsset, IblAssetHeader};
+pub use ibl_asset::{upload_ibl, IblAssetHeader};
 pub use image::ImageHandle;
 pub use joint_buffer::JointMatricesBuffer;
 pub use material::{Material, MaterialHandle, MaterialManager};

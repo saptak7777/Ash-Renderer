@@ -555,6 +555,13 @@ impl ForwardPlusIntegration {
     }
 }
 
+impl Drop for ForwardPlusIntegration {
+    fn drop(&mut self) {
+        // LightManager will be dropped automatically via its own Drop impl
+        log::debug!("ForwardPlusIntegration: Drop called (cleanup requires explicit destroy)");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -564,12 +571,5 @@ mod tests {
         // Unit tests are limited without active Vulkan context.
         let info = ForwardPlusInfo::default();
         assert_eq!(info.num_tiles, [0, 0]);
-    }
-}
-
-impl Drop for ForwardPlusIntegration {
-    fn drop(&mut self) {
-        // LightManager will be dropped automatically via its own Drop impl
-        log::debug!("ForwardPlusIntegration: Drop called (cleanup requires explicit destroy)");
     }
 }

@@ -30,7 +30,7 @@ fn test_phase4_smart_material() {
     let registered_handle = manager.register_material(material);
 
     println!("✅ Registered mesh with material:");
-    println!("   - Material handle: {:?}", registered_handle);
+    println!("   - Material handle: {registered_handle:?}");
 
     // Test automatic material selection (simulating submit_render_commands)
     let render_command = ash_renderer::renderer::RenderCommand {
@@ -64,8 +64,7 @@ fn test_phase4_smart_material() {
     };
 
     println!(
-        "   - Selected material handle: {:?}",
-        selected_material_handle
+        "   - Selected material handle: {selected_material_handle:?}"
     );
 
     // Get the material
@@ -109,7 +108,7 @@ fn test_phase4_smart_material() {
     // Register multiple materials
     for i in 1..=3 {
         let material = ash_renderer::renderer::Material {
-            name: format!("material_{}", i),
+            name: format!("material_{i}"),
             color: [0.5, 0.5, 0.5, 1.0],
             metallic: i as f32 * 0.3,
             roughness: 1.0 - (i as f32 * 0.3),

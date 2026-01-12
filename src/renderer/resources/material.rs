@@ -115,10 +115,22 @@ impl MaterialKey {
             tint_index: material.tint_index,
             is_transparent: material.is_transparent,
             texture_index: material.texture_index.map(|i| i as i32).unwrap_or(-1),
-            normal_texture_index: material.normal_texture_index.map(|i| i as i32).unwrap_or(-1),
-            metallic_roughness_texture_index: material.metallic_roughness_texture_index.map(|i| i as i32).unwrap_or(-1),
-            occlusion_texture_index: material.occlusion_texture_index.map(|i| i as i32).unwrap_or(-1),
-            emissive_texture_index: material.emissive_texture_index.map(|i| i as i32).unwrap_or(-1),
+            normal_texture_index: material
+                .normal_texture_index
+                .map(|i| i as i32)
+                .unwrap_or(-1),
+            metallic_roughness_texture_index: material
+                .metallic_roughness_texture_index
+                .map(|i| i as i32)
+                .unwrap_or(-1),
+            occlusion_texture_index: material
+                .occlusion_texture_index
+                .map(|i| i as i32)
+                .unwrap_or(-1),
+            emissive_texture_index: material
+                .emissive_texture_index
+                .map(|i| i as i32)
+                .unwrap_or(-1),
         }
     }
 
@@ -217,7 +229,8 @@ impl MaterialManager {
         self.next_material_id += 1;
 
         if (index as usize) >= self.materials.len() {
-            self.materials.resize(index as usize + 1, Material::default());
+            self.materials
+                .resize(index as usize + 1, Material::default());
             self.versions.resize(index as usize + 1, 0);
         }
 
@@ -229,14 +242,14 @@ impl MaterialManager {
             version: self.versions[index as usize],
         };
         self.key_to_handle.insert(key, handle);
-        
+
         log::warn!(
             "✓ Material Registered: {} -> handle {:?} (idx={})",
             material.name,
             handle,
             index
         );
-        
+
         handle
     }
 
@@ -295,7 +308,6 @@ impl Default for MaterialManager {
 }
 
 /// A centralized registry for materials with O(1) deduplication
-
 #[cfg(test)]
 mod tests {
     use super::*;

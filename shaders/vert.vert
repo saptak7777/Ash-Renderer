@@ -56,7 +56,15 @@ void main() {
     }
     fragUV = inUV;
     
-    mat3 normalMat = mat3(mvp.normal_matrix);
+    mat3 normalMat;
+    if (push.use_instancing != 0) {
+        // PER-INSTANCE NORMAL MATRIX: Calculate from instance model matrix to fix lighting on rotated objects
+        // In Phase 2, we will pass this pre-calculated from CPU to avoid inverse-transpose in shader.
+        normalMat = transpose(inverse(mat3(modelMatrix)));
+    } else {
+        normalMat = mat3(mvp.normal_matrix);
+    }
+    
     fragNormal = normalize(normalMat * inNormal);
     fragTangent = vec4(normalize(normalMat * inTangent.xyz), inTangent.w);
     

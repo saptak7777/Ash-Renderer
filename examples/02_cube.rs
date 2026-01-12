@@ -19,8 +19,8 @@ struct App {
     window: Option<Window>,
     tint_buffer: Option<Arc<parking_lot::Mutex<StorageBuffer<Vec4>>>>,
     renderer: Option<Renderer>,
-    start_time: Instant,
     render_commands: Vec<ash_renderer::renderer::RenderCommand>,
+    start_time: Instant,
 }
 
 impl Default for App {
@@ -29,8 +29,8 @@ impl Default for App {
             window: None,
             tint_buffer: None,
             renderer: None,
-            start_time: Instant::now(),
             render_commands: Vec::new(),
+            start_time: Instant::now(),
         }
     }
 }
@@ -52,11 +52,10 @@ impl ApplicationHandler for App {
                 for v in &mut cube.vertices {
                     v.color = [1.0, 1.0, 1.0];
                 }
+                // RENAMING is critical because the renderer caches meshes by name!
                 cube.name = Arc::from("TexturedCube");
+                // Clear texture data so material color shows through
                 cube.texture_data = None;
-
-                // Upload mesh
-                let mesh_handle = renderer.upload_mesh(cube).unwrap_or(0);
 
                 // Set up material
                 let material = Material {
@@ -66,10 +65,18 @@ impl ApplicationHandler for App {
                     ..Default::default()
                 };
 
+                // Upload mesh
+                let mesh_handle = renderer.upload_mesh(cube).unwrap();
+                log::info!("✓ Mesh uploaded to GPU");
+
                 // Register and upload material
                 let material_handle = renderer.register_and_upload_material(material).unwrap();
 
-                // Setup render command
+                log::info!(
+                    "✓ Uploaded red material to GPU with handle {material_handle:?}"
+                );
+
+                // Setup initial render command
                 self.render_commands
                     .push(ash_renderer::renderer::RenderCommand {
                         mesh_handle,
@@ -77,11 +84,6 @@ impl ApplicationHandler for App {
                         transform: Mat4::IDENTITY,
                         ..Default::default()
                     });
-
-                log::info!(
-                    "✓ Uploaded red material to GPU with handle {:?}",
-                    material_handle
-                );
 
                 // CRITICAL: Set lighting for visibility (default ambient is too dark)
                 renderer.set_lighting(

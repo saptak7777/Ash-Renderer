@@ -378,16 +378,16 @@ mod tests {
     #[test]
     fn test_spirv_size_validation() {
         // Verify size validation catches non-4-byte-aligned data
-        let bad_size = vec![0x03, 0x02, 0x23, 0x07, 0, 0, 0]; // Size 7 (not multiple of 4)
+        let bad_size = [0x03, 0x02, 0x23, 0x07, 0, 0, 0]; // Size 7 (not multiple of 4)
         assert_ne!(bad_size.len() % 4, 0);
     }
 
     #[test]
     fn test_spirv_magic_validation() {
         // Verify magic number validation logic
-        let valid_magic_le = vec![0x03, 0x02, 0x23, 0x07]; // 0x07230203 in little-endian
-        let valid_magic_be = vec![0x07, 0x23, 0x02, 0x03]; // 0x07230203 in big-endian
-        let invalid_magic = vec![0x00, 0x00, 0x00, 0x00];
+        let valid_magic_le = [0x03, 0x02, 0x23, 0x07]; // 0x07230203 in little-endian
+        let valid_magic_be = [0x07, 0x23, 0x02, 0x03]; // 0x07230203 in big-endian
+        let invalid_magic = [0x00, 0x00, 0x00, 0x00];
 
         let magic_le = u32::from_le_bytes([
             valid_magic_le[0],

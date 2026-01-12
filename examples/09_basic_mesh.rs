@@ -13,21 +13,13 @@ use winit::{
     window::{Window, WindowId},
 };
 
+#[derive(Default)]
 struct App {
     window: Option<Window>,
     renderer: Option<Renderer>,
     render_commands: Vec<ash_renderer::renderer::RenderCommand>,
 }
 
-impl Default for App {
-    fn default() -> Self {
-        Self {
-            window: None,
-            renderer: None,
-            render_commands: Vec::new(),
-        }
-    }
-}
 
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {

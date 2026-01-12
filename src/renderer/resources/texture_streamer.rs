@@ -13,7 +13,6 @@ enum StreamRequest {
     Load {
         path: PathBuf,
         _handle: u32, // ID to notify back when done (future improvement) or just for tracking
-        name: String,
     },
     Shutdown,
 }
@@ -67,11 +66,10 @@ impl TextureStreamer {
 
     /// Request a texture to be loaded from disk.
     /// Returns immediately.
-    pub fn request_load(&self, path: impl AsRef<Path>, handle: u32, name: impl Into<String>) {
+    pub fn request_load(&self, path: impl AsRef<Path>, handle: u32, _name: impl Into<String>) {
         let _ = self.sender.send(StreamRequest::Load {
             path: path.as_ref().to_path_buf(),
             _handle: handle,
-            name: name.into(),
         });
     }
 
@@ -84,19 +82,25 @@ impl TextureStreamer {
 
     fn loader_loop(
         receiver: Receiver<StreamRequest>,
-        allocator: Arc<vulkan::Allocator>,
-        device: Arc<ash::Device>,
-        command_pool: vk::CommandPool,
-        queue: vk::Queue,
-        completed: Arc<Mutex<HashMap<PathBuf, Arc<Texture>>>>,
+        _allocator: Arc<vulkan::Allocator>,
+        _device: Arc<ash::Device>,
+        _command_pool: vk::CommandPool,
+        _queue: vk::Queue,
+        _completed: Arc<Mutex<HashMap<PathBuf, Arc<Texture>>>>,
     ) {
         log::info!("TextureStreamer background thread started");
 
         while let Ok(request) = receiver.recv() {
             match request {
-                StreamRequest::Load { path, name, .. } => {
+                StreamRequest::Load { path, .. } => {
                     log::debug!("Streaming asset: {path:?}");
 
+                    log::warn!(
+                        "Texture streaming is temporarily disabled during asset system migration."
+                    );
+                    continue;
+
+                    /*
                     // 1. Try to load .ash_tex first
                     let ash_tex_path = path.with_extension("ash_tex");
                     let result = if ash_tex_path.exists() {
@@ -117,6 +121,7 @@ impl TextureStreamer {
                         continue;
                     };
 
+                    /*
                     match result {
                         Ok(texture) => {
                             let mut map = completed.lock().unwrap();
@@ -127,6 +132,8 @@ impl TextureStreamer {
                             log::error!("Failed to stream texture {path:?}: {e}");
                         }
                     }
+                    */
+                    */
                 }
                 StreamRequest::Shutdown => break,
             }

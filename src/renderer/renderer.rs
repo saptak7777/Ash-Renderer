@@ -355,6 +355,7 @@ pub struct Renderer {
     command_buffers: Vec<vk::CommandBuffer>,
     frame_syncs: Vec<vulkan::FrameSync>,
     current_frame: usize,
+    prev_view_proj: Mat4,
     _default_texture: Texture,
     _black_texture: Texture,
     model_renderer: ModelRenderer,
@@ -863,6 +864,7 @@ impl Renderer {
                 command_buffers,
                 frame_syncs,
                 current_frame: 0,
+                prev_view_proj: Mat4::IDENTITY,
                 _default_texture: default_texture,
                 _black_texture: black_texture,
                 model_renderer,
@@ -1752,63 +1754,31 @@ impl Renderer {
 
         Ok(())
     }
-    /// Loads an HDR environment map and bakes IBL resources.
-    pub fn load_environment_map<P: AsRef<std::path::Path>>(&mut self, path: P) -> Result<()> {
-        log::info!("Loading and baking environment map: {:?}", path.as_ref());
 
-        let (irradiance_map, prefiltered_map) = if path.as_ref().extension().and_then(|s| s.to_str()) == Some("ibl") {
-            log::info!("Detected .ibl asset, loading binary...");
-            let asset = resources::ibl_asset::IblAsset::load(path.as_ref())?;
-            let (_env_cubemap, irradiance, prefiltered) = asset.upload_to_gpu(
-                Arc::clone(&self.device.device),
-                Arc::clone(&self.alloc),
-                self.cmds.upload_command_pool_handle(),
-                self.device.graphics_queue,
-            )?;
-            (irradiance, prefiltered)
-        } else {
-            // Fallback to runtime baking for HDR/LDR
-            let equirect_tex = unsafe {
-                resources::texture::Texture::load_hdr(
-                    Arc::clone(&self.alloc),
-                    Arc::clone(&self.device.device),
-                    self.cmds.upload_command_pool_handle(),
-                    self.device.graphics_queue,
-                    path.as_ref(),
-                )?
-            };
+    /// Uploads pre-loaded IBL data to the GPU and binds it.
+    pub fn upload_ibl(
+        &mut self,
+        header: &resources::ibl_asset::IblAssetHeader,
+        cubemap_data: &[u8],
+        irradiance_data: &[u8],
+        prefiltered_data: &[u8],
+    ) -> Result<()> {
+        log::info!("Uploading IBL assets to GPU...");
 
-            log::info!("Baking environment cubemap...");
-            let env_cubemap = self.ibl_manager.create_cubemap_from_equirect(
-                &self.device,
-                self.cmds.upload_command_pool_handle(),
-                equirect_tex.view(),
-                equirect_tex.sampler(),
-                512, // Standard resolution
-            )?;
-
-            log::info!("Baking irradiance map...");
-            let irradiance = self.ibl_manager.generate_irradiance(
-                &self.device,
-                self.cmds.upload_command_pool_handle(),
-                env_cubemap.view(),
-                equirect_tex.sampler(),
-            )?;
-
-            log::info!("Baking prefiltered reflection map...");
-            let prefiltered = self.ibl_manager.generate_prefiltered(
-                &self.device,
-                self.cmds.upload_command_pool_handle(),
-                env_cubemap.view(),
-                equirect_tex.sampler(),
-            )?;
-            
-            (irradiance, prefiltered)
-        };
+        let (_env_cubemap, irradiance, prefiltered) = resources::ibl_asset::upload_ibl(
+            Arc::clone(&self.device.device),
+            Arc::clone(&self.alloc),
+            self.cmds.upload_command_pool_handle(),
+            self.device.graphics_queue,
+            header,
+            cubemap_data,
+            irradiance_data,
+            prefiltered_data,
+        )?;
 
         // Update renderer state
-        self.irradiance_map = Some(irradiance_map);
-        self.prefiltered_map = Some(prefiltered_map);
+        self.irradiance_map = Some(irradiance);
+        self.prefiltered_map = Some(prefiltered);
 
         // Update descriptors
         if let Some(manager) = self.descriptors.as_ref() {
@@ -1816,7 +1786,7 @@ impl Renderer {
                 irradiance_view: self.irradiance_map.as_ref().unwrap().view(),
                 prefiltered_view: self.prefiltered_map.as_ref().unwrap().view(),
                 brdf_lut_view: self.brdf_lut_pass.as_ref().unwrap().get_lut_view().unwrap(),
-                skybox_view: self.irradiance_map.as_ref().unwrap().view(), // Use irradiance as dummy skybox if separate skybox not loaded
+                skybox_view: self.irradiance_map.as_ref().unwrap().view(), // Use irradiance as dummy skybox
                 sampler: self.ibl_sampler,
             };
             for i in 0..manager.frame_set_count() {
@@ -1824,9 +1794,10 @@ impl Renderer {
             }
         }
         
-        log::info!("✓ Environment IBL resources successfully baked and bound.");
+        log::info!("✓ IBL assets uploaded and bound.");
         Ok(())
     }
+
 
     // DELETED: set_mesh() method. Use submit_render_commands instead.
 
@@ -3982,6 +3953,7 @@ impl Renderer {
                 matrices.view = view;
                 matrices.projection = jittered_projection;
                 matrices.view_proj = jittered_projection * view;
+                matrices.prev_view_proj = self.prev_view_proj;
                 matrices.camera_pos = camera_pos.extend(1.0);
                 matrices.set_lighting(
                     self.light_direction,
@@ -3992,9 +3964,12 @@ impl Renderer {
                 // Set light-space matrix for shadow mapping
                 let light_space_matrix = self.shadow_feature.light_space_matrix();
                 matrices.set_light_space_matrix(light_space_matrix);
-                matrices.normal_matrix = matrices.model.inverse().transpose();
+                // REDUNDANT OVERWRITE REMOVED: Using pre-calculated normal matrix from transform_system
+                // matrices.normal_matrix = matrices.model.inverse().transpose();
 
+                let view_proj = matrices.view_proj;
                 uniform_buffer.update()?;
+                self.prev_view_proj = view_proj;
             }
 
             // CRITICAL: Ensure all host-written buffers (including bindless storage buffers) are visible to GPU
@@ -4921,11 +4896,8 @@ impl Renderer {
         // Binding the color view directly to bloom causes over-brightness because the tonemapping 
         // shader adds 'bloom' to the original color. Until a real bloom pass is implemented, 
         // we should bind a target that is logically black.
-        // We use the SSGI view if available (since it might be dark) or just a zero-texture if we had one.
-        // For now, let's just use the color_view BUT we will set bloom_intensity push constant to 0.0 later
-        // if bloom is disabled.
-        // Fix: Use SSGI view or fallback to default texture instead of color_view to avoid double-exposure
-        let bloom_view = ssgi_view; 
+        // PREVIOUS BUG: let bloom_view = ssgi_view; // This caused flickering SSGI to appear as blinking glow
+        let bloom_view = self._black_texture.view(); 
         
         log::debug!("Updating post-processing descriptors (HDR: {}, Bloom: {})", 
             hdr.is_some(), self.bloom_enabled);

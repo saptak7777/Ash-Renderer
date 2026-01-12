@@ -163,6 +163,12 @@ pub struct TransformSystem {
     dirty_flags: Vec<bool>,
 }
 
+impl Default for TransformSystem {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl TransformSystem {
     pub fn new() -> Self {
         Self {

@@ -35,6 +35,7 @@ impl Default for App {
 }
 
 impl ApplicationHandler for App {
+    #[allow(clippy::field_reassign_with_default)]
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         let window_attrs = Window::default_attributes()
             .with_title("ASH Renderer - GLB Material Registration Demo")
@@ -65,9 +66,9 @@ impl ApplicationHandler for App {
                 // Register the mesh with the renderer (this triggers material registration)
                 let handle = 1u32;
                 if let Err(e) = renderer.register_mesh_handle(handle, &mut demo_mesh) {
-                    log::error!("Failed to register demo mesh: {}", e);
+                    log::error!("Failed to register demo mesh: {e}");
                 } else {
-                    log::info!("✅ Demo mesh registered with handle {}", handle);
+                    log::info!("✅ Demo mesh registered with handle {handle}");
 
                     // Check if material was registered
                     let mesh_data = renderer.mesh_data();
@@ -81,7 +82,7 @@ impl ApplicationHandler for App {
                                 renderer.material_manager().get_material(mat_handle).clone();
                             let _ =
                                 renderer.upload_material_to_gpu(mat_handle.index as u32, &material);
-                            log::info!("✅ Material uploaded to GPU: {:?}", mat_handle);
+                            log::info!("✅ Material uploaded to GPU: {mat_handle:?}");
 
                             log::info!("   - Material: {}", material.name);
                             log::info!("   - Metallic: {:.2}", material.metallic);
@@ -99,18 +100,12 @@ impl ApplicationHandler for App {
 
                 // Submit render command with automatic material selection
                 if let Some(mesh_handle) = self.mesh_handle {
-                    let _ =
-                        renderer.submit_render_commands(&[ash_renderer::renderer::RenderCommand {
-                            mesh_handle,
-                            material_handle: ash_renderer::renderer::MaterialHandle::null(), // null = auto-select from mesh material
-                            transform: Mat4::IDENTITY,
-                            is_skinned: false,
-                            joint_offset: 0,
-                            cast_shadows: true,
-                            receive_shadows: true,
-                            is_transparent: false,
-                            is_hidden: false,
-                        }]);
+                    let mut cmd = ash_renderer::renderer::RenderCommand::default();
+                    cmd.mesh_handle = mesh_handle;
+                    cmd.material_handle = ash_renderer::renderer::MaterialHandle::null();
+                    cmd.transform = Mat4::IDENTITY;
+
+                    let _ = renderer.submit_render_commands(&[cmd]);
                     log::info!("✅ Render command submitted with auto material selection");
                 }
 

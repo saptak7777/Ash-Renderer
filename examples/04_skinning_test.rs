@@ -134,8 +134,7 @@ impl ApplicationHandler for App {
                     .unwrap();
 
                 log::info!(
-                    "✓ Registered and uploaded green material with handle {:?}",
-                    material_handle
+                    "✓ Registered and uploaded green material with handle {material_handle:?}"
                 );
 
                 self.renderer = Some(renderer);

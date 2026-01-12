@@ -1,21 +1,22 @@
-//! GLTF model loading example.
+//! GLTF Model Loading example.
 //!
-//! Demonstrates loading and rendering GLTF models with PBR materials.
-//! Shows how to control the camera from the application.
+//! Demonstrates loading a GLTF/GLB model using the renderer's gltf_loader utility.
 
 use ash_renderer::prelude::*;
+use ash_renderer::renderer::resources::gltf_loader;
 use glam::{Mat4, Vec3};
 use std::time::Instant;
 use winit::{
     application::ApplicationHandler,
     event::WindowEvent,
-    event_loop::{ActiveEventLoop, ControlFlow, EventLoop},
+    event_loop::{ActiveEventLoop, EventLoop},
     window::{Window, WindowId},
 };
 
 struct App {
     window: Option<Window>,
     renderer: Option<Renderer>,
+    mesh_handles: Vec<u32>,
     start_time: Instant,
 }
 
@@ -24,6 +25,7 @@ impl Default for App {
         Self {
             window: None,
             renderer: None,
+            mesh_handles: Vec::new(),
             start_time: Instant::now(),
         }
     }
@@ -32,21 +34,45 @@ impl Default for App {
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         let window_attrs = Window::default_attributes()
-            .with_title("ASH Renderer - GLTF Model")
-            .with_inner_size(winit::dpi::LogicalSize::new(1920, 1080));
+            .with_title("ASH Renderer - Model Loading")
+            .with_inner_size(winit::dpi::LogicalSize::new(1280, 720));
 
         let window = event_loop.create_window(window_attrs).unwrap();
         let surface_provider = ash_renderer::vulkan::WindowSurfaceProvider::new(&window);
 
         match Renderer::new(&surface_provider) {
-            Ok(renderer) => {
-                // Load GLTF model
-                // Loader implementation for GLTF files via `renderer.load_gltf` is pending.
-                log::info!("GLTF loading example - model loading not yet implemented");
+            Ok(mut renderer) => {
+                // Path to a GLB model
+                let glb_path = "assets/models/test.glb";
+
+                if std::path::Path::new(glb_path).exists() {
+                    log::info!("Loading model from: {glb_path}");
+                    match gltf_loader::load_model(glb_path) {
+                        Ok(meshes) => {
+                            for (i, mut mesh) in meshes.into_iter().enumerate() {
+                                let handle = (i + 1) as u32;
+                                if renderer.register_mesh_handle(handle, &mut mesh).is_ok() {
+                                    self.mesh_handles.push(handle);
+                                    log::info!(
+                                        "Registered mesh {} with handle {}",
+                                        mesh.name,
+                                        handle
+                                    );
+                                }
+                            }
+                        }
+                        Err(e) => log::error!("Failed to load model: {e}"),
+                    }
+                } else {
+                    log::warn!("Model not found at {glb_path}. Using default cube.");
+                    let mut cube = Mesh::create_cube();
+                    if renderer.register_mesh_handle(1, &mut cube).is_ok() {
+                        self.mesh_handles.push(1);
+                    }
+                }
 
                 self.renderer = Some(renderer);
                 self.window = Some(window);
-                self.start_time = Instant::now();
             }
             Err(e) => {
                 log::error!("Failed to create renderer: {e}");
@@ -60,37 +86,29 @@ impl ApplicationHandler for App {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::RedrawRequested => {
                 if let (Some(renderer), Some(window)) = (&mut self.renderer, &self.window) {
-                    // Application-side camera control (replaces auto_rotate)
-                    let elapsed = self.start_time.elapsed().as_secs_f32();
                     let size = window.inner_size();
                     let aspect = size.width as f32 / size.height as f32;
+                    let elapsed = self.start_time.elapsed().as_secs_f32();
 
-                    // Orbiting camera around the origin
-                    let radius = 5.0;
-                    let camera_x = radius * elapsed.sin();
-                    let camera_z = radius * elapsed.cos();
-                    let camera_pos = Vec3::new(camera_x, 2.0, camera_z);
-                    let target = Vec3::ZERO;
-                    let up = Vec3::Y;
+                    let camera_pos = Vec3::new(3.0 * elapsed.sin(), 2.0, 3.0 * elapsed.cos());
+                    let view = Mat4::look_at_rh(camera_pos, Vec3::ZERO, Vec3::Y);
+                    let mut proj = Mat4::perspective_rh(45.0_f32.to_radians(), aspect, 0.1, 100.0);
+                    proj.y_axis.y *= -1.0;
 
-                    let view = Mat4::look_at_rh(camera_pos, target, up);
-                    let mut proj = Mat4::perspective_rh(45.0_f32.to_radians(), aspect, 0.5, 100.0);
-                    proj.y_axis.y *= -1.0; // Vulkan Y-flip
-
-                    if let Err(e) = renderer.render_frame(view, proj, camera_pos, None) {
-                        log::error!("Render error: {e}");
+                    let mut commands = Vec::new();
+                    for &handle in &self.mesh_handles {
+                        commands.push(ash_renderer::renderer::RenderCommand {
+                            mesh_handle: handle,
+                            transform: Mat4::IDENTITY,
+                            ..Default::default()
+                        });
                     }
+
+                    let _ = renderer.submit_render_commands(&commands);
+                    let _ = renderer.render_frame(view, proj, camera_pos, None);
                 }
                 if let Some(window) = &self.window {
                     window.request_redraw();
-                }
-            }
-            WindowEvent::Resized(size) => {
-                if let Some(renderer) = &mut self.renderer {
-                    renderer.request_swapchain_resize(ash::vk::Extent2D {
-                        width: size.width,
-                        height: size.height,
-                    });
                 }
             }
             _ => {}
@@ -98,14 +116,9 @@ impl ApplicationHandler for App {
     }
 }
 
-fn main() -> Result<()> {
+fn main() {
     env_logger::init();
-
-    let event_loop = EventLoop::new().expect("Failed to create event loop");
-    event_loop.set_control_flow(ControlFlow::Poll);
-
+    let event_loop = EventLoop::new().unwrap();
     let mut app = App::default();
-    event_loop.run_app(&mut app).expect("Event loop error");
-
-    Ok(())
+    event_loop.run_app(&mut app).unwrap();
 }
