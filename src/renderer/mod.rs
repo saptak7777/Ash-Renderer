@@ -29,6 +29,7 @@ pub mod render_stats;
 pub mod renderer;
 pub mod resource_registry;
 pub mod resources;
+pub mod sdfgi_pass;
 pub mod shadow_map;
 pub mod skinned_vertex;
 pub mod ssgi_pass;
@@ -55,6 +56,7 @@ pub use pipeline_cache::PipelineCache;
 pub use render_stats::{RenderStats, StatsCollector};
 pub use renderer::{RenderCommand, Renderer};
 pub use resource_registry::{ResourceId, ResourceRegistry};
+pub use sdfgi_pass::{SdfgiPass, SdfgiQuality};
 pub use ssgi_pass::{SsgiPass, SsgiQuality};
 pub use temporal_upscaling::{VsrPass, VsrQuality};
 
