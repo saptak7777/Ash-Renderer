@@ -215,18 +215,13 @@ impl LightCullingPass {
             self.lights.push(GpuLight::from_point_light(light));
         }
 
-        // Directional lights: Infinitely far, these bypass tiling and affect all pixels.
-        for light in directional_lights {
-            if self.lights.len() >= MAX_LIGHTS {
-                break;
-            }
-
-            if !light.direction.is_finite() || !light.color.is_finite() {
-                log::warn!("LightManager: Skipping malformed directional light (NaN/Inf detected)");
-                continue;
-            }
-
-            self.lights.push(GpuLight::from_directional_light(light));
+        // Directional lights are NOT supported in Forward+ (Layer 3).
+        // They should be set via SceneLighting (Layer 2) to avoid double-lighting.
+        if !directional_lights.is_empty() {
+            log::warn!(
+                "LightManager: Ignoring {} directional light(s). Use SceneLighting for global directional lights (sun/moon).",
+                directional_lights.len()
+            );
         }
 
         // Spotlights

@@ -11,28 +11,117 @@
 
 use glam::{Mat4, Vec2};
 
+/// TAA quality preset (AAA-grade, Unreal TSR style)
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum TaaQuality {
+    /// Responsive (low latency, less stable)
+    Responsive,
+    /// Balanced (default)
+    Balanced,
+    /// Quality (most stable)
+    Quality,
+}
+
+impl TaaQuality {
+    /// Unreal's presets (tuned over years)
+    pub const RESPONSIVE: Self = Self::Responsive;
+    pub const BALANCED: Self = Self::Balanced;
+    pub const QUALITY: Self = Self::Quality;
+
+    /// Get history weight
+    pub const fn history_weight(self) -> f32 {
+        match self {
+            Self::Responsive => 0.7,
+            Self::Balanced => 0.85,
+            Self::Quality => 0.95,
+        }
+    }
+
+    /// Get clamping gamma (for AABB clipping)
+    pub const fn clamping_gamma(self) -> f32 {
+        match self {
+            Self::Responsive => 1.5,
+            Self::Balanced => 1.2,
+            Self::Quality => 1.0,
+        }
+    }
+}
+
+impl Default for TaaQuality {
+    fn default() -> Self {
+        Self::Balanced
+    }
+}
+
+/// Sharpening mode (Unreal pattern)
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum SharpeningMode {
+    /// No sharpening
+    None,
+    /// Subtle (0.2 strength)
+    Subtle,
+    /// Moderate (0.4 strength) - Unreal default
+    Moderate,
+    /// Strong (0.6 strength)
+    Strong,
+}
+
+impl SharpeningMode {
+    pub fn strength(self) -> f32 {
+        match self {
+            Self::None => 0.0,
+            Self::Subtle => 0.2,
+            Self::Moderate => 0.4,
+            Self::Strong => 0.6,
+        }
+    }
+}
+
+impl Default for SharpeningMode {
+    fn default() -> Self {
+        Self::Moderate
+    }
+}
+
 /// TAA configuration
 #[derive(Debug, Clone)]
 pub struct TaaConfig {
     /// Enable/disable TAA
     pub enabled: bool,
+    /// Quality preset (AAA-grade)
+    pub quality: TaaQuality,
+    /// Sharpening mode
+    pub sharpening: SharpeningMode,
     /// Blend factor (0.0 = current only, 1.0 = history only)
+    /// Note: Overridden by quality preset if not manually set
     pub blend_factor: f32,
     /// Enable color clamping to reduce ghosting
     pub color_clamp: bool,
     /// Enable velocity rejection
     pub velocity_rejection: bool,
+    /// Velocity rejection threshold (higher = more responsive)
+    pub velocity_threshold: f32,
+    /// Depth rejection threshold
+    pub depth_threshold: f32,
+    /// Anti-flicker (Unreal TSR feature)
+    pub anti_flicker: bool,
     /// Jitter scale (typically 1.0)
     pub jitter_scale: f32,
 }
 
 impl Default for TaaConfig {
     fn default() -> Self {
+        let quality = TaaQuality::default();
         Self {
             enabled: true,
-            blend_factor: 0.9,
+            quality,
+            sharpening: SharpeningMode::default(),
+            blend_factor: quality.history_weight(),
             color_clamp: true,
             velocity_rejection: true,
+            velocity_threshold: 0.02, // Unreal default
+            depth_threshold: 0.1,     // Unreal default
+            anti_flicker: true,
             jitter_scale: 1.0,
         }
     }
@@ -88,8 +177,10 @@ impl Default for HaltonSequence {
 pub struct TaaPushConstants {
     /// Screen size (width, height, 1/width, 1/height)
     pub screen_params: [f32; 4],
-    /// Blend factor, color clamp toggle, velocity rejection, padding
+    /// Blend factor, color clamp toggle, velocity rejection, clamping gamma
     pub params: [f32; 4],
+    /// Velocity threshold, depth threshold, anti-flicker, padding
+    pub quality_params: [f32; 4],
     /// Current jitter offset
     pub jitter: [f32; 2],
     /// Previous jitter offset
@@ -100,7 +191,8 @@ impl Default for TaaPushConstants {
     fn default() -> Self {
         Self {
             screen_params: [1920.0, 1080.0, 1.0 / 1920.0, 1.0 / 1080.0],
-            params: [0.9, 1.0, 1.0, 0.0],
+            params: [0.85, 1.0, 1.0, 1.2],
+            quality_params: [0.02, 0.1, 1.0, 0.0],
             jitter: [0.0, 0.0],
             prev_jitter: [0.0, 0.0],
         }
@@ -172,6 +264,12 @@ impl TemporalAA {
                 } else {
                     0.0
                 },
+                self.config.quality.clamping_gamma(),
+            ],
+            quality_params: [
+                self.config.velocity_threshold,
+                self.config.depth_threshold,
+                if self.config.anti_flicker { 1.0 } else { 0.0 },
                 0.0,
             ],
             jitter: [self.current_jitter.x, self.current_jitter.y],
@@ -235,5 +333,39 @@ mod tests {
         let jittered = taa.jitter_projection(proj, 1920, 1080);
         // Initial jitter is zero, so should be same
         assert_eq!(proj, jittered);
+    }
+
+    #[test]
+    fn test_taa_quality_presets() {
+        // Responsive: low history weight, high clamping gamma
+        assert_eq!(TaaQuality::Responsive.history_weight(), 0.7);
+        assert_eq!(TaaQuality::Responsive.clamping_gamma(), 1.5);
+
+        // Balanced: middle ground
+        assert_eq!(TaaQuality::Balanced.history_weight(), 0.85);
+        assert_eq!(TaaQuality::Balanced.clamping_gamma(), 1.2);
+
+        // Quality: high history weight, low clamping gamma
+        assert_eq!(TaaQuality::Quality.history_weight(), 0.95);
+        assert_eq!(TaaQuality::Quality.clamping_gamma(), 1.0);
+    }
+
+    #[test]
+    fn test_sharpening_modes() {
+        assert_eq!(SharpeningMode::None.strength(), 0.0);
+        assert_eq!(SharpeningMode::Subtle.strength(), 0.2);
+        assert_eq!(SharpeningMode::Moderate.strength(), 0.4);
+        assert_eq!(SharpeningMode::Strong.strength(), 0.6);
+    }
+
+    #[test]
+    fn test_taa_config_defaults() {
+        let config = TaaConfig::default();
+        assert_eq!(config.quality, TaaQuality::Balanced);
+        assert_eq!(config.sharpening, SharpeningMode::Moderate);
+        assert_eq!(config.blend_factor, 0.85); // Balanced preset
+        assert!(config.anti_flicker);
+        assert_eq!(config.velocity_threshold, 0.02);
+        assert_eq!(config.depth_threshold, 0.1);
     }
 }

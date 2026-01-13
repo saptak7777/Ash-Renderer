@@ -33,6 +33,7 @@ pub mod sdfgi_pass;
 pub mod shadow_map;
 pub mod skinned_vertex;
 pub mod ssgi_pass;
+pub mod temporal_aa;
 pub mod temporal_upscaling;
 pub mod vram_budget;
 

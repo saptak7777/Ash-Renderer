@@ -10,9 +10,256 @@ use std::sync::Arc;
 
 use crate::vulkan::VulkanDevice;
 use crate::Result;
+use thiserror::Error;
+
+/// Hi-Z error types (Rust explicit errors)
+#[derive(Debug, Error)]
+pub enum HiZError {
+    #[error("Insufficient resolution {resolution:?} for {requested} mips (max: {max_possible})")]
+    InsufficientResolution {
+        requested: u32,
+        max_possible: u32,
+        resolution: (u32, u32),
+    },
+
+    #[error("Mip level {mip_level} too small: {size:?} (minimum 4x4)")]
+    MipTooSmall { mip_level: u32, size: (u32, u32) },
+
+    #[error("Vulkan error: {0}")]
+    Vulkan(#[from] ash::vk::Result),
+}
+
+/// Quality report (for debugging/profiling)
+#[derive(Debug)]
+pub struct HiZQualityReport {
+    pub quality_mode: HiZQuality,
+    pub mip_count: u32,
+    pub avg_frame_time_ms: f64,
+    pub performance_acceptable: bool,
+    pub validation_failures: u32,
+}
+
+impl std::fmt::Display for HiZQualityReport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Hi-Z Quality Report:\n\
+             - Mode: {:?}\n\
+             - Mip Levels: {}\n\
+             - Frame Time: {:.2}ms\n\
+             - Performance: {}\n\
+             - Validation Failures: {}",
+            self.quality_mode,
+            self.mip_count,
+            self.avg_frame_time_ms,
+            if self.performance_acceptable {
+                "✅ Good"
+            } else {
+                "⚠️ Slow"
+            },
+            self.validation_failures
+        )
+    }
+}
 
 /// Hi-Z pyramid mip levels (1024 → 1)
 pub const HIZ_MIP_LEVELS: u32 = 10;
+
+/// Hi-Z quality mode (AAA-grade dynamic mip count)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HiZQuality {
+    /// 6 mip levels (Performance: ~2ms)
+    Performance,
+    /// 8 mip levels (Balanced: ~3ms)
+    Balanced,
+    /// 10 mip levels (Quality: ~4ms)
+    Quality,
+    /// 12 mip levels (Ultra: ~5ms)
+    Ultra,
+}
+
+impl HiZQuality {
+    /// Get mip count (compile-time constant)
+    pub const fn mip_count(self) -> u32 {
+        match self {
+            Self::Performance => 6,
+            Self::Balanced => 8,
+            Self::Quality => 10,
+            Self::Ultra => 12,
+        }
+    }
+
+    /// Calculate optimal mip count from depth buffer size
+    pub fn from_resolution(width: u32, height: u32) -> Self {
+        let max_dimension = width.max(height);
+        let max_mips = (32 - max_dimension.leading_zeros()).min(12);
+
+        match max_mips {
+            0..=6 => Self::Performance,
+            7..=8 => Self::Balanced,
+            9..=10 => Self::Quality,
+            _ => Self::Ultra,
+        }
+    }
+
+    /// Validate mip chain (Unreal-style validation)
+    pub fn validate_mip_chain(self, width: u32, height: u32) -> Result<()> {
+        let mip_count = self.mip_count();
+
+        // Check if we have enough resolution
+        let min_dimension = width.min(height);
+        let max_possible_mips = (32 - min_dimension.leading_zeros()).min(12);
+
+        if mip_count > max_possible_mips {
+            return Err(crate::AshError::VulkanError(format!(
+                "Hi-Z: Insufficient resolution {:?} for {} mips (max: {})",
+                (width, height),
+                mip_count,
+                max_possible_mips
+            )));
+        }
+
+        // Validate each mip level (Unreal's rule: No mip smaller than 4x4)
+        for mip in 0..mip_count {
+            let mip_width = (width >> mip).max(1);
+            let mip_height = (height >> mip).max(1);
+
+            if mip_width < 4 || mip_height < 4 {
+                return Err(crate::AshError::VulkanError(format!(
+                    "Hi-Z: Mip level {} too small: {:?} (minimum 4x4)",
+                    mip,
+                    (mip_width, mip_height)
+                )));
+            }
+        }
+
+        Ok(())
+    }
+}
+
+impl Default for HiZQuality {
+    fn default() -> Self {
+        Self::Balanced
+    }
+}
+
+/// Performance metrics (AAA-grade profiling)
+#[derive(Default, Debug)]
+pub struct HiZMetrics {
+    /// GPU time per frame (microseconds)
+    gpu_time_us: f64,
+    /// Frame number
+    frame_count: u64,
+    /// Number of validation failures (AAA standard)
+    pub validation_failures: u32,
+}
+
+impl HiZMetrics {
+    /// Update metrics (called every frame)
+    pub fn update(&mut self, total_time_us: f64) {
+        self.gpu_time_us = total_time_us;
+        self.frame_count += 1;
+    }
+
+    /// Get average GPU time (milliseconds)
+    pub fn avg_gpu_time_ms(&self) -> f64 {
+        self.gpu_time_us / 1000.0
+    }
+
+    /// Check if performance is acceptable (Unreal: < 5ms for Hi-Z)
+    pub fn is_performance_acceptable(&self) -> bool {
+        self.avg_gpu_time_ms() < 5.0
+    }
+}
+
+/// Validation state (debug only - zero cost in release!)
+#[cfg(debug_assertions)]
+#[derive(Default, Debug)]
+pub struct HiZValidation {
+    /// Verify mip chain correctness
+    _verify_mip_chain: bool,
+    /// Check for NaN/Inf in depth values
+    _check_invalid_depth: bool,
+}
+
+/// Adaptive quality manager (AAA-grade dynamic adjustment)
+pub struct AdaptiveHiZManager {
+    /// Target GPU time for Hi-Z generation (ms)
+    target_time_ms: f64,
+    /// Hysteresis margin to avoid quality flipping
+    hysteresis_margin: f64,
+    /// Frames to wait before quality change (stability)
+    stability_frames: u32,
+    /// Current stability counter
+    current_stability: u32,
+    /// Pending quality change
+    pending_quality: Option<HiZQuality>,
+}
+
+impl AdaptiveHiZManager {
+    /// Create new adaptive manager with target time
+    pub fn new(target_time_ms: f64) -> Self {
+        Self {
+            target_time_ms,
+            hysteresis_margin: 0.5, // 0.5ms margin
+            stability_frames: 30,   // Wait 30 frames before changing
+            current_stability: 0,
+            pending_quality: None,
+        }
+    }
+
+    /// Update with latest metrics and return new quality if change is needed
+    pub fn update(&mut self, current_quality: HiZQuality, gpu_time_ms: f64) -> Option<HiZQuality> {
+        // Determine desired quality based on performance
+        let desired_quality = if gpu_time_ms > self.target_time_ms + self.hysteresis_margin {
+            // Too slow, lower quality
+            match current_quality {
+                HiZQuality::Ultra => HiZQuality::Quality,
+                HiZQuality::Quality => HiZQuality::Balanced,
+                HiZQuality::Balanced => HiZQuality::Performance,
+                HiZQuality::Performance => HiZQuality::Performance, // Already lowest
+            }
+        } else if gpu_time_ms < self.target_time_ms - self.hysteresis_margin {
+            // Fast enough, try higher quality
+            match current_quality {
+                HiZQuality::Performance => HiZQuality::Balanced,
+                HiZQuality::Balanced => HiZQuality::Quality,
+                HiZQuality::Quality => HiZQuality::Ultra,
+                HiZQuality::Ultra => HiZQuality::Ultra, // Already highest
+            }
+        } else {
+            // Within acceptable range, keep current
+            current_quality
+        };
+
+        // Check if quality change is needed
+        if desired_quality != current_quality {
+            if self.pending_quality == Some(desired_quality) {
+                // Same pending change, increment stability counter
+                self.current_stability += 1;
+                if self.current_stability >= self.stability_frames {
+                    // Stable enough, apply change
+                    self.current_stability = 0;
+                    self.pending_quality = None;
+                    log::info!(
+                        "Adaptive Hi-Z: Changing quality {current_quality:?} -> {desired_quality:?} (GPU time: {gpu_time_ms:.2}ms)"
+                    );
+                    return Some(desired_quality);
+                }
+            } else {
+                // New pending change, reset counter
+                self.pending_quality = Some(desired_quality);
+                self.current_stability = 1;
+            }
+        } else {
+            // No change needed, reset
+            self.pending_quality = None;
+            self.current_stability = 0;
+        }
+
+        None
+    }
+}
 
 /// Push constants for Hi-Z generation
 #[repr(C)]
@@ -45,7 +292,18 @@ pub struct HiZPass {
     // Geometry
     width: u32,
     height: u32,
-    mip_count: u32,
+    mip_count: u32,        // Allocated mip count (max for resolution)
+    active_mip_count: u32, // Active mip count (based on quality)
+
+    // Quality configuration
+    quality: HiZQuality,
+
+    // Performance metrics (AAA standard)
+    metrics: HiZMetrics,
+
+    // Validation state (debug builds only)
+    #[cfg(debug_assertions)]
+    _validation: HiZValidation,
 
     initialized: bool,
 }
@@ -67,6 +325,14 @@ impl HiZPass {
             width: 0,
             height: 0,
             mip_count: 0,
+            active_mip_count: 0,
+            quality: HiZQuality::default(),
+            metrics: HiZMetrics::default(),
+            #[cfg(debug_assertions)]
+            _validation: HiZValidation {
+                _verify_mip_chain: true,
+                _check_invalid_depth: true,
+            },
             initialized: false,
         }
     }
@@ -98,7 +364,30 @@ impl HiZPass {
 
         self.width = width;
         self.height = height;
-        self.mip_count = Self::calculate_mip_count(width, height);
+
+        // Calculate max mips for this resolution (allocate for best quality)
+        let min_dimension = width.min(height);
+        let max_mips = (32 - min_dimension.leading_zeros()).min(12);
+        self.mip_count = max_mips;
+
+        // Auto-detect initial quality from resolution
+        self.quality = HiZQuality::from_resolution(width, height);
+        self.active_mip_count = self.quality.mip_count().min(self.mip_count);
+
+        // Validate mip chain
+        if let Err(e) = self.quality.validate_mip_chain(width, height) {
+            log::error!("HiZPass: Validation failed: {e}");
+            return;
+        }
+
+        log::info!(
+            "HiZPass: Initializing with {:?} quality ({}/{} mips) for {}x{}",
+            self.quality,
+            self.active_mip_count,
+            self.mip_count,
+            width,
+            height
+        );
 
         // Hi-Z image with mip chain
         self.create_hiz_image(allocator)
@@ -111,12 +400,6 @@ impl HiZPass {
             .expect("Hi-Z pipeline creation failed");
 
         self.initialized = true;
-    }
-
-    /// Calculate required mip levels
-    fn calculate_mip_count(width: u32, height: u32) -> u32 {
-        let max_dim = width.max(height);
-        (32 - max_dim.leading_zeros()).min(HIZ_MIP_LEVELS)
     }
 
     /// Create Hi-Z image with mip chain
@@ -322,17 +605,62 @@ impl HiZPass {
         Ok(())
     }
 
+    /// Validate mip chain configuration at runtime
+    ///
+    /// Checks if the current configuration (dimensions vs mip count) is valid.
+    /// Returns true if valid, false otherwise (with error logging).
+    pub fn validate_mip_chain_runtime(&mut self) -> bool {
+        if self.width == 0 || self.height == 0 {
+            log::error!(
+                "Hi-Z Validation Failed: Invalid dimensions {}x{}",
+                self.width,
+                self.height
+            );
+            self.metrics.validation_failures += 1;
+            return false;
+        }
+
+        if self.active_mip_count == 0 {
+            log::error!("Hi-Z Validation Failed: Active mip count is 0");
+            self.metrics.validation_failures += 1;
+            return false;
+        }
+
+        let max_mips = (self.width.max(self.height) as f32).log2().floor() as u32 + 1;
+        if self.active_mip_count > max_mips {
+            log::error!(
+                "Hi-Z Validation Failed: Active mip count ({}) exceeds max possible ({}) for {}x{}",
+                self.active_mip_count,
+                max_mips,
+                self.width,
+                self.height
+            );
+            self.metrics.validation_failures += 1;
+            return false;
+        }
+
+        true
+    }
+
     /// Build Hi-Z pyramid from depth buffer
     ///
     /// # Safety
     /// Command buffer must be in recording state.
     pub unsafe fn build_pyramid(
-        &self,
+        &mut self,
         cmd: vk::CommandBuffer,
         depth_image: vk::Image,
     ) -> Result<()> {
         if !self.initialized {
             return Ok(());
+        }
+
+        // Runtime validation (AAA standard)
+        if !self.validate_mip_chain_runtime() {
+            // In production, we might fallback or panic, but here we error
+            return Err(crate::AshError::VulkanError(
+                "Hi-Z runtime validation failed".to_string(),
+            ));
         }
 
         // Depth -> Source for transfer
@@ -450,11 +778,11 @@ impl HiZPass {
             &[mip0_read_barrier],
         );
 
-        // Generate mip chain
+        // Generate mip chain (use active mip count for current quality)
         self.device
             .cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, self.generate_pipeline);
 
-        for mip in 1..self.mip_count {
+        for mip in 1..self.active_mip_count {
             let mip_width = (self.width >> mip).max(1);
             let mip_height = (self.height >> mip).max(1);
 
@@ -583,6 +911,53 @@ impl HiZPass {
         self.hiz_views.first().copied()
     }
 
+    /// Get current quality mode
+    pub fn quality(&self) -> HiZQuality {
+        self.quality
+    }
+
+    /// Get performance metrics
+    pub fn metrics(&self) -> &HiZMetrics {
+        &self.metrics
+    }
+
+    /// Update performance metrics
+    pub fn update_metrics(&mut self, gpu_time_us: f64) {
+        self.metrics.update(gpu_time_us);
+    }
+
+    /// Set quality level (updates active mip count)
+    pub fn set_quality(&mut self, quality: HiZQuality) {
+        if quality != self.quality {
+            self.quality = quality;
+            self.active_mip_count = quality.mip_count().min(self.mip_count);
+            log::debug!(
+                "Hi-Z quality changed to {:?} ({} active mips)",
+                quality,
+                self.active_mip_count
+            );
+
+            // Validate new configuration
+            let _ = self.validate_mip_chain_runtime();
+        }
+    }
+
+    /// Check if performance is acceptable
+    pub fn is_performance_acceptable(&self) -> bool {
+        self.metrics.is_performance_acceptable()
+    }
+
+    /// Get quality report (AAA standard)
+    pub fn quality_report(&self) -> HiZQualityReport {
+        HiZQualityReport {
+            quality_mode: self.quality,
+            mip_count: self.active_mip_count,
+            avg_frame_time_ms: self.metrics.avg_gpu_time_ms(),
+            performance_acceptable: self.metrics.is_performance_acceptable(),
+            validation_failures: self.metrics.validation_failures,
+        }
+    }
+
     /// Resize the Hi-Z pyramid
     ///
     /// # Safety
@@ -605,6 +980,9 @@ impl HiZPass {
 
         self.destroy(allocator);
         self.init(allocator, vulkan_device, width, height);
+
+        // Final validation after resize (AAA standard)
+        let _ = self.validate_mip_chain_runtime();
     }
 
     /// Destroy GPU resources

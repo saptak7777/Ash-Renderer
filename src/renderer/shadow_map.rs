@@ -295,7 +295,7 @@ mod tests {
     #[test]
     fn test_shadow_config_default() {
         let config = ShadowConfig::default();
-        assert_eq!(config.resolution, 2048);
+        assert_eq!(config.resolution, 4096);
         assert_eq!(config.pcf_size, 3);
         assert!(config.enabled);
     }

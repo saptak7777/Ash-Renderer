@@ -8,12 +8,24 @@ layout(set = 0, binding = 2) uniform sampler2D depthBuffer;
 layout(set = 0, binding = 3) uniform sampler2D historyBuffer;
 layout(set = 0, binding = 4, rgba16f) uniform writeonly image2D outputImage;
 
+// Metrics buffer for quality feedback (AAA standard)
+layout(set = 0, binding = 5) buffer MetricsBuffer {
+    uint rejectedPixels;    // Count of pixels that rejected history
+    uint totalWeight;       // Sum of history weights (scaled by 1000)
+    uint totalPixels;       // Total pixels processed
+    uint padding;
+} metrics;
+
 layout(push_constant) uniform Constants {
     vec2 jitter;
     vec2 renderSize;
     vec2 displaySize;
     float historyWeight;
     uint frameIndex;
+    // Quality params
+    float clampingGamma;   // 1.0 (Quality) - 1.5 (Responsive)
+    float velocityThreshold; // 0.02
+    float antiFlicker;       // 1.0 = on, 0.0 = off
 } pc;
 
 // Catmull-Rom filtering for high quality upsampling
@@ -52,6 +64,44 @@ vec3 sampleCatmullRom(sampler2D tex, vec2 uv, vec2 texSize) {
     return max(vec3(0.0), result);
 }
 
+// Convert RGB to YCoCg color space
+vec3 rgbToYCoCg(vec3 rgb) {
+    return vec3(
+        0.25 * rgb.r + 0.5 * rgb.g + 0.25 * rgb.b,
+        0.5 * rgb.r - 0.5 * rgb.b,
+        -0.25 * rgb.r + 0.5 * rgb.g - 0.25 * rgb.b
+    );
+}
+
+// Convert YCoCg to RGB color space
+vec3 yCoCgToRgb(vec3 ycocg) {
+    float y = ycocg.x;
+    float co = ycocg.y;
+    float cg = ycocg.z;
+    return vec3(
+        y + co - cg,
+        y + cg,
+        y - co - cg
+    );
+}
+
+vec3 tonemap(vec3 color) { return color / (1.0 + color); }
+vec3 untonemap(vec3 color) { return color / (1.0 - color + 0.0001); }
+
+// Enhanced AABB clamping with gamma (Unreal TSR)
+vec3 clipAABBGamma(vec3 aabbMin, vec3 aabbMax, vec3 historyColor, float gamma) {
+    vec3 center = 0.5 * (aabbMax + aabbMin);
+    vec3 extents = 0.5 * (aabbMax - aabbMin);
+    
+    // Extend AABB by gamma (reduces flickering)
+    extents *= gamma;
+    
+    vec3 clampedMin = center - extents;
+    vec3 clampedMax = center + extents;
+    
+    return clamp(historyColor, clampedMin, clampedMax);
+}
+
 void main() {
     ivec2 display_coord = ivec2(gl_GlobalInvocationID.xy);
     if (display_coord.x >= pc.displaySize.x || display_coord.y >= pc.displaySize.y) return;
@@ -62,48 +112,85 @@ void main() {
     vec2 jitter_uv = pc.jitter / pc.renderSize;
     vec2 current_uv = display_uv - jitter_uv;
 
-    // 1. High-quality upsample of current frame
+    // 1. High-quality upsample of current frame (Catmull-Rom)
     vec3 current_color = sampleCatmullRom(currentBuffer, current_uv, pc.renderSize);
+    current_color = max(vec3(0.0), current_color); // Safety
 
-    // 2. Reprojection
-    // Motion vectors in this renderer are assumed to be in UV-space velocity [curr_uv - prev_uv]
-    vec2 motion = texture(motionBuffer, current_uv).rg;
-    vec2 history_uv = display_uv - motion;
-
-    // 3. Neighborhood Clamping (AABB) to reduce ghosting
+    // Sample neighborhood for clamping (Unreal TSR pattern) in YCoCg
     // We sample a 3x3 neighborhood in the low-res current frame
-    vec3 m1 = vec3(0.0);
-    vec3 m2 = vec3(0.0);
-    
     vec2 texelSize = 1.0 / pc.renderSize;
+    vec3 samples[9];
+    int idx = 0;
+    
     for(int y = -1; y <= 1; ++y) {
         for(int x = -1; x <= 1; ++x) {
             vec3 neighbor = texture(currentBuffer, current_uv + vec2(x, y) * texelSize).rgb;
-            m1 += neighbor;
-            m2 += neighbor * neighbor;
+            samples[idx++] = rgbToYCoCg(tonemap(neighbor));
         }
     }
     
-    vec3 mean = m1 / 9.0;
-    vec3 stddev = sqrt(max(vec3(0.0), (m2 / 9.0) - (mean * mean)));
-    
-    // Increase clamping range based on motion or contrast? (simple scale for now)
-    float k = 1.0; 
-    vec3 min_color = mean - k * stddev;
-    vec3 max_color = mean + k * stddev;
+    vec3 aabbMin = samples[0];
+    vec3 aabbMax = samples[0];
+    for(int i = 1; i < 9; ++i) {
+        aabbMin = min(aabbMin, samples[i]);
+        aabbMax = max(aabbMax, samples[i]);
+    }
 
-    // 4. Sample history and clamp
-    vec3 history_color = texture(historyBuffer, history_uv).rgb;
-    history_color = clamp(history_color, min_color, max_color);
+    // 2. Reprojection
+    vec2 motion = texture(motionBuffer, current_uv).rg;
+    vec2 history_uv = display_uv - motion;
+
+    // 3. Sample History (High Quality)
+    // Use Catmull-Rom for history too if we want max sharpness (Quality/Balanced)
+    // For now we assume high quality is desired for VSR
+    vec3 history_color = sampleCatmullRom(historyBuffer, history_uv, pc.displaySize);
+    
+    // 4. Clamping
+    vec3 historyYCoCg = rgbToYCoCg(tonemap(history_color));
+    
+    // Use clamping gamma from push constants
+    float gamma = pc.clampingGamma > 0.0 ? pc.clampingGamma : 1.2;
+    vec3 clampedHistoryYCoCg = clipAABBGamma(aabbMin, aabbMax, historyYCoCg, gamma);
+    
+    vec3 clamped_history = untonemap(yCoCgToRgb(clampedHistoryYCoCg));
 
     // 5. Temporal Blend
-    // Calculate weight: lower weight if history is outside display bounds
     float weight = pc.historyWeight;
+
+    // Velocity Rejection
+    float velocityLength = length(motion * pc.displaySize);
+    if (velocityLength > pc.velocityThreshold) {
+         // Reduce history weight for moving objects
+         weight *= max(0.0, 1.0 - (velocityLength - pc.velocityThreshold) * 5.0);
+    }
+    
+    // Anti-Flicker (Unreal TSR style)
+    if (pc.antiFlicker > 0.5) {
+        float currentLuma = samples[4].x; // Center sample Y
+        float historyLuma = historyYCoCg.x;
+        // If current is much brighter than history, trust current more to avoid ghosting/smearing
+        if (currentLuma > historyLuma + 0.5) {
+             weight *= 0.5;
+        }
+    }
+
+    // Off-screen rejection
     if (history_uv.x < 0.0 || history_uv.x > 1.0 || history_uv.y < 0.0 || history_uv.y > 1.0) {
         weight = 0.0;
     }
 
-    vec3 final_color = mix(current_color, history_color, weight);
+    vec3 final_color = mix(current_color, clamped_history, weight);
+    
+    // Track metrics (AAA quality monitoring)
+    bool rejected = (weight < 0.1); // Consider <10% weight as rejection
+    if (rejected) {
+        atomicAdd(metrics.rejectedPixels, 1);
+    }
+    atomicAdd(metrics.totalWeight, uint(weight * 1000.0)); // Scale to integer
+    atomicAdd(metrics.totalPixels, 1);
+    
+    // NaN safety
+    if (any(isnan(final_color))) final_color = vec3(0.0);
 
     imageStore(outputImage, display_coord, vec4(final_color, 1.0));
 }

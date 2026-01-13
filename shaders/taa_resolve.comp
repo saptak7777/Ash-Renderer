@@ -20,10 +20,11 @@ layout(set = 0, binding = 4, rgba16f) uniform writeonly image2D outputColor;
 
 // Push constants
 layout(push_constant) uniform PushConstants {
-    vec4 screenParams;  // width, height, 1/width, 1/height
-    vec4 params;        // blendFactor, colorClamp, velocityRejection, padding
-    vec2 jitter;        // Current frame jitter
-    vec2 prevJitter;    // Previous frame jitter
+    vec4 screenParams;      // width, height, 1/width, 1/height
+    vec4 params;            // blendFactor, colorClamp, velocityRejection, clampingGamma
+    vec4 qualityParams;     // velocityThreshold, depthThreshold, antiFlicker, padding
+    vec2 jitter;            // Current frame jitter
+    vec2 prevJitter;        // Previous frame jitter
 } pc;
 
 // ============================================================================
@@ -76,6 +77,50 @@ vec3 clipAABB(vec3 aabbMin, vec3 aabbMax, vec3 color, vec3 historyColor) {
     return historyColor;
 }
 
+// Enhanced AABB clamping with gamma (Unreal TSR)
+vec3 clipAABBGamma(vec3 aabbMin, vec3 aabbMax, vec3 historyColor, float gamma) {
+    vec3 center = 0.5 * (aabbMax + aabbMin);
+    vec3 extents = 0.5 * (aabbMax - aabbMin);
+    
+    // Extend AABB by gamma (reduces flickering)
+    extents *= gamma;
+    
+    vec3 clampedMin = center - extents;
+    vec3 clampedMax = center + extents;
+    
+    return clamp(historyColor, clampedMin, clampedMax);
+}
+
+// Bicubic history sampling (Catmull-Rom) - Unreal TSR quality
+vec3 sampleHistoryBicubic(sampler2D tex, vec2 uv) {
+    vec2 texSize = vec2(textureSize(tex, 0));
+    vec2 pixel = uv * texSize;
+    vec2 frac = fract(pixel);
+    vec2 iPixel = floor(pixel);
+    
+    // Catmull-Rom weights
+    vec2 w0 = frac * (-0.5 + frac * (1.0 - 0.5 * frac));
+    vec2 w1 = 1.0 + frac * frac * (-2.5 + 1.5 * frac);
+    vec2 w2 = frac * (0.5 + frac * (2.0 - 1.5 * frac));
+    vec2 w3 = frac * frac * (-0.5 + 0.5 * frac);
+    
+    // Sample 4x4 kernel
+    vec3 color = vec3(0.0);
+    for (int y = -1; y <= 2; y++) {
+        for (int x = -1; x <= 2; x++) {
+            vec2 offset = vec2(x, y);
+            vec2 sampleUV = (iPixel + offset + 0.5) / texSize;
+            
+            float wx = (x == -1) ? w0.x : (x == 0) ? w1.x : (x == 1) ? w2.x : w3.x;
+            float wy = (y == -1) ? w0.y : (y == 0) ? w1.y : (y == 1) ? w2.y : w3.y;
+            
+            color += texture(tex, sampleUV).rgb * wx * wy;
+        }
+    }
+    
+    return color;
+}
+
 // ============================================================================
 // MAIN
 // ============================================================================
@@ -103,9 +148,16 @@ void main() {
     
     // Sample current color (at current position, unjittered)
     vec3 current = texture(currentColor, uv).rgb;
+    float currentDepth = texture(depthBuffer, uv).r;
     
-    // Sample history color (at reprojected position)
-    vec3 history = texture(historyColor, historyUV).rgb;
+    // Sample history color (bicubic for quality, bilinear for responsive)
+    // Use bicubic if clampingGamma <= 1.2 (Quality/Balanced presets)
+    vec3 history;
+    if (pc.params.w <= 1.2) {
+        history = sampleHistoryBicubic(historyColor, historyUV);
+    } else {
+        history = texture(historyColor, historyUV).rgb;
+    }
     
     // Color clamping in YCoCg space
     vec3 result;
@@ -128,25 +180,40 @@ void main() {
             aabbMax = max(aabbMax, samples[i]);
         }
         
-        // Expand AABB slightly to reduce flicker
-        vec3 aabbCenter = (aabbMin + aabbMax) * 0.5;
-        vec3 aabbExtent = (aabbMax - aabbMin) * 0.5;
-        aabbMin = aabbCenter - aabbExtent * 1.25;
-        aabbMax = aabbCenter + aabbExtent * 1.25;
-        
-        // Clamp history to neighborhood
+        // Enhanced AABB clamping with gamma (Unreal TSR)
         vec3 currentYCoCg = rgbToYCoCg(tonemap(current));
         vec3 historyYCoCg = rgbToYCoCg(tonemap(history));
-        vec3 clampedHistory = clipAABB(aabbMin, aabbMax, currentYCoCg, historyYCoCg);
+        vec3 clampedHistory = clipAABBGamma(aabbMin, aabbMax, historyYCoCg, pc.params.w);
         history = untonemap(yCoCgToRgb(clampedHistory));
     }
     
-    // Velocity rejection - reduce blend factor for fast-moving objects
+    // Velocity rejection - use threshold from push constants
     float blendFactor = pc.params.x;
     if (pc.params.z > 0.5) {
         float velocityLength = length(velocity * screenSize);
-        float velocityWeight = clamp(1.0 - velocityLength * 0.1, 0.0, 1.0);
-        blendFactor *= velocityWeight;
+        float velocityThreshold = pc.qualityParams.x;
+        if (velocityLength > velocityThreshold) {
+            blendFactor *= max(0.0, 1.0 - (velocityLength - velocityThreshold) * 10.0);
+        }
+    }
+    
+    // Depth rejection
+    float historyDepth = texture(depthBuffer, historyUV).r;
+    float depthDiff = abs(currentDepth - historyDepth);
+    float depthThreshold = pc.qualityParams.y;
+    if (depthDiff > depthThreshold) {
+        blendFactor *= 0.5; // Reduce history influence
+    }
+    
+    // Anti-flicker (Unreal TSR feature)
+    if (pc.qualityParams.z > 0.5) {
+        // Reduce history weight if current is much brighter (prevents flicker)
+        float currentLuma = dot(current, vec3(0.299, 0.587, 0.114));
+        float historyLuma = dot(history, vec3(0.299, 0.587, 0.114));
+        
+        if (currentLuma > historyLuma * 1.5) {
+            blendFactor *= 0.5;  // Reduce history influence
+        }
     }
     
     // Check if history is valid (within screen bounds)

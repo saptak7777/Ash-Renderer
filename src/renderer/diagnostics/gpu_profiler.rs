@@ -39,8 +39,12 @@ pub enum TimingScope {
     PostProcessEnd = 6,
     /// End of UI rendering
     UiEnd = 7,
+    /// End of Hi-Z pyramid generation
+    HiZGenerateEnd = 8,
+    /// End of Hi-Z culling
+    HiZCullEnd = 9,
     /// End of frame
-    FrameEnd = 8,
+    FrameEnd = 10,
 }
 
 impl TimingScope {
@@ -59,6 +63,8 @@ impl TimingScope {
             TimingScope::BloomUpsampleEnd,
             TimingScope::PostProcessEnd,
             TimingScope::UiEnd,
+            TimingScope::HiZGenerateEnd,
+            TimingScope::HiZCullEnd,
             TimingScope::FrameEnd,
         ]
     }
@@ -83,6 +89,10 @@ pub struct ExtendedGpuTimings {
     pub post_process_ms: f32,
     /// UI overlay (ms)
     pub ui_ms: f32,
+    /// Hi-Z pyramid generation (ms)
+    pub hiz_generate_ms: f32,
+    /// Hi-Z culling (ms)
+    pub hiz_cull_ms: f32,
     /// Whether data is valid (queries completed)
     pub valid: bool,
 }
@@ -96,7 +106,9 @@ impl ExtendedGpuTimings {
             post_process_ms: self.bloom_threshold_ms
                 + self.bloom_downsample_ms
                 + self.bloom_upsample_ms
-                + self.post_process_ms,
+                + self.post_process_ms
+                + self.hiz_generate_ms
+                + self.hiz_cull_ms,
             ui_ms: self.ui_ms,
         }
     }
@@ -107,12 +119,13 @@ impl ExtendedGpuTimings {
             return "GPU: (waiting for data)".to_string();
         }
         format!(
-            "GPU: {:.2}ms | Shadow: {:.2}ms | Scene: {:.2}ms | Bloom: {:.2}ms | Post: {:.2}ms | UI: {:.2}ms",
+            "GPU: {:.2}ms | Shadow: {:.2}ms | Scene: {:.2}ms | Bloom: {:.2}ms | Post: {:.2}ms | HiZ: {:.2}ms | UI: {:.2}ms",
             self.total_ms,
             self.shadow_ms,
             self.scene_ms,
             self.bloom_threshold_ms + self.bloom_downsample_ms + self.bloom_upsample_ms,
             self.post_process_ms,
+            self.hiz_generate_ms + self.hiz_cull_ms,
             self.ui_ms
         )
     }
@@ -136,7 +149,10 @@ pub struct GpuProfiler {
     /// Number of frames since last successful result
     frames_since_result: u32,
     /// Total frames profiled
+    /// Total frames profiled
     total_frames: u64,
+    /// Whether profiling is enabled
+    pub enabled: bool,
 }
 
 impl GpuProfiler {
@@ -176,6 +192,7 @@ impl GpuProfiler {
             last_results: ExtendedGpuTimings::default(),
             frames_since_result: 0,
             total_frames: 0,
+            enabled: false,
         })
     }
 
@@ -189,7 +206,7 @@ impl GpuProfiler {
     /// # Safety
     /// Command buffer must be in recording state
     pub unsafe fn begin_frame(&mut self, cmd: vk::CommandBuffer) {
-        if !self.timestamps_supported {
+        if !self.timestamps_supported || !self.enabled {
             return;
         }
 
@@ -294,6 +311,8 @@ impl GpuProfiler {
         let bloom_up_end = get(TimingScope::BloomUpsampleEnd);
         let post_end = get(TimingScope::PostProcessEnd);
         let ui_end = get(TimingScope::UiEnd);
+        let hiz_gen_end = get(TimingScope::HiZGenerateEnd);
+        let hiz_cull_end = get(TimingScope::HiZCullEnd);
         let frame_end = get(TimingScope::FrameEnd);
 
         // Use previous valid timestamp if current is 0 (scope wasn't recorded)
@@ -324,6 +343,12 @@ impl GpuProfiler {
             bloom_up_start
         };
         let ui_start = if post_end > 0 { post_end } else { post_start };
+        let hiz_gen_start = if ui_end > 0 { ui_end } else { ui_start };
+        let hiz_cull_start = if hiz_gen_end > 0 {
+            hiz_gen_end
+        } else {
+            hiz_gen_start
+        };
 
         ExtendedGpuTimings {
             total_ms: to_ms(frame_start, frame_end),
@@ -369,6 +394,22 @@ impl GpuProfiler {
             ),
             post_process_ms: to_ms(post_start, if post_end > 0 { post_end } else { post_start }),
             ui_ms: to_ms(ui_start, if ui_end > 0 { ui_end } else { ui_start }),
+            hiz_generate_ms: to_ms(
+                hiz_gen_start,
+                if hiz_gen_end > 0 {
+                    hiz_gen_end
+                } else {
+                    hiz_gen_start
+                },
+            ),
+            hiz_cull_ms: to_ms(
+                hiz_cull_start,
+                if hiz_cull_end > 0 {
+                    hiz_cull_end
+                } else {
+                    hiz_cull_start
+                },
+            ),
             valid: true,
         }
     }
@@ -419,7 +460,7 @@ mod tests {
     #[test]
     fn test_timing_scope_indices() {
         assert_eq!(TimingScope::FrameStart.index(), 0);
-        assert_eq!(TimingScope::FrameEnd.index(), 8);
+        assert_eq!(TimingScope::FrameEnd.index(), 10);
     }
 
     #[test]
@@ -433,12 +474,14 @@ mod tests {
             bloom_upsample_ms: 0.5,
             post_process_ms: 1.0,
             ui_ms: 0.5,
+            hiz_generate_ms: 0.3,
+            hiz_cull_ms: 0.2,
             valid: true,
         };
         let basic = ext.to_basic();
         assert_eq!(basic.total_ms, 10.0);
         assert_eq!(basic.scene_ms, 3.0); // shadow + scene
-        assert_eq!(basic.post_process_ms, 2.5); // bloom + post
+        assert_eq!(basic.post_process_ms, 3.0); // bloom + post + hiz
         assert_eq!(basic.ui_ms, 0.5);
     }
 }

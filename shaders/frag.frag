@@ -328,7 +328,6 @@ void main() {
         
         // Light type constants (aligned with Rust and compute shader)
         const uint LIGHT_TYPE_POINT = 0u;
-        const uint LIGHT_TYPE_DIRECTIONAL = 1u;
         const uint LIGHT_TYPE_SPOT = 2u;
         
         uint lightType = uint(light.direction.w);
@@ -350,11 +349,6 @@ void main() {
             float distRatio = dist / radius;
             attenuation = 1.0 / (dist * dist + 1.0);
             attenuation *= max(0.0, 1.0 - distRatio * distRatio);
-        }
-        // Directional Light
-        else if (lightType == LIGHT_TYPE_DIRECTIONAL) {
-            L = -normalize(light.direction.xyz);
-            attenuation = 1.0;
         }
         // Spot Light
         else if (lightType == LIGHT_TYPE_SPOT) {

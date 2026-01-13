@@ -99,6 +99,7 @@ fn compile_shaders() {
             "comp",
             &[],
         ),
+        ("shaders/sharpen.comp", "sharpen.comp.spv", "comp", &[]),
         (
             "shaders/occlusion_cull.comp",
             "occlusion_cull.comp.spv",

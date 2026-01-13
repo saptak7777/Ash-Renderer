@@ -24,7 +24,9 @@ use crate::{
         resources,
         resources::uniform::{StorageBuffer, UniformBuffer},
         ssgi_pass::{SsgiPass, SsgiQuality},
+        temporal_aa::TaaConfig,
         temporal_upscaling::{VsrPass, VsrQuality},
+        hiz_pass::AdaptiveHiZManager,
         vram_budget, DepthBuffer, GBuffer, Material, MaterialHandle, MaterialManager, Mesh,
         PipelineCache, SkinnedVertex, Texture, TextureData, Transform,
     },
@@ -419,6 +421,7 @@ pub struct Renderer {
     forward_plus: Option<ForwardPlusIntegration>,
     // GPU-driven occlusion culling (Hi-Z + Indirect Draw)
     hiz_pass: Option<HiZPass>,
+    adaptive_hiz_manager: AdaptiveHiZManager,
     indirect_draw_pass: Option<IndirectDrawPass>,
     occlusion_culling: OcclusionCulling,
     // Temporal Super-Resolution
@@ -467,6 +470,9 @@ pub struct Renderer {
     // Headless support
     readback_buffer: Option<BufferHandle>,
     last_image_index: u32,
+
+    // TAA Configuration
+    pub taa_config: TaaConfig,
 
     // Bindless Buffer Indices
     pub instance_buffer_indices: Vec<u32>,
@@ -966,6 +972,8 @@ impl Renderer {
                 strict_mode: renderer_config.strict_mode,
                 readback_buffer,
                 last_image_index: 0,
+                taa_config: TaaConfig::default(),
+                adaptive_hiz_manager: AdaptiveHiZManager::new(3.0), // Target 3ms for Hi-Z
             };
 
             // Initialize dummy IBL cubemaps to prevent descriptor mismatches (samplerCube vs sampler2D)
@@ -3983,8 +3991,24 @@ impl Renderer {
             if let (Some(ref mut hiz), Some(depth_buffer)) =
                 (&mut self.hiz_pass, &self.depth_buffer)
             {
+                // Update adaptive quality based on previous frame's metrics
+                if let Some(ref mut profiler) = self.gpu_profiler {
+                    let timings = profiler.last_extended_timings();
+                    if timings.valid {
+                        let hiz_time_ms = timings.hiz_generate_ms as f64;
+                        if let Some(new_quality) = self.adaptive_hiz_manager.update(hiz.quality(), hiz_time_ms) {
+                            hiz.set_quality(new_quality);
+                        }
+                    }
+                }
+
                 // Hiz pyramid is built from previous frame's depth
                 hiz.build_pyramid(command_buffer, depth_buffer.image())?;
+                
+                // Write timestamp after Hi-Z generation
+                if let Some(ref profiler) = self.gpu_profiler {
+                    profiler.write_timestamp(command_buffer, crate::renderer::diagnostics::TimingScope::HiZGenerateEnd);
+                }
             }
 
             // Apply sub-pixel jitter for VSR/TSR if enabled
@@ -4366,6 +4390,9 @@ impl Renderer {
             if let (Some(ref mut vsr), Some(ref mut gbuffer)) =
                 (&mut self.vsr_pass, &mut self.gbuffer)
             {
+                // Read back metrics from previous frame (non-blocking)
+                vsr.readback_metrics(command_buffer, &self.alloc.vma);
+
                 let depth_buffer = self
                     .depth_buffer
                     .as_ref()
@@ -4378,6 +4405,7 @@ impl Renderer {
                     depth_buffer.view(),
                     gbuffer.motion_view(),
                     jitter_uv,
+                    &self.taa_config,
                 )?;
                 vsr.next_frame();
             }
@@ -4948,7 +4976,11 @@ impl Renderer {
         let vsr = self.vsr_pass.as_ref();
 
         let color_view = if let Some(vsr) = vsr {
-            vsr.output_view()
+            vsr.output_view([
+                crate::renderer::temporal_aa::SharpeningMode::Subtle,
+                crate::renderer::temporal_aa::SharpeningMode::Moderate,
+                crate::renderer::temporal_aa::SharpeningMode::Strong,
+            ].contains(&self.taa_config.sharpening))
         } else if let Some(hdr) = hdr {
             hdr.view()
         } else {
@@ -5114,6 +5146,9 @@ impl Renderer {
     /// Collects frame diagnostics.
     /// Call this after render_frame() to collect stats
     pub fn update_diagnostics(&mut self) {
+        if let Some(ref mut profiler) = self.gpu_profiler {
+            profiler.enabled = self.diagnostics.mode != DiagnosticsMode::Off;
+        }
         // Begin frame profiling
         self.frame_profiler.begin_frame();
 
@@ -5135,6 +5170,17 @@ impl Renderer {
         // Print to console if enabled
         if self.diagnostics.should_print_console() {
             self.diagnostics.print_console();
+        }
+    }
+
+    /// Log quality reports for debug/profiling
+    pub fn log_quality_reports(&self) {
+        if let Some(hiz) = &self.hiz_pass {
+            log::info!("{}", hiz.quality_report());
+        }
+
+        if let Some(vsr) = &self.vsr_pass {
+            log::info!("{}", vsr.quality_report(self.taa_config.quality, self.taa_config.sharpening));
         }
     }
 

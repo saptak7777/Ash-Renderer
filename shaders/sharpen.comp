@@ -1,0 +1,53 @@
+#version 450
+
+//! Post-TAA Sharpening Shader (Unreal TSR Style)
+//!
+//! Applies contrast-adaptive sharpening to reduce TAA blur.
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+// Input: TAA resolved image
+layout(set = 0, binding = 0) uniform sampler2D inputTexture;
+
+// Output: Sharpened image
+layout(set = 0, binding = 1, rgba16f) uniform writeonly image2D outputTexture;
+
+// Push constants
+layout(push_constant) uniform PushConstants {
+    float strength;  // 0.0 = no sharpening, 1.0 = maximum
+    float padding1;
+    float padding2;
+    float padding3;
+} pc;
+
+void main() {
+    ivec2 pos = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 imageSize = imageSize(outputTexture);
+    
+    if (pos.x >= imageSize.x || pos.y >= imageSize.y) {
+        return;
+    }
+    
+    vec2 uv = (vec2(pos) + 0.5) / vec2(imageSize);
+    vec2 texelSize = 1.0 / vec2(textureSize(inputTexture, 0));
+    
+    // Center sample
+    vec3 center = texture(inputTexture, uv).rgb;
+    
+    // Cross sample (Unreal's pattern)
+    vec3 top    = texture(inputTexture, uv + vec2(0.0, -texelSize.y)).rgb;
+    vec3 bottom = texture(inputTexture, uv + vec2(0.0,  texelSize.y)).rgb;
+    vec3 left   = texture(inputTexture, uv + vec2(-texelSize.x, 0.0)).rgb;
+    vec3 right  = texture(inputTexture, uv + vec2( texelSize.x, 0.0)).rgb;
+    
+    // Laplacian filter (edge detection)
+    vec3 laplacian = 4.0 * center - (top + bottom + left + right);
+    
+    // Sharpen (Unreal's formula)
+    vec3 sharpened = center + laplacian * pc.strength;
+    
+    // Clamp to prevent overshoot
+    sharpened = clamp(sharpened, 0.0, 65504.0); // Max for fp16
+    
+    imageStore(outputTexture, pos, vec4(sharpened, 1.0));
+}
