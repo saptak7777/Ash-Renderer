@@ -2,8 +2,10 @@
 //!
 //! Simplest possible example: non-textured cube with basic lighting.
 //! No Forward+, no post-processing, no complexity.
+//!
 
 use ash_renderer::prelude::*;
+use ash_renderer::renderer::features::ambient_lighting::{AmbientPreset, LightingBuilder};
 use glam::{Mat4, Vec3};
 use std::sync::Arc;
 use winit::{
@@ -19,7 +21,6 @@ struct App {
     renderer: Option<Renderer>,
     render_commands: Vec<ash_renderer::renderer::RenderCommand>,
 }
-
 
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
@@ -66,12 +67,17 @@ impl ApplicationHandler for App {
                         ..Default::default()
                     });
 
-                // Simple directional lighting (NO Forward+)
-                renderer.set_lighting(
-                    Vec3::new(1.0, -1.0, -1.0).normalize(),
-                    [3.0, 3.0, 3.0, 1.0], // Bright white
-                    0.3,                  // Strong ambient
-                );
+                // Simple directional lighting (RAGE approach)
+                let lighting = LightingBuilder::new()
+                    .with_ambient_preset(AmbientPreset::IndoorLit)
+                    .with_directional(
+                        Vec3::new(1.0, -1.0, -1.0).normalize(),
+                        Vec3::splat(3.0),
+                        1.0,
+                    )
+                    .build();
+
+                renderer.set_lighting(&lighting);
 
                 log::info!("✓ Basic mesh renderer initialized");
                 self.renderer = Some(renderer);

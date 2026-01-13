@@ -1,3 +1,4 @@
+pub mod ambient_lighting;
 mod auto_rotate;
 pub mod bloom;
 pub mod brdf_lut;
@@ -10,6 +11,9 @@ pub mod post_processing;
 pub mod shadows;
 pub mod tonemapping;
 
+pub use ambient_lighting::{
+    AmbientPreset, HemisphereAmbient, LightingBuilder, LightingPresets, SceneLighting,
+};
 pub use auto_rotate::AutoRotateFeature;
 pub use bloom::{BloomConfig, BloomFeature, BloomPass, BloomPushConstants};
 pub use brdf_lut::{BrdfLutConfig, BrdfLutPass};

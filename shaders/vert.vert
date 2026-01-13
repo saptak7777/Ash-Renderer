@@ -26,9 +26,7 @@ layout(set = 0, binding = 0) uniform MVP {
     mat4 light_space_matrix;
     mat4 normal_matrix;
     vec4 camera_pos;
-    vec4 light_direction;
-    vec4 light_color;
-    vec4 ambient_color;
+    SceneLighting scene_lighting;
 } mvp;
 
 // Set 1: Bindless consolidated resources

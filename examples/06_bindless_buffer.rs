@@ -5,6 +5,7 @@
 //! using standard uniforms.
 
 use ash_renderer::prelude::*;
+use ash_renderer::renderer::features::ambient_lighting::{AmbientPreset, LightingBuilder};
 use ash_renderer::renderer::resources::uniform::StorageBuffer;
 use glam::{Mat4, Vec3, Vec4};
 use std::sync::Arc;
@@ -70,9 +71,7 @@ impl ApplicationHandler for App {
 
                 // Register and upload material
                 let material_handle = renderer.register_and_upload_material(material).unwrap();
-                log::info!(
-                    "✓ Registered orange material with handle {material_handle:?}"
-                );
+                log::info!("✓ Registered orange material with handle {material_handle:?}");
 
                 // 3. Create a cube
                 let mut cube = Mesh::create_cube();
@@ -102,12 +101,17 @@ impl ApplicationHandler for App {
                     renderer.set_tonemapping_enabled(true);
                 }
 
-                // 6. Setup PHASE 2 Lighting: Balanced HDR
-                renderer.set_lighting(
-                    Vec3::new(-1.0, -1.0, -1.0).normalize(),
-                    [2.5, 2.5, 2.5, 1.0], // Correct: White light with 2.5 brightness
-                    0.2,                  // Improved ambient strength for better visibility
-                );
+                // 6. Setup PHASE 2 Lighting: Balanced HDR (RAGE approach)
+                let lighting = LightingBuilder::new()
+                    .with_ambient_preset(AmbientPreset::IndoorLit)
+                    .with_directional(
+                        Vec3::new(-1.0, -1.0, -1.0).normalize(),
+                        Vec3::splat(2.5),
+                        1.0,
+                    )
+                    .build();
+
+                renderer.set_lighting(&lighting);
 
                 self.renderer = Some(renderer);
                 self.window = Some(window);
@@ -137,14 +141,18 @@ impl ApplicationHandler for App {
                         let view = Mat4::look_at_rh(camera_pos, Vec3::ZERO, Vec3::Y);
                         let mut proj =
                             Mat4::perspective_rh(45.0_f32.to_radians(), aspect, 0.1, 100.0);
-                        proj.y_axis.y *= -1.0;
-
-                        // Dynamic Lighting
+                        proj.y_axis.y *= -1.0; // Vulkan Y-flip
+                                               // Dynamic Lighting
                         let light_angle = time * 0.5;
                         let light_dir =
                             Vec3::new(-light_angle.cos(), -1.0, -light_angle.sin()).normalize();
 
-                        renderer.set_lighting(light_dir, [2.5, 2.5, 2.5, 1.0], 0.2);
+                        let lighting = LightingBuilder::new()
+                            .with_ambient_preset(AmbientPreset::IndoorLit)
+                            .with_directional(light_dir, Vec3::splat(2.5), 1.0)
+                            .build();
+
+                        renderer.set_lighting(&lighting);
 
                         // Submit commands
                         if let Err(e) = renderer.submit_render_commands(&self.render_commands) {

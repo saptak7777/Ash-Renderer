@@ -18,6 +18,7 @@ Ash Renderer is a low-level Vulkan rendering library for Rust projects that want
 ### What It Does (Mostly)
 
 - ✅ **Forward+ Lighting**: Tile-based culling for hundreds of point and spot lights.
+- ✅ **RAGE Hemisphere Ambient**: AAA-standard ambient model for physically plausible fill lighting.
 - ✅ **Bindless Resources**: Up to 16,384 texture slots because who has time to bind things manually?
 - ✅ **GPU-Driven Culling**: Hi-Z occlusion and frustum culling so your GPU doesn't melt.
 - ✅ **PBR Workflow**: Metallic/Roughness standard, with automatic GLB material ingestion.
@@ -90,9 +91,25 @@ impl ApplicationHandler for App {
 }
 ```
 
-### 2. Modern Lighting (Spotlights & Friends)
+### 2. RAGE Ambient Lighting (The AAA Way)
 
-We recently stopped ignoring spotlights. You can update them like this:
+We've ditched the legacy ambient color for a proper **Hemisphere Ambient** model (as seen in RAGE/GTA V). It uses a sky color and ground color to ensure your metals look good even in the shadows.
+
+```rust
+use ash_renderer::renderer::features::ambient_lighting::{AmbientPreset, LightingBuilder};
+
+// Build a preset or custom lighting setup (Compile-time verified!)
+let lighting = LightingBuilder::new()
+    .with_ambient_preset(AmbientPreset::OutdoorDay)
+    .with_sun() // Adds a default global directional light
+    .build();
+
+renderer.set_lighting(&lighting);
+```
+
+### 3. Spotlights & Dynamic Gear
+
+We also haven't ignored spotlights. You can update them like this:
 
 ```rust
 let spot = SpotLight::new(

@@ -19,9 +19,7 @@ pub struct MvpMatrices {
     pub light_space_matrix: Mat4,
     pub normal_matrix: Mat4,
     pub camera_pos: Vec4,
-    pub light_direction: Vec4,
-    pub light_color: Vec4,
-    pub ambient_color: Vec4,
+    pub scene_lighting: crate::renderer::features::SceneLighting,
 }
 
 /// Material parameters exposed to the GPU
@@ -109,9 +107,7 @@ impl Default for MvpMatrices {
             light_space_matrix: Mat4::IDENTITY,
             normal_matrix: Mat4::IDENTITY,
             camera_pos: Vec4::ZERO,
-            light_direction: Vec4::new(0.0, -1.0, 0.0, 0.0),
-            light_color: Vec4::splat(1.0),
-            ambient_color: Vec4::splat(0.1),
+            scene_lighting: crate::renderer::features::SceneLighting::default(),
         }
     }
 }
@@ -156,11 +152,9 @@ impl MvpMatrices {
         self.recalc_view_proj();
     }
 
-    /// Configure lighting terms for the frame
-    pub fn set_lighting(&mut self, direction: Vec3, light_color: Vec3, ambient_color: Vec3) {
-        self.light_direction = direction.normalize_or_zero().extend(0.0);
-        self.light_color = light_color.extend(0.0);
-        self.ambient_color = ambient_color.extend(0.0);
+    /// Configure lighting for the frame
+    pub fn set_lighting(&mut self, lighting: &crate::renderer::features::SceneLighting) {
+        self.scene_lighting = *lighting;
     }
 
     /// Set the light-space matrix for shadow mapping

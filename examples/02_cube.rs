@@ -4,6 +4,7 @@
 //! Shows how to control the camera from the application.
 
 use ash_renderer::prelude::*;
+use ash_renderer::renderer::features::ambient_lighting::{AmbientPreset, LightingBuilder};
 use ash_renderer::renderer::resources::uniform::StorageBuffer;
 use glam::{Mat4, Vec3, Vec4};
 use std::sync::Arc;
@@ -72,9 +73,7 @@ impl ApplicationHandler for App {
                 // Register and upload material
                 let material_handle = renderer.register_and_upload_material(material).unwrap();
 
-                log::info!(
-                    "✓ Uploaded red material to GPU with handle {material_handle:?}"
-                );
+                log::info!("✓ Uploaded red material to GPU with handle {material_handle:?}");
 
                 // Setup initial render command
                 self.render_commands
@@ -85,12 +84,17 @@ impl ApplicationHandler for App {
                         ..Default::default()
                     });
 
-                // CRITICAL: Set lighting for visibility (default ambient is too dark)
-                renderer.set_lighting(
-                    Vec3::new(1.0, -1.0, -1.0).normalize(),
-                    [2.0, 2.0, 2.0, 1.0], // Bright white light
-                    0.2,                  // Ambient strength for better visibility
-                );
+                // CRITICAL: Set lighting for visibility (RAGE approach)
+                let lighting = LightingBuilder::new()
+                    .with_ambient_preset(AmbientPreset::IndoorLit)
+                    .with_directional(
+                        Vec3::new(1.0, -1.0, -1.0).normalize(),
+                        Vec3::splat(2.0),
+                        1.0,
+                    )
+                    .build();
+
+                renderer.set_lighting(&lighting);
 
                 // Register bindless storage buffer (prevents crash)
                 let tint_colors = [Vec4::new(1.0, 1.0, 1.0, 1.0)];

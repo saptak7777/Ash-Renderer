@@ -4,6 +4,7 @@
 //! Features: GLB loading, proper material registration, HDR post-processing.
 
 use ash_renderer::prelude::*;
+use ash_renderer::renderer::features::ambient_lighting::{AmbientPreset, LightingBuilder};
 use ash_renderer::renderer::resources::gltf_loader;
 use glam::{Mat4, Vec3};
 use std::time::Instant;
@@ -153,12 +154,17 @@ impl ApplicationHandler for App {
                         ..Default::default()
                     });
 
-                // Setup lighting
-                renderer.set_lighting(
-                    Vec3::new(-0.5, -1.0, -0.5).normalize(),
-                    [3.0, 3.0, 3.0, 1.0],
-                    0.3,
-                );
+                // Setup lighting (RAGE approach)
+                let lighting = LightingBuilder::new()
+                    .with_ambient_preset(AmbientPreset::OutdoorDay)
+                    .with_directional(
+                        Vec3::new(-0.5, -1.0, -0.5).normalize(),
+                        Vec3::splat(3.0),
+                        1.0,
+                    )
+                    .build();
+
+                renderer.set_lighting(&lighting);
 
                 self.renderer = Some(renderer);
                 self.window = Some(window);

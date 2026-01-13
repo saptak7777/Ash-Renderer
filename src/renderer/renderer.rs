@@ -434,9 +434,7 @@ pub struct Renderer {
     culling_manager: CullingManager,
     use_gpu_driven: bool,
     // Lighting
-    light_direction: Vec3,
-    light_color: [f32; 4],
-    ambient_color: [f32; 4],
+    scene_lighting: crate::renderer::features::SceneLighting,
     point_lights: Vec<PointLight>,
     directional_lights: Vec<DirectionalLight>,
     spot_lights: Vec<SpotLight>,
@@ -938,9 +936,7 @@ impl Renderer {
                 gbuffer: Some(gbuffer),
                 culling_manager: CullingManager::new(),
                 use_gpu_driven: pass_manager.use_gpu_driven(),
-                light_direction: Vec3::new(-0.35, -1.0, -0.25).normalize(),
-                light_color: [1.5, 1.5, 1.5, 1.0],
-                ambient_color: [0.1, 0.1, 0.1, 1.0],
+                scene_lighting: crate::renderer::features::SceneLighting::default(),
                 point_lights: Vec::new(),
                 directional_lights: Vec::new(),
                 spot_lights: Vec::new(),
@@ -1923,40 +1919,8 @@ impl Renderer {
         &mut self.bindless_manager
     }
 
-    /// Set global lighting parameters.
-    pub fn set_lighting(&mut self, direction: Vec3, color: [f32; 4], ambient_strength: f32) {
-        self.light_direction = direction;
-        self.light_color = color;
-        self.ambient_color = [ambient_strength, ambient_strength, ambient_strength, 1.0];
+    // Legacy lighting methods removed for modern RAGE pipeline
 
-        // Synchronize with shadow feature
-        self.shadow_feature.set_light_direction(direction);
-        
-        // MODERNIZATION: Sync with Forward+ system
-        // This ensures examples using simple `set_lighting` still work with the modern Forward+ shader
-        use crate::renderer::features::DirectionalLight;
-        let dir_light = DirectionalLight {
-            direction,
-            color: Vec3::new(color[0], color[1], color[2]),
-            intensity: color[3], // Use alpha as intensity
-        };
-        
-        // Store directional light so it's preserved when update_light() is called
-        self.directional_lights = vec![dir_light];
-
-        // Sync with Forward+ if available
-        if let Some(forward_plus) = &mut self.forward_plus {
-            forward_plus.update_lights(&self.point_lights, &self.directional_lights, &self.spot_lights);
-            // Upload to GPU so lights are visible
-            unsafe {
-                let _ = forward_plus.upload_to_gpu(&self.alloc.vma, &self.device.device);
-            }
-        }
-    }
-
-    pub fn ambient_color_mut(&mut self) -> &mut [f32; 4] {
-        &mut self.ambient_color
-    }
 
     /// Update a point light at the specified index.
     pub fn update_light(&mut self, index: usize, light: PointLight) {
@@ -3868,6 +3832,15 @@ impl Renderer {
         Ok(())
     }
 
+    /// Set scene lighting configuration (RAGE)
+    pub fn set_lighting(&mut self, lighting: &crate::renderer::features::SceneLighting) {
+        self.scene_lighting = *lighting;
+        
+        // Sync shadow direction
+        let direction = Vec4::from_array(lighting.directional.direction).truncate();
+        self.shadow_feature.set_light_direction(direction);
+    }
+
     pub fn render_frame(
         &mut self,
         view: Mat4,
@@ -4063,11 +4036,7 @@ impl Renderer {
                 matrices.view_proj = jittered_projection * view;
                 matrices.prev_view_proj = self.prev_view_proj;
                 matrices.camera_pos = camera_pos.extend(1.0);
-                matrices.set_lighting(
-                    self.light_direction,
-                    Vec4::from_array(self.light_color).truncate(),
-                    Vec4::from_array(self.ambient_color).truncate(),
-                );
+                matrices.set_lighting(&self.scene_lighting);
 
                 // Set light-space matrix for shadow mapping
                 let light_space_matrix = self.shadow_feature.light_space_matrix();

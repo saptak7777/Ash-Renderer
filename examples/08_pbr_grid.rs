@@ -13,6 +13,7 @@
 //! - Testing lighting and reflection systems
 
 use ash_renderer::prelude::*;
+use ash_renderer::renderer::features::ambient_lighting::{AmbientPreset, LightingBuilder};
 use ash_renderer::renderer::features::PointLight;
 use ash_renderer::renderer::resources::uniform::StorageBuffer;
 use glam::{Mat4, Vec3, Vec4};
@@ -169,12 +170,17 @@ impl ApplicationHandler for App {
                     grid_size * grid_size
                 );
 
-                // Set up lighting to highlight PBR properties
-                renderer.set_lighting(
-                    Vec3::new(1.0, -1.0, -1.0).normalize(),
-                    [2.0, 2.0, 2.0, 1.0], // Bright white light
-                    0.1,                  // Low ambient to make specular highlights pop
-                );
+                // Set up lighting to highlight PBR properties (RAGE approach)
+                let lighting = LightingBuilder::new()
+                    .with_ambient_preset(AmbientPreset::IndoorLit)
+                    .with_directional(
+                        Vec3::new(1.0, -1.0, -1.0).normalize(),
+                        Vec3::splat(2.0),
+                        1.0,
+                    )
+                    .build();
+
+                renderer.set_lighting(&lighting);
 
                 self.renderer = Some(renderer);
                 self.window = Some(window);

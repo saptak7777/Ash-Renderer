@@ -32,9 +32,7 @@ layout(set = 0, binding = 0) uniform MVP {
     mat4 light_space_matrix;
     mat4 normal_matrix;
     vec4 camera_pos;
-    vec4 light_direction;
-    vec4 light_color;
-    vec4 ambient_color;
+    SceneLighting scene_lighting;
 } mvp;
 
 struct MaterialUniform {
@@ -47,6 +45,8 @@ struct MaterialUniform {
     float alpha_cutoff;
     float _padding;
 };
+
+
 
 // Set 1: Bindless consolidated resources
 layout(set = 1, binding = 0) uniform sampler2D textures[];
@@ -168,16 +168,67 @@ vec3 fresnel_schlick_roughness(float cosTheta, vec3 F0, float roughness) {
     return F0 + (max(vec3(1.0 - roughness), F0) - F0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
 }
 
+// ============================================================================
+// AMBIENT CALCULATION - RAGE HEMISPHERE
+// ============================================================================
+
+vec3 calculateHemisphereAmbient(vec3 normal, vec3 albedo) {
+    // Blend between sky and ground based on normal.y
+    float skyFactor = normal.y * 0.5 + 0.5;
+    
+    vec3 skyContribution = mvp.scene_lighting.ambient.sky_color.xyz * skyFactor;
+    vec3 groundContribution = mvp.scene_lighting.ambient.ground_color.xyz * (1.0 - skyFactor);
+    
+    vec3 ambientColor = (skyContribution + groundContribution) * mvp.scene_lighting.ambient.sky_color.w;
+    
+    return ambientColor * albedo;
+}
+
+// ============================================================================
+// DIRECTIONAL LIGHT CALCULATION
+// ============================================================================
+
+vec3 calculateDirectionalLight(
+    vec3 N,
+    vec3 V,
+    vec3 albedo,
+    float metallic,
+    float roughness,
+    vec4 fragPosLightSpace
+) {
+    vec3 L = -normalize(mvp.scene_lighting.directional.direction.xyz);
+    vec3 H = normalize(V + L);
+    
+    float NdotL = max(dot(N, L), 0.0);
+    float NdotH = max(dot(N, H), 0.0);
+    float NdotV = max(dot(N, V), 0.0);
+    
+    vec3 F0 = mix(vec3(0.04), albedo, metallic);
+    vec3 F = fresnel_schlick_fast(max(dot(H, V), 0.0), F0);
+    float D = distribution_ggx(NdotH, roughness);
+    float G = geometry_smith(NdotV, NdotL, roughness);
+    
+    vec3 specular = (D * F * G) / max(4.0 * NdotV * NdotL, 0.001);
+    vec3 kD = (1.0 - F) * (1.0 - metallic);
+    vec3 diffuse = kD * albedo / PI;
+    
+    // Shadows
+    float shadow = 0.0;
+    if (mvp.scene_lighting.directional.direction.w > 0.5) {
+        shadow = ShadowCalculation(fragPosLightSpace, N, L);
+    }
+    
+    vec3 radiance = mvp.scene_lighting.directional.color_intensity.rgb * mvp.scene_lighting.directional.color_intensity.w;
+    
+    return (diffuse + specular) * radiance * NdotL * (1.0 - shadow);
+}
+
 void main() {
     // Extract actual index from handle (lower 16 bits)
     uint actual_material_index = push.material_index & 0xFFFFu;
     MaterialUniform mat = material_buffers[nonuniformEXT(push.material_buffer_index)].materials[actual_material_index];
 
-    vec3 lightColor = mvp.light_color.xyz;
-    vec3 ambientColor = mvp.ambient_color.xyz;
-
     vec3 viewDir = normalize(mvp.camera_pos.xyz - fragWorldPos);
-    vec3 lightDir = normalize(-mvp.light_direction.xyz);
 
     // Sample base color
     int base_color_idx = mat.texture_indices.x;
@@ -366,44 +417,18 @@ void main() {
     }
     
     // ============================================================================
-    // AMBIENT LIGHTING (Image-Based Lighting)
+    // ============================================================================
+    // RAGE AMBIENT + GLOBAL DIRECTIONAL
     // ============================================================================
 
-    // ========== PBR IBL CALCULATIONS ==========
+    // Layer 1: Hemisphere Ambient (RAGE)
+    vec3 ambient = calculateHemisphereAmbient(normal, baseColor) * occlusion;
+    
+    // Layer 2: Global Directional Light
+    vec3 directional = calculateDirectionalLight(
+        normal, viewDir, baseColor, metallic, roughness, fragPosLightSpace
+    );
 
-    // 1. Normalize vectors
-    vec3 V = normalize(viewDir);             // View direction
-    vec3 R_probe = reflect(-V, normal);      // Reflection vector
-
-    // 2. Calculate angles
-    // NdotV already calculated above
-
-    // 3. Fresnel-Schlick approximation (using roughness-aware fresnel)
-    vec3 fresnel_ibl = fresnel_schlick_roughness(NdotV, F0, roughness);
-
-    // IBL intensity multiplier - boosts environment lighting for richer colors
-    const float IBL_INTENSITY = 1.5;
-
-    // 4. Diffuse IBL (Irradiance Map - pre-filtered)
-    // Convolves radiance around the normal
-    vec3 irradiance_ibl = texture(irradianceMap, normal).rgb;
-    vec3 kd_ibl = (1.0 - metallic) * (1.0 - fresnel_ibl);  // Diffuse coefficient
-    vec3 diffuseIBL = kd_ibl * irradiance_ibl * baseColor * IBL_INTENSITY;
-
-    // 5. Specular IBL (Pre-filtered Environment Map + BRDF LUT)
-    // Pre-filtered map: mip level based on roughness
-    const float MAX_REFLECTION_LOD = 4.0; // Assuming 5 mip levels (0-4)
-    float lod = roughness * MAX_REFLECTION_LOD;
-    vec3 specularColor = textureLod(prefilterMap, R_probe, lod).rgb;
-
-    // BRDF LUT lookup: roughness vs. view angle
-    vec2 brdfUv = vec2(NdotV, roughness);
-    vec2 brdfSample = texture(brdfLUT, brdfUv).rg;  // Fetch (scale, bias)
-    vec3 specularIBL = specularColor * (fresnel_ibl * brdfSample.x + brdfSample.y) * IBL_INTENSITY;
-
-    // 6. Combine diffuse + specular IBL
-    // 6. Combine diffuse + specular IBL (no legacy ambient - was adding white tint)
-    vec3 ambient = (diffuseIBL + specularIBL) * occlusion;
     
     // Emissive
     int emissive_idx = mat.emissive_texture_index;
@@ -412,8 +437,8 @@ void main() {
         emissive *= texture(textures[nonuniformEXT(emissive_idx)], fragUV).rgb;
     }
 
-    // Apply edge-aware denoising (id Tech style)
-    vec3 color = edge_denoise(ambient + Lo + emissive, fragWorldPos);
+    // Combine: Ambient + Directional + Dynamic(Lo) + Emissive
+    vec3 color = edge_denoise(ambient + directional + Lo + emissive, fragWorldPos);
 
     // Debug Path Visualization - Only compiled when debug_visualization feature is enabled
     #ifdef DEBUG_VISUALIZATION

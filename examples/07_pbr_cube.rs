@@ -4,7 +4,8 @@
 //! Features: PBR materials, dynamic lighting, HDR post-processing.
 
 use ash_renderer::prelude::*;
-use ash_renderer::renderer::features::{DirectionalLight, PointLight};
+use ash_renderer::renderer::features::ambient_lighting::{AmbientPreset, LightingBuilder};
+use ash_renderer::renderer::features::PointLight;
 use ash_renderer::renderer::resources::uniform::StorageBuffer;
 use glam::{Mat4, Quat, Vec3, Vec4};
 use std::sync::Arc;
@@ -73,9 +74,7 @@ impl ApplicationHandler for App {
                 // Register and upload material
                 let material_handle = renderer.register_and_upload_material(material).unwrap();
 
-                log::info!(
-                    "✓ Uploaded red PBR material to GPU with handle {material_handle:?}"
-                );
+                log::info!("✓ Uploaded red PBR material to GPU with handle {material_handle:?}");
 
                 // Setup the initial render command
                 self.render_commands
@@ -102,12 +101,17 @@ impl ApplicationHandler for App {
                 }
 
                 // CRITICAL: Set lighting to highlight the PBR properties
-                // Directional light from top-front-right
-                renderer.set_lighting(
-                    Vec3::new(1.0, -1.0, -1.0).normalize(),
-                    [2.0, 2.0, 2.0, 1.0], // Bright white light
-                    0.2,                  // Ambient strength for better visibility
-                );
+                // RAGE Hemisphere Ambient + Global Directional Light
+                let lighting = LightingBuilder::new()
+                    .with_ambient_preset(AmbientPreset::IndoorLit)
+                    .with_directional(
+                        Vec3::new(1.0, -1.0, -1.0).normalize(),
+                        Vec3::splat(2.0),
+                        1.0,
+                    )
+                    .build();
+
+                renderer.set_lighting(&lighting);
 
                 self.renderer = Some(renderer);
                 self.window = Some(window);
@@ -161,14 +165,7 @@ impl ApplicationHandler for App {
                         },
                     ];
 
-                    // Directional light for general illumination
-                    let dir_lights = vec![DirectionalLight {
-                        direction: Vec3::new(1.0, -1.0, -1.0).normalize(),
-                        color: Vec3::new(1.0, 1.0, 1.0),
-                        intensity: 1.0,
-                    }];
-
-                    renderer.update_lights(&lights, &dir_lights);
+                    renderer.update_lights(&lights, &[]);
 
                     // Fixed camera looking at the rotating cube
                     let camera_pos = Vec3::new(0.0, 2.0, 5.0);

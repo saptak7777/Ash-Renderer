@@ -37,3 +37,23 @@ layout(push_constant) uniform PushConstants {
     layout(offset = 144) uint debug_visualization_enabled;
     layout(offset = 148) uint _fragment_padding[3]; // Pad to 160 bytes
 } push;
+
+// RAGE Hemisphere Ambient
+struct HemisphereAmbient {
+    vec4 sky_color;       // xyz = color, w = intensity
+    vec4 ground_color;    // xyz = color, w = unused
+};
+
+struct DirectionalLight {
+    vec4 direction;       // xyz = direction, w = shadow enabled
+    vec4 color_intensity; // xyz = color, w = intensity
+};
+
+struct SceneLighting {
+    HemisphereAmbient ambient;
+    DirectionalLight directional;
+    uint point_light_count;
+    uint _pad1;
+    uint _pad2;
+    uint _pad3;
+};
