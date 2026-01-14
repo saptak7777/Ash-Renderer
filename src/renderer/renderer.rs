@@ -617,12 +617,26 @@ impl Renderer {
             // Initialize Shadow Feature
             let mut shadow_feature = ShadowFeature::new();
             if shadow_feature.is_active() || shadow_feature.config.enabled {
-                let shadow_map = crate::renderer::shadow_map::ShadowMap::new(
+                match crate::renderer::shadow_map::ShadowMap::new_with_fallback(
                     Arc::clone(&device.device),
                     device.memory_properties,
                     shadow_feature.config.clone(),
-                )?;
-                shadow_feature.set_shadow_map(shadow_map);
+                ) {
+                    Ok((shadow_map, resolution)) => {
+                        shadow_feature.set_shadow_map(shadow_map);
+                        log::info!("Shadow map initialized successfully at {resolution}x{resolution}");
+                    }
+                    Err(e) => {
+                        log::error!("Shadow map initialization failed: {e}");
+                        for action in e.suggested_actions() {
+                            log::error!("  → Suggested Action: {action}");
+                        }
+                        return Err(AshError::VulkanError(format!(
+                            "Shadow map allocation failed: {}",
+                            e.user_message()
+                        )));
+                    }
+                }
             }
             let pipeline_cache = PipelineCache::new(Arc::clone(&device.device))?;
             let renderer_config = RendererConfig::default();
@@ -3570,6 +3584,12 @@ impl Renderer {
 
         // --- Main Pass Rendering Paths ---
 
+        // Calculate shadow boundary parameters once per frame
+        let shadow_boundary = self.shadow_feature
+            .shadow_map()
+            .map(|sm| crate::renderer::shadow_boundary::ShadowBoundaryParams::from(sm.boundary_config))
+            .unwrap_or_default();
+
         // 1. Render all visible opaque instanced batches (High-performance Path)
         // GPU-Driven Path: Used for large numbers of static meshes with instancing.
         let mut current_object_offset = 0;
@@ -3635,6 +3655,7 @@ impl Renderer {
                             material: &material_push,
                             instance_buffer_index: indirect.object_buffer_index().unwrap_or(0),
                             joint_buffer_index: self.joint_buffer_indices[frame_index],
+                            shadow_boundary,
                         };
                         unsafe {
                             self.model_renderer.draw_mesh_indirect_count(
@@ -3664,6 +3685,7 @@ impl Renderer {
                             material: &material_push,
                             instance_buffer_index: self.instance_buffer_indices[frame_index],
                             joint_buffer_index: self.joint_buffer_indices[frame_index],
+                            shadow_boundary,
                         };
 
                         let offset = batch_offsets.get(&batch.key).copied().unwrap_or(0);
@@ -3734,6 +3756,7 @@ impl Renderer {
                         material: &material_push,
                         instance_buffer_index: self.instance_buffer_indices[frame_index],
                         joint_buffer_index: self.joint_buffer_indices[frame_index],
+                        shadow_boundary,
                     };
 
                     unsafe {
@@ -3768,6 +3791,7 @@ impl Renderer {
                             material: &material_push,
                             instance_buffer_index: self.instance_buffer_indices[frame_index],
                             joint_buffer_index: self.joint_buffer_indices[frame_index],
+                            shadow_boundary,
                         };
 
                         let offset = batch_offsets.get(&batch.key).copied().unwrap_or(0);
@@ -3827,6 +3851,7 @@ impl Renderer {
                         material: &material_push,
                         instance_buffer_index: self.instance_buffer_indices[frame_index],
                         joint_buffer_index: self.joint_buffer_indices[frame_index],
+                        shadow_boundary,
                     };
 
                     unsafe {

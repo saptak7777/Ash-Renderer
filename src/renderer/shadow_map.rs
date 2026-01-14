@@ -5,8 +5,9 @@
 use ash::vk;
 use std::sync::Arc;
 
+use super::shadow_error::ShadowMapError;
 use crate::vulkan::utils::find_memory_type;
-use crate::{AshError, Result};
+use crate::Result;
 
 /// Shadow map configuration
 #[derive(Debug, Clone)]
@@ -35,6 +36,8 @@ impl Default for ShadowConfig {
     }
 }
 
+use super::shadow_boundary::ShadowBoundaryConfig;
+
 /// Shadow map for a directional light
 pub struct ShadowMap {
     device: Arc<ash::Device>,
@@ -54,10 +57,12 @@ pub struct ShadowMap {
     pub light_space_matrix: glam::Mat4,
     /// Configuration
     pub config: ShadowConfig,
+    /// Shadow boundary configuration for AAA clamping
+    pub boundary_config: ShadowBoundaryConfig,
 }
 
 impl ShadowMap {
-    /// Create a new shadow map
+    /// Create a new shadow map with a fixed resolution.
     ///
     /// # Safety
     /// Device must remain valid for the lifetime of this shadow map.
@@ -65,7 +70,64 @@ impl ShadowMap {
         device: Arc<ash::Device>,
         memory_properties: vk::PhysicalDeviceMemoryProperties,
         config: ShadowConfig,
-    ) -> Result<Self> {
+    ) -> Result<Self, ShadowMapError> {
+        Self::try_create(device, memory_properties, config)
+    }
+
+    /// Create shadow map with automatic resolution fallback.
+    ///
+    /// Tries resolutions in order: 4096 → 2048 → 1024 → 512.
+    /// Returns the highest resolution that successfully allocates.
+    ///
+    /// # Safety
+    /// Device must remain valid for the lifetime of this shadow map.
+    pub unsafe fn new_with_fallback(
+        device: Arc<ash::Device>,
+        memory_properties: vk::PhysicalDeviceMemoryProperties,
+        mut config: ShadowConfig,
+    ) -> Result<(Self, u32), ShadowMapError> {
+        // Resolution cascade (Unity-style)
+        let resolutions = [4096, 2048, 1024, 512];
+        let mut attempts = Vec::new();
+        let mut last_error = None;
+
+        for resolution in resolutions {
+            config.resolution = resolution;
+            attempts.push(resolution);
+
+            match Self::try_create(Arc::clone(&device), memory_properties, config.clone()) {
+                Ok(shadow_map) => {
+                    if resolution < 4096 {
+                        log::warn!(
+                            "Shadow map resolution reduced to {resolution}x{resolution} due to memory constraints"
+                        );
+                    } else {
+                        log::info!("Shadow map created at {resolution}x{resolution}");
+                    }
+                    return Ok((shadow_map, resolution));
+                }
+                Err(e) => {
+                    log::debug!("Failed to allocate shadow map at {resolution}x{resolution}: {e}");
+                    last_error = Some(e);
+                }
+            }
+        }
+
+        // All resolutions failed
+        Err(ShadowMapError::AllResolutionsFailed {
+            attempts,
+            final_error: Box::new(last_error.unwrap_or(ShadowMapError::VulkanError(
+                vk::Result::ERROR_OUT_OF_DEVICE_MEMORY,
+            ))),
+        })
+    }
+
+    /// Internal creation attempt - returns Result instead of panicking.
+    unsafe fn try_create(
+        device: Arc<ash::Device>,
+        memory_properties: vk::PhysicalDeviceMemoryProperties,
+        config: ShadowConfig,
+    ) -> Result<Self, ShadowMapError> {
         let res = config.resolution;
 
         // Create depth image
@@ -89,7 +151,7 @@ impl ShadowMap {
 
         let depth_image = device
             .create_image(&image_info, None)
-            .map_err(|e| AshError::VulkanError(format!("Shadow depth image failed: {e}")))?;
+            .map_err(ShadowMapError::VulkanError)?;
 
         // Allocate memory
         let mem_reqs = device.get_image_memory_requirements(depth_image);
@@ -98,19 +160,28 @@ impl ShadowMap {
             mem_reqs.memory_type_bits,
             vk::MemoryPropertyFlags::DEVICE_LOCAL,
         )
-        .expect("ShadowMap: No suitable memory type found for depth image");
+        .ok_or_else(|| ShadowMapError::NoSuitableMemoryType {
+            required_flags: "DEVICE_LOCAL".to_string(),
+            available_types: (0..memory_properties.memory_type_count).collect(),
+        })?;
 
         let alloc_info = vk::MemoryAllocateInfo::default()
             .allocation_size(mem_reqs.size)
             .memory_type_index(memory_type_index);
 
-        let depth_memory = device
-            .allocate_memory(&alloc_info, None)
-            .map_err(|e| AshError::VulkanError(format!("Shadow memory alloc failed: {e}")))?;
+        let depth_memory = device.allocate_memory(&alloc_info, None).map_err(|_e| {
+            // Calculate memory requirements for error message
+            let needed_mb = mem_reqs.size as f32 / 1_048_576.0;
+            ShadowMapError::OutOfMemory {
+                needed_mb,
+                available_mb: 0.0,
+                resolution: res,
+            }
+        })?;
 
         device
             .bind_image_memory(depth_image, depth_memory, 0)
-            .map_err(|e| AshError::VulkanError(format!("Bind shadow memory failed: {e}")))?;
+            .map_err(ShadowMapError::VulkanError)?;
 
         // Create depth image view
         let view_info = vk::ImageViewCreateInfo::default()
@@ -127,7 +198,7 @@ impl ShadowMap {
 
         let depth_image_view = device
             .create_image_view(&view_info, None)
-            .map_err(|e| AshError::VulkanError(format!("Shadow image view failed: {e}")))?;
+            .map_err(ShadowMapError::VulkanError)?;
 
         // Create render pass (depth-only)
         let depth_attachment = vk::AttachmentDescription {
@@ -172,7 +243,7 @@ impl ShadowMap {
 
         let render_pass = device
             .create_render_pass(&render_pass_info, None)
-            .map_err(|e| AshError::VulkanError(format!("Shadow render pass failed: {e}")))?;
+            .map_err(ShadowMapError::VulkanError)?;
 
         // Create framebuffer
         let attachments = [depth_image_view];
@@ -185,7 +256,7 @@ impl ShadowMap {
 
         let framebuffer = device
             .create_framebuffer(&framebuffer_info, None)
-            .map_err(|e| AshError::VulkanError(format!("Shadow framebuffer failed: {e}")))?;
+            .map_err(ShadowMapError::VulkanError)?;
 
         // Create sampler for shadow map sampling (manual PCF)
         let sampler_info = vk::SamplerCreateInfo::default()
@@ -202,9 +273,7 @@ impl ShadowMap {
 
         let sampler = device
             .create_sampler(&sampler_info, None)
-            .map_err(|e| AshError::VulkanError(format!("Shadow sampler failed: {e}")))?;
-
-        log::info!("[ShadowMap] Shadow map created successfully");
+            .map_err(ShadowMapError::VulkanError)?;
 
         Ok(Self {
             device,
@@ -217,6 +286,7 @@ impl ShadowMap {
             res,
             light_space_matrix: glam::Mat4::IDENTITY,
             config,
+            boundary_config: ShadowBoundaryConfig::new(res, 2), // 4x4 PCF kernel uses radius 2
         })
     }
 
@@ -298,6 +368,25 @@ mod tests {
         assert_eq!(config.resolution, 4096);
         assert_eq!(config.pcf_size, 3);
         assert!(config.enabled);
+    }
+
+    #[test]
+    fn test_shadow_map_error_messages() {
+        let error = ShadowMapError::OutOfMemory {
+            needed_mb: 64.0,
+            available_mb: 32.0,
+            resolution: 4096,
+        };
+        assert!(error.user_message().contains("Out of GPU memory"));
+        assert!(!error.suggested_actions().is_empty());
+
+        let fallback_err = ShadowMapError::AllResolutionsFailed {
+            attempts: vec![4096, 2048, 1024, 512],
+            final_error: Box::new(error),
+        };
+        assert!(fallback_err
+            .to_string()
+            .contains("Failed at all resolutions"));
     }
 
     #[test]

@@ -104,33 +104,41 @@ vec3 srgb_to_linear(vec3 color) {
 }
 
 float ShadowCalculation(vec4 fragPosLightSpace, vec3 normal, vec3 lightDir) {
+    // 1. PROJECT & NORMALIZE TO [0,1]
     vec3 projCoords = fragPosLightSpace.xyz / fragPosLightSpace.w;
     projCoords = projCoords * 0.5 + 0.5;
     
-    // CRITICAL FIX: Clamp projCoords to [0,1] range to prevent edge artifacts from PCF sampling
-    // Without this, textureGather at boundaries reads outside the shadow map, causing glitchy overlaps
-    projCoords = clamp(projCoords, vec3(0.0), vec3(1.0));
+    // 2. EARLY REJECTION (Unreal-style)
+    // If outside safe zone, skip expensive PCF
+    if (projCoords.x < push.uv_min || projCoords.x > push.uv_max ||
+        projCoords.y < push.uv_min || projCoords.y > push.uv_max ||
+        projCoords.z > 1.0) {
+        return 0.0; // Outside shadow map = fully lit
+    }
     
+    // 3. GUARD BAND CLAMPING (Unreal-style)
+    // Clamp to inset boundaries - guarantees all PCF samples are valid
+    vec2 uv = clamp(projCoords.xy, vec2(push.uv_min), vec2(push.uv_max));
     float currentDepth = projCoords.z;
     
-    // Adaptive bias based on surface slope relative to light direction
+    // 4. ADAPTIVE BIAS (prevents shadow acne)
     float cosAngle = clamp(dot(normal, lightDir), 0.0, 1.0);
     float minBias = 0.0005;
     float maxBias = 0.005;
     float bias = max(maxBias * (1.0 - cosAngle), minBias);
     
-    if(projCoords.z > 1.0)
-        return 0.0;
-    
-    vec2 texelSize = 1.0 / textureSize(shadowMap, 0);
-    vec2 uv = projCoords.xy;
-    
+    // 5. OPTIMIZED PCF WITH TEXTURE GATHER
+    // 4x4 kernel using textureGather
     float shadow = 0.0;
-    vec4 g0 = textureGather(shadowMap, uv + vec2(-1.0, -1.0) * texelSize);
-    vec4 g1 = textureGather(shadowMap, uv + vec2( 1.0, -1.0) * texelSize);
-    vec4 g2 = textureGather(shadowMap, uv + vec2(-1.0,  1.0) * texelSize);
-    vec4 g3 = textureGather(shadowMap, uv + vec2( 1.0,  1.0) * texelSize);
+    float texelSize = push.texel_size;
     
+    // Sample 4 corners of 2x2 blocks
+    vec4 g0 = textureGather(shadowMap, uv + vec2(-1.0, -1.0) * texelSize, 0);
+    vec4 g1 = textureGather(shadowMap, uv + vec2( 1.0, -1.0) * texelSize, 0);
+    vec4 g2 = textureGather(shadowMap, uv + vec2(-1.0,  1.0) * texelSize, 0);
+    vec4 g3 = textureGather(shadowMap, uv + vec2( 1.0,  1.0) * texelSize, 0);
+    
+    // Compare depths (SIMD-friendly)
     float compareDepth = currentDepth - bias;
     shadow += dot(vec4(greaterThan(vec4(compareDepth), g0)), vec4(1.0));
     shadow += dot(vec4(greaterThan(vec4(compareDepth), g1)), vec4(1.0));

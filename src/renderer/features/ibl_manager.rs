@@ -1,4 +1,5 @@
 use crate::renderer::resources::ImageHandle;
+use crate::renderer::util::scoped_resources::ScopedImageView;
 use crate::vulkan::{descriptor_layout::DescriptorSetLayoutBuilder, Allocator, VulkanDevice};
 use crate::{AshError, Result};
 use ash::vk;
@@ -270,11 +271,11 @@ impl IblManager {
                 base_array_layer: 0,
                 layer_count: 6,
             });
-        let target_view = unsafe { self.device.create_image_view(&view_info, None)? };
+        let target_view = unsafe { ScopedImageView::new(Arc::clone(&self.device), &view_info)? };
 
         desc_set.update_image(
             1,
-            target_view,
+            *target_view,
             vk::Sampler::null(),
             vk::ImageLayout::GENERAL,
             vk::DescriptorType::STORAGE_IMAGE,
@@ -363,10 +364,6 @@ impl IblManager {
                 );
             }
         })?;
-
-        unsafe {
-            self.device.destroy_image_view(target_view, None);
-        }
 
         Ok(())
     }

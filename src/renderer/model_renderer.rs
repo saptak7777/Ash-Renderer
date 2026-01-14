@@ -5,6 +5,7 @@ use bytemuck::{bytes_of, Pod, Zeroable};
 use vk_mem::Alloc;
 
 use crate::renderer::resources::BufferHandle;
+use crate::renderer::shadow_boundary::ShadowBoundaryParams;
 use crate::renderer::{MaterialHandle, Mesh, SkinnedVertex, Vertex};
 use crate::vulkan::Allocator;
 use crate::{AshError, Result};
@@ -122,7 +123,9 @@ struct DrawPushConstants {
     flags: u32,
     material_buffer_index: u32,
     debug_visualization_enabled: u32,
-    _fragment_padding: [u32; 3],
+    shadow_uv_min: f32,
+    shadow_uv_max: f32,
+    shadow_texel_size: f32,
 }
 
 #[repr(C, align(16))]
@@ -146,6 +149,7 @@ pub struct DrawContext<'a> {
     pub material: &'a MaterialPushConstants,
     pub instance_buffer_index: u32,
     pub joint_buffer_index: u32,
+    pub shadow_boundary: ShadowBoundaryParams,
 }
 
 /// Parameters for indirect draw with count buffer
@@ -448,7 +452,9 @@ impl ModelRenderer {
             flags: ctx.material.flags,
             material_buffer_index: ctx.material.material_buffer_index,
             debug_visualization_enabled: ctx.material.debug_visualization_enabled,
-            _fragment_padding: [0; 3],
+            shadow_uv_min: ctx.shadow_boundary.uv_min,
+            shadow_uv_max: ctx.shadow_boundary.uv_max,
+            shadow_texel_size: ctx.shadow_boundary.texel_size,
         };
 
         let push_bytes = bytes_of(&push);
@@ -544,7 +550,9 @@ impl ModelRenderer {
             flags: ctx.material.flags,
             material_buffer_index: ctx.material.material_buffer_index,
             debug_visualization_enabled: ctx.material.debug_visualization_enabled,
-            _fragment_padding: [0; 3],
+            shadow_uv_min: ctx.shadow_boundary.uv_min,
+            shadow_uv_max: ctx.shadow_boundary.uv_max,
+            shadow_texel_size: ctx.shadow_boundary.texel_size,
         };
 
         let push_bytes = bytes_of(&push);
@@ -622,7 +630,9 @@ impl ModelRenderer {
             flags: ctx.material.flags,
             material_buffer_index: ctx.material.material_buffer_index,
             debug_visualization_enabled: ctx.material.debug_visualization_enabled,
-            _fragment_padding: [0; 3],
+            shadow_uv_min: ctx.shadow_boundary.uv_min,
+            shadow_uv_max: ctx.shadow_boundary.uv_max,
+            shadow_texel_size: ctx.shadow_boundary.texel_size,
         };
 
         let push_bytes = bytes_of(&push);
@@ -686,7 +696,9 @@ impl ModelRenderer {
             flags: ctx.material.flags,
             material_buffer_index: ctx.material.material_buffer_index,
             debug_visualization_enabled: ctx.material.debug_visualization_enabled,
-            _fragment_padding: [0; 3],
+            shadow_uv_min: ctx.shadow_boundary.uv_min,
+            shadow_uv_max: ctx.shadow_boundary.uv_max,
+            shadow_texel_size: ctx.shadow_boundary.texel_size,
         };
 
         let push_bytes = bytes_of(&push);

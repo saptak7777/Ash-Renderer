@@ -30,11 +30,14 @@ pub mod renderer;
 pub mod resource_registry;
 pub mod resources;
 pub mod sdfgi_pass;
+pub mod shadow_boundary;
+pub mod shadow_error;
 pub mod shadow_map;
 pub mod skinned_vertex;
 pub mod ssgi_pass;
 pub mod temporal_aa;
 pub mod temporal_upscaling;
+pub mod util;
 pub mod vram_budget;
 
 // Re-exports for public API

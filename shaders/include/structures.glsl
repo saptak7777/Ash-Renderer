@@ -35,7 +35,9 @@ layout(push_constant) uniform PushConstants {
     layout(offset = 136) uint flags; // bit 0: receive_shadows
     layout(offset = 140) uint material_buffer_index;
     layout(offset = 144) uint debug_visualization_enabled;
-    layout(offset = 148) uint _fragment_padding[3]; // Pad to 160 bytes
+    layout(offset = 148) float uv_min;
+    layout(offset = 152) float uv_max;
+    layout(offset = 156) float texel_size;
 } push;
 
 // RAGE Hemisphere Ambient

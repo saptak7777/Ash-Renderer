@@ -472,6 +472,11 @@ impl VsrPass {
         Ok(())
     }
 
+    /// Create descriptor set layout and pools for upscaling
+    ///
+    /// # Safety
+    ///
+    /// The Vulkan device must be valid and supports the required descriptor types.
     unsafe fn create_descriptors(&mut self) -> Result<()> {
         // [0..3]: Color, Motion, Depth, History
         // [4]: Output
@@ -547,6 +552,10 @@ impl VsrPass {
     }
 
     /// Create upscale compute pipeline
+    ///
+    /// # Safety
+    ///
+    /// The Vulkan device must be valid and the SPIR-V shader module must be compatible with the layout.
     unsafe fn create_pipeline(&mut self) -> Result<()> {
         let shader_code = include_bytes!(concat!(env!("OUT_DIR"), "/vsr_upscale.comp.spv"));
 
@@ -586,6 +595,11 @@ impl VsrPass {
         Ok(())
     }
 
+    /// Create resources for the sharpening pass
+    ///
+    /// # Safety
+    ///
+    /// `alloc` must be a valid VMA allocator.
     unsafe fn create_sharpening_resources(&mut self, alloc: &vk_mem::Allocator) -> Result<()> {
         use vk_mem::Alloc;
 
@@ -680,6 +694,11 @@ impl VsrPass {
         Ok(())
     }
 
+    /// Create the sharpening compute pipeline
+    ///
+    /// # Safety
+    ///
+    /// The Vulkan device must be valid and the SPIR-V shader module must be compatible with the layout.
     unsafe fn create_sharpening_pipeline(&mut self) -> Result<()> {
         let shader_code = include_bytes!(concat!(env!("OUT_DIR"), "/sharpen.comp.spv"));
 
@@ -757,7 +776,10 @@ impl VsrPass {
     /// Perform temporal upscaling
     ///
     /// # Safety
-    /// command_buffer must be in a recording state. Image views must be valid.
+    ///
+    /// * `command_buffer` must be in a recording state.
+    /// * Input image views must be valid and match the expected formats.
+    /// * Synchronization must be handled to ensure inputs are not being written to by other stages.
     pub unsafe fn upscale(
         &mut self,
         command_buffer: vk::CommandBuffer,
@@ -992,6 +1014,11 @@ impl VsrPass {
         Ok(())
     }
 
+    /// Update descriptor sets with current frame resources
+    ///
+    /// # Safety
+    ///
+    /// Image views and buffers must be valid and accessible by the GPU.
     unsafe fn update_descriptor_set(
         &self,
         set_idx: usize,
@@ -1059,6 +1086,12 @@ impl VsrPass {
     ///
     /// This should be called at the start of the frame to read stats from the *previous* frame
     /// to avoid stalling the pipeline.
+    ///
+    /// # Safety
+    ///
+    /// * `cmd` must be a valid, recording Vulkan command buffer.
+    /// * `allocator` must be the same allocator used to create the metrics buffers.
+    /// * The `metrics_readback_buffer` must be host-visible and mapped.
     pub unsafe fn readback_metrics(
         &mut self,
         cmd: vk::CommandBuffer,
@@ -1197,7 +1230,9 @@ impl VsrPass {
     /// Destroy GPU resources
     ///
     /// # Safety
-    /// Resources must not be in use.
+    ///
+    /// * Resources must not be in use by the GPU.
+    /// * `allocator` must be the same allocator used to create the resources.
     pub unsafe fn destroy(&mut self, allocator: &vk_mem::Allocator) {
         if !self.initialized {
             return;
