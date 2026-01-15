@@ -5,12 +5,12 @@
 //! `BufferHandle` and `ImageHandle`.
 
 use ash_renderer::prelude::*;
-use ash_renderer::renderer::resources::{GpuBuffer, GpuTexture};
 use glam::{Vec3, Vec4};
 
 /// Example vertex type for demonstration
 #[repr(C)]
 #[derive(Clone, Copy)]
+#[allow(dead_code)]
 struct ExampleVertex {
     position: Vec3,
     color: Vec4,

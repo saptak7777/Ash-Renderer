@@ -165,6 +165,11 @@ impl<T> GpuBuffer<T> {
     }
 
     /// Unmaps the buffer memory.
+    /// Unmaps the buffer memory.
+    ///
+    /// # Safety
+    ///
+    /// The buffer must have been previously mapped with `map()`.
     pub unsafe fn unmap(&mut self) {
         self.allocator.unmap_allocation(&mut self.allocation);
     }

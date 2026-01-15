@@ -26,6 +26,10 @@ Ash Renderer is a low-level Vulkan rendering library for Rust projects that want
 - ✅ **Post-Processing**: Bloom, Tonemapping, and a VSR (Temporal) implementation that's surprisingly okay.
 - ✅ **Debug Visualization**: See exactly what's being culled with colored wireframes (Red=Gone, Green=Seen).
 - ✅ **Shader Hot-Reload**: Iterate on compute shaders instantly (F5) without restarting.
+- ✅ **Safe RHI**: No more raw pointers bro, I swear. We use `GpuBuffer<T>` now, very safe, very typed.
+- ✅ **Render Graph**: Handles barriers automatically so I don't cry at night. Barriers merged also, performance stonks.
+- ✅ **Parallel Everything**: Command recording on all cores? Yes. Culling on all cores? Yes. CPU fan go brrr? Also yes.
+- ✅ **Async Transfers**: Data loading happens in background, no lag spike guarantee (mostly).
 
 ### What It Doesn't Do (Yet)
 
@@ -139,6 +143,19 @@ let (buffer, allocation) = BufferBuilder::new(1024)
     .build(renderer.allocator())?;
 ```
 
+### 4. Parallel Command Recording (The "Fastness" Way)
+
+If you have many CPU cores (rich guy), use them all to record commands.
+
+```rust
+// Auto-switches to parallel if you have more than 4 passes
+// Trust me, it works very fast.
+recorder.record_parallel(cmd, pass_count, |idx, cmd| {
+    // Record commands here, very thread safe
+    Ok(())
+})?;
+```
+
 ---
 
 ## API Reference (The Important Bits)
@@ -147,7 +164,8 @@ let (buffer, allocation) = BufferBuilder::new(1024)
 The heavy lifter. You probably only need one.
 - `Renderer::new(provider)`: The constructor. Expects a `SurfaceProvider`.
 - `render_frame(...)`: Call this every frame or nothing happens.
-- `upload_mesh(mesh)`: Sends geometry to the GPU. Returns a handle that's basically an ID.
+- `upload_mesh(mesh)`: Sends geometry to the GPU using new `GpuBuffer`, very type safe.
+- `allocate_transient(...)`: Get temporary image for one frame. Automatic delete, no leak guarantee.
 - `update_point_lights(...)`: For the spheres of light.
 - `update_spot_lights(...)`: For the cones of light.
 

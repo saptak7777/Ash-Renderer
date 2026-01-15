@@ -280,7 +280,7 @@ impl ModelRenderer {
         queue: vk::Queue,
     ) -> Result<GpuBuffer<T>> {
         unsafe {
-            let size = (data.len() * std::mem::size_of::<T>()) as vk::DeviceSize;
+            let size = std::mem::size_of_val(data) as vk::DeviceSize;
 
             // Create staging buffer
             let (staging_buffer, mut staging_alloc) = self

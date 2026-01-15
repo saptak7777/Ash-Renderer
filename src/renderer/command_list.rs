@@ -68,8 +68,7 @@ impl CommandList {
             }
             _ => {
                 return Err(crate::AshError::VulkanError(format!(
-                    "Unsupported pipeline bind point: {:?}",
-                    bind_point
+                    "Unsupported pipeline bind point: {bind_point:?}"
                 )))
             }
         }

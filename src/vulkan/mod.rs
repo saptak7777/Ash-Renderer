@@ -17,6 +17,7 @@ pub mod instance;
 pub mod light_culling_pipeline;
 #[cfg(feature = "parallel")]
 pub mod parallel_command;
+pub mod parallel_command_recorder;
 pub mod pipeline;
 pub mod pipeline_layout;
 pub mod pipeline_state;
@@ -44,6 +45,7 @@ pub use descriptor_set::DescriptorSet;
 pub use device::VulkanDevice;
 pub use framebuffer::Framebuffer;
 pub use instance::VulkanInstance;
+pub use parallel_command_recorder::ParallelCommandRecorder;
 pub use pipeline::{MultisampleConfig, Pipeline, PipelineBuilder};
 pub use pipeline_layout::{PipelineLayout, PipelineLayoutBuilder};
 pub use pipeline_state::PipelineState;
