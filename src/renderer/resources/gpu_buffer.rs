@@ -123,6 +123,51 @@ impl<T> GpuBuffer<T> {
     pub fn allocation_mut(&mut self) -> &mut vk_mem::Allocation {
         &mut self.allocation
     }
+    /// Uploads data to the buffer.
+    ///
+    /// # Safety
+    ///
+    /// The buffer must be CPU-writable (e.g., created with `MemoryUsage::CpuToGpu` or `CpuOnly`).
+    /// The provided data must fit within the buffer.
+    pub unsafe fn upload(&mut self, data: &[T]) -> crate::Result<()>
+    where
+        T: Copy + bytemuck::Pod,
+    {
+        let data_bytes = bytemuck::cast_slice(data);
+        if data_bytes.len() as u64 > self.size {
+            return Err(crate::AshError::VulkanError(format!(
+                "Buffer upload too large ({}, capacity {})",
+                data_bytes.len(),
+                self.size
+            )));
+        }
+
+        let ptr = self.allocator.map_allocation(&mut self.allocation)?;
+        std::ptr::copy_nonoverlapping(data_bytes.as_ptr(), ptr, data_bytes.len());
+        self.allocator.unmap_allocation(&mut self.allocation);
+
+        Ok(())
+    }
+
+    /// Maps the buffer memory for direct access.
+    ///
+    /// # Safety
+    ///
+    /// The buffer must be CPU-visible. The caller is responsible for proper synchronization
+    /// if the buffer is accessed by the GPU while mapped.
+    pub unsafe fn map(&mut self) -> crate::Result<&mut [T]>
+    where
+        T: Copy + bytemuck::Pod,
+    {
+        let ptr = self.allocator.map_allocation(&mut self.allocation)?;
+        let slice = std::slice::from_raw_parts_mut(ptr as *mut T, self.element_count);
+        Ok(slice)
+    }
+
+    /// Unmaps the buffer memory.
+    pub unsafe fn unmap(&mut self) {
+        self.allocator.unmap_allocation(&mut self.allocation);
+    }
 }
 
 impl<T> Drop for GpuBuffer<T> {

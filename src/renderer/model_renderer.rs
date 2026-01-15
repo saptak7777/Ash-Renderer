@@ -4,16 +4,22 @@ use ash::{vk, Device};
 use bytemuck::{bytes_of, Pod, Zeroable};
 use vk_mem::Alloc;
 
-use crate::renderer::resources::BufferHandle;
+use crate::renderer::resources::GpuBuffer;
 use crate::renderer::shadow_boundary::ShadowBoundaryParams;
 use crate::renderer::{MaterialHandle, Mesh, SkinnedVertex, Vertex};
 use crate::vulkan::Allocator;
 use crate::{AshError, Result};
 
+/// Vertex buffer type for uploaded meshes.
+enum VertexBufferType {
+    Standard(GpuBuffer<Vertex>),
+    Skinned(GpuBuffer<SkinnedVertex>),
+}
+
 /// GPU-resident mesh data managed by `ModelRenderer`.
 pub struct UploadedMesh {
-    vertex_buffer: BufferHandle,
-    index_buffer: Option<BufferHandle>,
+    vertex_buffer: VertexBufferType,
+    index_buffer: Option<GpuBuffer<u32>>,
     vertex_count: u32,
     index_count: u32,
     pub clusters: Vec<crate::renderer::resources::mesh::MeshCluster>,
@@ -54,7 +60,10 @@ impl MaterialPushConstants {
 
 impl UploadedMesh {
     pub fn vertex_buffer(&self) -> vk::Buffer {
-        self.vertex_buffer.handle()
+        match &self.vertex_buffer {
+            VertexBufferType::Standard(buf) => buf.handle(),
+            VertexBufferType::Skinned(buf) => buf.handle(),
+        }
     }
 
     pub fn index_buffer(&self) -> Option<vk::Buffer> {
@@ -217,36 +226,34 @@ impl ModelRenderer {
         command_pool: vk::CommandPool,
         queue: vk::Queue,
     ) -> Result<UploadedMesh> {
-        let (v_count, v_ptr, v_size) = if !mesh.skinned_vertices.is_empty() {
-            let count = mesh.skinned_vertices.len();
-            let size = (count * std::mem::size_of::<SkinnedVertex>()) as vk::DeviceSize;
-            (
-                count as u32,
-                mesh.skinned_vertices.as_ptr() as *const u8,
-                size,
-            )
+        let vertex_buffer = if !mesh.skinned_vertices.is_empty() {
+            let buffer = self.create_gpu_buffer(
+                &mesh.skinned_vertices,
+                vk::BufferUsageFlags::VERTEX_BUFFER,
+                command_pool,
+                queue,
+            )?;
+            VertexBufferType::Skinned(buffer)
         } else {
-            let count = mesh.vertices.len();
-            let size = (count * std::mem::size_of::<Vertex>()) as vk::DeviceSize;
-            (count as u32, mesh.vertices.as_ptr() as *const u8, size)
+            let buffer = self.create_gpu_buffer(
+                &mesh.vertices,
+                vk::BufferUsageFlags::VERTEX_BUFFER,
+                command_pool,
+                queue,
+            )?;
+            VertexBufferType::Standard(buffer)
         };
 
-        let vertex_buffer = self.allocate_and_fill_buffer(
-            v_size,
-            vk::BufferUsageFlags::VERTEX_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
-            v_ptr,
-            v_size,
-            command_pool,
-            queue,
-        )?;
+        let v_count = if !mesh.skinned_vertices.is_empty() {
+            mesh.skinned_vertices.len() as u32
+        } else {
+            mesh.vertices.len() as u32
+        };
 
         let (index_buffer, i_count) = if let Some(indices) = mesh.indices.as_ref() {
-            let i_size = (indices.len() * std::mem::size_of::<u32>()) as vk::DeviceSize;
-            let buffer = self.allocate_and_fill_buffer(
-                i_size,
-                vk::BufferUsageFlags::INDEX_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
-                indices.as_ptr() as *const u8,
-                i_size,
+            let buffer = self.create_gpu_buffer(
+                indices,
+                vk::BufferUsageFlags::INDEX_BUFFER,
                 command_pool,
                 queue,
             )?;
@@ -264,16 +271,18 @@ impl ModelRenderer {
         })
     }
 
-    fn allocate_and_fill_buffer(
+    /// Creates a GPU buffer and uploads data via staging buffer.
+    fn create_gpu_buffer<T: Copy + bytemuck::Pod>(
         &self,
-        size: vk::DeviceSize,
+        data: &[T],
         usage: vk::BufferUsageFlags,
-        data_ptr: *const u8,
-        data_size: vk::DeviceSize,
         command_pool: vk::CommandPool,
         queue: vk::Queue,
-    ) -> Result<BufferHandle> {
+    ) -> Result<GpuBuffer<T>> {
         unsafe {
+            let size = (data.len() * std::mem::size_of::<T>()) as vk::DeviceSize;
+
+            // Create staging buffer
             let (staging_buffer, mut staging_alloc) = self
                 .alloc
                 .vma
@@ -296,13 +305,17 @@ impl ModelRenderer {
                 let mut guard = self
                     .alloc
                     .map_allocation_guarded(&mut staging_alloc, size)?;
-                // Copy data to staging
-                ptr::copy_nonoverlapping(data_ptr, guard.as_mut_ptr(), data_size as usize);
+                ptr::copy_nonoverlapping(
+                    data.as_ptr() as *const u8,
+                    guard.as_mut_ptr(),
+                    size as usize,
+                );
             }
 
-            let device_buffer = BufferHandle::new(
+            // Create device buffer
+            let device_buffer = GpuBuffer::new(
                 Arc::clone(&self.alloc),
-                size,
+                data.len(),
                 usage | vk::BufferUsageFlags::TRANSFER_DST,
                 vk_mem::MemoryUsage::AutoPreferDevice,
                 None,

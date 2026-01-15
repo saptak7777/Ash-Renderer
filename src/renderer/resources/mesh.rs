@@ -22,7 +22,7 @@ pub struct MeshCluster {
 
 /// Vertex struct with position, normal, UV, and color
 #[repr(C)]
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct Vertex {
     pub position: [f32; 3],
     pub normal: [f32; 3],
@@ -1183,9 +1183,7 @@ mod tests {
             string_clones.push(s.clone());
         }
         let string_duration = start.elapsed();
-        println!(
-            "String cloning ({iterations} iterations): {string_duration:?}"
-        );
+        println!("String cloning ({iterations} iterations): {string_duration:?}");
 
         // Benchmark Arc<str> cloning
         let arc: Arc<str> = name_str.into();
@@ -1195,9 +1193,7 @@ mod tests {
             arc_clones.push(Arc::clone(&arc));
         }
         let arc_duration = start.elapsed();
-        println!(
-            "Arc<str> cloning ({iterations} iterations): {arc_duration:?}"
-        );
+        println!("Arc<str> cloning ({iterations} iterations): {arc_duration:?}");
 
         assert!(
             arc_duration < string_duration,

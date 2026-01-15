@@ -2,7 +2,7 @@ use ash::vk;
 
 /// Vertex with skeletal animation data (bone indices + weights)
 #[repr(C)]
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct SkinnedVertex {
     pub position: [f32; 3],
     pub normal: [f32; 3],

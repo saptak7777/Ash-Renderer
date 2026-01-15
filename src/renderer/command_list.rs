@@ -160,6 +160,42 @@ impl CommandList {
             .cmd_push_constants(self.cmd, layout, stage_flags, offset, bytes);
     }
 
+    /// Binds vertex buffers.
+    ///
+    /// # Safety
+    ///
+    /// The buffers must be valid.
+    pub unsafe fn bind_vertex_buffers(
+        &mut self,
+        first_binding: u32,
+        buffers: &[vk::Buffer],
+        offsets: &[vk::DeviceSize],
+    ) {
+        if self.state.bound_graphics_pipeline.is_none() {
+            log::warn!("Binding vertex buffers without bound graphics pipeline");
+        }
+        self.device
+            .cmd_bind_vertex_buffers(self.cmd, first_binding, buffers, offsets);
+    }
+
+    /// Binds an index buffer.
+    ///
+    /// # Safety
+    ///
+    /// The buffer must be valid and contain index data.
+    pub unsafe fn bind_index_buffer(
+        &mut self,
+        buffer: vk::Buffer,
+        offset: vk::DeviceSize,
+        index_type: vk::IndexType,
+    ) {
+        if self.state.bound_graphics_pipeline.is_none() {
+            log::warn!("Binding index buffer without bound graphics pipeline");
+        }
+        self.device
+            .cmd_bind_index_buffer(self.cmd, buffer, offset, index_type);
+    }
+
     /// Returns the current bound compute pipeline (if any)
     pub fn bound_compute_pipeline(&self) -> Option<vk::Pipeline> {
         self.state.bound_compute_pipeline

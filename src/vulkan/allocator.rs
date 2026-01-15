@@ -407,6 +407,27 @@ impl Allocator {
             .build(self)
     }
 
+    /// Map an allocation and return the raw pointer.
+    ///
+    /// # Safety
+    /// // SAFETY: Must be matched with unmap_allocation.
+    pub unsafe fn map_allocation(
+        &self,
+        allocation: &mut vk_mem::Allocation,
+    ) -> crate::Result<*mut u8> {
+        self.vma
+            .map_memory(allocation)
+            .map_err(|e| crate::AshError::VulkanError(format!("Map memory failed: {e:?}")))
+    }
+
+    /// Unmap an allocation.
+    ///
+    /// # Safety
+    /// // SAFETY: Must be called only if mapped.
+    pub unsafe fn unmap_allocation(&self, allocation: &mut vk_mem::Allocation) {
+        self.vma.unmap_memory(allocation);
+    }
+
     /// Map an allocation and return an RAII guard.
     ///
     /// # Safety
@@ -416,10 +437,7 @@ impl Allocator {
         allocation: &'a mut vk_mem::Allocation,
         size: u64,
     ) -> crate::Result<MapGuard<'a>> {
-        let ptr = self
-            .vma
-            .map_memory(allocation)
-            .map_err(|e| crate::AshError::VulkanError(format!("Map memory failed: {e:?}")))?;
+        let ptr = self.map_allocation(allocation)?;
 
         Ok(MapGuard {
             vma: &self.vma,

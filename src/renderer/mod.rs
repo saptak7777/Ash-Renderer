@@ -30,6 +30,7 @@ pub mod pipeline_cache;
 pub mod render_graph;
 pub mod render_stats;
 pub mod renderer;
+pub mod resource_pool;
 pub mod resource_registry;
 pub mod resources;
 pub mod sdfgi_pass;

@@ -2,6 +2,10 @@ use ash::vk;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use crate::renderer::resource_pool::ResourcePool;
+use crate::renderer::resources::ImageHandle;
+use crate::vulkan::Allocator;
+
 /// Handle to a render graph resource (image or buffer).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ResourceHandle(u32);
@@ -87,6 +91,7 @@ pub struct RenderGraph {
     passes: Vec<PassNode>,
     resource_counter: u32,
     resource_states: HashMap<ResourceHandle, (vk::ImageLayout, vk::AccessFlags)>,
+    resource_pool: Option<ResourcePool>,
 }
 
 impl RenderGraph {
@@ -96,6 +101,18 @@ impl RenderGraph {
             passes: Vec::new(),
             resource_counter: 0,
             resource_states: HashMap::new(),
+            resource_pool: None,
+        }
+    }
+
+    /// Creates a new render graph with transient resource pooling enabled.
+    pub fn new_with_pool(device: Arc<ash::Device>, allocator: Arc<Allocator>) -> Self {
+        Self {
+            device: Arc::clone(&device),
+            passes: Vec::new(),
+            resource_counter: 0,
+            resource_states: HashMap::new(),
+            resource_pool: Some(ResourcePool::new(device, allocator)),
         }
     }
 
@@ -104,6 +121,25 @@ impl RenderGraph {
         let handle = ResourceHandle::new(self.resource_counter);
         self.resource_counter += 1;
         handle
+    }
+
+    /// Allocates a transient image from the resource pool.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure the image is only used within the current frame.
+    pub unsafe fn allocate_transient(
+        &mut self,
+        format: vk::Format,
+        extent: vk::Extent2D,
+        usage: vk::ImageUsageFlags,
+    ) -> crate::Result<ImageHandle> {
+        match &mut self.resource_pool {
+            Some(pool) => pool.allocate_transient(format, extent, usage, 1),
+            None => Err(crate::AshError::VulkanError(
+                "RenderGraph was not created with resource pooling enabled".to_string(),
+            )),
+        }
     }
 
     /// Adds a pass to the graph.
@@ -192,9 +228,10 @@ impl RenderGraph {
         }
 
         if !barriers.is_empty() {
+            let merged_barriers = Self::merge_barriers(barriers);
             log::debug!(
                 "RenderGraph: Injecting {} barriers for pass '{}'",
-                barriers.len(),
+                merged_barriers.len(),
                 pass.name()
             );
             self.device.cmd_pipeline_barrier(
@@ -204,17 +241,47 @@ impl RenderGraph {
                 vk::DependencyFlags::empty(),
                 &[],
                 &[],
-                &barriers,
+                &merged_barriers,
             );
         }
 
         Ok(())
     }
 
-    /// Clears all passes (for next frame).
+    /// Merges redundant barriers.
+    fn merge_barriers(barriers: Vec<vk::ImageMemoryBarrier>) -> Vec<vk::ImageMemoryBarrier> {
+        if barriers.len() <= 1 {
+            return barriers;
+        }
+
+        let mut merged = Vec::with_capacity(barriers.len());
+        // Simple deduplication: remove exact duplicates
+        // A more advanced version would merge access flags
+        for barrier in barriers {
+            if !merged.iter().any(|b: &vk::ImageMemoryBarrier| {
+                b.image == barrier.image
+                    && b.old_layout == barrier.old_layout
+                    && b.new_layout == barrier.new_layout
+                    && b.src_access_mask == barrier.src_access_mask
+                    && b.dst_access_mask == barrier.dst_access_mask
+            }) {
+                merged.push(barrier);
+            }
+        }
+        merged
+    }
+
+    /// Clears all passes and advances to the next frame.
+    ///
+    /// If resource pooling is enabled, this also cleans up old transient resources.
     pub fn clear(&mut self) {
         self.passes.clear();
         self.resource_states.clear();
+
+        // Advance frame and cleanup old resources (keep resources for 3 frames)
+        if let Some(pool) = &mut self.resource_pool {
+            pool.next_frame(3);
+        }
     }
 }
 
