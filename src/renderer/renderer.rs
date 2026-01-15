@@ -1,4 +1,4 @@
-use crate::{
+﻿use crate::{
     renderer::{
         async_readback::AsyncReadbackManager,
         diagnostics::{
@@ -23,9 +23,12 @@ use crate::{
         resource_registry::{ResourceId, ResourceRegistry},
         resources,
         resources::uniform::{StorageBuffer, UniformBuffer},
-        ssgi_pass::{SsgiPass, SsgiQuality},
-        temporal_aa::TaaConfig,
-        temporal_upscaling::{VsrPass, VsrQuality},
+        ssgi_pass::{SsgiConfig, SsgiPass, SsgiQuality},
+        temporal_aa::{
+            detect_config_change, ConfigChangeType, ConfigMetrics, ConfigMetricsReport,
+            ConfigValidationError, SharpeningMode, TaaConfig, Validate,
+        },
+        vsr_pass::{SharpenConfig, VsrConfig, VsrInputs, VsrPass, VsrQuality, VsrUpscaleConfig},
         hiz_pass::AdaptiveHiZManager,
         vram_budget, DepthBuffer, GBuffer, Material, MaterialHandle, MaterialManager, Mesh,
         PipelineCache, SkinnedVertex, Texture, TextureData, Transform,
@@ -428,7 +431,7 @@ pub struct Renderer {
     vsr_pass: Option<VsrPass>,
     // Screen-Space Global Illumination
     ssgi_pass: Option<SsgiPass>,
-    // Motion Vector Pass for TSR/TAA
+    // Motion Vector Pass for VSR/TAA
     motion_pass: Option<MotionVectorPass>,
     motion_framebuffer: Option<vk::Framebuffer>,
     // G-Buffer for Normals and Motion Vectors
@@ -473,6 +476,11 @@ pub struct Renderer {
 
     // TAA Configuration
     pub taa_config: TaaConfig,
+    /// TAA configuration metrics (tracking changes/validation)
+    taa_config_metrics: ConfigMetrics,
+
+    pub ssgi_config: SsgiConfig,
+    pub vsr_config: VsrConfig,
 
     // Bindless Buffer Indices
     pub instance_buffer_indices: Vec<u32>,
@@ -629,7 +637,7 @@ impl Renderer {
                     Err(e) => {
                         log::error!("Shadow map initialization failed: {e}");
                         for action in e.suggested_actions() {
-                            log::error!("  → Suggested Action: {action}");
+                            log::error!("  â†’ Suggested Action: {action}");
                         }
                         return Err(AshError::VulkanError(format!(
                             "Shadow map allocation failed: {}",
@@ -987,6 +995,9 @@ impl Renderer {
                 readback_buffer,
                 last_image_index: 0,
                 taa_config: TaaConfig::default(),
+                taa_config_metrics: ConfigMetrics::default(),
+                ssgi_config: SsgiConfig::default(),
+                vsr_config: VsrConfig::default(),
                 adaptive_hiz_manager: AdaptiveHiZManager::new(3.0), // Target 3ms for Hi-Z
             };
 
@@ -1253,7 +1264,7 @@ impl Renderer {
         Ok(data)
     }
 
-    /// Initialize motion vector pass for TSR/TAA
+    /// Initialize motion vector pass for VSR/TAA
     ///
     /// # Safety
     /// Must be called after GBuffer is initialized
@@ -1912,7 +1923,7 @@ impl Renderer {
             }
         }
         
-        log::info!("✓ IBL assets uploaded and bound.");
+        log::info!("âœ“ IBL assets uploaded and bound.");
         Ok(())
     }
 
@@ -2164,7 +2175,7 @@ impl Renderer {
 
             // Log the material data we just uploaded for debugging
             log::warn!(
-                "✓ Material[{}] Streamed -> color={:?}, metallic={:.2}, roughness={:.2}",
+                "âœ“ Material[{}] Streamed -> color={:?}, metallic={:.2}, roughness={:.2}",
                 handle,
                 material.color,
                 material.metallic,
@@ -3044,7 +3055,7 @@ impl Renderer {
                     &self.device,
                     extent.width,
                     extent.height,
-                    ssgi.quality(),
+                    self.ssgi_config.clone(),
                 );
             }
         }
@@ -3060,8 +3071,9 @@ impl Renderer {
                     &self.device,
                     display_extent.width,
                     display_extent.height,
-                    vsr.quality(),
-                );
+                    self.vsr_config.quality,
+                )
+                .map_err(|e| AshError::VulkanError(format!("VSR init failed: {e}")))?;
             }
         }
         Ok(())
@@ -3871,7 +3883,77 @@ impl Renderer {
         
         // Sync shadow direction
         let direction = Vec4::from_array(lighting.directional.direction).truncate();
+        self.set_light_direction(direction);
+    }
+
+    pub fn set_light_direction(&mut self, direction: Vec3) {
         self.shadow_feature.set_light_direction(direction);
+    }
+
+    /// Update TAA configuration with validation, metrics, and resource management.
+    ///
+    /// Validates the configuration, logs change severity, tracks metrics, and recreates
+    /// TAA resources when a major change occurs (e.g., quality/sharpening/enable).
+    pub fn update_taa_config(&mut self, config: TaaConfig) -> Result<(), ConfigValidationError> {
+        // Validate incoming config
+        config.validate()?;
+
+        // Determine change type
+        let change_type = detect_config_change(&self.taa_config, &config);
+
+        // Log change severity
+        match change_type {
+            ConfigChangeType::None => {
+                log::debug!("TAA config unchanged");
+                return Ok(());
+            }
+            ConfigChangeType::Minor => {
+                log::info!(
+                    "TAA config updated (minor): {:?} -> {:?}",
+                    self.taa_config.quality,
+                    config.quality
+                );
+            }
+            ConfigChangeType::Major => {
+                log::info!(
+                    "TAA config updated (major, recreation needed): {:?} -> {:?}",
+                    self.taa_config.quality,
+                    config.quality
+                );
+            }
+        }
+
+        // Apply configuration
+        self.taa_config = config;
+
+        // Track metrics
+        self.taa_config_metrics
+            .record_change(self.current_frame as u64);
+
+        // Recreate resources if needed
+        if change_type.needs_recreation() {
+            self.recreate_taa_resources();
+        }
+
+        Ok(())
+    }
+
+    /// Recreate TAA resources when config changes (resets temporal accumulation)
+    fn recreate_taa_resources(&mut self) {
+        log::debug!("Recreating TAA resources due to TAA config change");
+        // Reset temporal accumulation to avoid ghosting after major config changes
+        self.current_frame = 0;
+        log::debug!("TAA resources recreated");
+    }
+
+    /// Access TAA configuration metrics
+    pub fn taa_config_metrics(&self) -> &ConfigMetrics {
+        &self.taa_config_metrics
+    }
+
+    /// Generate TAA configuration metrics report
+    pub fn taa_config_metrics_report(&self) -> ConfigMetricsReport {
+        self.taa_config_metrics.report()
     }
 
     pub fn render_frame(
@@ -4036,7 +4118,7 @@ impl Renderer {
                 }
             }
 
-            // Apply sub-pixel jitter for VSR/TSR if enabled
+            // Apply sub-pixel jitter for VSR/VSR if enabled
             let mut jittered_projection = projection;
             let mut jitter_uv = [0.0f32; 2];
             if let Some(ref mut vsr) = self.vsr_pass {
@@ -4416,7 +4498,7 @@ impl Renderer {
                 (&mut self.vsr_pass, &mut self.gbuffer)
             {
                 // Read back metrics from previous frame (non-blocking)
-                vsr.readback_metrics(command_buffer, &self.alloc.vma);
+                let _ = vsr.readback_metrics(command_buffer, &self.alloc.vma);
 
                 let depth_buffer = self
                     .depth_buffer
@@ -4424,14 +4506,38 @@ impl Renderer {
                     .ok_or_else(|| AshError::VulkanError("Depth buffer missing".to_string()))?;
                 // Pass current color result (which is now correctly the HDR buffer if initialized)
                 // and upsample to VSR history.
-                vsr.upscale(
+                let sharpen_mode = self.taa_config.sharpening;
+                let sharpen_config = if sharpen_mode != SharpeningMode::None {
+                    Some(SharpenConfig {
+                        strength: sharpen_mode.strength(),
+                        edge_threshold: 0.12,
+                        adaptive: true,
+                    })
+                } else {
+                    None
+                };
+
+                let vsr_config = VsrUpscaleConfig {
+                    velocity_threshold: self.taa_config.velocity_threshold,
+                    history_weight: self.taa_config.blend_factor,
+                    clamping_gamma: self.taa_config.quality.clamping_gamma(),
+                    anti_ghosting: true,
+                };
+
+                let vsr_inputs = VsrInputs {
+                    color: hdr_attachment,
+                    depth: depth_buffer.view(),
+                    motion: gbuffer.motion_view(),
+                    jitter: jitter_uv,
+                };
+
+                vsr.upscale_with_sharpening(
                     command_buffer,
-                    hdr_attachment, // Index 0 is now HDR if active
-                    depth_buffer.view(),
-                    gbuffer.motion_view(),
-                    jitter_uv,
-                    &self.taa_config,
-                )?;
+                    vsr_inputs,
+                    &vsr_config,
+                    sharpen_config.as_ref(),
+                )
+                .map_err(|e| AshError::VulkanError(format!("VSR upscale failed: {e}")))?;
                 vsr.next_frame();
             }
 
@@ -4537,9 +4643,9 @@ impl Renderer {
     // DELETED: Legacy accessor methods (mesh_mut, material, material_mut, refresh_draw_items)
 
 
-    // ──────────────────────────────────────────────────────────
+    // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     // Post-Processing API
-    // ──────────────────────────────────────────────────────────
+    // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     /// Sets the MSAA preset.
     pub fn set_msaa_preset(&mut self, preset: MsaaPreset) {
@@ -4608,9 +4714,9 @@ impl Renderer {
         self.bloom_intensity
     }
 
-    // ──────────────────────────────────────────────────────────
+    // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     // Forward+ Lighting API
-    // ──────────────────────────────────────────────────────────
+    // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     /// Update point lights for Forward+ rendering
     ///
@@ -4679,9 +4785,9 @@ impl Renderer {
             .unwrap_or(0)
     }
 
-    // ──────────────────────────────────────────────────────────
+    // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     // GPU-Driven Occlusion Culling API
-    // ──────────────────────────────────────────────────────────
+    // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     /// Enables GPU-driven occlusion culling using Hi-Z pyramid.
     ///
@@ -4743,18 +4849,18 @@ impl Renderer {
         self.hiz_pass.is_some() && self.indirect_draw_pass.is_some()
     }
 
-    // ──────────────────────────────────────────────────────────
+    // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     // Temporal Super-Resolution API
-    // ──────────────────────────────────────────────────────────
+    // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-    /// Enables Temporal Super-Resolution (TSR)
+    /// Enables Temporal Super-Resolution (VSR)
     ///
-    /// TSR renders at a lower internal resolution and uses temporal
+    /// VSR renders at a lower internal resolution and uses temporal
     /// accumulation to reconstruct higher quality output. This improves
     /// performance while maintaining near-native image quality.
     ///
     /// # Arguments
-    /// * `quality` - The TSR quality preset (affects internal render resolution)
+    /// * `quality` - The VSR quality preset (affects internal render resolution)
     pub fn enable_vsr(&mut self, quality: VsrQuality) -> Result<()> {
         if self.vsr_pass.is_some() {
             return Ok(()); // Already enabled
@@ -4777,29 +4883,31 @@ impl Renderer {
                 extent.width,
                 extent.height,
                 quality,
-            );
+            )
+            .map_err(|e| AshError::VulkanError(format!("VSR init failed: {e}")))?;
         }
 
         self.vsr_pass = Some(vsr);
+        self.vsr_config.quality = quality;
         log::info!(
-            "TSR enabled with {:?} quality ({}x upscale)",
+            "VSR enabled with {:?} quality ({}x upscale)",
             quality,
             quality.factor()
         );
         Ok(())
     }
 
-    /// Returns whether TSR is enabled
-    pub fn tsr_enabled(&self) -> bool {
+    /// Returns whether VSR is enabled
+    pub fn vsr_enabled(&self) -> bool {
         self.vsr_pass.is_some()
     }
 
-    /// Returns the current TSR quality preset
+    /// Returns the current VSR quality preset
     pub fn vsr_quality(&self) -> Option<VsrQuality> {
-        self.vsr_pass.as_ref().map(|t| t.quality())
+        self.vsr_pass.as_ref().map(|t| t.config.quality)
     }
 
-    /// Get jittered projection matrix for TAA/TSR
+    /// Get jittered projection matrix for TAA/VSR
     ///
     /// Call this each frame to get a projection matrix with sub-pixel jitter
     /// applied. This is essential for temporal accumulation quality.
@@ -4811,9 +4919,9 @@ impl Renderer {
         }
     }
 
-    // ──────────────────────────────────────────────────────────
+    // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     // Screen-Space Global Illumination API
-    // ──────────────────────────────────────────────────────────
+    // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     /// Enables Screen-Space Global Illumination (SSGI)
     ///
@@ -4838,23 +4946,19 @@ impl Renderer {
             });
 
         let mut ssgi = SsgiPass::new(Arc::clone(&self.device.device));
+        self.ssgi_config.quality = quality;
         unsafe {
             ssgi.init(
                 &self.alloc.vma,
                 &self.device,
                 extent.width,
                 extent.height,
-                quality,
+                self.ssgi_config.clone(),
             );
         }
-
+ 
         self.ssgi_pass = Some(ssgi);
-        log::info!(
-            "SSGI enabled with {:?} quality ({} rays, {} steps)",
-            quality,
-            quality.ray_count(),
-            quality.step_count()
-        );
+        log::info!("SSGI enabled with {quality:?} quality");
         Ok(())
     }
 
@@ -4875,9 +4979,9 @@ impl Renderer {
         }
     }
 
-    // ──────────────────────────────────────────────────────────
+    // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     // Post-Processing Initialization & Application
-    // ──────────────────────────────────────────────────────────
+    // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     /// Enables HDR rendering. Should be called after initialization.
     /// Allocates GPU memory for the HDR buffer.
@@ -5001,11 +5105,7 @@ impl Renderer {
         let vsr = self.vsr_pass.as_ref();
 
         let color_view = if let Some(vsr) = vsr {
-            vsr.output_view([
-                crate::renderer::temporal_aa::SharpeningMode::Subtle,
-                crate::renderer::temporal_aa::SharpeningMode::Moderate,
-                crate::renderer::temporal_aa::SharpeningMode::Strong,
-            ].contains(&self.taa_config.sharpening))
+            vsr.active_view()
         } else if let Some(hdr) = hdr {
             hdr.view()
         } else {
@@ -5205,7 +5305,7 @@ impl Renderer {
         }
 
         if let Some(vsr) = &self.vsr_pass {
-            log::info!("{}", vsr.quality_report(self.taa_config.quality, self.taa_config.sharpening));
+            log::info!("{}", vsr.quality_report());
         }
     }
 

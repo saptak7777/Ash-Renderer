@@ -36,9 +36,9 @@ pub mod shadow_map;
 pub mod skinned_vertex;
 pub mod ssgi_pass;
 pub mod temporal_aa;
-pub mod temporal_upscaling;
 pub mod util;
 pub mod vram_budget;
+pub mod vsr_pass;
 
 // Re-exports for public API
 pub use async_readback::AsyncReadbackManager;
@@ -61,8 +61,8 @@ pub use render_stats::{RenderStats, StatsCollector};
 pub use renderer::{RenderCommand, Renderer};
 pub use resource_registry::{ResourceId, ResourceRegistry};
 pub use sdfgi_pass::{SdfgiPass, SdfgiQuality};
-pub use ssgi_pass::{SsgiPass, SsgiQuality};
-pub use temporal_upscaling::{VsrPass, VsrQuality};
+pub use ssgi_pass::{SsgiConfig, SsgiPass, SsgiQuality};
+pub use vsr_pass::{VsrConfig, VsrPass, VsrQuality};
 
 // Re-export from resources submodule
 pub use resources::{

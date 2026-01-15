@@ -14,37 +14,61 @@ use crate::vulkan::VulkanDevice;
 use crate::Result;
 
 /// SSGI quality presets
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum SsgiQuality {
-    /// 4 rays, 8 steps - Fastest
+    /// 4 rays, 16 steps - Fastest
     Low,
-    /// 8 rays, 16 steps - Balanced
+    /// 8 rays, 32 steps - Balanced
     #[default]
     Medium,
-    /// 16 rays, 32 steps - Quality
+    /// 16 rays, 48 steps - Quality
     High,
-    /// 32 rays, 64 steps - Ultra
-    Ultra,
 }
 
 impl SsgiQuality {
-    /// Get ray count
-    pub fn ray_count(&self) -> u32 {
+    pub const fn ray_count(self) -> u32 {
         match self {
-            SsgiQuality::Low => 4,
-            SsgiQuality::Medium => 8,
-            SsgiQuality::High => 16,
-            SsgiQuality::Ultra => 32,
+            Self::Low => 4,
+            Self::Medium => 8,
+            Self::High => 16,
         }
     }
 
-    /// Get step count per ray
-    pub fn step_count(&self) -> u32 {
+    pub const fn step_count(self) -> u32 {
         match self {
-            SsgiQuality::Low => 8,
-            SsgiQuality::Medium => 16,
-            SsgiQuality::High => 32,
-            SsgiQuality::Ultra => 64,
+            Self::Low => 16,
+            Self::Medium => 32,
+            Self::High => 48,
+        }
+    }
+
+    pub const fn temporal_weight(self) -> f32 {
+        match self {
+            Self::Low => 0.90,
+            Self::Medium => 0.93,
+            Self::High => 0.95,
+        }
+    }
+}
+
+/// SSGI configuration
+#[derive(Debug, Clone)]
+pub struct SsgiConfig {
+    pub quality: SsgiQuality,
+    pub adaptive_sampling: bool,
+    pub max_ray_distance: f32,
+    pub intensity: f32,
+    pub temporal_weight: f32,
+}
+
+impl Default for SsgiConfig {
+    fn default() -> Self {
+        Self {
+            quality: SsgiQuality::Medium,
+            adaptive_sampling: true,
+            max_ray_distance: 10.0,
+            intensity: 1.0,
+            temporal_weight: SsgiQuality::Medium.temporal_weight(),
         }
     }
 }
@@ -68,6 +92,8 @@ pub struct SsgiPushConstants {
     pub frame_index: u32,
     /// History blend factor
     pub history_weight: f32,
+    /// Adaptive sampling toggle (1.0 = on, 0.0 = off)
+    pub adaptive_sampling: f32,
 }
 
 /// Screen-Space GI pass
@@ -104,9 +130,7 @@ pub struct SsgiPass {
     // State
     width: u32,
     height: u32,
-    quality: SsgiQuality,
-    intensity: f32,
-    max_distance: f32,
+    config: SsgiConfig,
     frame_index: u32,
 
     initialized: bool,
@@ -133,9 +157,7 @@ impl SsgiPass {
             sampler: vk::Sampler::null(),
             width: 0,
             height: 0,
-            quality: SsgiQuality::default(),
-            intensity: 1.0,
-            max_distance: 10.0,
+            config: SsgiConfig::default(),
             frame_index: 0,
             initialized: false,
         }
@@ -149,7 +171,7 @@ impl SsgiPass {
         _vulkan_device: &VulkanDevice,
         width: u32,
         height: u32,
-        quality: SsgiQuality,
+        config: SsgiConfig,
     ) {
         if self.initialized {
             return;
@@ -158,7 +180,7 @@ impl SsgiPass {
         // Half-res GI for bandwidth savings
         self.width = width / 2;
         self.height = height / 2;
-        self.quality = quality;
+        self.config = config;
 
         // Note: failures here are considered fatal since we can't recover
         // without the primary GI buffers.
@@ -627,22 +649,32 @@ impl SsgiPass {
 
     /// Get current quality preset
     pub fn quality(&self) -> SsgiQuality {
-        self.quality
+        self.config.quality
     }
 
     /// Set GI intensity
     pub fn set_intensity(&mut self, intensity: f32) {
-        self.intensity = intensity.max(0.0);
+        self.config.intensity = intensity.max(0.0);
     }
 
     /// Get GI intensity
     pub fn intensity(&self) -> f32 {
-        self.intensity
+        self.config.intensity
     }
 
     /// Set max ray distance
     pub fn set_max_distance(&mut self, distance: f32) {
-        self.max_distance = distance.max(1.0);
+        self.config.max_ray_distance = distance.max(1.0);
+    }
+
+    /// Update configuration
+    pub fn set_config(&mut self, config: SsgiConfig) {
+        self.config = config;
+    }
+
+    /// Get current configuration
+    pub fn config(&self) -> &SsgiConfig {
+        &self.config
     }
 
     /// Advance to next frame
@@ -655,12 +687,17 @@ impl SsgiPass {
         SsgiPushConstants {
             inv_view_proj: inv_view_proj.to_cols_array_2d(),
             screen_size: [self.width as f32, self.height as f32],
-            ray_count: self.quality.ray_count(),
-            step_count: self.quality.step_count(),
-            max_distance: self.max_distance,
-            intensity: self.intensity,
+            ray_count: self.config.quality.ray_count(),
+            step_count: self.config.quality.step_count(),
+            max_distance: self.config.max_ray_distance,
+            intensity: self.config.intensity,
             frame_index: self.frame_index,
-            history_weight: 0.9,
+            history_weight: self.config.temporal_weight,
+            adaptive_sampling: if self.config.adaptive_sampling {
+                1.0
+            } else {
+                0.0
+            },
         }
     }
 

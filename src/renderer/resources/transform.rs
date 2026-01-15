@@ -351,7 +351,7 @@ pub struct TemporalCamera {
     prev_view_proj: Mat4,
 
     // Jitter state
-    halton: crate::renderer::temporal_upscaling::HaltonSequence,
+    halton: crate::renderer::vsr_pass::HaltonSequence,
     current_jitter: (f32, f32),
 }
 
@@ -376,7 +376,7 @@ impl TemporalCamera {
             prev_view: view,
             prev_proj: proj,
             prev_view_proj: view_proj,
-            halton: crate::renderer::temporal_upscaling::HaltonSequence::new(16),
+            halton: crate::renderer::vsr_pass::HaltonSequence::new(16),
             current_jitter: (0.0, 0.0),
         }
     }
@@ -396,7 +396,7 @@ impl TemporalCamera {
         std::mem::swap(&mut self.prev_view_proj, &mut self.view_proj);
 
         // Update jitter for this frame
-        self.current_jitter = self.halton.next();
+        self.current_jitter = self.halton.next_sample();
 
         // Recalculate matrices with new jitter
         self.update_matrices();

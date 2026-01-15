@@ -1,4 +1,4 @@
-//! Temporal Anti-Aliasing (TAA) System
+﻿//! Temporal Anti-Aliasing (TAA) System
 //!
 //! Provides high-quality anti-aliasing by blending the current frame with
 //! previous frames using motion vectors and color clamping.
@@ -10,8 +10,160 @@
 //! - Configurable blend factor
 
 use glam::{Mat4, Vec2};
+use std::fmt;
 
-/// TAA quality preset (AAA-grade, Unreal TSR style)
+/// Configuration validation error
+#[derive(Debug, Clone, PartialEq)]
+pub enum ConfigValidationError {
+    InvalidVelocityThreshold { value: f32 },
+    InvalidDepthThreshold { value: f32 },
+    InvalidJitterScale { value: f32 },
+}
+
+impl fmt::Display for ConfigValidationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidVelocityThreshold { value } => {
+                write!(f, "Invalid velocity threshold: {value} (must be 0.0-1.0)")
+            }
+            Self::InvalidDepthThreshold { value } => {
+                write!(f, "Invalid depth threshold: {value} (must be >= 0.0)")
+            }
+            Self::InvalidJitterScale { value } => {
+                write!(f, "Invalid jitter scale: {value} (must be > 0.0)")
+            }
+        }
+    }
+}
+
+/// Config change type (for determining if recreation is needed)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfigChangeType {
+    /// No change
+    None,
+    /// Minor change (no recreation needed)
+    Minor,
+    /// Major change (recreation needed)
+    Major,
+}
+
+impl ConfigChangeType {
+    /// Check if recreation is needed
+    pub fn needs_recreation(self) -> bool {
+        matches!(self, ConfigChangeType::Major)
+    }
+}
+
+/// Detect config change type (AAA pattern)
+pub fn detect_config_change(old: &TaaConfig, new: &TaaConfig) -> ConfigChangeType {
+    // Quality change requires recreation (Unreal pattern)
+    if old.quality != new.quality {
+        return ConfigChangeType::Major;
+    }
+
+    // Sharpening mode change requires recreation
+    if old.sharpening != new.sharpening {
+        return ConfigChangeType::Major;
+    }
+
+    // Enable/disable requires recreation
+    if old.enabled != new.enabled {
+        return ConfigChangeType::Major;
+    }
+
+    // Threshold changes are minor (no recreation)
+    if old.velocity_threshold != new.velocity_threshold || old.depth_threshold != new.depth_threshold {
+        return ConfigChangeType::Minor;
+    }
+
+    // No change
+    ConfigChangeType::None
+}
+
+impl std::error::Error for ConfigValidationError {}
+
+/// Validation trait (AAA pattern + Rust composable validation)
+pub trait Validate {
+    /// Validate configuration
+    fn validate(&self) -> Result<(), ConfigValidationError>;
+
+    /// Validate and clamp invalid values (Unity pattern)
+    fn validate_clamped(&self) -> Self
+    where
+        Self: Clone;
+}
+
+/// Configuration change metrics (AAA-grade profiling)
+#[derive(Default, Debug, Clone, PartialEq)]
+pub struct ConfigMetrics {
+    /// Total number of config changes
+    pub change_count: u64,
+    /// Number of validation failures
+    pub validation_failures: u64,
+    /// Number of auto-clamped values
+    pub clamped_values: u64,
+    /// Last change timestamp (frame number)
+    pub last_change_frame: u64,
+}
+
+impl ConfigMetrics {
+    /// Record a config change
+    pub fn record_change(&mut self, frame: u64) {
+        self.change_count += 1;
+        self.last_change_frame = frame;
+    }
+
+    /// Record a validation failure
+    pub fn record_validation_failure(&mut self) {
+        self.validation_failures += 1;
+    }
+
+    /// Record an auto-clamped value
+    pub fn record_clamped(&mut self) {
+        self.clamped_values += 1;
+    }
+
+    /// Get metrics report (for debugging)
+    pub fn report(&self) -> ConfigMetricsReport {
+        ConfigMetricsReport {
+            change_count: self.change_count,
+            validation_failures: self.validation_failures,
+            clamped_values: self.clamped_values,
+            validation_failure_rate: if self.change_count > 0 {
+                self.validation_failures as f32 / self.change_count as f32
+            } else {
+                0.0
+            },
+        }
+    }
+}
+
+/// Metrics report (for display)
+#[derive(Debug, Clone, PartialEq)]
+pub struct ConfigMetricsReport {
+    pub change_count: u64,
+    pub validation_failures: u64,
+    pub clamped_values: u64,
+    pub validation_failure_rate: f32,
+}
+
+impl fmt::Display for ConfigMetricsReport {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "Config Metrics:\n\
+             - Changes: {}\n\
+             - Validation Failures: {} ({:.1}%)\n\
+             - Clamped Values: {}",
+            self.change_count,
+            self.validation_failures,
+            self.validation_failure_rate * 100.0,
+            self.clamped_values
+        )
+    }
+}
+
+/// TAA quality preset (AAA-grade, Unreal VSR style)
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum TaaQuality {
     /// Responsive (low latency, less stable)
@@ -23,11 +175,6 @@ pub enum TaaQuality {
 }
 
 impl TaaQuality {
-    /// Unreal's presets (tuned over years)
-    pub const RESPONSIVE: Self = Self::Responsive;
-    pub const BALANCED: Self = Self::Balanced;
-    pub const QUALITY: Self = Self::Quality;
-
     /// Get history weight
     pub const fn history_weight(self) -> f32 {
         match self {
@@ -103,7 +250,7 @@ pub struct TaaConfig {
     pub velocity_threshold: f32,
     /// Depth rejection threshold
     pub depth_threshold: f32,
-    /// Anti-flicker (Unreal TSR feature)
+    /// Anti-flicker (Unreal VSR feature)
     pub anti_flicker: bool,
     /// Jitter scale (typically 1.0)
     pub jitter_scale: f32,
@@ -124,6 +271,58 @@ impl Default for TaaConfig {
             anti_flicker: true,
             jitter_scale: 1.0,
         }
+    }
+}
+
+impl Validate for TaaConfig {
+    fn validate(&self) -> Result<(), ConfigValidationError> {
+        if self.velocity_threshold < 0.0 || self.velocity_threshold > 1.0 {
+            return Err(ConfigValidationError::InvalidVelocityThreshold {
+                value: self.velocity_threshold,
+            });
+        }
+
+        if self.depth_threshold < 0.0 {
+            return Err(ConfigValidationError::InvalidDepthThreshold {
+                value: self.depth_threshold,
+            });
+        }
+
+        if self.jitter_scale <= 0.0 {
+            return Err(ConfigValidationError::InvalidJitterScale {
+                value: self.jitter_scale,
+            });
+        }
+
+        if !self.enabled {
+            log::warn!(
+                "TAA is disabled but quality is set to {:?}. Quality will be ignored.",
+                self.quality
+            );
+        }
+
+        Ok(())
+    }
+
+    fn validate_clamped(&self) -> Self
+    where
+        Self: Clone,
+    {
+        let mut clamped = self.clone();
+
+        clamped.velocity_threshold = clamped.velocity_threshold.clamp(0.0, 1.0);
+
+        if clamped.depth_threshold < 0.0 {
+            clamped.depth_threshold = 0.0;
+            log::warn!("Depth threshold clamped to 0.0");
+        }
+
+        if clamped.jitter_scale <= 0.0 {
+            clamped.jitter_scale = 1.0;
+            log::warn!("Jitter scale clamped to 1.0");
+        }
+
+        clamped
     }
 }
 
@@ -367,5 +566,92 @@ mod tests {
         assert!(config.anti_flicker);
         assert_eq!(config.velocity_threshold, 0.02);
         assert_eq!(config.depth_threshold, 0.1);
+    }
+
+    #[test]
+    fn test_validate_valid_config() {
+        let config = TaaConfig::default();
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_invalid_velocity() {
+        let mut config = TaaConfig::default();
+        config.velocity_threshold = 2.0;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_validate_invalid_depth() {
+        let mut config = TaaConfig::default();
+        config.depth_threshold = -1.0;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_validate_invalid_jitter() {
+        let mut config = TaaConfig::default();
+        config.jitter_scale = 0.0;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_validate_clamped() {
+        let mut config = TaaConfig::default();
+        config.velocity_threshold = 2.0;
+        config.depth_threshold = -1.0;
+        config.jitter_scale = -0.5;
+
+        let clamped = config.validate_clamped();
+        assert_eq!(clamped.velocity_threshold, 1.0);
+        assert_eq!(clamped.depth_threshold, 0.0);
+        assert_eq!(clamped.jitter_scale, 1.0);
+    }
+
+    #[test]
+    fn test_detect_config_change_none() {
+        let old = TaaConfig::default();
+        let new = old.clone();
+        assert_eq!(detect_config_change(&old, &new), ConfigChangeType::None);
+    }
+
+    #[test]
+    fn test_detect_config_change_minor() {
+        let old = TaaConfig::default();
+        let mut new = old.clone();
+        new.velocity_threshold = 0.5;
+        assert_eq!(detect_config_change(&old, &new), ConfigChangeType::Minor);
+    }
+
+    #[test]
+    fn test_detect_config_change_major() {
+        let old = TaaConfig::default();
+        let mut new = old.clone();
+        new.quality = TaaQuality::Quality;
+        assert_eq!(detect_config_change(&old, &new), ConfigChangeType::Major);
+    }
+
+    #[test]
+    fn test_config_metrics() {
+        let mut metrics = ConfigMetrics::default();
+        metrics.record_change(100);
+        metrics.record_validation_failure();
+        metrics.record_clamped();
+
+        assert_eq!(metrics.change_count, 1);
+        assert_eq!(metrics.validation_failures, 1);
+        assert_eq!(metrics.clamped_values, 1);
+        assert_eq!(metrics.last_change_frame, 100);
+
+        let report = metrics.report();
+        assert_eq!(report.change_count, 1);
+        assert_eq!(report.validation_failure_rate, 1.0);
+    }
+
+    #[test]
+    fn test_config_change_type_needs_recreation() {
+        assert!(!ConfigChangeType::None.needs_recreation());
+        assert!(!ConfigChangeType::Minor.needs_recreation());
+        assert!(ConfigChangeType::Major.needs_recreation());
     }
 }

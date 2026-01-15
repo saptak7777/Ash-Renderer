@@ -1,4 +1,4 @@
-//! Temporal Super-Resolution (TSR)
+﻿//! Temporal Super-Resolution (TSR)
 //!
 //! Implements temporal upscaling for improved image quality at reduced rendering cost.
 //! Key features:
@@ -51,15 +51,15 @@ impl std::fmt::Display for TaaQualityReport {
             self.rejection_rate * 100.0,
             self.ghosting_score,
             if self.ghosting_score < 0.1 {
-                "✅"
+                "Γ£à"
             } else {
-                "⚠️"
+                "ΓÜá∩╕Å"
             },
             self.shimmering_score,
             if self.shimmering_score < 0.15 {
-                "✅"
+                "Γ£à"
             } else {
-                "⚠️"
+                "ΓÜá∩╕Å"
             }
         )
     }
