@@ -25,6 +25,7 @@ pub mod shader;
 pub mod surface_provider;
 pub mod swapchain;
 pub mod sync;
+pub mod transfer_context;
 pub mod utils;
 
 pub use ibl_descriptor::{IBLDescriptorSet, IBLResources};
@@ -51,3 +52,4 @@ pub use shader::{ShaderModule, ShaderReflection};
 pub use surface_provider::{HeadlessSurfaceProvider, SurfaceProvider, WindowSurfaceProvider};
 pub use swapchain::SwapchainWrapper;
 pub use sync::FrameSync;
+pub use transfer_context::TransferContext;
