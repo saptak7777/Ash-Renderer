@@ -611,6 +611,16 @@ impl VsrPass {
             return Ok(());
         }
 
+        // Adversarial Defense: Zero-Sized Resource
+        // Minimizing a window on Windows often causes width/height to become 0.
+        // Creating Vulkan images with 0 dimensions is invalid and will crash.
+        if display_width == 0 || display_height == 0 {
+            log::warn!(
+                "VsrPass: Skipping initialization with zero dimensions (window likely minimized)"
+            );
+            return Ok(()); // Return success, assume resize will reinitialize
+        }
+
         let w = display_width;
         let h = display_height;
 

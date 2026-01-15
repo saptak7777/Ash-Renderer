@@ -2105,6 +2105,10 @@ impl Renderer {
             vram_usage: self.vram_budget.get_stats(),
             draw_calls_per_frame: self.diagnostics.frame_stats.draw_calls,
             triangles_rendered: self.diagnostics.frame_stats.triangles,
+            cull_efficiency: 0.0, // TODO: Calculate from occlusion culling stats
+            gpu_frame_ms: 0.0,    // TODO: Get from GPU profiler
+            hiz_quality: format!("{:?}", self.hiz_pass.as_ref().map(|h| h.quality()).unwrap_or(crate::renderer::hiz_pass::HiZQuality::Balanced)),
+            frame_count: 0,
         }
     }
 

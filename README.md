@@ -24,6 +24,8 @@ Ash Renderer is a low-level Vulkan rendering library for Rust projects that want
 - ✅ **PBR Workflow**: Metallic/Roughness standard, with automatic GLB material ingestion.
 - ✅ **Async Readbacks**: Get data back from the GPU without stalling the whole pipeline (usually).
 - ✅ **Post-Processing**: Bloom, Tonemapping, and a VSR (Temporal) implementation that's surprisingly okay.
+- ✅ **Debug Visualization**: See exactly what's being culled with colored wireframes (Red=Gone, Green=Seen).
+- ✅ **Shader Hot-Reload**: Iterate on compute shaders instantly (F5) without restarting.
 
 ### What It Doesn't Do (Yet)
 

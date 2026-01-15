@@ -1,6 +1,6 @@
 [package]
 name = "ash_renderer"
-version = "0.4.91"
+version = "0.4.92"
 edition = "2021"
 authors = ["Saptak Santra"]
 license = "Apache-2.0"
@@ -80,6 +80,7 @@ shader_compilation = ["shaderc"] # Runtime shader compilation
 shader_reflection = ["spirv-reflect"] # SPIRV reflection support
 profiling = [] # Enable GPU profiling
 parallel = [] # Enable parallel command buffer recording
+simd = [] # Enable explicit SIMD optimizations for CPU culling
 debug_visualization = [
 ] # Enable debug visualization modes (normals, albedo, roughness, metallic)
 full = [

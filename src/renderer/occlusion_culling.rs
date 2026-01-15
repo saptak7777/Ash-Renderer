@@ -320,6 +320,7 @@ impl CullStats {
 pub struct OcclusionCulling {
     pub enabled: bool,
     pub frustum_only: bool,
+    pub debug_enabled: bool,
     objects: Vec<CullObjectData>,
     stats: CullStats,
 }
@@ -329,6 +330,7 @@ impl OcclusionCulling {
         Self {
             enabled: true,
             frustum_only: false,
+            debug_enabled: false,
             objects: Vec::with_capacity(1024),
             stats: CullStats::default(),
         }
@@ -420,6 +422,58 @@ impl OcclusionCulling {
 
     pub fn stats(&self) -> &CullStats {
         &self.stats
+    }
+
+    /// Generate debug visualization data for culled objects
+    ///
+    /// Returns a vector of (transform, color) pairs for rendering bounding boxes.
+    /// Color encoding: Green = Visible, Red = Culled
+    pub fn debug_boxes(&self, visible_indices: &[u32]) -> Vec<(Mat4, [f32; 4])> {
+        if !self.debug_enabled || self.objects.is_empty() {
+            return Vec::new();
+        }
+
+        let mut boxes = Vec::with_capacity(self.objects.len());
+        let visible_set: std::collections::HashSet<u32> = visible_indices.iter().copied().collect();
+
+        for (i, obj) in self.objects.iter().enumerate() {
+            let is_visible = visible_set.contains(&(i as u32));
+
+            // Reconstruct model matrix from rows
+            let model = Mat4::from_cols_array_2d(&[
+                obj.model_row0,
+                obj.model_row1,
+                obj.model_row2,
+                obj.model_row3,
+            ]);
+
+            // Scale unit cube to match bounding box
+            let center = Vec3::new(
+                obj.bounds.center[0],
+                obj.bounds.center[1],
+                obj.bounds.center[2],
+            );
+            let extents = Vec3::new(
+                obj.bounds.extents[0],
+                obj.bounds.extents[1],
+                obj.bounds.extents[2],
+            );
+
+            let scale = Mat4::from_scale(extents);
+            let translate = Mat4::from_translation(center);
+            let transform = model * translate * scale;
+
+            // Color: Green if visible, Red if culled
+            let color = if is_visible {
+                [0.0, 1.0, 0.0, 0.5] // Green, semi-transparent
+            } else {
+                [1.0, 0.0, 0.0, 0.5] // Red, semi-transparent
+            };
+
+            boxes.push((transform, color));
+        }
+
+        boxes
     }
 }
 

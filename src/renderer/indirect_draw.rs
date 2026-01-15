@@ -311,6 +311,68 @@ impl IndirectDrawPass {
         Ok(())
     }
 
+    /// Reload compute pipeline with new shader code
+    ///
+    /// # Safety
+    /// The caller must ensure that the pipeline is not in use and that the
+    /// provided SPIR-V code is valid.
+    pub unsafe fn reload_pipeline(
+        &mut self,
+        spirv_code: &[u32],
+        frame_layout: vk::DescriptorSetLayout,
+        bindless_layout: vk::DescriptorSetLayout,
+    ) -> Result<()> {
+        log::info!("IndirectDrawPass: Reloading pipeline...");
+
+        // Destroy old pipeline
+        if self.cull_pipeline != vk::Pipeline::null() {
+            self.device.destroy_pipeline(self.cull_pipeline, None);
+            self.cull_pipeline = vk::Pipeline::null();
+        }
+        if self.cull_layout != vk::PipelineLayout::null() {
+            self.device.destroy_pipeline_layout(self.cull_layout, None);
+            self.cull_layout = vk::PipelineLayout::null();
+        }
+
+        // Create new shader module
+        let shader_module_info = vk::ShaderModuleCreateInfo::default().code(spirv_code);
+        let shader_module = self
+            .device
+            .create_shader_module(&shader_module_info, None)?;
+
+        let push_constant_range = vk::PushConstantRange::default()
+            .stage_flags(vk::ShaderStageFlags::COMPUTE)
+            .offset(0)
+            .size(std::mem::size_of::<CullingPushConstants>() as u32);
+
+        let layouts = [self.layout, frame_layout, bindless_layout];
+        let layout_info = vk::PipelineLayoutCreateInfo::default()
+            .set_layouts(&layouts)
+            .push_constant_ranges(std::slice::from_ref(&push_constant_range));
+
+        self.cull_layout = self.device.create_pipeline_layout(&layout_info, None)?;
+
+        let stage_info = vk::PipelineShaderStageCreateInfo::default()
+            .stage(vk::ShaderStageFlags::COMPUTE)
+            .module(shader_module)
+            .name(c"main");
+
+        let pipeline_info = vk::ComputePipelineCreateInfo::default()
+            .stage(stage_info)
+            .layout(self.cull_layout);
+
+        let pipelines = self
+            .device
+            .create_compute_pipelines(vk::PipelineCache::null(), &[pipeline_info], None)
+            .map_err(|(_, e)| e)?;
+
+        self.cull_pipeline = pipelines[0];
+        self.device.destroy_shader_module(shader_module, None);
+
+        log::info!("IndirectDrawPass: Pipeline reloaded successfully");
+        Ok(())
+    }
+
     /// Update descriptors with Hi-Z image
     ///
     /// # Safety
