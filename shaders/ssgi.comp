@@ -12,6 +12,7 @@ layout(set = 0, binding = 0) uniform sampler2D depthBuffer;
 layout(set = 0, binding = 1) uniform sampler2D normalBuffer;
 layout(set = 0, binding = 2) uniform sampler2D albedoBuffer;
 layout(set = 0, binding = 3) uniform sampler2D historyBuffer;
+layout(set = 0, binding = 5) uniform sampler2D velocityBuffer;
 
 // Output
 layout(set = 0, binding = 4, r11f_g11f_b10f) uniform writeonly image2D giOutput;
@@ -158,9 +159,16 @@ void main() {
     indirect *= albedo;  // Modulate by surface albedo
     indirect *= pc.intensity;
     
-    // Temporal accumulation
-    vec3 history = texture(historyBuffer, uv).rgb;
-    vec3 result = mix(indirect, history, pc.historyWeight);
+    // Temporal accumulation with motion vector reprojection
+    vec2 velocity = texture(velocityBuffer, uv).rg;
+    vec2 prevUV = uv - velocity;
+    
+    // Bounds check (discard history if offscreen)
+    bool is_offscreen = any(lessThan(prevUV, vec2(0.0))) || any(greaterThan(prevUV, vec2(1.0)));
+    float validHistory = is_offscreen ? 0.0 : 1.0;
+    
+    vec3 history = texture(historyBuffer, prevUV).rgb;
+    vec3 result = mix(indirect, history, pc.historyWeight * validHistory);
     
     imageStore(giOutput, fragCoord, vec4(result, 1.0));
 }

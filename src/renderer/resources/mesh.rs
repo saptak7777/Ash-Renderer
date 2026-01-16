@@ -1183,7 +1183,7 @@ mod tests {
             string_clones.push(s.clone());
         }
         let string_duration = start.elapsed();
-        println!("String cloning ({iterations} iterations): {string_duration:?}");
+        log::debug!("String cloning ({iterations} iterations): {string_duration:?}");
 
         // Benchmark Arc<str> cloning
         let arc: Arc<str> = name_str.into();
@@ -1193,15 +1193,13 @@ mod tests {
             arc_clones.push(Arc::clone(&arc));
         }
         let arc_duration = start.elapsed();
-        println!("Arc<str> cloning ({iterations} iterations): {arc_duration:?}");
+        log::debug!("Arc cloning ({iterations} iterations): {arc_duration:?}");
 
         assert!(
             arc_duration < string_duration,
             "Arc<str> should be faster than String for cloning"
         );
-        println!(
-            "Speedup factor: {:.2}x",
-            string_duration.as_secs_f64() / arc_duration.as_secs_f64()
-        );
+        let speedup = string_duration.as_secs_f64() / arc_duration.as_secs_f64();
+        log::debug!("Speedup factor: {:.2}x", speedup);
     }
 }

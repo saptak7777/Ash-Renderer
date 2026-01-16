@@ -96,6 +96,17 @@ pub struct SsgiPushConstants {
     pub adaptive_sampling: f32,
 }
 
+/// Input textures for SSGI pass
+///
+/// This struct enforces explicit resource dependencies following the "dumb pipe" principle.
+/// The renderer constructs this from its G-Buffer and passes it to the SSGI pass.
+pub struct SsgiInputs {
+    pub depth_view: vk::ImageView,
+    pub normal_view: vk::ImageView,
+    pub albedo_view: vk::ImageView,
+    pub velocity_view: vk::ImageView,
+}
+
 /// Screen-Space GI pass
 pub struct SsgiPass {
     device: Arc<ash::Device>,
@@ -352,6 +363,12 @@ impl SsgiPass {
                 .descriptor_type(vk::DescriptorType::STORAGE_IMAGE)
                 .descriptor_count(1)
                 .stage_flags(vk::ShaderStageFlags::COMPUTE),
+            // Binding 5: Velocity buffer (motion vectors)
+            vk::DescriptorSetLayoutBinding::default()
+                .binding(5)
+                .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::COMPUTE),
         ];
 
         let layout_info = vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings);
@@ -362,7 +379,7 @@ impl SsgiPass {
         let pool_sizes = [
             vk::DescriptorPoolSize {
                 ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-                descriptor_count: 8,
+                descriptor_count: 10, // Increased from 8 to accommodate velocity buffer
             },
             vk::DescriptorPoolSize {
                 ty: vk::DescriptorType::STORAGE_IMAGE,
@@ -433,16 +450,14 @@ impl SsgiPass {
         Ok(())
     }
 
-    /// Compute SSGI for the current frame
+    /// Record SSGI compute commands
     ///
     /// # Safety
-    /// Command buffer must be in recording state.
-    pub unsafe fn compute_gi(
+    /// Command buffer must be in recording state
+    pub unsafe fn record_commands(
         &mut self,
         cmd: vk::CommandBuffer,
-        depth_view: vk::ImageView,
-        normal_view: vk::ImageView,
-        albedo_view: vk::ImageView,
+        inputs: &SsgiInputs,
         inv_view_proj: glam::Mat4,
     ) -> Result<()> {
         if !self.initialized || self.gi_pipeline == vk::Pipeline::null() {
@@ -458,10 +473,11 @@ impl SsgiPass {
             .sampler(self.sampler)
             .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL);
 
-        let depth_info = sampler_info.image_view(depth_view);
-        let normal_info = sampler_info.image_view(normal_view);
-        let albedo_info = sampler_info.image_view(albedo_view);
+        let depth_info = sampler_info.image_view(inputs.depth_view);
+        let normal_info = sampler_info.image_view(inputs.normal_view);
+        let albedo_info = sampler_info.image_view(inputs.albedo_view);
         let history_info = sampler_info.image_view(self.history_vs[prev_idx]);
+        let velocity_info = sampler_info.image_view(inputs.velocity_view);
 
         let output_info = vk::DescriptorImageInfo::default()
             .image_view(self.gi_view)
@@ -493,6 +509,11 @@ impl SsgiPass {
                 .dst_binding(4)
                 .descriptor_type(vk::DescriptorType::STORAGE_IMAGE)
                 .image_info(std::slice::from_ref(&output_info)),
+            vk::WriteDescriptorSet::default()
+                .dst_set(desc_set)
+                .dst_binding(5)
+                .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                .image_info(std::slice::from_ref(&velocity_info)),
         ];
 
         self.device.update_descriptor_sets(&writes, &[]);

@@ -89,16 +89,18 @@ vec4 sampleCascade(vec3 worldPos, vec3 normal, uint cascadeIndex) {
         return vec4(0.0);
     }
     
-    // Sample appropriate cascade
+    // Sample appropriate cascade using switch for better branch prediction
     vec4 albedo;
-    if (cascadeIndex == 0) albedo = texture(cascadeAlbedo0, voxelCoord);
-    else if (cascadeIndex == 1) albedo = texture(cascadeAlbedo1, voxelCoord);
-    else if (cascadeIndex == 2) albedo = texture(cascadeAlbedo2, voxelCoord);
-    else if (cascadeIndex == 3) albedo = texture(cascadeAlbedo3, voxelCoord);
-    else if (cascadeIndex == 4) albedo = texture(cascadeAlbedo4, voxelCoord);
-    else if (cascadeIndex == 5) albedo = texture(cascadeAlbedo5, voxelCoord);
-    else if (cascadeIndex == 6) albedo = texture(cascadeAlbedo6, voxelCoord);
-    else albedo = texture(cascadeAlbedo7, voxelCoord);
+    switch (cascadeIndex) {
+        case 0: albedo = texture(cascadeAlbedo0, voxelCoord); break;
+        case 1: albedo = texture(cascadeAlbedo1, voxelCoord); break;
+        case 2: albedo = texture(cascadeAlbedo2, voxelCoord); break;
+        case 3: albedo = texture(cascadeAlbedo3, voxelCoord); break;
+        case 4: albedo = texture(cascadeAlbedo4, voxelCoord); break;
+        case 5: albedo = texture(cascadeAlbedo5, voxelCoord); break;
+        case 6: albedo = texture(cascadeAlbedo6, voxelCoord); break;
+        default: albedo = texture(cascadeAlbedo7, voxelCoord); break;
+    }
     
     return albedo;
 }

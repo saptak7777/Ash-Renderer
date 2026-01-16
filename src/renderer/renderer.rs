@@ -4492,13 +4492,14 @@ impl Renderer {
                     .ok_or_else(|| AshError::VulkanError("Depth buffer missing".to_string()))?;
                 let inv_view_proj = (jittered_projection * view).inverse();
 
-                ssgi.compute_gi(
-                    command_buffer,
-                    depth_buffer.view(),
-                    gbuffer.normal_view(),
-                    gbuffer.albedo_view(),
-                    inv_view_proj,
-                )?;
+                let inputs = crate::renderer::ssgi_pass::SsgiInputs {
+                    depth_view: depth_buffer.view(),
+                    normal_view: gbuffer.normal_view(),
+                    albedo_view: gbuffer.albedo_view(),
+                    velocity_view: gbuffer.motion_view(),
+                };
+
+                ssgi.record_commands(command_buffer, &inputs, inv_view_proj)?;
                 ssgi.next_frame();
             }
 

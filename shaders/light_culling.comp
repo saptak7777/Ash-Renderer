@@ -11,8 +11,8 @@ layout(constant_id = 1) const uint WORKGROUP_SIZE_Y = 16;
 
 layout(local_size_x_id = 0, local_size_y_id = 1, local_size_z = 1) in;
 
-// Maximum lights per tile
-#define MAX_LIGHTS_PER_TILE 256
+// Maximum lights per tile (reduced from 256 for better occupancy)
+#define MAX_LIGHTS_PER_TILE 128
 
 // Light structure
 struct Light {

@@ -279,7 +279,11 @@ impl LodManager {
                 let distance = (world_position - camera_position).length();
                 self.select_by_distance(mesh, distance)
             }
-            LodSelectionMode::Force(_) => unreachable!(),
+            LodSelectionMode::Force(level) => {
+                // Force mode already handled above, this is unreachable
+                // but kept for exhaustive match
+                (level, 0.0)
+            }
         };
 
         // Apply global and per-object bias
