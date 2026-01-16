@@ -4,7 +4,7 @@
 //! Implements industry-standard dual-filtering bloom with firefly suppression.
 
 use super::{FeatureFrameContext, FeatureRenderContext, RenderFeature};
-use ash::Device;
+use ash::{vk, Device};
 
 /// Push constants for bloom shaders, corresponding to the GLSL layout.
 #[repr(C)]
@@ -186,6 +186,126 @@ impl Default for BloomPass {
     }
 }
 
+/// GPU resources for bloom effect
+///
+/// Manages bloom image with mip chain and associated views.
+/// Implements RAII cleanup pattern.
+#[allow(dead_code)] // Fields used in Parts 2 & 3
+struct BloomResources {
+    image: vk::Image,
+    allocation: vk_mem::Allocation,
+    view: vk::ImageView,
+    mip_views: Vec<vk::ImageView>,
+    allocator: std::sync::Arc<crate::vulkan::Allocator>,
+    device: std::sync::Arc<ash::Device>,
+    width: u32,
+    height: u32,
+}
+
+impl BloomResources {
+    /// Create bloom resources for given resolution
+    ///
+    /// # Safety
+    /// Device and allocator must be valid.
+    #[allow(dead_code)] // Used when renderer integration is complete
+    unsafe fn new(
+        device: std::sync::Arc<ash::Device>,
+        allocator: std::sync::Arc<crate::vulkan::Allocator>,
+        width: u32,
+        height: u32,
+        mip_count: u32,
+    ) -> crate::Result<Self> {
+        use ash::vk;
+
+        // Create bloom image with mip levels
+        let image_info = vk::ImageCreateInfo::default()
+            .image_type(vk::ImageType::TYPE_2D)
+            .format(vk::Format::R16G16B16A16_SFLOAT)
+            .extent(vk::Extent3D {
+                width,
+                height,
+                depth: 1,
+            })
+            .mip_levels(mip_count)
+            .array_layers(1)
+            .samples(vk::SampleCountFlags::TYPE_1)
+            .tiling(vk::ImageTiling::OPTIMAL)
+            .usage(
+                vk::ImageUsageFlags::SAMPLED
+                    | vk::ImageUsageFlags::COLOR_ATTACHMENT
+                    | vk::ImageUsageFlags::TRANSFER_SRC
+                    | vk::ImageUsageFlags::TRANSFER_DST,
+            )
+            .sharing_mode(vk::SharingMode::EXCLUSIVE)
+            .initial_layout(vk::ImageLayout::UNDEFINED);
+
+        let (image, allocation) =
+            allocator.create_image(&image_info, vk_mem::MemoryUsage::AutoPreferDevice)?;
+
+        // Create full image view
+        let view_info = vk::ImageViewCreateInfo::default()
+            .image(image)
+            .view_type(vk::ImageViewType::TYPE_2D)
+            .format(vk::Format::R16G16B16A16_SFLOAT)
+            .subresource_range(vk::ImageSubresourceRange {
+                aspect_mask: vk::ImageAspectFlags::COLOR,
+                base_mip_level: 0,
+                level_count: mip_count,
+                base_array_layer: 0,
+                layer_count: 1,
+            });
+
+        let view = device.create_image_view(&view_info, None)?;
+
+        // Create per-mip views
+        let mut mip_views = Vec::with_capacity(mip_count as usize);
+        for mip_level in 0..mip_count {
+            let mip_view_info = vk::ImageViewCreateInfo::default()
+                .image(image)
+                .view_type(vk::ImageViewType::TYPE_2D)
+                .format(vk::Format::R16G16B16A16_SFLOAT)
+                .subresource_range(vk::ImageSubresourceRange {
+                    aspect_mask: vk::ImageAspectFlags::COLOR,
+                    base_mip_level: mip_level,
+                    level_count: 1,
+                    base_array_layer: 0,
+                    layer_count: 1,
+                });
+
+            let mip_view = device.create_image_view(&mip_view_info, None)?;
+            mip_views.push(mip_view);
+        }
+
+        log::debug!("Created bloom resources ({width}x{height}, {mip_count} mips)");
+
+        Ok(Self {
+            image,
+            allocation,
+            view,
+            mip_views,
+            allocator,
+            device,
+            width,
+            height,
+        })
+    }
+}
+
+impl Drop for BloomResources {
+    fn drop(&mut self) {
+        unsafe {
+            // Cleanup in reverse order
+            for view in self.mip_views.drain(..) {
+                self.device.destroy_image_view(view, None);
+            }
+            self.device.destroy_image_view(self.view, None);
+            self.allocator
+                .vma
+                .destroy_image(self.image, &mut self.allocation);
+        }
+    }
+}
+
 /// Bloom render feature
 ///
 /// Integrates BloomPass with the rendering pipeline.
@@ -193,12 +313,13 @@ impl Default for BloomPass {
 pub struct BloomFeature {
     pass: BloomPass,
     device: Option<ash::Device>,
-    // GPU resources will be lazily initialized
-    // prefilter_pipeline: Option<vk::Pipeline>,
-    // downsample_pipeline: Option<vk::Pipeline>,
-    // upsample_pipeline: Option<vk::Pipeline>,
-    // mip_images: Vec<vk::Image>,
-    // mip_views: Vec<vk::ImageView>,
+    resources: Option<BloomResources>,
+    prefilter_pipeline: Option<vk::Pipeline>,
+    downsample_pipeline: Option<vk::Pipeline>,
+    upsample_pipeline: Option<vk::Pipeline>,
+    pipeline_layout: Option<vk::PipelineLayout>,
+    descriptor_set_layout: Option<vk::DescriptorSetLayout>,
+    render_pass: Option<vk::RenderPass>,
 }
 
 impl BloomFeature {
@@ -207,6 +328,13 @@ impl BloomFeature {
         Self {
             pass: BloomPass::new(),
             device: None,
+            resources: None,
+            prefilter_pipeline: None,
+            downsample_pipeline: None,
+            upsample_pipeline: None,
+            pipeline_layout: None,
+            descriptor_set_layout: None,
+            render_pass: None,
         }
     }
 
@@ -215,6 +343,13 @@ impl BloomFeature {
         Self {
             pass: BloomPass::with_config(config),
             device: None,
+            resources: None,
+            prefilter_pipeline: None,
+            downsample_pipeline: None,
+            upsample_pipeline: None,
+            pipeline_layout: None,
+            descriptor_set_layout: None,
+            render_pass: None,
         }
     }
 
@@ -260,6 +395,241 @@ impl BloomFeature {
     pub fn set_enabled(&mut self, enabled: bool) {
         self.pass.config_mut().enabled = enabled;
     }
+
+    /// Create bloom pipelines
+    ///
+    /// # Safety
+    /// Device must be valid and remain valid for pipeline lifetime.
+    unsafe fn create_pipelines(&mut self, device: &Device) -> crate::Result<()> {
+        // Load shaders
+        let vert_code = include_bytes!("../../../shaders/postprocess.vert.spv");
+        let prefilter_frag_code = include_bytes!("../../../shaders/bloom_prefilter.frag.spv");
+        let downsample_frag_code = include_bytes!("../../../shaders/bloom_downsample.frag.spv");
+        let upsample_frag_code = include_bytes!("../../../shaders/bloom_upsample.frag.spv");
+
+        let vert_info = vk::ShaderModuleCreateInfo::default().code(bytemuck::cast_slice(vert_code));
+        let vert_module = device.create_shader_module(&vert_info, None)?;
+
+        let prefilter_info =
+            vk::ShaderModuleCreateInfo::default().code(bytemuck::cast_slice(prefilter_frag_code));
+        let prefilter_frag_module = device.create_shader_module(&prefilter_info, None)?;
+
+        let downsample_info =
+            vk::ShaderModuleCreateInfo::default().code(bytemuck::cast_slice(downsample_frag_code));
+        let downsample_frag_module = device.create_shader_module(&downsample_info, None)?;
+
+        let upsample_info =
+            vk::ShaderModuleCreateInfo::default().code(bytemuck::cast_slice(upsample_frag_code));
+        let upsample_frag_module = device.create_shader_module(&upsample_info, None)?;
+
+        // Create descriptor set layout (1 sampled image)
+        let bindings = [vk::DescriptorSetLayoutBinding::default()
+            .binding(0)
+            .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+            .descriptor_count(1)
+            .stage_flags(vk::ShaderStageFlags::FRAGMENT)];
+
+        let descriptor_layout_info =
+            vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings);
+        let descriptor_set_layout =
+            device.create_descriptor_set_layout(&descriptor_layout_info, None)?;
+        self.descriptor_set_layout = Some(descriptor_set_layout);
+
+        // Create pipeline layout with push constants
+        let push_constant_range = vk::PushConstantRange::default()
+            .stage_flags(vk::ShaderStageFlags::FRAGMENT)
+            .offset(0)
+            .size(std::mem::size_of::<BloomPushConstants>() as u32);
+
+        let pipeline_layout_info = vk::PipelineLayoutCreateInfo::default()
+            .set_layouts(std::slice::from_ref(&descriptor_set_layout))
+            .push_constant_ranges(std::slice::from_ref(&push_constant_range));
+
+        let pipeline_layout = device.create_pipeline_layout(&pipeline_layout_info, None)?;
+        self.pipeline_layout = Some(pipeline_layout);
+
+        // Create render pass (single color attachment, no depth)
+        let attachment = vk::AttachmentDescription::default()
+            .format(vk::Format::R16G16B16A16_SFLOAT)
+            .samples(vk::SampleCountFlags::TYPE_1)
+            .load_op(vk::AttachmentLoadOp::DONT_CARE)
+            .store_op(vk::AttachmentStoreOp::STORE)
+            .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
+            .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
+            .initial_layout(vk::ImageLayout::UNDEFINED)
+            .final_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL);
+
+        let color_attachment_ref = vk::AttachmentReference::default()
+            .attachment(0)
+            .layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL);
+
+        let subpass = vk::SubpassDescription::default()
+            .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
+            .color_attachments(std::slice::from_ref(&color_attachment_ref));
+
+        let render_pass_info = vk::RenderPassCreateInfo::default()
+            .attachments(std::slice::from_ref(&attachment))
+            .subpasses(std::slice::from_ref(&subpass));
+
+        let render_pass = device.create_render_pass(&render_pass_info, None)?;
+        self.render_pass = Some(render_pass);
+
+        // Common pipeline state (fullscreen triangle, no vertex input)
+        let vertex_input = vk::PipelineVertexInputStateCreateInfo::default();
+
+        let input_assembly = vk::PipelineInputAssemblyStateCreateInfo::default()
+            .topology(vk::PrimitiveTopology::TRIANGLE_LIST)
+            .primitive_restart_enable(false);
+
+        let viewport_state = vk::PipelineViewportStateCreateInfo::default()
+            .viewport_count(1)
+            .scissor_count(1);
+
+        let rasterizer = vk::PipelineRasterizationStateCreateInfo::default()
+            .depth_clamp_enable(false)
+            .rasterizer_discard_enable(false)
+            .polygon_mode(vk::PolygonMode::FILL)
+            .line_width(1.0)
+            .cull_mode(vk::CullModeFlags::NONE)
+            .front_face(vk::FrontFace::COUNTER_CLOCKWISE)
+            .depth_bias_enable(false);
+
+        let multisampling = vk::PipelineMultisampleStateCreateInfo::default()
+            .sample_shading_enable(false)
+            .rasterization_samples(vk::SampleCountFlags::TYPE_1);
+
+        let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
+        let dynamic_state =
+            vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);
+
+        // Prefilter & Downsample: No blending
+        let color_blend_attachment_opaque = vk::PipelineColorBlendAttachmentState::default()
+            .color_write_mask(
+                vk::ColorComponentFlags::R
+                    | vk::ColorComponentFlags::G
+                    | vk::ColorComponentFlags::B
+                    | vk::ColorComponentFlags::A,
+            )
+            .blend_enable(false);
+
+        let color_blending_opaque = vk::PipelineColorBlendStateCreateInfo::default()
+            .logic_op_enable(false)
+            .attachments(std::slice::from_ref(&color_blend_attachment_opaque));
+
+        // Upsample: Additive blending (ONE, ONE)
+        let color_blend_attachment_additive = vk::PipelineColorBlendAttachmentState::default()
+            .color_write_mask(
+                vk::ColorComponentFlags::R
+                    | vk::ColorComponentFlags::G
+                    | vk::ColorComponentFlags::B
+                    | vk::ColorComponentFlags::A,
+            )
+            .blend_enable(true)
+            .src_color_blend_factor(vk::BlendFactor::ONE)
+            .dst_color_blend_factor(vk::BlendFactor::ONE)
+            .color_blend_op(vk::BlendOp::ADD)
+            .src_alpha_blend_factor(vk::BlendFactor::ONE)
+            .dst_alpha_blend_factor(vk::BlendFactor::ONE)
+            .alpha_blend_op(vk::BlendOp::ADD);
+
+        let color_blending_additive = vk::PipelineColorBlendStateCreateInfo::default()
+            .logic_op_enable(false)
+            .attachments(std::slice::from_ref(&color_blend_attachment_additive));
+
+        // Create Prefilter pipeline
+        let prefilter_stages = [
+            vk::PipelineShaderStageCreateInfo::default()
+                .stage(vk::ShaderStageFlags::VERTEX)
+                .module(vert_module)
+                .name(c"main"),
+            vk::PipelineShaderStageCreateInfo::default()
+                .stage(vk::ShaderStageFlags::FRAGMENT)
+                .module(prefilter_frag_module)
+                .name(c"main"),
+        ];
+
+        let prefilter_info = vk::GraphicsPipelineCreateInfo::default()
+            .stages(&prefilter_stages)
+            .vertex_input_state(&vertex_input)
+            .input_assembly_state(&input_assembly)
+            .viewport_state(&viewport_state)
+            .rasterization_state(&rasterizer)
+            .multisample_state(&multisampling)
+            .color_blend_state(&color_blending_opaque)
+            .dynamic_state(&dynamic_state)
+            .layout(pipeline_layout)
+            .render_pass(render_pass)
+            .subpass(0);
+
+        // Create Downsample pipeline
+        let downsample_stages = [
+            vk::PipelineShaderStageCreateInfo::default()
+                .stage(vk::ShaderStageFlags::VERTEX)
+                .module(vert_module)
+                .name(c"main"),
+            vk::PipelineShaderStageCreateInfo::default()
+                .stage(vk::ShaderStageFlags::FRAGMENT)
+                .module(downsample_frag_module)
+                .name(c"main"),
+        ];
+
+        let downsample_info = vk::GraphicsPipelineCreateInfo::default()
+            .stages(&downsample_stages)
+            .vertex_input_state(&vertex_input)
+            .input_assembly_state(&input_assembly)
+            .viewport_state(&viewport_state)
+            .rasterization_state(&rasterizer)
+            .multisample_state(&multisampling)
+            .color_blend_state(&color_blending_opaque)
+            .dynamic_state(&dynamic_state)
+            .layout(pipeline_layout)
+            .render_pass(render_pass)
+            .subpass(0);
+
+        // Create Upsample pipeline (with additive blending)
+        let upsample_stages = [
+            vk::PipelineShaderStageCreateInfo::default()
+                .stage(vk::ShaderStageFlags::VERTEX)
+                .module(vert_module)
+                .name(c"main"),
+            vk::PipelineShaderStageCreateInfo::default()
+                .stage(vk::ShaderStageFlags::FRAGMENT)
+                .module(upsample_frag_module)
+                .name(c"main"),
+        ];
+
+        let upsample_info = vk::GraphicsPipelineCreateInfo::default()
+            .stages(&upsample_stages)
+            .vertex_input_state(&vertex_input)
+            .input_assembly_state(&input_assembly)
+            .viewport_state(&viewport_state)
+            .rasterization_state(&rasterizer)
+            .multisample_state(&multisampling)
+            .color_blend_state(&color_blending_additive)
+            .dynamic_state(&dynamic_state)
+            .layout(pipeline_layout)
+            .render_pass(render_pass)
+            .subpass(0);
+
+        // Create all pipelines
+        let pipeline_infos = [prefilter_info, downsample_info, upsample_info];
+        let pipelines = device
+            .create_graphics_pipelines(vk::PipelineCache::null(), &pipeline_infos, None)
+            .map_err(|(_, e)| e)?;
+
+        self.prefilter_pipeline = Some(pipelines[0]);
+        self.downsample_pipeline = Some(pipelines[1]);
+        self.upsample_pipeline = Some(pipelines[2]);
+
+        // Cleanup shader modules
+        device.destroy_shader_module(vert_module, None);
+        device.destroy_shader_module(prefilter_frag_module, None);
+        device.destroy_shader_module(downsample_frag_module, None);
+        device.destroy_shader_module(upsample_frag_module, None);
+
+        log::info!("Bloom pipelines created");
+        Ok(())
+    }
 }
 
 impl Default for BloomFeature {
@@ -282,19 +652,16 @@ impl RenderFeature for BloomFeature {
             cfg.mip_count
         );
         self.device = Some(device.clone());
-        // Pipelines for prefilter, downsample, and upsample stages remain to be implemented.
-        // Allocation of mip chain images remains to be implemented.
+
+        // Create pipelines
+        if let Err(e) = unsafe { self.create_pipelines(device) } {
+            log::error!("Failed to create bloom pipelines: {e}");
+        }
     }
 
-    fn before_frame(&mut self, ctx: &mut FeatureFrameContext<'_>) {
-        if !self.pass.config().enabled {
-            return;
-        }
-
-        // Mip chain recalculation based on screen dimensions is pending.
-        // Placeholder implementation logic follows.
-        // self.pass.calculate_mip_chain(screen_width, screen_height);
-        let _ = ctx;
+    fn before_frame(&mut self, _ctx: &mut FeatureFrameContext<'_>) {
+        // Note: Resource creation deferred to render() where we have access to actual dimensions
+        // This is a limitation of the current FeatureFrameContext API
     }
 
     unsafe fn render(&self, ctx: &FeatureRenderContext<'_>) {
@@ -302,28 +669,137 @@ impl RenderFeature for BloomFeature {
             return;
         }
 
-        // Bloom rendering pipeline:
-        // 1. Prefilter: Extract bright pixels using bloom_prefilter.frag
-        // 2. Downsample chain: Progressive blur using bloom_downsample.frag
-        // 3. Upsample chain: Additive blend back using bloom_upsample.frag
-        // 4. Composite: Blend with original HDR buffer
+        // Early return if resources or pipelines not ready
+        let Some(ref resources) = self.resources else {
+            return;
+        };
+        let Some(prefilter_pipeline) = self.prefilter_pipeline else {
+            return;
+        };
+        let Some(downsample_pipeline) = self.downsample_pipeline else {
+            return;
+        };
+        let Some(upsample_pipeline) = self.upsample_pipeline else {
+            return;
+        };
+        let Some(pipeline_layout) = self.pipeline_layout else {
+            return;
+        };
+        let Some(render_pass) = self.render_pass else {
+            return;
+        };
 
-        // Push constants example for prefilter:
-        // let prefilter_pc = self.pass.get_prefilter_push_constants();
-        // device.cmd_push_constants(
-        //     ctx.command_buffer,
-        //     pipeline_layout,
-        //     vk::ShaderStageFlags::FRAGMENT,
-        //     0,
-        //     bytemuck::bytes_of(&prefilter_pc),
-        // );
+        let device = ctx.device;
+        let cmd = ctx.command_buffer;
 
-        let _ = ctx;
+        // Note: Full bloom implementation requires:
+        // 1. Source HDR image (from renderer)
+        // 2. Framebuffers for each mip level
+        // 3. Descriptor sets for binding textures
+        // 4. Sampler for texture sampling
+        //
+        // Current limitation: FeatureRenderContext doesn't provide access to:
+        // - Source HDR texture
+        // - Descriptor pool for dynamic allocation
+        // - Sampler
+        //
+        // This is a placeholder that sets up the structure.
+        // Full integration requires renderer-level changes to pass these resources.
+
+        let mip_count = self.pass.mip_count();
+        if mip_count == 0 {
+            return;
+        }
+
+        // Bloom pipeline structure (for future implementation):
+        //
+        // 1. Prefilter Pass:
+        //    - Input: HDR source texture
+        //    - Output: Mip 0
+        //    - Push constants: threshold, soft_knee
+        //
+        // 2. Downsample Chain (i = 0 to mip_count-2):
+        //    - Input: Mip i
+        //    - Output: Mip i+1
+        //    - Push constants: texel_size for mip i+1
+        //
+        // 3. Upsample Chain (i = mip_count-1 down to 1):
+        //    - Input: Mip i
+        //    - Output: Mip i-1 (additive blend)
+        //    - Push constants: texel_size for mip i-1, intensity
+        //
+        // Example command recording (when resources available):
+        /*
+        // Prefilter
+        let pc = self.pass.get_prefilter_push_constants();
+        device.cmd_push_constants(
+            cmd,
+            pipeline_layout,
+            vk::ShaderStageFlags::FRAGMENT,
+            0,
+            bytemuck::bytes_of(&pc),
+        );
+        device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, prefilter_pipeline);
+        // ... bind descriptor set, begin render pass, draw ...
+
+        // Downsample loop
+        for i in 0..mip_count-1 {
+            if let Some(pc) = self.pass.get_downsample_push_constants(i) {
+                device.cmd_push_constants(...);
+                device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, downsample_pipeline);
+                // ... render to mip i+1 ...
+            }
+        }
+
+        // Upsample loop (reverse order, with additive blending)
+        for i in (1..mip_count).rev() {
+            if let Some(pc) = self.pass.get_upsample_push_constants(mip_count - 1 - i) {
+                device.cmd_push_constants(...);
+                device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, upsample_pipeline);
+                // ... render to mip i-1 with additive blend ...
+            }
+        }
+        */
+
+        // Placeholder: Log that bloom would execute
+        let _ = (
+            device,
+            cmd,
+            resources,
+            prefilter_pipeline,
+            downsample_pipeline,
+            upsample_pipeline,
+            pipeline_layout,
+            render_pass,
+        );
+        log::trace!("Bloom render called (awaiting renderer integration)");
     }
 
     fn on_removed(&mut self, device: &Device) {
-        // GPU resources (pipelines, images, and views) cleanup is pending.
-        let _ = device;
+        unsafe {
+            // Cleanup pipelines
+            if let Some(pipeline) = self.prefilter_pipeline.take() {
+                device.destroy_pipeline(pipeline, None);
+            }
+            if let Some(pipeline) = self.downsample_pipeline.take() {
+                device.destroy_pipeline(pipeline, None);
+            }
+            if let Some(pipeline) = self.upsample_pipeline.take() {
+                device.destroy_pipeline(pipeline, None);
+            }
+            if let Some(layout) = self.pipeline_layout.take() {
+                device.destroy_pipeline_layout(layout, None);
+            }
+            if let Some(layout) = self.descriptor_set_layout.take() {
+                device.destroy_descriptor_set_layout(layout, None);
+            }
+            if let Some(render_pass) = self.render_pass.take() {
+                device.destroy_render_pass(render_pass, None);
+            }
+        }
+
+        // Drop resources (RAII handles cleanup)
+        self.resources = None;
         log::info!("Bloom feature removed");
     }
 }

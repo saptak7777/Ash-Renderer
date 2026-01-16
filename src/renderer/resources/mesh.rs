@@ -1,7 +1,3 @@
-// TODO: Migration Plan - This crate relies on the deprecated `archetype_asset` loader.
-// We plan to migrate to a new asset system in v0.5.0.
-#![allow(deprecated)]
-
 #[cfg(feature = "gltf_loading")]
 use ash::vk;
 use std::sync::Arc;

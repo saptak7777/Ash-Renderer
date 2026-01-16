@@ -51,6 +51,8 @@ pub enum ResourceError {
     InvalidResourceId(String),
     #[error("Invalid dependency: {0}")]
     InvalidDependency(String),
+    #[error("Lock poisoned: {0}")]
+    LockPoisoned(String),
 }
 
 /// Trait implemented by tracked resources.
@@ -281,7 +283,10 @@ impl ResourceRegistry {
             return Err(ResourceError::DependencyCycle(cycle));
         }
 
-        let mut resources = self.resources.write().unwrap();
+        let mut resources = self
+            .resources
+            .write()
+            .map_err(|_| ResourceError::LockPoisoned("resources lock poisoned".into()))?;
 
         // Philosophy 1: Graceful error instead of panic on double registration.
         if resources.contains_key(&id) {
@@ -293,9 +298,13 @@ impl ResourceRegistry {
 
         self.dependencies
             .write()
-            .unwrap()
+            .map_err(|_| ResourceError::LockPoisoned("dependencies lock poisoned".into()))?
             .insert(id, deps_set.clone());
-        let mut reverse = self.reverse_dependencies.write().unwrap();
+
+        let mut reverse = self.reverse_dependencies.write().map_err(|_| {
+            ResourceError::LockPoisoned("reverse_dependencies lock poisoned".into())
+        })?;
+
         for dep in deps_set {
             reverse.entry(dep).or_default().insert(id);
         }
@@ -318,8 +327,11 @@ impl ResourceRegistry {
                 continue;
             }
 
-            if let Some(child_deps) = self.dependencies.read().unwrap().get(&current) {
-                stack.extend(child_deps.iter().copied());
+            // Gracefully handle poisoned lock during cycle detection
+            if let Ok(deps_lock) = self.dependencies.read() {
+                if let Some(child_deps) = deps_lock.get(&current) {
+                    stack.extend(child_deps.iter().copied());
+                }
             }
         }
 
@@ -333,7 +345,12 @@ impl ResourceRegistry {
             .upgrade()
             .ok_or_else(|| ResourceError::CleanupFailed(id, "Device has been dropped".into()))?;
 
-        if let Some(dependents) = self.reverse_dependencies.read().unwrap().get(&id) {
+        if let Some(dependents) = self
+            .reverse_dependencies
+            .read()
+            .map_err(|_| ResourceError::LockPoisoned("reverse_dependencies lock poisoned".into()))?
+            .get(&id)
+        {
             if !dependents.is_empty() {
                 return Err(ResourceError::InvalidDependency(format!(
                     "Cannot remove resource {id}: {} dependents exist",
@@ -342,8 +359,15 @@ impl ResourceRegistry {
             }
         }
 
-        if let Some(deps) = self.dependencies.write().unwrap().remove(&id) {
-            let mut reverse = self.reverse_dependencies.write().unwrap();
+        if let Some(deps) = self
+            .dependencies
+            .write()
+            .map_err(|_| ResourceError::LockPoisoned("dependencies lock poisoned".into()))?
+            .remove(&id)
+        {
+            let mut reverse = self.reverse_dependencies.write().map_err(|_| {
+                ResourceError::LockPoisoned("reverse_dependencies lock poisoned".into())
+            })?;
             for dep in deps {
                 if let Some(entries) = reverse.get_mut(&dep) {
                     entries.remove(&id);
@@ -351,12 +375,15 @@ impl ResourceRegistry {
             }
         }
 
-        self.reverse_dependencies.write().unwrap().remove(&id);
+        self.reverse_dependencies
+            .write()
+            .map_err(|_| ResourceError::LockPoisoned("reverse_dependencies lock poisoned".into()))?
+            .remove(&id);
 
         let entry = self
             .resources
             .write()
-            .unwrap()
+            .map_err(|_| ResourceError::LockPoisoned("resources lock poisoned".into()))?
             .remove(&id)
             .ok_or(ResourceError::NotFound(id))?;
 
@@ -418,7 +445,12 @@ impl ResourceRegistry {
         }
 
         temp.insert(id);
-        if let Some(deps) = self.dependencies.read().unwrap().get(&id) {
+        if let Some(deps) = self
+            .dependencies
+            .read()
+            .map_err(|_| ResourceError::LockPoisoned("dependencies lock poisoned".into()))?
+            .get(&id)
+        {
             for dep in deps.iter().copied() {
                 self.visit(dep, visited, temp, order)?;
             }

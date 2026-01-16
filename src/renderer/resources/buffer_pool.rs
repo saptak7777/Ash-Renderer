@@ -52,7 +52,10 @@ impl BufferPool {
         memory_usage: vk_mem::MemoryUsage,
         name: Option<String>,
     ) -> crate::Result<BufferAllocation> {
-        let mut pools = self.pools.lock().unwrap();
+        let mut pools = self
+            .pools
+            .lock()
+            .map_err(|_| crate::AshError::VulkanError("Buffer pool lock poisoned".into()))?;
 
         // Try to find a reusable buffer
         if let Some(mut alloc) = pools.available.pop_front() {
@@ -93,7 +96,13 @@ impl BufferPool {
 
     /// Returns a buffer to the pool
     pub fn deallocate(&self, buffer: BufferAllocation) {
-        let mut pools = self.pools.lock().unwrap();
+        let mut pools = match self.pools.lock() {
+            Ok(p) => p,
+            Err(_) => {
+                log::error!("Buffer pool lock poisoned during deallocation");
+                return;
+            }
+        };
 
         // Remove from in_use
         pools.in_use.retain(|b| b.buffer != buffer.buffer);
@@ -107,7 +116,13 @@ impl BufferPool {
 
     /// Get pool statistics
     pub fn stats(&self) -> (usize, usize, u64) {
-        let pools = self.pools.lock().unwrap();
+        let pools = match self.pools.lock() {
+            Ok(p) => p,
+            Err(_) => {
+                log::error!("Buffer pool lock poisoned during stats");
+                return (0, 0, 0);
+            }
+        };
         (
             pools.available.len(),
             pools.in_use.len(),

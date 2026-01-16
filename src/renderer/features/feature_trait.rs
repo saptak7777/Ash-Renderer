@@ -20,6 +20,9 @@ pub struct FeatureRenderContext<'a> {
     pub descriptor_manager: Option<&'a DescriptorManager>,
     pub command_buffer: vk::CommandBuffer,
     pub transform: &'a Transform,
+    pub frame_index: usize,
+    pub screen_width: u32,
+    pub screen_height: u32,
 }
 
 pub trait RenderFeature: Send + Any {

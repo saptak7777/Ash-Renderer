@@ -76,8 +76,13 @@ impl TextureStreamer {
     /// Checks if a requested texture has been loaded.
     /// This is a temporary polling mechanism until we integrate a full asset system.
     pub fn try_get(&self, path: impl AsRef<Path>) -> Option<Arc<Texture>> {
-        let mut map = self.pending_uploads.lock().unwrap();
-        map.remove(path.as_ref())
+        match self.pending_uploads.lock() {
+            Ok(mut map) => map.remove(path.as_ref()),
+            Err(_) => {
+                log::error!("Texture streamer lock poisoned during try_get");
+                None
+            }
+        }
     }
 
     fn loader_loop(

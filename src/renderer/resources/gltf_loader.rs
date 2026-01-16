@@ -1,77 +1,227 @@
-use crate::renderer::resources::mesh::{MaterialProperties, Mesh};
-use crate::renderer::resources::Vertex as RendererVertex;
-use crate::Result;
-use archetype_asset::ModelLoader;
+//! GLTF Model Loading
+//!
+//! Provides utilities to load GLTF/GLB models directly using the `gltf` crate.
+//! This module follows the "Dumb Pipe" philosophy by keeping loading logic
+//! separate from the core renderer.
+
+use crate::renderer::resources::mesh::{MaterialProperties, Mesh, Vertex};
+use crate::renderer::resources::texture::TextureData;
+use crate::{AshError, Result};
 use std::path::Path;
 
-/// Utility to load GLTF models and bridge them to the renderer's data structures.
-/// This fulfills the "Dumb Pipe" philosophy by keeping loading logic out of the core renderer
-/// while still providing a convenient helper for applications and examples.
+/// Loads a GLTF or GLB model from the filesystem.
+///
+/// Returns a vector of meshes with embedded material properties and texture data.
+/// Each mesh corresponds to a primitive in the GLTF file.
+///
+/// # Errors
+/// Returns `AshError` if:
+/// - File cannot be read
+/// - GLTF parsing fails
+/// - Buffer data is missing or invalid
+/// - Accessor data is malformed
 #[cfg(feature = "gltf_loading")]
-#[allow(clippy::field_reassign_with_default)]
 pub fn load_model(path: impl AsRef<Path>) -> Result<Vec<Mesh>> {
     let path = path.as_ref();
-    let glb_data = std::fs::read(path)
-        .map_err(|e| crate::AshError::VulkanError(format!("Failed to read GLB: {e}")))?;
 
-    let loader = ModelLoader::new();
-
-    // We use block_on here because the examples are currently synchronous.
-    // In a real async application, you would use the loader directly.
-    let model = futures::executor::block_on(loader.load_gltf_optimized(&glb_data))
-        .map_err(|e| crate::AshError::VulkanError(format!("Failed to load GLTF: {e}")))?;
+    // Load GLTF document
+    let (document, buffers, images) = gltf::import(path)
+        .map_err(|e| AshError::VulkanError(format!("Failed to load GLTF: {e}")))?;
 
     let mut meshes = Vec::new();
 
-    for (i, mesh_asset) in model.meshes.into_iter().enumerate() {
-        // Map archetype_asset vertices (16 floats) to ash_renderer vertices (15 floats)
-        let renderer_vertices: Vec<RendererVertex> = mesh_asset
-            .vertices()
-            .vertices
-            .chunks_exact(16)
-            .map(|v| {
-                RendererVertex {
-                    position: [v[0], v[1], v[2]],
-                    normal: [v[3], v[4], v[5]],
-                    uv: [v[6], v[7]],
-                    color: [v[12], v[13], v[14]], // RGB from RGBA
-                    tangent: [v[8], v[9], v[10], v[11]],
-                }
-            })
-            .collect();
+    for (mesh_idx, gltf_mesh) in document.meshes().enumerate() {
+        for (prim_idx, primitive) in gltf_mesh.primitives().enumerate() {
+            let reader =
+                primitive.reader(|buffer| buffers.get(buffer.index()).map(|data| &data[..]));
 
-        let mut mesh = Mesh::default();
-        mesh.name = mesh_asset
-            .name
-            .clone()
-            .unwrap_or_else(|| format!("Mesh_{i}"))
-            .into();
-        mesh.vertices = renderer_vertices;
-        mesh.indices = Some(mesh_asset.vertices().indices.clone());
+            // Extract vertex data
+            let positions = reader
+                .read_positions()
+                .ok_or_else(|| AshError::VulkanError("Missing position attribute".into()))?
+                .collect::<Vec<_>>();
 
-        // Map material properties
-        if let Some(mat_idx) = mesh_asset.material_index {
-            if mat_idx < model.materials.len() {
-                let mat_asset = &model.materials[mat_idx];
-                mesh.material_properties = Some(MaterialProperties {
-                    base_color_factor: mat_asset.base_color_factor,
-                    metallic_factor: mat_asset.metallic_factor,
-                    roughness_factor: mat_asset.roughness_factor,
-                    emissive_factor: [
-                        mat_asset.emissive_factor[0],
-                        mat_asset.emissive_factor[1],
-                        mat_asset.emissive_factor[2],
-                        1.0,
-                    ],
-                    occlusion_strength: mat_asset.occlusion_strength,
-                    normal_scale: mat_asset.normal_scale,
-                    alpha_cutoff: mat_asset.alpha_cutoff,
-                });
-            }
+            let normals = reader
+                .read_normals()
+                .map(|iter| iter.collect::<Vec<_>>())
+                .unwrap_or_else(|| vec![[0.0, 0.0, 1.0]; positions.len()]);
+
+            let uvs = reader
+                .read_tex_coords(0)
+                .map(|iter| iter.into_f32().collect::<Vec<_>>())
+                .unwrap_or_else(|| vec![[0.0, 0.0]; positions.len()]);
+
+            let colors = reader
+                .read_colors(0)
+                .map(|iter| iter.into_rgb_f32().collect::<Vec<_>>())
+                .unwrap_or_else(|| vec![[1.0, 1.0, 1.0]; positions.len()]);
+
+            let tangents = reader
+                .read_tangents()
+                .map(|iter| iter.collect::<Vec<_>>())
+                .unwrap_or_else(|| vec![[0.0, 0.0, 0.0, 1.0]; positions.len()]);
+
+            // Build vertices
+            let vertices: Vec<Vertex> = (0..positions.len())
+                .map(|i| Vertex {
+                    position: positions[i],
+                    normal: normals[i],
+                    uv: uvs[i],
+                    color: colors[i],
+                    tangent: tangents[i],
+                })
+                .collect();
+
+            // Extract indices
+            let indices = reader
+                .read_indices()
+                .map(|iter| iter.into_u32().collect::<Vec<_>>());
+
+            // Extract material properties
+            let material_properties = primitive.material().index().and_then(|mat_idx| {
+                document.materials().nth(mat_idx).map(|mat| {
+                    let pbr = mat.pbr_metallic_roughness();
+                    MaterialProperties {
+                        base_color_factor: pbr.base_color_factor(),
+                        metallic_factor: pbr.metallic_factor(),
+                        roughness_factor: pbr.roughness_factor(),
+                        emissive_factor: {
+                            let e = mat.emissive_factor();
+                            [e[0], e[1], e[2], 1.0]
+                        },
+                        occlusion_strength: mat
+                            .occlusion_texture()
+                            .map(|t| t.strength())
+                            .unwrap_or(1.0),
+                        normal_scale: mat.normal_texture().map(|t| t.scale()).unwrap_or(1.0),
+                        alpha_cutoff: mat.alpha_cutoff().unwrap_or(0.5),
+                    }
+                })
+            });
+
+            // Load textures
+            let base_color_texture = primitive
+                .material()
+                .pbr_metallic_roughness()
+                .base_color_texture()
+                .and_then(|info| load_texture_data(&images, info.texture().source().index()));
+
+            let normal_texture = primitive
+                .material()
+                .normal_texture()
+                .and_then(|info| load_texture_data(&images, info.texture().source().index()));
+
+            let metallic_roughness_texture = primitive
+                .material()
+                .pbr_metallic_roughness()
+                .metallic_roughness_texture()
+                .and_then(|info| load_texture_data(&images, info.texture().source().index()));
+
+            let occlusion_texture = primitive
+                .material()
+                .occlusion_texture()
+                .and_then(|info| load_texture_data(&images, info.texture().source().index()));
+
+            let emissive_texture = primitive
+                .material()
+                .emissive_texture()
+                .and_then(|info| load_texture_data(&images, info.texture().source().index()));
+
+            // Create mesh
+            let mesh_name = gltf_mesh
+                .name()
+                .map(|n| format!("{n}_prim{prim_idx}"))
+                .unwrap_or_else(|| format!("Mesh{mesh_idx}_prim{prim_idx}"));
+
+            let mut mesh = Mesh::default();
+            mesh.name = mesh_name.into();
+            mesh.vertices = vertices;
+            mesh.indices = indices;
+            mesh.texture_data = base_color_texture;
+            mesh.normal_texture_data = normal_texture;
+            mesh.metallic_roughness_texture_data = metallic_roughness_texture;
+            mesh.occlusion_texture_data = occlusion_texture;
+            mesh.emissive_texture_data = emissive_texture;
+            mesh.material_properties = material_properties;
+
+            meshes.push(mesh);
         }
-
-        meshes.push(mesh);
     }
 
+    log::info!("Loaded {} meshes from {:?}", meshes.len(), path);
     Ok(meshes)
+}
+
+/// Converts a GLTF image to TextureData (RGBA8).
+fn load_texture_data(images: &[gltf::image::Data], index: usize) -> Option<TextureData> {
+    let image = images.get(index)?;
+
+    // Convert to RGBA8 if needed
+    let pixels = match image.format {
+        gltf::image::Format::R8G8B8A8 => image.pixels.clone(),
+        gltf::image::Format::R8G8B8 => {
+            // Convert RGB to RGBA
+            image
+                .pixels
+                .chunks_exact(3)
+                .flat_map(|rgb| [rgb[0], rgb[1], rgb[2], 255])
+                .collect()
+        }
+        gltf::image::Format::R8G8 => {
+            // Convert RG to RGBA (useful for normal maps)
+            image
+                .pixels
+                .chunks_exact(2)
+                .flat_map(|rg| [rg[0], rg[1], 0, 255])
+                .collect()
+        }
+        gltf::image::Format::R8 => {
+            // Convert R to RGBA
+            image.pixels.iter().flat_map(|&r| [r, r, r, 255]).collect()
+        }
+        _ => {
+            log::warn!("Unsupported texture format: {:?}", image.format);
+            return None;
+        }
+    };
+
+    TextureData::new(image.width, image.height, pixels).ok()
+}
+
+#[cfg(all(test, feature = "gltf_loading"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_load_texture_data_rgba() {
+        let image = gltf::image::Data {
+            pixels: vec![255, 0, 0, 255, 0, 255, 0, 255],
+            format: gltf::image::Format::R8G8B8A8,
+            width: 2,
+            height: 1,
+        };
+        let images = vec![image];
+
+        let texture = load_texture_data(&images, 0).expect("Should load texture");
+        assert_eq!(texture.width, 2);
+        assert_eq!(texture.height, 1);
+        assert_eq!(texture.pixels.len(), 8);
+    }
+
+    #[test]
+    fn test_load_texture_data_rgb() {
+        let image = gltf::image::Data {
+            pixels: vec![255, 0, 0, 0, 255, 0],
+            format: gltf::image::Format::R8G8B8,
+            width: 2,
+            height: 1,
+        };
+        let images = vec![image];
+
+        let texture = load_texture_data(&images, 0).expect("Should load texture");
+        assert_eq!(texture.width, 2);
+        assert_eq!(texture.height, 1);
+        assert_eq!(texture.pixels.len(), 8); // Converted to RGBA
+        assert_eq!(texture.pixels[3], 255); // Alpha should be 255
+    }
 }

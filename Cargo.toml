@@ -1,6 +1,6 @@
 [package]
 name = "ash_renderer"
-version = "0.4.97"
+version = "0.4.98"
 edition = "2021"
 authors = ["Saptak Santra"]
 license = "Apache-2.0"
@@ -45,9 +45,7 @@ image = { version = "0.25", default-features = false, features = [
     "hdr",
 ] }
 gltf = { version = "1.4", optional = true }
-archetype_asset = { version = "0.2.1", optional = true }
 intel_tex_2 = "0.5.0"
-futures = { version = "0.3", optional = true }
 
 # Logging
 log = "0.4"
@@ -71,11 +69,7 @@ futures = "0.3"
 [features]
 default = ["validation", "gltf_loading"]
 validation = [] # Enable Vulkan validation layers
-gltf_loading = [
-    "gltf",
-    "archetype_asset",
-    "futures",
-] # GLTF model loading support
+gltf_loading = ["gltf"] # GLTF model loading support
 shader_compilation = ["shaderc"] # Runtime shader compilation
 shader_reflection = ["spirv-reflect"] # SPIRV reflection support
 profiling = [] # Enable GPU profiling

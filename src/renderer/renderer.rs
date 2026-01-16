@@ -1102,10 +1102,27 @@ impl Renderer {
 
                     // Initial IBL binding (dummy/default textures until baked)
                     let dummy_resources = crate::vulkan::IBLResources {
-                        irradiance_view: renderer.irradiance_map.as_ref().unwrap().view(),
-                        prefiltered_view: renderer.prefiltered_map.as_ref().unwrap().view(),
-                        brdf_lut_view: renderer.brdf_lut_pass.as_ref().unwrap().get_lut_view().unwrap(),
-                        skybox_view: renderer.irradiance_map.as_ref().unwrap().view(), // Fallback
+                        irradiance_view: renderer
+                            .irradiance_map
+                            .as_ref()
+                            .ok_or_else(|| AshError::VulkanError("Irradiance map not initialized".into()))?
+                            .view(),
+                        prefiltered_view: renderer
+                            .prefiltered_map
+                            .as_ref()
+                            .ok_or_else(|| AshError::VulkanError("Prefiltered map not initialized".into()))?
+                            .view(),
+                        brdf_lut_view: renderer
+                            .brdf_lut_pass
+                            .as_ref()
+                            .ok_or_else(|| AshError::VulkanError("BRDF LUT pass not initialized".into()))?
+                            .get_lut_view()
+                            .ok_or_else(|| AshError::VulkanError("BRDF LUT texture missing".into()))?,
+                        skybox_view: renderer
+                            .irradiance_map
+                            .as_ref()
+                            .ok_or_else(|| AshError::VulkanError("Irradiance map not initialized for skybox".into()))?
+                            .view(),
                         sampler: renderer.ibl_sampler,
                     };
                     manager.bind_ibl_resources(index, &dummy_resources)?;
@@ -1912,10 +1929,27 @@ impl Renderer {
         // Update descriptors
         if let Some(manager) = self.descriptors.as_ref() {
             let res = crate::vulkan::IBLResources {
-                irradiance_view: self.irradiance_map.as_ref().unwrap().view(),
-                prefiltered_view: self.prefiltered_map.as_ref().unwrap().view(),
-                brdf_lut_view: self.brdf_lut_pass.as_ref().unwrap().get_lut_view().unwrap(),
-                skybox_view: self.irradiance_map.as_ref().unwrap().view(), // Use irradiance as dummy skybox
+                irradiance_view: self
+                    .irradiance_map
+                    .as_ref()
+                    .ok_or_else(|| AshError::VulkanError("Irradiance map not initialized".into()))?
+                    .view(),
+                prefiltered_view: self
+                    .prefiltered_map
+                    .as_ref()
+                    .ok_or_else(|| AshError::VulkanError("Prefiltered map not initialized".into()))?
+                    .view(),
+                brdf_lut_view: self
+                    .brdf_lut_pass
+                    .as_ref()
+                    .ok_or_else(|| AshError::VulkanError("BRDF LUT pass not initialized".into()))?
+                    .get_lut_view()
+                    .ok_or_else(|| AshError::VulkanError("BRDF LUT texture missing".into()))?,
+                skybox_view: self
+                    .irradiance_map
+                    .as_ref()
+                    .ok_or_else(|| AshError::VulkanError("Irradiance map not initialized for skybox".into()))?
+                    .view(),
                 sampler: self.ibl_sampler,
             };
             for i in 0..manager.frame_set_count() {
@@ -3627,9 +3661,9 @@ impl Renderer {
                         .with_debug_visualization(self.debug_visualization_enabled);
 
                     // --- GPU-Driven Indirect Path ---
-                    if self.use_gpu_driven && self.indirect_draw_pass.is_some() {
-                        let indirect = self.indirect_draw_pass.as_mut().unwrap();
-                        // 1. Upload instances for this batch to the object buffer
+                    if self.use_gpu_driven {
+                        if let Some(indirect) = self.indirect_draw_pass.as_mut() {
+                            // 1. Upload instances for this batch to the object buffer
                         unsafe {
                             indirect.upload_objects(
                                 &self.alloc.vma,
@@ -3694,6 +3728,7 @@ impl Renderer {
                         }
 
                         current_object_offset += batch.count();
+                        }
                     } else {
                         // --- Direct Instanced Path Fallback ---
                         let material_push = material_push
@@ -4383,7 +4418,10 @@ impl Renderer {
                 device: self.device.device.as_ref(),
                 descriptor_manager: self.descriptors.as_ref(),
                 command_buffer,
-                transform: &dummy_render_transform, // Use local dummy
+                transform: &dummy_render_transform,
+                frame_index,
+                screen_width: swapchain_extent.width,
+                screen_height: swapchain_extent.height,
             };
 
             self.features.render(&render_ctx);
