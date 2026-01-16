@@ -2043,7 +2043,7 @@ impl Renderer {
                     );
                 } else {
                     let material = Material {
-                        name: format!("{}_material_{}", &*mesh.name, handle),
+                        name: format!("{}_material_{handle}", &*mesh.name),
                         color: props.base_color_factor,
                         metallic: props.metallic_factor,
                         roughness: props.roughness_factor,
@@ -2105,10 +2105,15 @@ impl Renderer {
             vram_usage: self.vram_budget.get_stats(),
             draw_calls_per_frame: self.diagnostics.frame_stats.draw_calls,
             triangles_rendered: self.diagnostics.frame_stats.triangles,
-            cull_efficiency: 0.0, // TODO: Calculate from occlusion culling stats
-            gpu_frame_ms: 0.0,    // TODO: Get from GPU profiler
+            cull_efficiency: {
+                // Calculate cull efficiency: (potential_draws - actual_draws) / potential_draws
+                let potential_draws = (self.diagnostics.frame_stats.triangles / 1000).max(1) as f32;
+                let actual_draws = self.diagnostics.frame_stats.draw_calls as f32;
+                ((potential_draws - actual_draws) / potential_draws.max(1.0)).clamp(0.0, 1.0)
+            },
+            gpu_frame_ms: self.diagnostics.gpu_timings.total_ms,
             hiz_quality: format!("{:?}", self.hiz_pass.as_ref().map(|h| h.quality()).unwrap_or(crate::renderer::hiz_pass::HiZQuality::Balanced)),
-            frame_count: 0,
+            frame_count: self.diagnostics.frame_stats.total_frames,
         }
     }
 

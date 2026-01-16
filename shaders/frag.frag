@@ -12,10 +12,17 @@ layout(location = 4) in vec4 fragPosLightSpace;
 layout(location = 5) in vec4 fragTangent;
 layout(location = 6) in vec2 motionVector;
 
-// Edge detection helper for adaptive anti-aliasing
-// DISABLED: Was causing darkening and cartoonish appearance
-vec3 edge_denoise(vec3 color, vec3 worldPos) {
-    return color;
+// Geometric Specular AA (Toksvig/Kaplanyan method)
+// Adjusts roughness based on normal map variance to prevent specular aliasing
+float adjust_roughness_geometric_aa(float roughness, vec3 normal) {
+    // Measure normal variation using screen-space derivatives
+    vec3 dndu = dFdx(normal);
+    vec3 dndv = dFdy(normal);
+    float variance = dot(dndu, dndu) + dot(dndv, dndv);
+    
+    // Toksvig AA formula: increases roughness on high-frequency normals
+    float kernelRoughness = min(2.0 * variance, 1.0);
+    return sqrt(roughness * roughness + kernelRoughness);
 }
 
 layout(location = 0) out vec4 outColor;
@@ -297,6 +304,9 @@ void main() {
         metallic = metallic * mrSample.b;
         roughness = max(roughness * mrSample.g, 0.04);
     }
+    
+    // Apply geometric AA to reduce specular aliasing from detailed normal maps
+    roughness = adjust_roughness_geometric_aa(roughness, normal);
 
     // Ambient occlusion
     float occlusion = 1.0;
@@ -404,10 +414,11 @@ void main() {
         
         vec3 specular = (D * G * F) / (4.0 * NdotV * NdotL + 0.001);
         
-        // Clamp extreme specular highlights
+        // HDR-safe specular clamping (FP16 buffer limit)
+        // Geometric AA already reduces fireflies, this prevents buffer overflow
         float specularMax = max(max(specular.r, specular.g), specular.b);
-        if (specularMax > 100.0) {
-            specular *= 100.0 / specularMax;
+        if (specularMax > 65000.0) {
+            specular *= 65000.0 / specularMax;
         }
         
         vec3 kD = (1.0 - F) * (1.0 - metallic);
@@ -440,7 +451,7 @@ void main() {
     }
 
     // Combine: Ambient + Directional + Dynamic(Lo) + Emissive
-    vec3 color = edge_denoise(ambient + directional + Lo + emissive, fragWorldPos);
+    vec3 color = ambient + directional + Lo + emissive;
 
     // Debug Path Visualization - Only compiled when debug_visualization feature is enabled
     #ifdef DEBUG_VISUALIZATION

@@ -56,7 +56,7 @@ impl ResourcePool {
         Self {
             device,
             allocator,
-            pools: HashMap::new(),
+            pools: HashMap::with_capacity(64), // Pre-allocate for common resource types
             current_frame: 0,
         }
     }
@@ -133,7 +133,11 @@ impl ResourcePool {
             1,
             Some(allocation),
             Some(Arc::clone(&self.allocator)),
-            Some(format!("transient_{}x{}", extent.width, extent.height)),
+            Some(format!(
+                "transient_{width}x{height}",
+                width = extent.width,
+                height = extent.height
+            )),
         )?;
 
         Ok(image_handle)
