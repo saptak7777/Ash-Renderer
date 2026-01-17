@@ -88,7 +88,6 @@ impl IndirectDrawPass {
         &mut self,
         allocator: &vk_mem::Allocator,
         _vulkan_device: &VulkanDevice,
-        frame_layout: vk::DescriptorSetLayout,
         bindless_manager: &mut BindlessManager,
         max_objects: usize,
     ) {
@@ -107,7 +106,7 @@ impl IndirectDrawPass {
 
         self.create_descriptors()
             .expect("Indirect descriptors failed");
-        self.create_pipeline(frame_layout, bindless_manager.layout())
+        self.create_pipeline(bindless_manager.layout())
             .expect("Indirect pipeline failed");
 
         self.initialized = true;
@@ -265,11 +264,7 @@ impl IndirectDrawPass {
     }
 
     /// Create compute pipeline
-    unsafe fn create_pipeline(
-        &mut self,
-        frame_layout: vk::DescriptorSetLayout,
-        bindless_layout: vk::DescriptorSetLayout,
-    ) -> Result<()> {
+    unsafe fn create_pipeline(&mut self, bindless_layout: vk::DescriptorSetLayout) -> Result<()> {
         let shader_code = include_bytes!(concat!(env!("OUT_DIR"), "/occlusion_cull.comp.spv"));
 
         let shader_module_info =
@@ -283,7 +278,7 @@ impl IndirectDrawPass {
             .offset(0)
             .size(std::mem::size_of::<CullingPushConstants>() as u32);
 
-        let layouts = [self.layout, frame_layout, bindless_layout];
+        let layouts = [self.layout, bindless_layout];
         let layout_info = vk::PipelineLayoutCreateInfo::default()
             .set_layouts(&layouts)
             .push_constant_ranges(std::slice::from_ref(&push_constant_range));
@@ -319,7 +314,6 @@ impl IndirectDrawPass {
     pub unsafe fn reload_pipeline(
         &mut self,
         spirv_code: &[u32],
-        frame_layout: vk::DescriptorSetLayout,
         bindless_layout: vk::DescriptorSetLayout,
     ) -> Result<()> {
         log::info!("IndirectDrawPass: Reloading pipeline...");
@@ -345,7 +339,7 @@ impl IndirectDrawPass {
             .offset(0)
             .size(std::mem::size_of::<CullingPushConstants>() as u32);
 
-        let layouts = [self.layout, frame_layout, bindless_layout];
+        let layouts = [self.layout, bindless_layout];
         let layout_info = vk::PipelineLayoutCreateInfo::default()
             .set_layouts(&layouts)
             .push_constant_ranges(std::slice::from_ref(&push_constant_range));
@@ -548,12 +542,12 @@ impl IndirectDrawPass {
             &[],
         );
 
-        // Bind bindless descriptors (Set 2)
+        // Bind bindless descriptors (Set 1)
         self.device.cmd_bind_descriptor_sets(
             cmd,
             vk::PipelineBindPoint::COMPUTE,
             self.cull_layout,
-            2,
+            1,
             &[bindless_manager.descriptor_set()],
             &[],
         );

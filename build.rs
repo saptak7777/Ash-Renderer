@@ -178,18 +178,16 @@ fn compile_shaders() {
             cmd.arg(format!("-D{define}"));
         }
 
-        let status = cmd.status();
+        let output = cmd.output().expect("Failed to execute glslc");
 
-        match status {
-            Ok(s) if s.success() => {}
-            Ok(s) => {
-                println!(
-                    "cargo:warning=Failed to compile shader {input}: exit code {:?}",
-                    s.code()
-                );
-            }
-            Err(e) => {
-                println!("cargo:warning=Failed to run glslc for {input}: {e}");
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            println!(
+                "cargo:warning=Failed to compile shader {input}: exit code {:?}",
+                output.status.code()
+            );
+            for line in stderr.lines() {
+                println!("cargo:warning={line}");
             }
         }
     }

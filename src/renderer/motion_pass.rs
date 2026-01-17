@@ -97,15 +97,17 @@ impl MotionVectorPass {
         let vert_code = include_bytes!(concat!(env!("OUT_DIR"), "/motion.vert.spv"));
         let frag_code = include_bytes!(concat!(env!("OUT_DIR"), "/motion.frag.spv"));
 
-        let vert_module = self.device.create_shader_module(
-            &vk::ShaderModuleCreateInfo::default().code(bytemuck::cast_slice(vert_code)),
-            None,
-        )?;
+        let vert_spv = ash::util::read_spv(&mut std::io::Cursor::new(vert_code))
+            .map_err(|e| crate::AshError::VulkanError(format!("Failed to read vert spv: {e}")))?;
+        let vert_module = self
+            .device
+            .create_shader_module(&vk::ShaderModuleCreateInfo::default().code(&vert_spv), None)?;
 
-        let frag_module = self.device.create_shader_module(
-            &vk::ShaderModuleCreateInfo::default().code(bytemuck::cast_slice(frag_code)),
-            None,
-        )?;
+        let frag_spv = ash::util::read_spv(&mut std::io::Cursor::new(frag_code))
+            .map_err(|e| crate::AshError::VulkanError(format!("Failed to read frag spv: {e}")))?;
+        let frag_module = self
+            .device
+            .create_shader_module(&vk::ShaderModuleCreateInfo::default().code(&frag_spv), None)?;
 
         // Push constant range for ObjectMotionData
         let push_constant_range = vk::PushConstantRange::default()

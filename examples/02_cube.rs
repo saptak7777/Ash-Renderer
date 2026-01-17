@@ -144,6 +144,11 @@ impl ApplicationHandler for App {
                     let view = Mat4::look_at_rh(camera_pos, target, up);
                     let mut proj = Mat4::perspective_rh(45.0_f32.to_radians(), aspect, 0.5, 100.0);
                     proj.y_axis.y *= -1.0; // Vulkan Y-flip
+                                           // Fix Z range: Vulkan [0, 1] vs OpenGL [-1, 1] derived from perspective_rh
+                    proj.x_axis.z = 0.5f32 * (proj.x_axis.z + proj.x_axis.w);
+                    proj.y_axis.z = 0.5f32 * (proj.y_axis.z + proj.y_axis.w);
+                    proj.z_axis.z = 0.5f32 * (proj.z_axis.z + proj.z_axis.w);
+                    proj.w_axis.z = 0.5f32 * (proj.w_axis.z + proj.w_axis.w);
 
                     // Submit commands
                     if let Err(e) = renderer.submit_render_commands(&self.render_commands) {

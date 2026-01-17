@@ -355,6 +355,11 @@ impl PipelineBuilder {
         self
     }
 
+    pub fn with_front_face(mut self, front_face: vk::FrontFace) -> Self {
+        self.rasterization.front_face = front_face;
+        self
+    }
+
     pub fn with_color_blend_attachments(
         mut self,
         attachments: Vec<vk::PipelineColorBlendAttachmentState>,
@@ -400,15 +405,15 @@ impl PipelineBuilder {
     /// Panics if layout, render_pass, extent, or shaders are missing.
     /// These are considered architectural invariants for a graphics pipeline.
     pub fn build(mut self) -> Result<Pipeline> {
-        let layout = self
-            .layout
-            .ok_or_else(|| AshError::PipelineMissing("Pipeline layout must be provided".to_string()))?;
-        let render_pass = self
-            .render_pass
-            .ok_or_else(|| AshError::RenderPassMissing("Render pass must be provided".to_string()))?;
-        let extent = self
-            .extent
-            .ok_or_else(|| AshError::SwapchainMissing("Viewport extent must be provided".to_string()))?;
+        let layout = self.layout.ok_or_else(|| {
+            AshError::PipelineMissing("Pipeline layout must be provided".to_string())
+        })?;
+        let render_pass = self.render_pass.ok_or_else(|| {
+            AshError::RenderPassMissing("Render pass must be provided".to_string())
+        })?;
+        let extent = self.extent.ok_or_else(|| {
+            AshError::SwapchainMissing("Viewport extent must be provided".to_string())
+        })?;
 
         if self.shader_stages.is_empty() {
             return Err(AshError::PipelineMissing(

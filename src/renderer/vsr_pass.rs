@@ -995,8 +995,9 @@ impl VsrPass {
 
     unsafe fn create_sharpening_pipeline(&mut self) -> Result<()> {
         let shader_code = include_bytes!(concat!(env!("OUT_DIR"), "/sharpen.comp.spv"));
-        let shader_module_info =
-            vk::ShaderModuleCreateInfo::default().code(bytemuck::cast_slice(shader_code));
+        let spv_code = ash::util::read_spv(&mut std::io::Cursor::new(shader_code))
+            .map_err(|e| crate::AshError::VulkanError(e.to_string()))?;
+        let shader_module_info = vk::ShaderModuleCreateInfo::default().code(&spv_code);
         let shader_module = self
             .device
             .create_shader_module(&shader_module_info, None)?;

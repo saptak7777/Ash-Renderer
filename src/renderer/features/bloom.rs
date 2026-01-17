@@ -407,19 +407,32 @@ impl BloomFeature {
         let downsample_frag_code = include_bytes!("../../../shaders/bloom_downsample.frag.spv");
         let upsample_frag_code = include_bytes!("../../../shaders/bloom_upsample.frag.spv");
 
-        let vert_info = vk::ShaderModuleCreateInfo::default().code(bytemuck::cast_slice(vert_code));
+        // Use ash::util::read_spv to ensure proper alignment
+        let vert_spv = ash::util::read_spv(&mut std::io::Cursor::new(vert_code)).map_err(|e| {
+            crate::AshError::VulkanError(format!("Failed to parse vertex shader: {e}"))
+        })?;
+        let vert_info = vk::ShaderModuleCreateInfo::default().code(&vert_spv);
         let vert_module = device.create_shader_module(&vert_info, None)?;
 
-        let prefilter_info =
-            vk::ShaderModuleCreateInfo::default().code(bytemuck::cast_slice(prefilter_frag_code));
+        let prefilter_spv = ash::util::read_spv(&mut std::io::Cursor::new(prefilter_frag_code))
+            .map_err(|e| {
+                crate::AshError::VulkanError(format!("Failed to parse bloom prefilter shader: {e}"))
+            })?;
+        let prefilter_info = vk::ShaderModuleCreateInfo::default().code(&prefilter_spv);
         let prefilter_frag_module = device.create_shader_module(&prefilter_info, None)?;
 
-        let downsample_info =
-            vk::ShaderModuleCreateInfo::default().code(bytemuck::cast_slice(downsample_frag_code));
+        let downsample_spv = ash::util::read_spv(&mut std::io::Cursor::new(downsample_frag_code))
+            .map_err(|e| {
+            crate::AshError::VulkanError(format!("Failed to parse bloom downsample shader: {e}"))
+        })?;
+        let downsample_info = vk::ShaderModuleCreateInfo::default().code(&downsample_spv);
         let downsample_frag_module = device.create_shader_module(&downsample_info, None)?;
 
-        let upsample_info =
-            vk::ShaderModuleCreateInfo::default().code(bytemuck::cast_slice(upsample_frag_code));
+        let upsample_spv = ash::util::read_spv(&mut std::io::Cursor::new(upsample_frag_code))
+            .map_err(|e| {
+                crate::AshError::VulkanError(format!("Failed to parse bloom upsample shader: {e}"))
+            })?;
+        let upsample_info = vk::ShaderModuleCreateInfo::default().code(&upsample_spv);
         let upsample_frag_module = device.create_shader_module(&upsample_info, None)?;
 
         // Create descriptor set layout (1 sampled image)

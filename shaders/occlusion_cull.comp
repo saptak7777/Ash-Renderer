@@ -1,11 +1,10 @@
 #version 450
 #extension GL_EXT_nonuniform_qualifier : enable
-#extension GL_EXT_runtime_descriptor_array : enable
 
-//! GPU Occlusion Culling Shader
+//! GPU Occlusion Culling Shader - FUNCTIONAL IMPLEMENTATION
 //!
 //! Tests object bounding boxes against the Hi-Z pyramid and frustum planes.
-//! Outputs visibility flags and indirect draw commands.
+//! Generates indirect draw commands for visible objects.
 
 layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 
@@ -14,7 +13,7 @@ layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 // ============================================================================
 
 struct BoundingBox {
-    vec4 center;   // xyz = center, w = padding
+    vec4 center;   // xyz = center, w = sphere mode flag
     vec4 extents;  // xyz = half-sizes, w = padding
 };
 
@@ -42,71 +41,81 @@ struct DrawCommand {
 };
 
 // ============================================================================
-// BUFFERS
+// DESCRIPTOR SETS (Aligned with IndirectDrawPass.rs)
 // ============================================================================
 
-// Set 1: Bindless consolidated resources
-// Binding 0: Textures (COMBINED_IMAGE_SAMPLER) - not used in culling
-// Binding 1: Materials (STORAGE_BUFFER) - not used in culling
-// Binding 2: Instance/Object data (STORAGE_BUFFER)
+// Set 0: Indirect Draw Pass Resources
+layout(set = 0, binding = 1) uniform sampler2D hizPyramid;
+layout(std430, set = 0, binding = 2) readonly buffer DrawTemplates {
+    DrawCommand templates[];
+};
+layout(std430, set = 0, binding = 3) writeonly buffer VisibilityFlags {
+    uint visibility[];
+};
+layout(std430, set = 0, binding = 4) writeonly buffer IndirectCommands {
+    DrawCommand commands[];
+};
+layout(std430, set = 0, binding = 5) buffer VisibleCount {
+    uint count;
+};
+
+// Set 1: Bindless Resources (Instance/Object Data)
 layout(std430, set = 1, binding = 2) readonly buffer ObjectBuffers {
     ObjectData objects[];
-} object_buffers;
+} object_buffers[];
 
-// Input: Hi-Z pyramid
-layout(set = 2, binding = 0) uniform sampler2D hizPyramid;
+// ============================================================================
+// PUSH CONSTANTS
+// ============================================================================
 
-// Indirect draw pass manages these buffers in its own descriptor set (Set 0)
-// For now, visibility, commands, and counts are handled by the indirect draw pass
-// This shader focuses on culling logic that can be extended later
-
-// Push constants
 layout(push_constant) uniform PushConstants {
     mat4 viewProj;
     vec4 screenParams;  // width, height, 1/width, 1/height
     uint objectCount;
     uint hizLevels;
     uint baseIndex;
-    // Visibility and output buffers are now managed through compute dispatch parameters
-    // instead of being passed via push constants
+    uint indirectStart;
+    uint objectBufferIndex;
 } pc;
 
 // ============================================================================
 // FRUSTUM CULLING
 // ============================================================================
 
-// Extract frustum planes from view-projection matrix
 void extractFrustumPlanes(mat4 vp, out vec4 planes[6]) {
-    // Left
-    planes[0] = vp[3] + vp[0];
-    // Right
-    planes[1] = vp[3] - vp[0];
-    // Bottom
-    planes[2] = vp[3] + vp[1];
-    // Top
-    planes[3] = vp[3] - vp[1];
-    // Near
-    planes[4] = vp[3] + vp[2];
-    // Far
-    planes[5] = vp[3] - vp[2];
+    // Extract planes from view-projection matrix (Row addition/subtraction)
+    // Row 0 = X, Row 1 = Y, Row 2 = Z, Row 3 = W
+    vec4 r0 = vec4(vp[0].x, vp[1].x, vp[2].x, vp[3].x);
+    vec4 r1 = vec4(vp[0].y, vp[1].y, vp[2].y, vp[3].y);
+    vec4 r2 = vec4(vp[0].z, vp[1].z, vp[2].z, vp[3].z);
+    vec4 r3 = vec4(vp[0].w, vp[1].w, vp[2].w, vp[3].w);
+
+    planes[0] = r3 + r0; // Left
+    planes[1] = r3 - r0; // Right
+    planes[2] = r3 + r1; // Bottom
+    planes[3] = r3 - r1; // Top
+    planes[4] = r2;      // Near (Vulkan [0,1] depth: z >= 0)
+    planes[5] = r3 - r2; // Far
     
-    // Normalize planes
+    // Normalize
     for (int i = 0; i < 6; i++) {
-        planes[i] /= length(planes[i].xyz);
+        float len = length(planes[i].xyz);
+        if (len > 0.0001) {
+            planes[i] /= len;
+        }
     }
 }
 
-// Test AABB against frustum
 bool frustumCull(vec3 center, vec3 extents, vec4 planes[6]) {
     for (int i = 0; i < 6; i++) {
         vec3 normal = planes[i].xyz;
         float dist = planes[i].w;
         
-        // Find the point most in the direction of the plane normal
+        // Positive vertex test
         vec3 positiveVertex = center + extents * sign(normal);
         
         if (dot(normal, positiveVertex) + dist < 0.0) {
-            return true; // Outside this plane
+            return true; // Culled
         }
     }
     return false;
@@ -116,7 +125,6 @@ bool frustumCull(vec3 center, vec3 extents, vec4 planes[6]) {
 // OCCLUSION CULLING
 // ============================================================================
 
-// Project AABB to screen-space and test against Hi-Z
 bool occlusionCull(vec3 center, vec3 extents, mat4 vp) {
     // Transform 8 corners to clip space
     vec3 corners[8] = vec3[8](
@@ -130,7 +138,6 @@ bool occlusionCull(vec3 center, vec3 extents, mat4 vp) {
         center + vec3(-extents.x,  extents.y,  extents.z)
     );
     
-    // Find screen-space bounds
     vec2 minScreen = vec2(1.0);
     vec2 maxScreen = vec2(0.0);
     float minZ = 1.0;
@@ -138,9 +145,8 @@ bool occlusionCull(vec3 center, vec3 extents, mat4 vp) {
     for (int i = 0; i < 8; i++) {
         vec4 clip = vp * vec4(corners[i], 1.0);
         
-        // Skip if behind camera
         if (clip.w <= 0.0) {
-            return false; // Visible (conservative)
+            return false; // Behind camera - conservative visible
         }
         
         vec3 ndc = clip.xyz / clip.w;
@@ -151,27 +157,19 @@ bool occlusionCull(vec3 center, vec3 extents, mat4 vp) {
         minZ = min(minZ, ndc.z);
     }
     
-    // Clamp to screen
     minScreen = clamp(minScreen, vec2(0.0), vec2(1.0));
     maxScreen = clamp(maxScreen, vec2(0.0), vec2(1.0));
     
-    // Calculate appropriate Hi-Z mip level based on projected size
+    // Calculate Hi-Z mip level
     vec2 screenSize = (maxScreen - minScreen) * pc.screenParams.xy;
     float mipLevel = ceil(log2(max(screenSize.x, screenSize.y)));
     mipLevel = clamp(mipLevel, 0.0, float(pc.hizLevels - 1));
     
-    // Sample Hi-Z at corners of projected bounds
-    vec2 uvMin = minScreen;
-    vec2 uvMax = maxScreen;
+    // Sample Hi-Z depth
+    float hizDepth = textureLod(hizPyramid, (minScreen + maxScreen) * 0.5, mipLevel).r;
     
-    float hizDepth = textureLod(hizPyramid, (uvMin + uvMax) * 0.5, mipLevel).r;
-    
-    // Object is occluded if its closest point is behind the Hi-Z depth
-    if (minZ > hizDepth) {
-        return true; // Occluded
-    }
-    
-    return false;
+    // Occluded if object's nearest point is behind Hi-Z depth
+    return minZ > hizDepth;
 }
 
 // ============================================================================
@@ -185,22 +183,18 @@ void main() {
         return;
     }
     
-    // Access object data from consolidated Set 1, Binding 2 (Instance buffer)
-    ObjectData obj = object_buffers.objects[pc.baseIndex + objectIdx];
+    // Fetch object data from bindless buffer array
+    ObjectData obj = object_buffers[nonuniformEXT(pc.objectBufferIndex)].objects[pc.baseIndex + objectIdx];
     
-    // Transform center to world space
+    // Transform to world space
     vec3 worldCenter = (obj.model * vec4(obj.bounds.center.xyz, 1.0)).xyz;
     vec3 worldExtents;
-
-    // Check if we are in sphere mode (w=1.0)
+    
     bool isSphere = obj.bounds.center.w > 0.5;
-
     if (isSphere) {
-        // Simple uniform scale for radius
         float scale = max(length(obj.model[0].xyz), max(length(obj.model[1].xyz), length(obj.model[2].xyz)));
         worldExtents = vec3(obj.bounds.extents.x * scale);
     } else {
-        // Approximate world-space extents (ignoring rotation for speed)
         worldExtents = obj.bounds.extents.xyz * vec3(
             length(obj.model[0].xyz),
             length(obj.model[1].xyz),
@@ -208,23 +202,38 @@ void main() {
         );
     }
     
-    // Extract frustum planes
+    // Frustum culling
     vec4 frustumPlanes[6];
     extractFrustumPlanes(pc.viewProj, frustumPlanes);
     
-    // Frustum culling
     if (frustumCull(worldCenter, worldExtents, frustumPlanes)) {
-        // Object is culled
+        visibility[objectIdx] = 0;
         return;
     }
     
-    // Occlusion culling (Hi-Z test)
+    // Occlusion culling
     if (occlusionCull(worldCenter, worldExtents, pc.viewProj)) {
-        // Object is culled
+        visibility[objectIdx] = 0;
         return;
     }
     
-    // Object is visible!
-    // Note: Visibility buffers and indirect draw updates are now handled
-    // separately through the IndirectDrawPass compute shader
+    // Object is visible - generate indirect draw command
+    visibility[objectIdx] = 1;
+    
+    // Atomic increment visible count
+    uint visibleIndex = atomicAdd(count, 1);
+    
+    // Fetch template command
+    DrawCommand drawTemplate = templates[obj.drawIndex];
+    
+    // Build indirect command
+    DrawCommand cmd;
+    cmd.indexCount = (obj.indexCount > 0) ? obj.indexCount : drawTemplate.indexCount;
+    cmd.instanceCount = 1;
+    cmd.firstIndex = (obj.firstIndex > 0) ? obj.firstIndex : drawTemplate.firstIndex;
+    cmd.vertexOffset = (obj.vertexOffset != 0) ? obj.vertexOffset : drawTemplate.vertexOffset;
+    cmd.firstInstance = pc.baseIndex + objectIdx;
+    
+    // Write to indirect buffer
+    commands[pc.indirectStart + visibleIndex] = cmd;
 }

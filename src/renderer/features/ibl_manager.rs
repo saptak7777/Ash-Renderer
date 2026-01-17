@@ -63,7 +63,10 @@ impl IblManager {
         let create_compute = |shader_bytes: &[u8]| -> Result<vk::Pipeline> {
             let shader_module = unsafe {
                 device.create_shader_module(
-                    &vk::ShaderModuleCreateInfo::default().code(bytemuck::cast_slice(shader_bytes)),
+                    &vk::ShaderModuleCreateInfo::default().code(
+                        &ash::util::read_spv(&mut std::io::Cursor::new(shader_bytes))
+                            .map_err(|e| AshError::VulkanError(e.to_string()))?,
+                    ),
                     None,
                 )?
             };

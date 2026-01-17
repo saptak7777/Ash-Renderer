@@ -211,6 +211,12 @@ impl CullObjectData {
         self
     }
 
+    /// Set bounding box
+    pub fn with_bounds(mut self, bounds: CullBoundingBox) -> Self {
+        self.bounds = bounds;
+        self
+    }
+
     /// Check if transparent
     pub fn is_transparent(&self) -> bool {
         self.has_flag(CULL_FLAG_TRANSPARENT)

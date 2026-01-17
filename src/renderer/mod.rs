@@ -62,7 +62,7 @@ pub use occlusion_culling::{CullBoundingBox, CullObjectData, OcclusionCulling};
 pub use pass_manager::{RenderPassManager, RenderingMode};
 pub use pipeline_cache::PipelineCache;
 pub use render_stats::{RenderStats, StatsCollector};
-pub use renderer::{RenderCommand, Renderer};
+pub use renderer::{DebugMode, RenderCommand, Renderer};
 pub use resource_registry::{ResourceId, ResourceRegistry};
 pub use sdfgi_pass::{SdfgiPass, SdfgiQuality};
 pub use ssgi_pass::{SsgiConfig, SsgiPass, SsgiQuality};

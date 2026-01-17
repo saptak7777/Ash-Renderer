@@ -251,10 +251,11 @@ impl ATrousDenoiser {
         // Load shader
         let shader_code = include_bytes!(concat!(env!("OUT_DIR"), "/atrous_denoise.comp.spv"));
 
-        let shader_module = self.device.create_shader_module(
-            &vk::ShaderModuleCreateInfo::default().code(bytemuck::cast_slice(shader_code)),
-            None,
-        )?;
+        let spv_code = ash::util::read_spv(&mut std::io::Cursor::new(shader_code))
+            .map_err(|e| crate::AshError::VulkanError(e.to_string()))?;
+        let shader_module = self
+            .device
+            .create_shader_module(&vk::ShaderModuleCreateInfo::default().code(&spv_code), None)?;
 
         // Push constant range
         let push_constant_range = vk::PushConstantRange::default()

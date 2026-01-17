@@ -117,10 +117,15 @@ impl TonemappingFeature {
         let vert_code = include_bytes!("../../../shaders/postprocess.vert.spv");
         let frag_code = include_bytes!("../../../shaders/tonemapping.frag.spv");
 
-        let vert_info = vk::ShaderModuleCreateInfo::default().code(bytemuck::cast_slice(vert_code));
+        // Use ash::util::read_spv to ensure proper alignment
+        let vert_spv = ash::util::read_spv(&mut std::io::Cursor::new(vert_code))
+            .map_err(|e| crate::AshError::VulkanError(format!("Tone map vert: {e}")))?;
+        let vert_info = vk::ShaderModuleCreateInfo::default().code(&vert_spv);
         let vert_module = device.create_shader_module(&vert_info, None)?;
 
-        let frag_info = vk::ShaderModuleCreateInfo::default().code(bytemuck::cast_slice(frag_code));
+        let frag_spv = ash::util::read_spv(&mut std::io::Cursor::new(frag_code))
+            .map_err(|e| crate::AshError::VulkanError(format!("Tone map frag: {e}")))?;
+        let frag_info = vk::ShaderModuleCreateInfo::default().code(&frag_spv);
         let frag_module = device.create_shader_module(&frag_info, None)?;
 
         // Create descriptor set layout (3 sampled images: HDR, Bloom, SSGI)

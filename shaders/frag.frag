@@ -113,7 +113,10 @@ vec3 srgb_to_linear(vec3 color) {
 float ShadowCalculation(vec4 fragPosLightSpace, vec3 normal, vec3 lightDir) {
     // 1. PROJECT & NORMALIZE TO [0,1]
     vec3 projCoords = fragPosLightSpace.xyz / fragPosLightSpace.w;
-    projCoords = projCoords * 0.5 + 0.5;
+    // CRITICAL FIX: Only transform XY from NDC [-1,1] to UV [0,1].
+    // Z is already [0,1] from orthographic_rh, applying the same transform
+    // would shift it to [0.5,1.0], causing false self-shadowing.
+    projCoords.xy = projCoords.xy * 0.5 + 0.5;
     
     // 2. EARLY REJECTION (Unreal-style)
     // If outside safe zone, skip expensive PCF
@@ -431,11 +434,26 @@ void main() {
     
     // ============================================================================
     // ============================================================================
-    // RAGE AMBIENT + GLOBAL DIRECTIONAL
+    // IMAGE-BASED LIGHTING (IBL) + GLOBAL DIRECTIONAL
     // ============================================================================
 
-    // Layer 1: Hemisphere Ambient (RAGE)
-    vec3 ambient = calculateHemisphereAmbient(normal, baseColor) * occlusion;
+    // Layer 1: IBL Ambient (Diffuse + Specular)
+    // Diffuse IBL: Irradiance map provides diffuse ambient
+    // Reuse F0 already calculated at line 324
+    vec3 F = fresnel_schlick_roughness(max(dot(normal, viewDir), 0.0), F0, roughness);
+    vec3 kD = (1.0 - F) * (1.0 - metallic);
+    
+    vec3 irradiance = texture(irradianceMap, normal).rgb;
+    vec3 diffuseIBL = kD * irradiance * baseColor;
+    
+    // Specular IBL: Prefiltered environment map + BRDF LUT
+    const float MAX_REFLECTION_LOD = 4.0;
+    vec3 R = reflect(-viewDir, normal);
+    vec3 prefilteredColor = textureLod(prefilterMap, R, roughness * MAX_REFLECTION_LOD).rgb;
+    vec2 envBRDF = texture(brdfLUT, vec2(max(dot(normal, viewDir), 0.0), roughness)).rg;
+    vec3 specularIBL = prefilteredColor * (F * envBRDF.x + envBRDF.y);
+    
+    vec3 ambient = (diffuseIBL + specularIBL) * occlusion;
     
     // Layer 2: Global Directional Light
     vec3 directional = calculateDirectionalLight(
@@ -454,12 +472,26 @@ void main() {
     vec3 color = ambient + directional + Lo + emissive;
 
     // Debug Path Visualization - Only compiled when debug_visualization feature is enabled
+    // Debug Path Visualization - Only compiled when debug_visualization feature is enabled
     #ifdef DEBUG_VISUALIZATION
     if (push.debug_visualization_enabled == 1) {
-        if (push.debug_path == 1) { // GPU-Driven
+        // debug_path values: 1=GPU, 2=Legacy, 3=Albedo, 4=Normal, 5=Metallic, 6=Roughness, 7=Lighting
+        if (push.debug_path == 1) { // GPU-Driven Path
             color = mix(color, vec3(0.0, 0.0, 1.0), 0.3); // Blue tint
-        } else if (push.debug_path == 2) { // Legacy
+        } else if (push.debug_path == 2) { // Legacy Path
             color = mix(color, vec3(0.0, 1.0, 0.0), 0.3); // Green tint
+        } else if (push.debug_path == 3) { // Albedo
+            color = baseColor;
+        } else if (push.debug_path == 4) { // Normal
+            color = normal * 0.5 + 0.5;
+        } else if (push.debug_path == 5) { // Metallic
+            color = vec3(metallic);
+        } else if (push.debug_path == 6) { // Roughness
+            color = vec3(roughness);
+        } else if (push.debug_path == 7) { // Lighting Only
+            // Show accumulated light without albedo modulation
+            // Recalculate basic lighting sum for visualization
+            color = ambient + directional + Lo;
         }
     }
     #endif

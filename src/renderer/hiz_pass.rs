@@ -564,8 +564,9 @@ impl HiZPass {
         // Load shader module
         let shader_code = include_bytes!(concat!(env!("OUT_DIR"), "/hiz_generate.comp.spv"));
 
-        let shader_module_info =
-            vk::ShaderModuleCreateInfo::default().code(bytemuck::cast_slice(shader_code));
+        let code = ash::util::read_spv(&mut std::io::Cursor::new(shader_code))
+            .map_err(|e| crate::AshError::VulkanError(e.to_string()))?;
+        let shader_module_info = vk::ShaderModuleCreateInfo::default().code(&code);
 
         let shader_module = self
             .device

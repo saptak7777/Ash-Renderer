@@ -783,6 +783,490 @@ impl Texture {
             device,
         })
     }
+    pub fn create_default_white(
+        allocator: Arc<vulkan::Allocator>,
+        device: Arc<ash::Device>,
+        command_pool: vk::CommandPool,
+        queue: vk::Queue,
+    ) -> Result<Self> {
+        let white = TextureData::solid_color([255, 255, 255, 255]);
+        unsafe {
+            Self::from_data(
+                allocator,
+                device,
+                command_pool,
+                queue,
+                &white,
+                vk::Format::R8G8B8A8_UNORM,
+                Some("DefaultWhite"),
+            )
+        }
+    }
+
+    pub fn create_default_black(
+        allocator: Arc<vulkan::Allocator>,
+        device: Arc<ash::Device>,
+        command_pool: vk::CommandPool,
+        queue: vk::Queue,
+    ) -> Result<Self> {
+        let black = TextureData::solid_color([0, 0, 0, 255]);
+        unsafe {
+            Self::from_data(
+                allocator,
+                device,
+                command_pool,
+                queue,
+                &black,
+                vk::Format::R8G8B8A8_UNORM,
+                Some("DefaultBlack"),
+            )
+        }
+    }
+
+    pub fn create_default_cube_black(
+        allocator: Arc<vulkan::Allocator>,
+        device: Arc<ash::Device>,
+        command_pool: vk::CommandPool,
+        queue: vk::Queue,
+    ) -> Result<Self> {
+        let resolution = 1;
+        let format = vk::Format::R8G8B8A8_UNORM;
+        let pixel_size = 4;
+        let total_size = resolution * resolution * pixel_size * 6; // 6 faces
+
+        // Create staging buffer (all zeros for black)
+        // Create staging buffer (all zeros for black)
+        let (staging_buffer, mut staging_alloc) = unsafe {
+            allocator.create_buffer_with_flags(
+                total_size as vk::DeviceSize,
+                vk::BufferUsageFlags::TRANSFER_SRC,
+                vk_mem::MemoryUsage::AutoPreferHost,
+                vk_mem::AllocationCreateFlags::HOST_ACCESS_SEQUENTIAL_WRITE,
+            )?
+        };
+
+        {
+            let mut guard = unsafe {
+                allocator
+                    .map_allocation_guarded(&mut staging_alloc, total_size as vk::DeviceSize)?
+            };
+            // Dark grey initialize (provides subtle ambient fallback)
+            for i in 0..6 {
+                let offset = i * 4;
+                guard[offset] = 30; // R
+                guard[offset + 1] = 30; // G
+                guard[offset + 2] = 30; // B
+                guard[offset + 3] = 255; // A
+            }
+        }
+
+        allocator
+            .vma
+            .flush_allocation(&staging_alloc, 0, total_size as vk::DeviceSize)
+            .map_err(|e| {
+                AshError::VulkanError(format!("Failed to flush default cube staging: {e}"))
+            })?;
+
+        // Create Cubemap Image
+        let image_info = vk::ImageCreateInfo::default()
+            .image_type(vk::ImageType::TYPE_2D)
+            .format(format)
+            .extent(vk::Extent3D {
+                width: resolution,
+                height: resolution,
+                depth: 1,
+            })
+            .mip_levels(1)
+            .array_layers(6)
+            .samples(vk::SampleCountFlags::TYPE_1)
+            .tiling(vk::ImageTiling::OPTIMAL)
+            .usage(vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::SAMPLED)
+            .sharing_mode(vk::SharingMode::EXCLUSIVE)
+            .flags(vk::ImageCreateFlags::CUBE_COMPATIBLE)
+            .initial_layout(vk::ImageLayout::UNDEFINED);
+
+        let (image, allocation) =
+            unsafe { allocator.create_image(&image_info, vk_mem::MemoryUsage::AutoPreferDevice)? };
+
+        // Upload
+        vulkan::utils::execute_single_use(device.as_ref(), command_pool, queue, |cmd| {
+            // Transition to TRANSFER_DST
+            let barrier = vk::ImageMemoryBarrier::default()
+                .old_layout(vk::ImageLayout::UNDEFINED)
+                .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                .src_access_mask(vk::AccessFlags::empty())
+                .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                .image(image)
+                .subresource_range(vk::ImageSubresourceRange {
+                    aspect_mask: vk::ImageAspectFlags::COLOR,
+                    base_mip_level: 0,
+                    level_count: 1,
+                    base_array_layer: 0,
+                    layer_count: 6,
+                });
+
+            unsafe {
+                device.cmd_pipeline_barrier(
+                    cmd,
+                    vk::PipelineStageFlags::TOP_OF_PIPE,
+                    vk::PipelineStageFlags::TRANSFER,
+                    vk::DependencyFlags::empty(),
+                    &[],
+                    &[],
+                    &[barrier],
+                );
+            }
+
+            // Copy 6 faces
+            let mut regions = Vec::with_capacity(6);
+            for i in 0..6 {
+                regions.push(vk::BufferImageCopy {
+                    buffer_offset: (i * 4) as vk::DeviceSize,
+                    buffer_row_length: 0,
+                    buffer_image_height: 0,
+                    image_subresource: vk::ImageSubresourceLayers {
+                        aspect_mask: vk::ImageAspectFlags::COLOR,
+                        mip_level: 0,
+                        base_array_layer: i as u32,
+                        layer_count: 1,
+                    },
+                    image_offset: vk::Offset3D { x: 0, y: 0, z: 0 },
+                    image_extent: vk::Extent3D {
+                        width: resolution,
+                        height: resolution,
+                        depth: 1,
+                    },
+                });
+            }
+
+            unsafe {
+                device.cmd_copy_buffer_to_image(
+                    cmd,
+                    staging_buffer,
+                    image,
+                    vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                    &regions,
+                );
+            }
+
+            // Transition to SHADER_READ_ONLY
+            let barrier_end = vk::ImageMemoryBarrier::default()
+                .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+                .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                .dst_access_mask(vk::AccessFlags::SHADER_READ)
+                .image(image)
+                .subresource_range(vk::ImageSubresourceRange {
+                    aspect_mask: vk::ImageAspectFlags::COLOR,
+                    base_mip_level: 0,
+                    level_count: 1,
+                    base_array_layer: 0,
+                    layer_count: 6,
+                });
+
+            unsafe {
+                device.cmd_pipeline_barrier(
+                    cmd,
+                    vk::PipelineStageFlags::TRANSFER,
+                    vk::PipelineStageFlags::FRAGMENT_SHADER,
+                    vk::DependencyFlags::empty(),
+                    &[],
+                    &[],
+                    &[barrier_end],
+                );
+            }
+        })?;
+
+        // Cleanup Staging
+        unsafe {
+            allocator
+                .vma
+                .destroy_buffer(staging_buffer, &mut staging_alloc);
+        }
+
+        // View
+        let view_info = vk::ImageViewCreateInfo::default()
+            .image(image)
+            .view_type(vk::ImageViewType::CUBE)
+            .format(format)
+            .subresource_range(vk::ImageSubresourceRange {
+                aspect_mask: vk::ImageAspectFlags::COLOR,
+                base_mip_level: 0,
+                level_count: 1,
+                base_array_layer: 0,
+                layer_count: 6,
+            });
+
+        let view = unsafe { device.create_image_view(&view_info, None)? };
+
+        // Sampler
+        let sampler_info = vk::SamplerCreateInfo::default()
+            .mag_filter(vk::Filter::NEAREST)
+            .min_filter(vk::Filter::NEAREST)
+            .mipmap_mode(vk::SamplerMipmapMode::NEAREST)
+            .address_mode_u(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+            .address_mode_v(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+            .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+            .min_lod(0.0)
+            .max_lod(1.0); // 1 Mip
+
+        let sampler = unsafe { device.create_sampler(&sampler_info, None)? };
+
+        log::info!("Created default black cubemap (1x1)");
+
+        Ok(Self {
+            image,
+            view,
+            sampler,
+            allocation,
+            allocator,
+            device,
+        })
+    }
+    pub fn create_procedural_skybox(
+        allocator: Arc<vulkan::Allocator>,
+        device: Arc<ash::Device>,
+        command_pool: vk::CommandPool,
+        queue: vk::Queue,
+        resolution: u32,
+    ) -> Result<Self> {
+        let format = vk::Format::R8G8B8A8_UNORM;
+        let pixel_size = 4;
+        let total_size = (resolution * resolution * pixel_size * 6) as u64;
+
+        // Create staging buffer
+        let (staging_buffer, mut staging_alloc) = unsafe {
+            allocator.create_buffer_with_flags(
+                total_size as vk::DeviceSize,
+                vk::BufferUsageFlags::TRANSFER_SRC,
+                vk_mem::MemoryUsage::AutoPreferHost,
+                vk_mem::AllocationCreateFlags::HOST_ACCESS_SEQUENTIAL_WRITE,
+            )?
+        };
+
+        {
+            let mut guard = unsafe {
+                allocator
+                    .map_allocation_guarded(&mut staging_alloc, total_size as vk::DeviceSize)?
+            };
+
+            // Colors for gradient
+            let zenith_color = glam::Vec3::new(0.05, 0.05, 0.1); // Deep Space Blue (Top)
+            let horizon_color = glam::Vec3::new(0.3, 0.4, 0.6); // Desaturated Blue (Horizon)
+            let nadir_color = glam::Vec3::new(0.02, 0.02, 0.03); // Very Dark Blue (Bottom)
+
+            // Iterate over 6 faces of the cubemap
+            for face in 0..6 {
+                for y in 0..resolution {
+                    for x in 0..resolution {
+                        // Calculate UV coordinates in [-1, 1] range
+                        let u = (x as f32 / resolution as f32) * 2.0 - 1.0;
+                        let v = (y as f32 / resolution as f32) * 2.0 - 1.0;
+
+                        // Calculate direction vector based on face index
+                        let dir = match face {
+                            0 => glam::Vec3::new(1.0, -v, -u),  // +X
+                            1 => glam::Vec3::new(-1.0, -v, u),  // -X
+                            2 => glam::Vec3::new(u, 1.0, v),    // +Y (Top)
+                            3 => glam::Vec3::new(u, -1.0, -v),  // -Y (Bottom)
+                            4 => glam::Vec3::new(u, -v, 1.0),   // +Z
+                            5 => glam::Vec3::new(-u, -v, -1.0), // -Z
+                            _ => glam::Vec3::ZERO,
+                        }
+                        .normalize();
+
+                        // Calculate gradient color based on Y component
+                        let color = if dir.y > 0.0 {
+                            zenith_color.lerp(horizon_color, 1.0 - dir.y.powf(0.5))
+                        } else {
+                            horizon_color.lerp(nadir_color, (-dir.y).powf(0.5))
+                        };
+
+                        // Gamma correct (approximate linear to sRGB conversion for storage)
+                        let srgb = color.powf(1.0 / 2.2);
+
+                        let r = (srgb.x * 255.0).clamp(0.0, 255.0) as u8;
+                        let g = (srgb.y * 255.0).clamp(0.0, 255.0) as u8;
+                        let b = (srgb.z * 255.0).clamp(0.0, 255.0) as u8;
+
+                        let pixel_index = ((face as u64 * resolution as u64 * resolution as u64)
+                            + (y as u64 * resolution as u64)
+                            + x as u64) as usize;
+                        let offset = pixel_index * 4;
+
+                        guard[offset] = r;
+                        guard[offset + 1] = g;
+                        guard[offset + 2] = b;
+                        guard[offset + 3] = 255;
+                    }
+                }
+            }
+        }
+
+        allocator
+            .vma
+            .flush_allocation(&staging_alloc, 0, total_size as vk::DeviceSize)
+            .map_err(|e| {
+                AshError::VulkanError(format!("Failed to flush procedural skybox staging: {e}"))
+            })?;
+
+        // Create Cubemap Image
+        let image_info = vk::ImageCreateInfo::default()
+            .image_type(vk::ImageType::TYPE_2D)
+            .format(format)
+            .extent(vk::Extent3D {
+                width: resolution,
+                height: resolution,
+                depth: 1,
+            })
+            .mip_levels(1)
+            .array_layers(6)
+            .samples(vk::SampleCountFlags::TYPE_1)
+            .tiling(vk::ImageTiling::OPTIMAL)
+            .usage(vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::SAMPLED)
+            .sharing_mode(vk::SharingMode::EXCLUSIVE)
+            .flags(vk::ImageCreateFlags::CUBE_COMPATIBLE)
+            .initial_layout(vk::ImageLayout::UNDEFINED);
+
+        let (image, allocation) =
+            unsafe { allocator.create_image(&image_info, vk_mem::MemoryUsage::AutoPreferDevice)? };
+
+        // Upload
+        vulkan::utils::execute_single_use(device.as_ref(), command_pool, queue, |cmd| {
+            // Transition to TRANSFER_DST
+            let barrier = vk::ImageMemoryBarrier::default()
+                .old_layout(vk::ImageLayout::UNDEFINED)
+                .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                .src_access_mask(vk::AccessFlags::empty())
+                .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                .image(image)
+                .subresource_range(vk::ImageSubresourceRange {
+                    aspect_mask: vk::ImageAspectFlags::COLOR,
+                    base_mip_level: 0,
+                    level_count: 1,
+                    base_array_layer: 0,
+                    layer_count: 6,
+                });
+
+            unsafe {
+                device.cmd_pipeline_barrier(
+                    cmd,
+                    vk::PipelineStageFlags::TOP_OF_PIPE,
+                    vk::PipelineStageFlags::TRANSFER,
+                    vk::DependencyFlags::empty(),
+                    &[],
+                    &[],
+                    &[barrier],
+                );
+            }
+
+            // Copy 6 faces
+            let mut regions = Vec::with_capacity(6);
+            for i in 0..6 {
+                regions.push(vk::BufferImageCopy {
+                    buffer_offset: (i as u64 * resolution as u64 * resolution as u64 * 4)
+                        as vk::DeviceSize,
+                    buffer_row_length: 0,
+                    buffer_image_height: 0,
+                    image_subresource: vk::ImageSubresourceLayers {
+                        aspect_mask: vk::ImageAspectFlags::COLOR,
+                        mip_level: 0,
+                        base_array_layer: i as u32,
+                        layer_count: 1,
+                    },
+                    image_offset: vk::Offset3D { x: 0, y: 0, z: 0 },
+                    image_extent: vk::Extent3D {
+                        width: resolution,
+                        height: resolution,
+                        depth: 1,
+                    },
+                });
+            }
+
+            unsafe {
+                device.cmd_copy_buffer_to_image(
+                    cmd,
+                    staging_buffer,
+                    image,
+                    vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                    &regions,
+                );
+            }
+
+            // Transition to SHADER_READ_ONLY
+            let barrier_end = vk::ImageMemoryBarrier::default()
+                .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+                .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                .dst_access_mask(vk::AccessFlags::SHADER_READ)
+                .image(image)
+                .subresource_range(vk::ImageSubresourceRange {
+                    aspect_mask: vk::ImageAspectFlags::COLOR,
+                    base_mip_level: 0,
+                    level_count: 1,
+                    base_array_layer: 0,
+                    layer_count: 6,
+                });
+
+            unsafe {
+                device.cmd_pipeline_barrier(
+                    cmd,
+                    vk::PipelineStageFlags::TRANSFER,
+                    vk::PipelineStageFlags::FRAGMENT_SHADER,
+                    vk::DependencyFlags::empty(),
+                    &[],
+                    &[],
+                    &[barrier_end],
+                );
+            }
+        })?;
+
+        // Cleanup Staging
+        unsafe {
+            allocator
+                .vma
+                .destroy_buffer(staging_buffer, &mut staging_alloc);
+        }
+
+        // View
+        let view_info = vk::ImageViewCreateInfo::default()
+            .image(image)
+            .view_type(vk::ImageViewType::CUBE)
+            .format(format)
+            .subresource_range(vk::ImageSubresourceRange {
+                aspect_mask: vk::ImageAspectFlags::COLOR,
+                base_mip_level: 0,
+                level_count: 1,
+                base_array_layer: 0,
+                layer_count: 6,
+            });
+
+        let view = unsafe { device.create_image_view(&view_info, None)? };
+
+        // Sampler (Linear for smooth skybox)
+        let sampler_info = vk::SamplerCreateInfo::default()
+            .mag_filter(vk::Filter::LINEAR)
+            .min_filter(vk::Filter::LINEAR)
+            .mipmap_mode(vk::SamplerMipmapMode::LINEAR)
+            .address_mode_u(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+            .address_mode_v(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+            .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+            .min_lod(0.0)
+            .max_lod(1.0);
+
+        let sampler = unsafe { device.create_sampler(&sampler_info, None)? };
+
+        log::info!("Created procedural skybox ({resolution}x{resolution})");
+
+        Ok(Self {
+            image,
+            view,
+            sampler,
+            allocation,
+            allocator,
+            device,
+        })
+    }
 }
 
 impl Drop for Texture {

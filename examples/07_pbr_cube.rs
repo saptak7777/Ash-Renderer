@@ -7,13 +7,15 @@ use ash_renderer::prelude::*;
 use ash_renderer::renderer::features::ambient_lighting::{AmbientPreset, LightingBuilder};
 use ash_renderer::renderer::features::PointLight;
 use ash_renderer::renderer::resources::uniform::StorageBuffer;
+use ash_renderer::renderer::DebugMode;
 use glam::{Mat4, Quat, Vec3, Vec4};
 use std::sync::Arc;
 use std::time::Instant;
 use winit::{
     application::ApplicationHandler,
-    event::WindowEvent,
+    event::{ElementState, KeyEvent, WindowEvent},
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop},
+    keyboard::{KeyCode, PhysicalKey},
     window::{Window, WindowId},
 };
 
@@ -23,6 +25,7 @@ struct App {
     renderer: Option<Renderer>,
     render_commands: Vec<ash_renderer::renderer::RenderCommand>,
     start_time: Instant,
+    current_debug_mode: DebugMode,
 }
 
 impl Default for App {
@@ -33,6 +36,7 @@ impl Default for App {
             renderer: None,
             render_commands: Vec::new(),
             start_time: Instant::now(),
+            current_debug_mode: DebugMode::None,
         }
     }
 }
@@ -62,8 +66,8 @@ impl ApplicationHandler for App {
                 let material = Material {
                     name: "ShinyRed".to_string(),
                     color: [1.0, 0.0, 0.0, 1.0], // Pure red
-                    metallic: 1.0,               // Fully metallic
-                    roughness: 0.05,             // Very smooth/shiny
+                    metallic: 0.9,               // Highly metallic (but not perfect mirror)
+                    roughness: 0.2,              // Smooth but with some blurring
                     ..Default::default()
                 };
 
@@ -175,6 +179,11 @@ impl ApplicationHandler for App {
                     let view = Mat4::look_at_rh(camera_pos, target, up);
                     let mut proj = Mat4::perspective_rh(45.0_f32.to_radians(), aspect, 0.1, 100.0);
                     proj.y_axis.y *= -1.0; // Vulkan Y-flip
+                                           // Fix Z range: Vulkan [0, 1] vs OpenGL [-1, 1] derived from perspective_rh
+                    proj.x_axis.z = 0.5f32 * (proj.x_axis.z + proj.x_axis.w);
+                    proj.y_axis.z = 0.5f32 * (proj.y_axis.z + proj.y_axis.w);
+                    proj.z_axis.z = 0.5f32 * (proj.z_axis.z + proj.z_axis.w);
+                    proj.w_axis.z = 0.5f32 * (proj.w_axis.z + proj.w_axis.w);
 
                     // Submit render commands
                     if let Err(e) = renderer.submit_render_commands(&self.render_commands) {
@@ -195,6 +204,30 @@ impl ApplicationHandler for App {
                         width: size.width,
                         height: size.height,
                     });
+                }
+            }
+            WindowEvent::KeyboardInput {
+                event:
+                    KeyEvent {
+                        physical_key: PhysicalKey::Code(KeyCode::KeyD),
+                        state: ElementState::Pressed,
+                        ..
+                    },
+                ..
+            } => {
+                // Cycle through debug modes
+                self.current_debug_mode = match self.current_debug_mode {
+                    DebugMode::None => DebugMode::Path,
+                    DebugMode::Path => DebugMode::Albedo,
+                    DebugMode::Albedo => DebugMode::Normal,
+                    DebugMode::Normal => DebugMode::Metallic,
+                    DebugMode::Metallic => DebugMode::Roughness,
+                    DebugMode::Roughness => DebugMode::Lighting,
+                    DebugMode::Lighting => DebugMode::None,
+                };
+                log::info!("Debug mode: {:?}", self.current_debug_mode);
+                if let Some(renderer) = &mut self.renderer {
+                    renderer.set_debug_mode(self.current_debug_mode);
                 }
             }
             _ => {}

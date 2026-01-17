@@ -114,6 +114,18 @@ impl CullingManager {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum DebugMode {
+    #[default]
+    None,            // Final render
+    Path,           // Visualize GPU vs Legacy path (Blue/Green)
+    Albedo,         // Visualize Albedo channel
+    Normal,         // Visualize Normal channel
+    Metallic,       // Visualize Metallic channel
+    Roughness,      // Visualize Roughness channel
+    Lighting,       // Visualize Lighting only
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 pub enum MsaaPreset {
     #[default]
@@ -166,6 +178,8 @@ struct RendererResources {
     joint_matrices_buffer: Vec<resources::JointMatricesBuffer>,
     default_texture: Texture,
     black_texture: Texture,
+    default_skybox: Texture, // Procedural skybox
+    default_cube_black: Texture,
     material_storage_buffer: StorageBuffer<resources::uniform::MaterialUniform>,
     instance_buffers: Vec<resources::InstanceBuffer>,
 }
@@ -365,6 +379,8 @@ pub struct Renderer {
     prev_view_proj: Mat4,
     _default_texture: Texture,
     _black_texture: Texture,
+    _default_skybox: Texture, // Procedural skybox for IBL fallback
+    _default_cube_black: Texture, // Keep alive
     model_renderer: ModelRenderer,
     draw_items: Vec<DrawItem>,
     swapchain: Option<vulkan::SwapchainWrapper>,
@@ -444,7 +460,7 @@ pub struct Renderer {
     point_lights: Vec<PointLight>,
     directional_lights: Vec<DirectionalLight>,
     spot_lights: Vec<SpotLight>,
-    debug_visualization_enabled: bool,
+    pub debug_mode: DebugMode,
     // Post-processing descriptors
     post_descriptor_pool: vk::DescriptorPool,
     post_descriptor_sets: Vec<vk::DescriptorSet>,
@@ -548,6 +564,7 @@ pub struct MeshData {
     pub texture_flags: TexturePresenceFlags,
     pub material_handle: MaterialHandle,
     pub is_hidden: bool,
+    pub bounds: CullBoundingBox,
 }
 
 impl Default for MeshData {
@@ -559,6 +576,7 @@ impl Default for MeshData {
             texture_flags: TexturePresenceFlags::default(),
             material_handle: MaterialHandle { index: 0, version: 0 },
             is_hidden: false,
+            bounds: CullBoundingBox::default(),
         }
     }
 }
@@ -602,6 +620,11 @@ impl Renderer {
             enable_sample_shading: self.sample_shading.enabled(),
             min_sample_shading: self.sample_shading.min_sample_shading(),
         }
+    }
+
+    pub fn set_debug_mode(&mut self, mode: DebugMode) {
+        self.debug_mode = mode;
+        log::info!("Debug mode set to: {mode:?}");
     }
 
     /// Initializes the renderer.
@@ -707,9 +730,39 @@ impl Renderer {
                 joint_matrices_buffer,
                 default_texture,
                 black_texture,
+                default_skybox,
+                default_cube_black,
                 material_storage_buffer,
                 instance_buffers,
             } = renderer_resources;
+
+            // Bind IBL defaults to all environment sets
+            {
+                let cube_info = vk::DescriptorImageInfo {
+                    image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                    image_view: default_cube_black.view(),
+                    sampler: default_cube_black.sampler(),
+                };
+                let tex_2d_info = vk::DescriptorImageInfo {
+                    image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                    image_view: black_texture.view(),
+                    sampler: black_texture.sampler(),
+                };
+                let shadow_info = vk::DescriptorImageInfo {
+                    image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                    image_view: default_texture.view(), // White for shadow = lit
+                    sampler: default_texture.sampler(),
+                };
+
+                for i in 0..descriptor_manager.environment_set_count() {
+                    descriptor_manager.bind_defaults(
+                        i,
+                        &cube_info,
+                        &tex_2d_info,
+                        &shadow_info,
+                    )?;
+                }
+            }
 
             let mut bindless_manager = crate::vulkan::BindlessManager::new(
                 Arc::clone(&device.device),
@@ -900,6 +953,8 @@ impl Renderer {
                 prev_view_proj: Mat4::IDENTITY,
                 _default_texture: default_texture,
                 _black_texture: black_texture,
+                _default_skybox: default_skybox,
+                _default_cube_black: default_cube_black,
                 model_renderer,
                 draw_items: Vec::new(),
                 swapchain: Some(swapchain),
@@ -963,12 +1018,13 @@ impl Renderer {
                 motion_framebuffer: None,
                 gbuffer: Some(gbuffer),
                 culling_manager: CullingManager::new(),
+                debug_mode: DebugMode::None,
                 use_gpu_driven: pass_manager.use_gpu_driven(),
                 scene_lighting: crate::renderer::features::SceneLighting::default(),
                 point_lights: Vec::new(),
                 directional_lights: Vec::new(),
                 spot_lights: Vec::new(),
-                debug_visualization_enabled: false,
+
                 post_descriptor_pool: vk::DescriptorPool::null(),
                 post_descriptor_sets: Vec::new(),
                 post_pipeline: None,
@@ -1415,8 +1471,8 @@ impl Renderer {
             )?
         };
 
-        // Create black texture for IBL fallback (no ambient light when IBL not loaded)
-        let black_texture_data = TextureData::solid_color([0, 0, 0, 255]);
+        // Create dark grey texture for IBL fallback (provides some ambient light when IBL not loaded)
+        let black_texture_data = TextureData::solid_color([30, 30, 30, 255]);
         let black_texture = unsafe {
             Texture::from_data(
                 Arc::clone(alloc),
@@ -1428,6 +1484,23 @@ impl Renderer {
                 Some("black_texture"),
             )?
         };
+
+        // Create procedural skybox
+        let default_skybox = Texture::create_procedural_skybox(
+            Arc::clone(alloc),
+            Arc::clone(&device.device),
+            command_pool,
+            device.graphics_queue,
+            512,
+        )?;
+
+        // Create default cube black
+        let default_cube_black = Texture::create_default_cube_black(
+            Arc::clone(alloc),
+            Arc::clone(&device.device),
+            command_pool,
+            device.graphics_queue,
+        )?;
 
         // Initialize material storage buffer (Bindless-ready)
         let max_materials = 1024;
@@ -1476,6 +1549,8 @@ impl Renderer {
             joint_matrices_buffer,
             default_texture,
             black_texture,
+            default_skybox,
+            default_cube_black,
             material_storage_buffer,
             instance_buffers,
         })
@@ -1713,7 +1788,8 @@ impl Renderer {
             .with_extent(extent)
             .with_pipeline_cache(pipeline_cache)
             .with_depth_format(depth_format)
-            .with_cull_mode(vk::CullModeFlags::BACK)
+            .with_cull_mode(vk::CullModeFlags::NONE)
+            .with_front_face(vk::FrontFace::CLOCKWISE)
             .with_multisampling(pipeline_cfg.multisample_config())
             .add_shader_from_bytes(
                 include_bytes!(concat!(env!("OUT_DIR"), "/vert.vert.spv")),
@@ -1832,7 +1908,7 @@ impl Renderer {
 
         let clear_values = [vk::ClearValue {
             color: vk::ClearColorValue {
-                float32: [0.0, 0.0, 0.0, 1.0], // Use black for post-processing clear to avoid flashes
+                float32: [1.0, 0.0, 1.0, 1.0], // Use Magenta for post-processing clear to DEBUG
             },
         }];
 
@@ -1889,6 +1965,22 @@ impl Renderer {
                 0,
                 bytemuck::bytes_of(&push_constants),
             );
+
+            // Set viewport and scissor for dynamic state
+            let viewport = vk::Viewport {
+                x: 0.0,
+                y: 0.0,
+                width: extent.width as f32,
+                height: extent.height as f32,
+                min_depth: 0.0,
+                max_depth: 1.0,
+            };
+            let scissor = vk::Rect2D {
+                offset: vk::Offset2D { x: 0, y: 0 },
+                extent,
+            };
+            self.device.device.cmd_set_viewport(command_buffer, 0, &[viewport]);
+            self.device.device.cmd_set_scissor(command_buffer, 0, &[scissor]);
 
             // Draw 3 vertices for a single fullscreen triangle
             log::debug!("DEBUG: Drawing fullscreen triangle");
@@ -2115,6 +2207,21 @@ impl Renderer {
             ];
             let emissive_index = mesh.emissive_texture_index.map(|i| i as i32).unwrap_or(-1);
 
+            // Calculate bounding box from mesh vertices
+            let bounds = if !mesh.vertices.is_empty() {
+                let mut min = Vec3::splat(f32::MAX);
+                let mut max = Vec3::splat(f32::MIN);
+                for vertex in &mesh.vertices {
+                    let pos = Vec3::from(vertex.position);
+                    min = min.min(pos);
+                    max = max.max(pos);
+                }
+                CullBoundingBox::from_min_max(min, max)
+            } else {
+                // Fallback to unit cube if no vertices
+                CullBoundingBox::new(Vec3::ZERO, Vec3::ONE)
+            };
+
             let mesh_data = MeshData {
                 name: Arc::clone(&key),
                 texture_indices: indices,
@@ -2122,6 +2229,7 @@ impl Renderer {
                 texture_flags: flags,
                 material_handle,
                 is_hidden: false,
+                bounds,
             };
 
             if handle as usize >= self.mesh_data.len() {
@@ -2451,7 +2559,8 @@ impl Renderer {
                                 });
                             } else {
                                 let key = BatchKey::new(command.mesh_handle, material_handle);
-                                let mut instance = InstanceData::from_matrix(command.transform);
+                                let mut instance = InstanceData::from_matrix(command.transform)
+                                    .with_bounds(mesh_data_entry.bounds);
                                 if command.cast_shadows {
                                     instance.set_flag(crate::renderer::occlusion_culling::CULL_FLAG_CAST_SHADOWS, true);
                                 }
@@ -2537,6 +2646,7 @@ impl Renderer {
                     } else {
                         let key = BatchKey::new(command.mesh_handle, material_handle);
                         let instance = InstanceData::from_matrix(command.transform)
+                            .with_bounds(mesh_data.bounds)
                             .with_cast_shadows(command.cast_shadows)
                             .with_receive_shadows(command.receive_shadows)
                             .with_hidden(command.is_hidden);
@@ -2863,7 +2973,8 @@ impl Renderer {
             .with_extent(extent)
             .with_pipeline_cache(cache)
             .with_depth_format(depth_format)
-            .with_cull_mode(vk::CullModeFlags::BACK)
+            .with_cull_mode(vk::CullModeFlags::NONE)
+            .with_front_face(vk::FrontFace::CLOCKWISE)
             .with_multisampling(multisample_config);
 
         if self.gbuffer.is_some() {
@@ -3238,12 +3349,25 @@ impl Renderer {
                 gbuffer.motion_view(),
                 depth_buffer.view(),
             ];
-            let framebuffer = vulkan::Framebuffer::new(
-                Arc::clone(&self.device.device),
+            
+            // CRITICAL FIX: Use the correct render pass for framebuffer creation.
+            // When HDR is enabled, framebuffers must be created against hdr_render_pass,
+            // not the swapchain render_pass, to ensure format compatibility.
+            let active_render_pass = if render_to_hdr {
+                self.hdr_render_pass
+                    .as_ref()
+                    .expect("HDR render pass just created")
+                    .handle()
+            } else {
                 self.render_pass
                     .as_ref()
                     .expect("render pass just created")
-                    .handle(),
+                    .handle()
+            };
+            
+            let framebuffer = vulkan::Framebuffer::new(
+                Arc::clone(&self.device.device),
+                active_render_pass,
                 &attachments,
                 extent,
             )?;
@@ -3645,6 +3769,17 @@ impl Renderer {
             .map(|sm| crate::renderer::shadow_boundary::ShadowBoundaryParams::from(sm.boundary_config))
             .unwrap_or_default();
 
+        // Resolve global debug state
+        let (debug_enabled, debug_path_override) = match self.debug_mode {
+            DebugMode::None => (false, None),
+            DebugMode::Path => (true, None),
+            DebugMode::Albedo => (true, Some(3)),
+            DebugMode::Normal => (true, Some(4)),
+            DebugMode::Metallic => (true, Some(5)),
+            DebugMode::Roughness => (true, Some(6)),
+            DebugMode::Lighting => (true, Some(7)),
+        };
+
         // 1. Render all visible opaque instanced batches (High-performance Path)
         // GPU-Driven Path: Used for large numbers of static meshes with instancing.
         let mut current_object_offset = 0;
@@ -3658,10 +3793,10 @@ impl Renderer {
                     let material_push = MaterialPushConstants::new(batch.key.material_id)
                         .with_material_buffer_index(self.material_buffer_index)
                         .with_receive_shadows(batch.receives_shadows())
-                        .with_debug_visualization(self.debug_visualization_enabled);
+                        .with_debug_visualization(debug_enabled);
 
                     // --- GPU-Driven Indirect Path ---
-                    if self.use_gpu_driven {
+                    if self.use_gpu_driven && self.indirect_draw_pass.is_some() {
                         if let Some(indirect) = self.indirect_draw_pass.as_mut() {
                             // 1. Upload instances for this batch to the object buffer
                         unsafe {
@@ -3702,7 +3837,8 @@ impl Renderer {
                         }
 
                         // 4. Draw Indirect
-                        let material_push = material_push.with_debug_path(1); // 1: GPU-Driven
+                        let final_path = debug_path_override.unwrap_or(1); // 1: GPU-Driven default
+                        let material_push = material_push.with_debug_path(final_path);
                         let ctx = DrawContext {
                             command_buffer: cmd_ctx.handle(),
                             pipeline_layout: pipeline_layout_handle,
@@ -3731,9 +3867,10 @@ impl Renderer {
                         }
                     } else {
                         // --- Direct Instanced Path Fallback ---
+                        let final_path = debug_path_override.unwrap_or(2); // 2: Legacy/Direct default
                         let material_push = material_push
-                            .with_debug_path(2) // 2: Legacy/Direct
-                            .with_debug_visualization(self.debug_visualization_enabled);
+                            .with_debug_path(final_path)
+                            .with_debug_visualization(debug_enabled);
                         let ctx = DrawContext {
                             command_buffer: cmd_ctx.handle(),
                             pipeline_layout: pipeline_layout_handle,
@@ -3746,6 +3883,7 @@ impl Renderer {
 
                         let offset = batch_offsets.get(&batch.key).copied().unwrap_or(0);
                         unsafe {
+                            log::info!("DRAW: Direct instanced draw for mesh {} (count: {})", mesh_key, batch.count());
                             self.model_renderer.draw_mesh_instanced(
                                 &ctx,
                                 batch.count() as u32,
@@ -3765,7 +3903,7 @@ impl Renderer {
                 let mesh_index = item.mesh_id;
                 
                 // Skip if already handled by GPU-driven path
-                if self.use_gpu_driven && self.culling_manager.gpu_driven_objects.contains(&mesh_index) {
+                if self.use_gpu_driven && self.indirect_draw_pass.is_some() && self.culling_manager.gpu_driven_objects.contains(&mesh_index) {
                     log::debug!("Mesh {} skipping main legacy path: handled by GPU-driven", item.key);
                     continue;
                 }
@@ -3799,11 +3937,12 @@ impl Renderer {
                     }
                     
                     let material_handle = item.material_handle;
+                    let final_path = debug_path_override.unwrap_or(2); // 2: Legacy
                     let material_push = MaterialPushConstants::new(material_handle)
                         .with_material_buffer_index(self.material_buffer_index)
                         .with_receive_shadows(item.receive_shadows)
-                        .with_debug_path(2) // 2: Legacy (Direct path)
-                        .with_debug_visualization(self.debug_visualization_enabled);
+                        .with_debug_path(final_path)
+                        .with_debug_visualization(debug_enabled);
 
                     let ctx = DrawContext {
                         command_buffer: cmd_ctx.handle(),
@@ -3834,11 +3973,12 @@ impl Renderer {
                     if let Some(uploaded) = self.model_renderer.get(mesh_key) {
                         log::debug!("Transparent batch for mesh {mesh_key} using main legacy path");
 
+                        let final_path = debug_path_override.unwrap_or(2); // 2: Legacy
                         let material_push = MaterialPushConstants::new(batch.key.material_id)
                             .with_material_buffer_index(self.material_buffer_index)
                             .with_receive_shadows(batch.receives_shadows())
-                            .with_debug_path(2) // 2: Legacy (Direct path)
-                            .with_debug_visualization(self.debug_visualization_enabled);
+                            .with_debug_path(final_path)
+                            .with_debug_visualization(debug_enabled);
                         
                         let ctx = DrawContext {
                             command_buffer: cmd_ctx.handle(),
@@ -4156,6 +4296,11 @@ impl Renderer {
                 // Hiz pyramid is built from previous frame's depth
                 hiz.build_pyramid(command_buffer, depth_buffer.image())?;
                 
+                // Update indirect draw pass descriptors with Hi-Z pyramid
+                if let Some(ref indirect) = self.indirect_draw_pass {
+                    indirect.update_hiz_descriptor(hiz);
+                }
+                
                 // Write timestamp after Hi-Z generation
                 if let Some(ref profiler) = self.gpu_profiler {
                     profiler.write_timestamp(command_buffer, crate::renderer::diagnostics::TimingScope::HiZGenerateEnd);
@@ -4343,34 +4488,50 @@ impl Renderer {
                 }
             }
 
-            let clear_values = [
-                vk::ClearValue {
-                    color: vk::ClearColorValue {
-                        float32: [0.0, 0.0, 0.0, 1.0], // 0: Color (HDR or Swapchain)
+            let clear_values = if self.hdr_framebuffer.is_some() {
+                vec![
+                    vk::ClearValue {
+                        color: vk::ClearColorValue {
+                            float32: [0.05, 0.05, 0.1, 1.0], // 0: Color - Deep Space Blue
+                        },
                     },
-                },
-                vk::ClearValue {
-                    color: vk::ClearColorValue {
-                        float32: [0.0, 0.0, 0.0, 0.0], // 1: G-Buffer Normal
+                    vk::ClearValue {
+                        color: vk::ClearColorValue {
+                            float32: [0.0, 0.0, 0.0, 0.0], // 1: G-Buffer Normal
+                        },
                     },
-                },
-                vk::ClearValue {
-                    color: vk::ClearColorValue {
-                        float32: [0.0, 0.0, 0.0, 1.0], // 2: G-Buffer Albedo (Clear to opaque black)
+                    vk::ClearValue {
+                        color: vk::ClearColorValue {
+                            float32: [0.0, 0.0, 0.0, 1.0], // 2: G-Buffer Albedo (Clear to opaque black)
+                        },
                     },
-                },
-                vk::ClearValue {
-                    color: vk::ClearColorValue {
-                        float32: [0.0, 0.0, 0.0, 0.0], // 3: G-Buffer Motion
+                    vk::ClearValue {
+                        color: vk::ClearColorValue {
+                            float32: [0.0, 0.0, 0.0, 0.0], // 3: G-Buffer Motion
+                        },
                     },
-                },
-                vk::ClearValue {
-                    depth_stencil: vk::ClearDepthStencilValue {
-                        depth: 1.0, // 4: Depth
-                        stencil: 0,
+                    vk::ClearValue {
+                        depth_stencil: vk::ClearDepthStencilValue {
+                            depth: 1.0, // 4: Depth
+                            stencil: 0,
+                        },
                     },
-                },
-            ];
+                ]
+            } else {
+                vec![
+                    vk::ClearValue {
+                        color: vk::ClearColorValue {
+                            float32: [1.0, 0.0, 1.0, 1.0], // 0: Swapchain Color - MAGENTA DEBUG
+                        },
+                    },
+                    vk::ClearValue {
+                        depth_stencil: vk::ClearDepthStencilValue {
+                            depth: 1.0, // 1: Depth
+                            stencil: 0,
+                        },
+                    },
+                ]
+            };
 
             let (framebuffer_handle, hdr_attachment) = {
                 let framebuffer = self.framebuffers.get(image_index as usize).ok_or_else(|| {
@@ -4478,6 +4639,18 @@ impl Renderer {
                                 sampler: self.ibl_sampler,
                             };
                             manager.bind_ibl_resources(frame_index, &ibl_resources)?;
+                        } else {
+                            // CRITICAL FIX: Bind fallback Procedural Skybox
+                            // This provides plausible ambient light instead of pitch black
+                            log::debug!("IBL assets missing, using procedural skybox fallback");
+                            let fallback_resources = vulkan::IBLResources {
+                                irradiance_view: self._default_skybox.view(),
+                                prefiltered_view: self._default_skybox.view(),
+                                brdf_lut_view: self._black_texture.view(), // 2D Texture (can't use cube)
+                                skybox_view: self._default_skybox.view(),
+                                sampler: self.ibl_sampler,
+                            };
+                            manager.bind_ibl_resources(frame_index, &fallback_resources)?;
                         }
 
                         cmd_ctx.bind_descriptor_sets(
@@ -4589,33 +4762,13 @@ impl Renderer {
                 vsr.next_frame();
             }
 
-            // --- Post-Processing (Tonemapping & Resolve) ---
-            // CRITICAL FIX: Transition HDR buffer to SHADER_READ_ONLY for sampling in tonemapping shader
-            if let Some(hdr) = &self.hdr_framebuffer {
-                let barrier = vk::ImageMemoryBarrier::default()
-                    .src_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE)
-                    .dst_access_mask(vk::AccessFlags::SHADER_READ)
-                    .old_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
-                    .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
-                    .image(hdr.image())
-                    .subresource_range(vk::ImageSubresourceRange {
-                        aspect_mask: vk::ImageAspectFlags::COLOR,
-                        base_mip_level: 0,
-                        level_count: 1,
-                        base_array_layer: 0,
-                        layer_count: 1,
-                    });
+            // Update post-processing descriptors after VSR completes
+            // This ensures we bind the current frame's output, not the previous frame's
+            self.update_post_descriptors()?;
 
-                self.device.device.cmd_pipeline_barrier(
-                    command_buffer,
-                    vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
-                    vk::PipelineStageFlags::FRAGMENT_SHADER,
-                    vk::DependencyFlags::empty(),
-                    &[],
-                    &[],
-                    &[barrier],
-                );
-            }
+            // --- Post-Processing (Tonemapping & Resolve) ---
+            // NOTE: HDR buffer is already in SHADER_READ_ONLY_OPTIMAL layout
+            // via the render pass final_layout, no manual barrier needed.
 
             // Resolve HDR target to swapchain (always needed even if tonemapping is disabled)
             log::debug!("DEBUG: About to call render_post_processing");
@@ -4713,8 +4866,9 @@ impl Renderer {
     }
 
     /// Enables or disables debug path visualization tints in the shader.
+    /// Deprecated: Use set_debug_mode instead.
     pub fn set_debug_visualization(&mut self, enabled: bool) {
-        self.debug_visualization_enabled = enabled;
+        self.debug_mode = if enabled { DebugMode::Path } else { DebugMode::None };
     }
 
     /// Returns whether tonemapping is enabled
@@ -4867,9 +5021,11 @@ impl Renderer {
 
         // Create Indirect Draw pass
         let mut indirect = IndirectDrawPass::new(Arc::clone(&self.device.device));
-        let manager = self.descriptors.as_ref().ok_or(AshError::VulkanError(
-            "DescriptorManager not initialized".to_string(),
-        ))?;
+        if self.descriptors.is_none() {
+            return Err(AshError::VulkanError(
+                "DescriptorManager not initialized".to_string(),
+            ));
+        }
         let bindless_manager = self.bindless_manager.as_mut().ok_or(AshError::VulkanError(
             "BindlessManager not initialized".to_string(),
         ))?;
@@ -4878,7 +5034,6 @@ impl Renderer {
             indirect.init(
                 &self.alloc.vma,
                 &self.device,
-                manager.frame_layout(),
                 bindless_manager,
                 crate::renderer::indirect_draw::MAX_INDIRECT_OBJECTS,
             );

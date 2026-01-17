@@ -198,6 +198,60 @@ impl DescriptorManager {
         self.frame_layout.handle()
     }
 
+    pub fn bind_defaults(
+        &self,
+        frame_index: usize,
+        default_cube: &vk::DescriptorImageInfo,
+        default_2d: &vk::DescriptorImageInfo,
+        default_shadow: &vk::DescriptorImageInfo,
+    ) -> Result<()> {
+        let descriptor = self.environment_sets.get(frame_index).ok_or_else(|| {
+            AshError::VulkanError("Environment descriptor set index out of bounds".into())
+        })?;
+
+        // 0: Irradiance Map (Cube)
+        descriptor.update_image_at(
+            0,
+            0,
+            *default_cube,
+            vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+        )?;
+        // 1: Prefiltered Map (Cube)
+        descriptor.update_image_at(
+            1,
+            0,
+            *default_cube,
+            vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+        )?;
+        // 2: BRDF LUT (2D)
+        descriptor.update_image_at(
+            2,
+            0,
+            *default_2d,
+            vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+        )?;
+        // 3: Skybox Map (Cube)
+        descriptor.update_image_at(
+            3,
+            0,
+            *default_cube,
+            vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+        )?;
+        // 4: Shadow Map (2D) - Binds default shadow map (white/black)
+        descriptor.update_image_at(
+            4,
+            0,
+            *default_shadow,
+            vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+        )?;
+
+        Ok(())
+    }
+
+    pub fn environment_set_count(&self) -> usize {
+        self.environment_sets.len()
+    }
+
     fn create_descriptor_sets(
         count: u32,
         layout: &super::descriptor_layout::DescriptorSetLayout,
