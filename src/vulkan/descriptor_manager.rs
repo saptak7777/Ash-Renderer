@@ -47,6 +47,8 @@ impl DescriptorManager {
         // 2: BRDF LUT
         // 3: Skybox Map
         // 4: Shadow Map
+        // 5: VSM Page Table
+        // 6: VSM Physical Cache
         let environment_layout = DescriptorSetLayoutBuilder::new()
             .add_binding(
                 0, // Irradiance Map
@@ -74,6 +76,18 @@ impl DescriptorManager {
             )
             .add_binding(
                 4, // Shadow Map
+                vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+                vk::ShaderStageFlags::FRAGMENT,
+                1,
+            )
+            .add_binding(
+                5, // VSM Page Table
+                vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+                vk::ShaderStageFlags::FRAGMENT,
+                1,
+            )
+            .add_binding(
+                6, // VSM Physical Cache
                 vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
                 vk::ShaderStageFlags::FRAGMENT,
                 1,
@@ -166,6 +180,48 @@ impl DescriptorManager {
         Ok(())
     }
 
+    /// Bind VSM resources (Page Table and Physical Cache) to environment descriptor set
+    pub fn bind_vsm_resources(
+        &self,
+        frame_index: usize,
+        page_table_view: vk::ImageView,
+        page_table_sampler: vk::Sampler,
+        physical_cache_view: vk::ImageView,
+        physical_cache_sampler: vk::Sampler,
+    ) -> Result<()> {
+        let descriptor = self.environment_sets.get(frame_index).ok_or_else(|| {
+            AshError::VulkanError("Environment descriptor set index out of bounds".into())
+        })?;
+
+        // Binding 5: VSM Page Table (R32_UINT)
+        let page_table_info = vk::DescriptorImageInfo {
+            sampler: page_table_sampler,
+            image_view: page_table_view,
+            image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+        };
+        descriptor.update_image_at(
+            5,
+            0,
+            page_table_info,
+            vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+        )?;
+
+        // Binding 6: VSM Physical Cache (R32_FLOAT)
+        let physical_cache_info = vk::DescriptorImageInfo {
+            sampler: physical_cache_sampler,
+            image_view: physical_cache_view,
+            image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+        };
+        descriptor.update_image_at(
+            6,
+            0,
+            physical_cache_info,
+            vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+        )?;
+
+        Ok(())
+    }
+
     /// Bind IBL resources to the environment descriptor set
     pub fn bind_ibl_resources(
         &self,
@@ -180,12 +236,18 @@ impl DescriptorManager {
     }
 
     pub fn recreate_frame_sets(&mut self, frame_count: u32) -> Result<()> {
+        if self.frame_sets.len() == frame_count as usize {
+            return Ok(());
+        }
         self.frame_sets =
             Self::create_descriptor_sets(frame_count, &self.frame_layout, &mut self.allocator)?;
         Ok(())
     }
 
     pub fn recreate_environment_sets(&mut self, frame_count: u32) -> Result<()> {
+        if self.environment_sets.len() == frame_count as usize {
+            return Ok(());
+        }
         self.environment_sets = Self::create_descriptor_sets(
             frame_count,
             &self.environment_layout,
@@ -204,6 +266,7 @@ impl DescriptorManager {
         default_cube: &vk::DescriptorImageInfo,
         default_2d: &vk::DescriptorImageInfo,
         default_shadow: &vk::DescriptorImageInfo,
+        default_uint_2d: &vk::DescriptorImageInfo, // R32_UINT for VSM page table
     ) -> Result<()> {
         let descriptor = self.environment_sets.get(frame_index).ok_or_else(|| {
             AshError::VulkanError("Environment descriptor set index out of bounds".into())
@@ -242,6 +305,20 @@ impl DescriptorManager {
             4,
             0,
             *default_shadow,
+            vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+        )?;
+        // 5: VSM Page Table (2D UINT) - Default to 0xFFFFFFFF (invalid page)
+        descriptor.update_image_at(
+            5,
+            0,
+            *default_uint_2d,
+            vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+        )?;
+        // 6: VSM Physical Cache (2D) - Default to white (no shadow)
+        descriptor.update_image_at(
+            6,
+            0,
+            *default_2d,
             vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
         )?;
 

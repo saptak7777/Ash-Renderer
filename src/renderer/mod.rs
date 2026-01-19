@@ -34,9 +34,6 @@ pub mod resource_pool;
 pub mod resource_registry;
 pub mod resources;
 pub mod sdfgi_pass;
-pub mod shadow_boundary;
-pub mod shadow_error;
-pub mod shadow_map;
 pub mod skinned_vertex;
 pub mod ssgi_pass;
 pub mod temporal_aa;
@@ -70,9 +67,9 @@ pub use vsr_pass::{VsrConfig, VsrPass, VsrQuality};
 
 // Re-export from resources submodule
 pub use resources::{
-    BufferAllocation, BufferHandle, BufferPool, Camera, CascadedShadowMap, DepthBuffer,
-    DescriptorSetHandle, ImageHandle, InstanceBuffer, Material, MaterialHandle, MaterialManager,
-    Mesh, MvpMatrices, ObjectMotionData, PipelineHandle, TemporalCamera, Texture, TextureData,
-    Transform, UniformBuffer, Vertex, VertexBuffer, MVP,
+    BufferAllocation, BufferHandle, BufferPool, Camera, DepthBuffer, DescriptorSetHandle,
+    ImageHandle, InstanceBuffer, Material, MaterialHandle, MaterialManager, Mesh, MvpMatrices,
+    ObjectMotionData, PipelineHandle, TemporalCamera, Texture, TextureData, Transform,
+    UniformBuffer, Vertex, VertexBuffer, MVP,
 };
 pub use skinned_vertex::SkinnedVertex;

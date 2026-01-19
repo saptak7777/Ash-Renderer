@@ -1,0 +1,140 @@
+#version 450
+#extension GL_EXT_nonuniform_qualifier : enable
+
+// VSM Analysis Compute Shader
+// Reads depth buffer and determines which virtual shadow pages are needed
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+// Input: Depth buffer from G-Buffer
+layout(set = 0, binding = 0) uniform sampler2D depthBuffer;
+
+// Input: VSM metadata
+layout(set = 0, binding = 1) uniform VsmMetadata {
+    uint virtual_resolution;
+    uint physical_resolution;
+    uint page_size;
+    uint page_table_resolution;
+    uint physical_page_count;
+    uint frame_index;
+    uint debug_flags;
+    uint _padding;
+} vsm;
+
+// Input: Camera matrices
+layout(set = 0, binding = 2) uniform CameraData {
+    mat4 view;
+    mat4 projection;
+    mat4 inv_view_proj;
+    vec4 camera_pos;
+} camera;
+
+// Input: Light data
+layout(set = 0, binding = 3) uniform LightData {
+    mat4 light_view_proj;
+    vec4 light_direction;
+} light;
+
+// Input/Output: Page table (read to check if page exists)
+layout(set = 0, binding = 4, r32ui) uniform uimage2D pageTable;
+
+// Output: Request buffer (atomic counter + requests)
+layout(std430, set = 0, binding = 5) buffer RequestBuffer {
+    uint request_count;
+    uint _padding[3];
+    // PageRequest entries follow
+    // struct PageRequest { uint virtual_x, virtual_y; float priority; uint _padding; }
+} requests;
+
+layout(std430, set = 0, binding = 6) buffer RequestData {
+    uvec4 request_data[]; // [virtual_x, virtual_y, priority_bits, padding]
+} request_entries;
+
+// Constants
+const uint INVALID_PAGE = 0xFFFFFFFF;
+const uint MAX_REQUESTS = 1024;
+
+// Reconstruct world position from depth
+vec3 reconstructWorldPos(vec2 uv, float depth) {
+    // NDC coordinates
+    vec4 ndc = vec4(uv * 2.0 - 1.0, depth, 1.0);
+    
+    // Transform to world space
+    vec4 worldPos = camera.inv_view_proj * ndc;
+    return worldPos.xyz / worldPos.w;
+}
+
+// Calculate virtual page coordinates from light-space position
+ivec2 calculateVirtualPage(vec3 worldPos) {
+    // Transform to light space
+    vec4 lightSpace = light.light_view_proj * vec4(worldPos, 1.0);
+    vec3 ndc = lightSpace.xyz / lightSpace.w;
+    
+    // Convert to UV [0, 1]
+    vec2 uv = ndc.xy * 0.5 + 0.5;
+    
+    // Clamp to valid range
+    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) {
+        return ivec2(-1, -1);
+    }
+    
+    // Calculate virtual page coordinates
+    vec2 virtualPageFloat = uv * float(vsm.page_table_resolution);
+    return ivec2(virtualPageFloat);
+}
+
+void main() {
+    // Get screen coordinates
+    ivec2 screenCoord = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 screenSize = textureSize(depthBuffer, 0);
+    
+    // Early exit if outside screen bounds
+    if (screenCoord.x >= screenSize.x || screenCoord.y >= screenSize.y) {
+        return;
+    }
+    
+    // Sample depth
+    vec2 uv = (vec2(screenCoord) + 0.5) / vec2(screenSize);
+    float depth = texture(depthBuffer, uv).r;
+    
+    // Skip background (depth = 1.0)
+    if (depth >= 0.9999) {
+        return;
+    }
+    
+    // Reconstruct world position
+    vec3 worldPos = reconstructWorldPos(uv, depth);
+    
+    // Calculate which virtual page this pixel needs
+    ivec2 virtualPage = calculateVirtualPage(worldPos);
+    
+    // Skip invalid pages (outside shadow frustum)
+    if (virtualPage.x < 0 || virtualPage.y < 0 || 
+        virtualPage.x >= int(vsm.page_table_resolution) || 
+        virtualPage.y >= int(vsm.page_table_resolution)) {
+        return;
+    }
+    
+    // Check if page is already allocated
+    uint pageEntry = imageLoad(pageTable, virtualPage).r;
+    
+    // If page is not allocated (INVALID_PAGE), request it
+    if (pageEntry == INVALID_PAGE) {
+        // Calculate priority (closer to camera = higher priority)
+        float distToCamera = length(worldPos - camera.camera_pos.xyz);
+        float priority = 1.0 / (distToCamera + 1.0);
+        
+        // Atomically add request (with bounds check)
+        uint requestIndex = atomicAdd(requests.request_count, 1);
+        
+        if (requestIndex < MAX_REQUESTS) {
+            // Write request data
+            request_entries.request_data[requestIndex] = uvec4(
+                uint(virtualPage.x),
+                uint(virtualPage.y),
+                floatBitsToUint(priority),
+                0
+            );
+        }
+    }
+}

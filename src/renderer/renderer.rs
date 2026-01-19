@@ -1,4 +1,4 @@
-﻿use crate::{
+use crate::{
     renderer::{
         async_readback::AsyncReadbackManager,
         diagnostics::{
@@ -6,7 +6,8 @@
         },
         features::{
             AutoRotateFeature, DirectionalLight, FeatureFrameContext, FeatureManager,
-            FeatureRenderContext, PointLight, RenderFeature, ShadowFeature, SpotLight,
+            FeatureRenderContext, PointLight, SpotLight,
+            VsmFeature, default_vsm_config,
         },
         forward_plus_integration::ForwardPlusIntegration,
         fullscreen_pass, hdr_framebuffer,
@@ -180,6 +181,7 @@ struct RendererResources {
     black_texture: Texture,
     default_skybox: Texture, // Procedural skybox
     default_cube_black: Texture,
+    vsm_default_uint: Texture,
     material_storage_buffer: StorageBuffer<resources::uniform::MaterialUniform>,
     instance_buffers: Vec<resources::InstanceBuffer>,
 }
@@ -381,6 +383,7 @@ pub struct Renderer {
     _black_texture: Texture,
     _default_skybox: Texture, // Procedural skybox for IBL fallback
     _default_cube_black: Texture, // Keep alive
+    _vsm_default_uint: Texture, // Keep alive (VSM bind default)
     model_renderer: ModelRenderer,
     draw_items: Vec<DrawItem>,
     swapchain: Option<vulkan::SwapchainWrapper>,
@@ -430,10 +433,8 @@ pub struct Renderer {
     gpu_profiler: Option<GpuProfiler>,
     async_readback: Option<AsyncReadbackManager>,
     diagnostics_overlay: DiagnosticsOverlay,
-    // Shadows
-    shadow_feature: ShadowFeature,
-    shadow_pipeline: Option<vulkan::Pipeline>,
-    shadow_pipeline_layout: Option<vulkan::PipelineLayout>,
+    // Virtual Shadow Maps
+    vsm_feature: Option<VsmFeature>,
     // Bindless textures
     bindless_manager: Option<vulkan::BindlessManager>,
     // Forward+ lighting
@@ -645,30 +646,9 @@ impl Renderer {
             features.set_device(Arc::clone(&device.device));
             features.add_feature(AutoRotateFeature::new());
 
-            // Initialize Shadow Feature
-            let mut shadow_feature = ShadowFeature::new();
-            if shadow_feature.is_active() || shadow_feature.config.enabled {
-                match crate::renderer::shadow_map::ShadowMap::new_with_fallback(
-                    Arc::clone(&device.device),
-                    device.memory_properties,
-                    shadow_feature.config.clone(),
-                ) {
-                    Ok((shadow_map, resolution)) => {
-                        shadow_feature.set_shadow_map(shadow_map);
-                        log::info!("Shadow map initialized successfully at {resolution}x{resolution}");
-                    }
-                    Err(e) => {
-                        log::error!("Shadow map initialization failed: {e}");
-                        for action in e.suggested_actions() {
-                            log::error!("  â†’ Suggested Action: {action}");
-                        }
-                        return Err(AshError::VulkanError(format!(
-                            "Shadow map allocation failed: {}",
-                            e.user_message()
-                        )));
-                    }
-                }
-            }
+
+            // VSM replaces legacy shadow system
+            // Initialize Pipeline Cache
             let pipeline_cache = PipelineCache::new(Arc::clone(&device.device))?;
             let renderer_config = RendererConfig::default();
             let texture_compression = renderer_config.texture_compression;
@@ -732,6 +712,7 @@ impl Renderer {
                 black_texture,
                 default_skybox,
                 default_cube_black,
+                vsm_default_uint,
                 material_storage_buffer,
                 instance_buffers,
             } = renderer_resources;
@@ -753,6 +734,11 @@ impl Renderer {
                     image_view: default_texture.view(), // White for shadow = lit
                     sampler: default_texture.sampler(),
                 };
+                let vsm_uint_info = vk::DescriptorImageInfo {
+                    image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                    image_view: vsm_default_uint.view(),
+                    sampler: vsm_default_uint.sampler(), // NEAREST
+                };
 
                 for i in 0..descriptor_manager.environment_set_count() {
                     descriptor_manager.bind_defaults(
@@ -760,6 +746,7 @@ impl Renderer {
                         &cube_info,
                         &tex_2d_info,
                         &shadow_info,
+                        &vsm_uint_info,
                     )?;
                 }
             }
@@ -850,20 +837,22 @@ impl Renderer {
                     &set_layouts,
                 )?;
 
-            // Create Shadow Pipeline
-            let (shadow_pipeline, shadow_pipeline_layout) =
-                if let Some(shadow_map) = shadow_feature.shadow_map() {
-                    let (p, l) = Self::create_shadow_pipeline(
-                        &device,
-                        pipeline_cache.handle(),
-                        shadow_map,
-                        descriptor_manager.frame_layout(),
-                        bindless_manager.layout(),
-                    )?;
-                    (Some(p), Some(l))
-                } else {
-                    (None, None)
-                };
+            log::info!("Initializing VSM Feature...");
+            let vsm_feature = match VsmFeature::new(
+                Arc::clone(&device.device),
+                Arc::clone(&alloc),
+                default_vsm_config(),
+                frame_syncs.len() as u32,
+            ) {
+                Ok(vsm) => {
+                    log::info!("VSM Feature initialized successfully.");
+                    Some(vsm)
+                },
+                Err(e) => {
+                    log::error!("Failed to initialize VSM feature: {e}");
+                    None
+                }
+            };
 
             // DELETED: Default cube creation. Renderer now starts empty.
             // let mut mesh = Mesh::create_cube();
@@ -955,6 +944,7 @@ impl Renderer {
                 _black_texture: black_texture,
                 _default_skybox: default_skybox,
                 _default_cube_black: default_cube_black,
+                _vsm_default_uint: vsm_default_uint,
                 model_renderer,
                 draw_items: Vec::new(),
                 swapchain: Some(swapchain),
@@ -1004,9 +994,7 @@ impl Renderer {
                 gpu_profiler: None,
                 async_readback: None,
                 diagnostics_overlay: DiagnosticsOverlay::new(),
-                shadow_feature,
-                shadow_pipeline,
-                shadow_pipeline_layout,
+                vsm_feature,
                 bindless_manager: Some(bindless_manager),
                 forward_plus: Some(forward_plus),
                 hiz_pass: None,
@@ -1152,9 +1140,7 @@ impl Renderer {
             if let Some(manager) = renderer.descriptors.as_ref() {
                 for index in 0..manager.frame_set_count() {
                     // Initial Shadow Map binding
-                    if let Some(shadow_map) = renderer.shadow_feature.shadow_map() {
-                        manager.bind_shadow_map(index, shadow_map.depth_image_view, shadow_map.sampler)?;
-                    }
+
 
                     // Initial IBL binding (dummy/default textures until baked)
                     let dummy_resources = crate::vulkan::IBLResources {
@@ -1502,6 +1488,15 @@ impl Renderer {
             device.graphics_queue,
         )?;
 
+        // Create R32_UINT 1x1 texture for VSM page table default (invalid page = 0xFFFFFFFF)
+        // CRITICAL: Uses NEAREST filtering (required for integer textures)
+        let vsm_default_uint = Texture::create_vsm_default_uint(
+            Arc::clone(alloc),
+            Arc::clone(&device.device),
+            command_pool,
+            device.graphics_queue,
+        )?;
+
         // Initialize material storage buffer (Bindless-ready)
         let max_materials = 1024;
         let mut material_storage_buffer = unsafe {
@@ -1551,6 +1546,7 @@ impl Renderer {
             black_texture,
             default_skybox,
             default_cube_black,
+            vsm_default_uint,
             material_storage_buffer,
             instance_buffers,
         })
@@ -1819,60 +1815,7 @@ impl Renderer {
         Ok((pipeline_layout, pipeline_layout_id, pipeline, pipeline_id))
     }
 
-    unsafe fn create_shadow_pipeline(
-        device: &vulkan::VulkanDevice,
-        pipeline_cache: vk::PipelineCache,
-        shadow_map: &crate::renderer::shadow_map::ShadowMap,
-        frame_layout: vk::DescriptorSetLayout,
-        bindless_layout: vk::DescriptorSetLayout,
-    ) -> Result<(vulkan::Pipeline, vulkan::PipelineLayout)> {
-        let shadow_push_range = vk::PushConstantRange {
-            stage_flags: vk::ShaderStageFlags::VERTEX,
-            offset: 0,
-            size: 144, // lightSpaceMatrix(64) + model(64) + 4*u32(16)
-        };
 
-        let shadow_push_range_frag = vk::PushConstantRange {
-            stage_flags: vk::ShaderStageFlags::FRAGMENT,
-            offset: 144,
-            size: 4, // base_color_index
-        };
-
-        let shadow_pipeline_layout = vulkan::PipelineLayout::builder(Arc::clone(&device.device))
-            .add_push_constant(shadow_push_range)
-            .add_push_constant(shadow_push_range_frag)
-            .add_set_layout(frame_layout) // Set 0: Frame
-            .add_set_layout(bindless_layout) // Set 1: Bindless (was 2)
-            .build()?;
-
-        let shadow_builder = vulkan::Pipeline::builder(Arc::clone(&device.device))
-            .with_layout(shadow_pipeline_layout.handle())
-            .with_render_pass(shadow_map.render_pass)
-            .with_extent(vk::Extent2D {
-                width: shadow_map.res,
-                height: shadow_map.res,
-            })
-            .with_pipeline_cache(pipeline_cache)
-            .with_depth_format(vk::Format::D32_SFLOAT)
-            .with_cull_mode(vk::CullModeFlags::FRONT)
-            .with_vertex_input(
-                vec![crate::renderer::skinned_vertex::SkinnedVertex::binding_description()],
-                crate::renderer::skinned_vertex::SkinnedVertex::attribute_descriptions().to_vec(),
-            )
-            .add_shader_from_bytes(
-                include_bytes!(concat!(env!("OUT_DIR"), "/shadow.vert.spv")),
-                vk::ShaderStageFlags::VERTEX,
-                "main",
-            )?
-            .add_shader_from_bytes(
-                include_bytes!(concat!(env!("OUT_DIR"), "/shadow.frag.spv")),
-                vk::ShaderStageFlags::FRAGMENT,
-                "main",
-            )?;
-
-        let shadow_pipeline = shadow_builder.build()?;
-        Ok((shadow_pipeline, shadow_pipeline_layout))
-    }
 
     fn worker_index_for_frame(&self, frame_index: usize) -> usize {
         compute_worker_index(self.worker_count, frame_index)
@@ -3508,6 +3451,12 @@ impl Renderer {
     }
 
     fn recreate_descriptor_sets(&mut self) -> Result<()> {
+        unsafe {
+            self.device.device.device_wait_idle().map_err(|e| {
+                AshError::VulkanError(format!("Failed to wait for device idle: {e:?}"))
+            })?;
+        }
+
         if let Some(manager) = self.descriptors.as_mut() {
             let count = self.frame_syncs.len() as u32;
             manager.recreate_frame_sets(count)?;
@@ -3525,45 +3474,80 @@ impl Renderer {
 
             // CRITICAL FIX: Recreate bindless manager descriptor set
             // This was the root cause of black screens during resize
+            // NON-CRITICAL: Bindless manager size is fixed, no need to recreate on resize.
+            // Disabling to prevent potential driver crashes from heavy updates.
+            /*
             if let Some(bindless) = self.bindless_manager.as_mut() {
                 log::info!("Recreating bindless descriptor set after swapchain resize...");
                 bindless.recreate(manager.allocator_mut())?;
             }
+            */
 
             // CRITICAL FIX: Re-bind Environment (Set 2) resources after recreation
             // Without this, shadow mapping and IBL break after resize
-            for index in 0..manager.frame_set_count() {
-                // Re-bind Shadow Map
-                if let Some(shadow_map) = self.shadow_feature.shadow_map() {
-                    manager.bind_shadow_map(index, shadow_map.depth_image_view, shadow_map.sampler)?;
-                }
+            // OPTIMIZATION: If DescriptorManager didn't recreate sets (count matched), 
+            // defaults are already bound. Re-binding them is redundant.
+            // If frame count changed, we *should* bind, but let's test stability first.
+            /*
+            // 1. Bind Defaults (Shadow Map, VSM Page Table, etc.)
+            let cube_info = vk::DescriptorImageInfo {
+                image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                image_view: self._default_cube_black.view(),
+                sampler: self._default_cube_black.sampler(),
+            };
+            let tex_2d_info = vk::DescriptorImageInfo {
+                image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                image_view: self._black_texture.view(),
+                sampler: self._black_texture.sampler(),
+            };
+            let shadow_info = vk::DescriptorImageInfo {
+                image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                image_view: self._default_texture.view(),
+                sampler: self._default_texture.sampler(),
+            };
+            let vsm_uint_info = vk::DescriptorImageInfo {
+                image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                image_view: self._vsm_default_uint.view(),
+                sampler: self._vsm_default_uint.sampler(),
+            };
 
-                // Re-bind IBL Resources if they exist
+            for index in 0..manager.environment_set_count() {
+                manager.bind_defaults(
+                    index,
+                    &cube_info,
+                    &tex_2d_info,
+                    &shadow_info,
+                    &vsm_uint_info,
+                )?;
+            }
+            */
+
+            // 2. Bind IBL Resources (Binding 0-3)
+            for index in 0..manager.frame_set_count() {
                 if let (Some(irr), Some(pre), Some(brdf)) = (
                     &self.irradiance_map,
                     &self.prefiltered_map,
                     &self.brdf_lut_pass,
                 ) {
                     let resources = crate::vulkan::IBLResources {
-                    irradiance_view: irr.view(),
-                    prefiltered_view: pre.view(),
-                    brdf_lut_view: brdf.get_lut_view().unwrap_or(self._default_texture.view()),
-                    skybox_view: irr.view(), // Fallback to irradiance map for now
-                    sampler: self.ibl_sampler,
-                };
+                        irradiance_view: irr.view(),
+                        prefiltered_view: pre.view(),
+                        brdf_lut_view: brdf.get_lut_view().unwrap_or(self._default_texture.view()),
+                        skybox_view: irr.view(), // Fallback to irradiance map for now
+                        sampler: self.ibl_sampler,
+                    };
                     manager.bind_ibl_resources(index, &resources)?;
                 } else {
                     // Fallback: Bind BRDF LUT and black textures if IBL is not loaded yet
-                    // Black texture ensures no ambient light is added when IBL is not loaded
                     let dummy_resources = crate::vulkan::IBLResources {
-                    irradiance_view: self._black_texture.view(),
-                    prefiltered_view: self._black_texture.view(),
-                    brdf_lut_view: self.brdf_lut_pass.as_ref()
-                        .and_then(|p| p.get_lut_view())
-                        .unwrap_or(self._black_texture.view()),
-                    skybox_view: self._black_texture.view(),
-                    sampler: self.ibl_sampler,
-                };
+                        irradiance_view: self._black_texture.view(),
+                        prefiltered_view: self._black_texture.view(),
+                        brdf_lut_view: self.brdf_lut_pass.as_ref()
+                            .and_then(|p| p.get_lut_view())
+                            .unwrap_or(self._black_texture.view()),
+                        skybox_view: self._black_texture.view(),
+                        sampler: self.ibl_sampler,
+                    };
                     manager.bind_ibl_resources(index, &dummy_resources)?;
                 }
             }
@@ -3597,156 +3581,7 @@ impl Renderer {
     /// - `view`: View matrix (camera look-at)
     /// - `projection`: Projection matrix (perspective/orthographic)
     /// - `camera_pos`: Camera world position (for lighting calculations)
-    pub fn render_shadow_pass(
-        &mut self,
-        cmd_ctx: &CommandBufferContext,
-        frame_index: usize,
-        light_space_matrix: Mat4,
-        batch_offsets: &HashMap<BatchKey, u32>,
-    ) -> Result<()> {
-        let (shadow_pipeline, shadow_layout) = if let (Some(pipeline), Some(layout)) = (
-            self.shadow_pipeline.as_ref(),
-            self.shadow_pipeline_layout.as_ref(),
-        ) {
-            (pipeline, layout)
-        } else {
-            return Ok(());
-        };
 
-        let shadow_map = if let Some(map) = self.shadow_feature.shadow_map() {
-            map
-        } else {
-            return Ok(());
-        };
-
-        let clear_values = [vk::ClearValue {
-            depth_stencil: vk::ClearDepthStencilValue {
-                depth: 1.0,
-                stencil: 0,
-            },
-        }];
-
-        let render_pass_begin = vk::RenderPassBeginInfo::default()
-            .render_pass(shadow_map.render_pass)
-            .framebuffer(shadow_map.framebuffer)
-            .render_area(shadow_map.scissor())
-            .clear_values(&clear_values);
-
-        cmd_ctx.begin_render_pass(&render_pass_begin, vk::SubpassContents::INLINE);
-        cmd_ctx.bind_pipeline(vk::PipelineBindPoint::GRAPHICS, shadow_pipeline.pipeline);
-
-        cmd_ctx.set_viewport(0, &[shadow_map.viewport()]);
-        cmd_ctx.set_scissor(0, &[shadow_map.scissor()]);
-
-        // Bind Descriptor Sets for Shadows
-        if let Some(manager) = self.descriptors.as_ref() {
-            if let Some(frame_set) = manager.frame_set(frame_index) {
-                cmd_ctx.bind_descriptor_sets(
-                    vk::PipelineBindPoint::GRAPHICS,
-                    shadow_layout.handle(),
-                    0,
-                    &[frame_set],
-                    &[],
-                );
-            }
-        }
-
-        if let Some(ref bindless) = self.bindless_manager {
-            cmd_ctx.bind_descriptor_sets(
-                vk::PipelineBindPoint::GRAPHICS,
-                shadow_layout.handle(),
-                1,
-                &[bindless.descriptor_set()],
-                &[],
-            );
-        }
-
-        // --- Shadow Rendering Paths ---
-
-        // METHOD A: GPU-Driven Instancing (Batched)
-        // This path handles high-performance instanced rendering of static shadow casters.
-        if self.use_gpu_driven {
-            for batch in self.instancing_manager.shadow_batches() {
-                let mesh_data = if let Some(m) = self.mesh_data.get(batch.key.mesh_id as usize) {
-                    m
-                } else {
-                    continue;
-                };
-
-                if let Some(uploaded) = self.model_renderer.get(&mesh_data.name) {
-                    if let Some(&first_instance) = batch_offsets.get(&batch.key) {
-                        log::debug!("Mesh {} using shadow GPU-driven path", mesh_data.name);
-                        let push = crate::renderer::model_renderer::ShadowPushConstants {
-                            light_space_matrix: crate::renderer::model_renderer::Mat4Push::from(light_space_matrix),
-                            model: crate::renderer::model_renderer::Mat4Push::from(glam::Mat4::IDENTITY),
-                            joint_offset: 0,
-                            use_instancing: 1,
-                            instance_buffer_index: self.instance_buffer_indices[frame_index],
-                            joint_buffer_index: 0,
-                            base_color_index: mesh_data.texture_indices[0],
-                            _padding: [0; 3],
-                        };
-
-                        unsafe {
-                            self.model_renderer.draw_mesh_instanced_shadow(
-                                cmd_ctx.handle(),
-                                shadow_layout.handle(),
-                                uploaded,
-                                batch.count() as u32,
-                                first_instance,
-                                &push,
-                            );
-                        }
-                    }
-                }
-            }
-        }
-
-        // METHOD B: Legacy / Direct Rendering (Non-batched)
-        // This path handles skinned meshes, single instances, and as a fallback
-        // for objects not currently managed by the GPU-driven system.
-        for item in &self.draw_items {
-            let mesh_index = item.mesh_id;
-            
-            // Skip if not a shadow caster
-            if !self.culling_manager.is_shadow_caster(mesh_index) {
-                continue;
-            }
-
-            // GPU-Driven Path: Skip if already handled by the high-performance path
-            if self.use_gpu_driven && self.culling_manager.gpu_driven_objects.contains(&mesh_index) {
-                log::debug!("Mesh {mesh_index} skipping shadow legacy path: handled by GPU-driven");
-                continue;
-            }
-
-            log::debug!("Mesh {mesh_index} using shadow legacy path");
-
-            if let Some(uploaded) = self.model_renderer.get(&item.key) {
-                let push = crate::renderer::model_renderer::ShadowPushConstants {
-                    light_space_matrix: crate::renderer::model_renderer::Mat4Push::from(light_space_matrix),
-                    model: crate::renderer::model_renderer::Mat4Push::from(item.transform),
-                    joint_offset: item.joint_offset,
-                    use_instancing: 0,
-                    instance_buffer_index: 0,
-                    joint_buffer_index: if item.is_skinned { self.joint_buffer_indices[frame_index] } else { 0 },
-                    base_color_index: item.texture_indices[0],
-                    _padding: [0; 3],
-                };
-
-                unsafe {
-                    self.model_renderer.draw_mesh_shadow(
-                        cmd_ctx.handle(),
-                        shadow_layout.handle(),
-                        uploaded,
-                        &push,
-                    );
-                }
-            }
-        }
-
-        cmd_ctx.end_render_pass();
-        Ok(())
-    }
 
     pub fn render_main_pass(
         &mut self,
@@ -3764,10 +3599,7 @@ impl Renderer {
         // --- Main Pass Rendering Paths ---
 
         // Calculate shadow boundary parameters once per frame
-        let shadow_boundary = self.shadow_feature
-            .shadow_map()
-            .map(|sm| crate::renderer::shadow_boundary::ShadowBoundaryParams::from(sm.boundary_config))
-            .unwrap_or_default();
+
 
         // Resolve global debug state
         let (debug_enabled, debug_path_override) = match self.debug_mode {
@@ -3846,7 +3678,7 @@ impl Renderer {
                             material: &material_push,
                             instance_buffer_index: indirect.object_buffer_index().unwrap_or(0),
                             joint_buffer_index: self.joint_buffer_indices[frame_index],
-                            shadow_boundary,
+
                         };
                         unsafe {
                             self.model_renderer.draw_mesh_indirect_count(
@@ -3878,7 +3710,7 @@ impl Renderer {
                             material: &material_push,
                             instance_buffer_index: self.instance_buffer_indices[frame_index],
                             joint_buffer_index: self.joint_buffer_indices[frame_index],
-                            shadow_boundary,
+
                         };
 
                         let offset = batch_offsets.get(&batch.key).copied().unwrap_or(0);
@@ -3951,7 +3783,7 @@ impl Renderer {
                         material: &material_push,
                         instance_buffer_index: self.instance_buffer_indices[frame_index],
                         joint_buffer_index: self.joint_buffer_indices[frame_index],
-                        shadow_boundary,
+
                     };
 
                     unsafe {
@@ -3987,7 +3819,7 @@ impl Renderer {
                             material: &material_push,
                             instance_buffer_index: self.instance_buffer_indices[frame_index],
                             joint_buffer_index: self.joint_buffer_indices[frame_index],
-                            shadow_boundary,
+
                         };
 
                         let offset = batch_offsets.get(&batch.key).copied().unwrap_or(0);
@@ -4047,7 +3879,7 @@ impl Renderer {
                         material: &material_push,
                         instance_buffer_index: self.instance_buffer_indices[frame_index],
                         joint_buffer_index: self.joint_buffer_indices[frame_index],
-                        shadow_boundary,
+
                     };
 
                     unsafe {
@@ -4070,8 +3902,9 @@ impl Renderer {
         self.set_light_direction(direction);
     }
 
-    pub fn set_light_direction(&mut self, direction: Vec3) {
-        self.shadow_feature.set_light_direction(direction);
+    pub fn set_light_direction(&mut self, _direction: Vec3) {
+        // Legacy shadow feature removed. VSM handles light direction internally or via scene updates.
+        // self.shadow_feature.set_light_direction(direction);
     }
 
     /// Update TAA configuration with validation, metrics, and resource management.
@@ -4340,7 +4173,7 @@ impl Renderer {
                     elapsed_seconds: elapsed,
                 };
                 self.features.before_frame(&mut feature_ctx);
-                self.shadow_feature.before_frame(&mut feature_ctx);
+
 
                 // Matrices provided via function arguments.
                 let matrices = uniform_buffer.matrices_mut();
@@ -4359,7 +4192,7 @@ impl Renderer {
                 matrices.set_lighting(&self.scene_lighting);
 
                 // Set light-space matrix for shadow mapping
-                let light_space_matrix = self.shadow_feature.light_space_matrix();
+                let light_space_matrix = glam::Mat4::IDENTITY; // VSM uses internal matrices
                 matrices.set_light_space_matrix(light_space_matrix);
                 // REDUNDANT OVERWRITE REMOVED: Using pre-calculated normal matrix from transform_system
                 // matrices.normal_matrix = matrices.model.inverse().transpose();
@@ -4464,8 +4297,7 @@ impl Renderer {
             }
 
             // Shadow Pass
-            let light_space_matrix = self.shadow_feature.light_space_matrix();
-            self.render_shadow_pass(&cmd_ctx, frame_index, light_space_matrix, &batch_offsets)?;
+
 
             // --- Light Culling Compute Dispatch ---
             if let Some(ref mut fp_integration) = self.forward_plus {
@@ -4618,13 +4450,7 @@ impl Renderer {
 
                     // Bind Global Environment descriptor (Set 2: ShadowMap + IBL)
                     if let Some(env_set) = manager.environment_set(frame_index) {
-                        if let Some(shadow_map) = self.shadow_feature.shadow_map() {
-                            manager.bind_shadow_map(
-                                frame_index,
-                                shadow_map.depth_image_view,
-                                shadow_map.sampler,
-                            )?;
-                        }
+
 
                         if let (Some(irradiance), Some(prefilter), Some(brdf_view)) = (
                             &self.irradiance_map,
@@ -5594,6 +5420,11 @@ impl Drop for Renderer {
             self.cleanup_framebuffers(); // Drains post_framebuffers
             self.cleanup_render_pass();  // Drains hdr_render_pass
             self.cleanup_pipeline();
+
+            // Cleanup VSM (Explicit)
+            if let Some(mut vsm) = self.vsm_feature.take() {
+                unsafe { vsm.destroy(); }
+            }
 
             self.flush_old_swapchains();
 

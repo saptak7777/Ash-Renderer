@@ -68,12 +68,14 @@ layout(std430, set = 1, binding = 1) readonly buffer MaterialBuffer {
 // Tints SHOULD be in Bindless (Set 1) if they are storage buffers.
 // For now, I'll rely on MaterialUniform's fields.
 
-// Set 2: Environment (IBL + Skybox + ShadowMap)
+// Set 2: Environment (IBL + Skybox + ShadowMap + VSM)
 layout(set = 2, binding = 0) uniform samplerCube irradianceMap;   // Diffuse IBL
 layout(set = 2, binding = 1) uniform samplerCube prefilterMap;     // Specular IBL  
 layout(set = 2, binding = 2) uniform sampler2D brdfLUT;            // BRDF LUT texture
 layout(set = 2, binding = 3) uniform samplerCube skyboxMap;        // Optional: Skybox for reflections
-layout(set = 2, binding = 4) uniform sampler2D shadowMap;          // Moved from binding 0
+layout(set = 2, binding = 4) uniform sampler2D shadowMap;          // Legacy shadow map
+layout(set = 2, binding = 5) uniform usampler2D vsmPageTable;      // VSM Page Table (R32_UINT)
+layout(set = 2, binding = 6) uniform sampler2D vsmPhysicalCache;   // VSM Physical Cache (R32_FLOAT)
 
 // Set 3: Forward+ Lighting (Modern tile-based deferred lighting)
 #define MAX_LIGHTS_PER_TILE 256
@@ -107,55 +109,80 @@ vec3 srgb_to_linear(vec3 color) {
         color / 12.92,
         pow((color + 0.055) / 1.055, vec3(2.4)),
         greaterThan(color, vec3(0.04045))
-    );
+    );\
 }
 
-float ShadowCalculation(vec4 fragPosLightSpace, vec3 normal, vec3 lightDir) {
+// VSM Shadow Calculation - Virtual Shadow Maps
+// Uses page table lookup to find physical cache location
+float VsmShadowCalculation(vec4 fragPosLightSpace, vec3 normal, vec3 lightDir) {
     // 1. PROJECT & NORMALIZE TO [0,1]
     vec3 projCoords = fragPosLightSpace.xyz / fragPosLightSpace.w;
-    // CRITICAL FIX: Only transform XY from NDC [-1,1] to UV [0,1].
-    // Z is already [0,1] from orthographic_rh, applying the same transform
-    // would shift it to [0.5,1.0], causing false self-shadowing.
     projCoords.xy = projCoords.xy * 0.5 + 0.5;
     
-    // 2. EARLY REJECTION (Unreal-style)
-    // If outside safe zone, skip expensive PCF
+    // 2. EARLY REJECTION
     if (projCoords.x < push.uv_min || projCoords.x > push.uv_max ||
         projCoords.y < push.uv_min || projCoords.y > push.uv_max ||
         projCoords.z > 1.0) {
         return 0.0; // Outside shadow map = fully lit
     }
     
-    // 3. GUARD BAND CLAMPING (Unreal-style)
-    // Clamp to inset boundaries - guarantees all PCF samples are valid
-    vec2 uv = clamp(projCoords.xy, vec2(push.uv_min), vec2(push.uv_max));
-    float currentDepth = projCoords.z;
+    // 3. CALCULATE VIRTUAL PAGE COORDINATES
+    // Assume 16k virtual resolution with 128x128 pages = 128x128 page table
+    const float virtualResolution = 16384.0;
+    const float pageSize = 128.0;
+    const float pageTableResolution = virtualResolution / pageSize; // 128
     
-    // 4. ADAPTIVE BIAS (prevents shadow acne)
+    vec2 virtualUV = clamp(projCoords.xy, vec2(push.uv_min), vec2(push.uv_max));
+    vec2 virtualPageFloat = virtualUV * pageTableResolution;
+    ivec2 virtualPage = ivec2(virtualPageFloat);
+    
+    // 4. SAMPLE PAGE TABLE TO GET PHYSICAL PAGE
+    uint packedPhysical = texture(vsmPageTable, (vec2(virtualPage) + 0.5) / pageTableResolution).r;
+    
+    // Check if page is allocated (0xFFFFFFFF = invalid)
+    const uint INVALID_PAGE = 0xFFFFFFFFu;
+    if (packedPhysical == INVALID_PAGE) {
+        return 0.0; // Page not allocated = fully lit (no shadow data)
+    }
+    
+    // 5. UNPACK PHYSICAL COORDINATES
+    uint physical_x = packedPhysical & 0xFFFFu;
+    uint physical_y = packedPhysical >> 16u;
+    
+    // 6. CALCULATE PHYSICAL UV
+    // Physical cache is 4096x4096 with 128x128 pages = 32x32 pages
+    const float physicalResolution = 4096.0;
+    vec2 localUV = fract(virtualPageFloat); // UV within the page [0,1]
+    vec2 physicalPageBase = vec2(float(physical_x), float(physical_y)) * pageSize;
+    vec2 physicalPixel = physicalPageBase + localUV * pageSize;
+    vec2 physicalUV = physicalPixel / physicalResolution;
+    
+    // 7. ADAPTIVE BIAS
     float cosAngle = clamp(dot(normal, lightDir), 0.0, 1.0);
     float minBias = 0.0005;
     float maxBias = 0.005;
     float bias = max(maxBias * (1.0 - cosAngle), minBias);
     
-    // 5. OPTIMIZED PCF WITH TEXTURE GATHER
-    // 4x4 kernel using textureGather
+    // 8. SAMPLE PHYSICAL CACHE WITH PCF
     float shadow = 0.0;
-    float texelSize = push.texel_size;
+    float texelSize = 1.0 / physicalResolution;
+    float currentDepth = projCoords.z;
     
-    // Sample 4 corners of 2x2 blocks
-    vec4 g0 = textureGather(shadowMap, uv + vec2(-1.0, -1.0) * texelSize, 0);
-    vec4 g1 = textureGather(shadowMap, uv + vec2( 1.0, -1.0) * texelSize, 0);
-    vec4 g2 = textureGather(shadowMap, uv + vec2(-1.0,  1.0) * texelSize, 0);
-    vec4 g3 = textureGather(shadowMap, uv + vec2( 1.0,  1.0) * texelSize, 0);
+    // 3x3 PCF kernel
+    for (int x = -1; x <= 1; x++) {
+        for (int y = -1; y <= 1; y++) {
+            vec2 offset = vec2(float(x), float(y)) * texelSize;
+            float pcfDepth = texture(vsmPhysicalCache, physicalUV + offset).r;
+            shadow += (currentDepth - bias) > pcfDepth ? 1.0 : 0.0;
+        }
+    }
     
-    // Compare depths (SIMD-friendly)
-    float compareDepth = currentDepth - bias;
-    shadow += dot(vec4(greaterThan(vec4(compareDepth), g0)), vec4(1.0));
-    shadow += dot(vec4(greaterThan(vec4(compareDepth), g1)), vec4(1.0));
-    shadow += dot(vec4(greaterThan(vec4(compareDepth), g2)), vec4(1.0));
-    shadow += dot(vec4(greaterThan(vec4(compareDepth), g3)), vec4(1.0));
-    
-    return shadow / 16.0;
+    return shadow / 9.0;
+}
+
+float ShadowCalculation(vec4 fragPosLightSpace, vec3 normal, vec3 lightDir) {
+    // Use VSM by default
+    return VsmShadowCalculation(fragPosLightSpace, normal, lightDir);
 }
 
 float distribution_ggx(float NdotH, float roughness) {
