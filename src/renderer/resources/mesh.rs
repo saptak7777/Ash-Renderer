@@ -8,12 +8,15 @@ use super::texture_compressor::{CompressionFormat, TextureCompressor};
 use crate::renderer::Material;
 
 /// Mesh Cluster for fine-grained culling (Nanite Phase 3)
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, bytemuck::Pod, bytemuck::Zeroable)]
+#[repr(C)]
 pub struct MeshCluster {
+    pub bounds_center: [f32; 3],
+    pub error_metric: f32, // Screen-space error threshold for this cluster
+    pub bounds_radius: f32,
+    pub parent_index: u32, // Index of parent cluster in the global buffer (u32::MAX if root)
     pub first_index: u32,
     pub index_count: u32,
-    pub bounds_center: [f32; 3],
-    pub bounds_radius: f32,
 }
 
 /// Vertex struct with position, normal, UV, and color
@@ -459,10 +462,12 @@ impl Mesh {
                 / std::mem::size_of::<u32>();
 
             clusters.push(MeshCluster {
+                bounds_center: center,
+                error_metric: 0.0, // Base clusters have 0 error
+                bounds_radius: radius_sq.sqrt(),
+                parent_index: u32::MAX, // Root (valid for V1 flat list)
                 first_index: first_index as u32,
                 index_count: chunk_indices.len() as u32,
-                bounds_center: center,
-                bounds_radius: radius_sq.sqrt(),
             });
         }
 

@@ -6,6 +6,7 @@ use std::sync::Arc;
 use crate::vulkan::Allocator;
 use crate::{AshError, Result};
 
+use super::clipmap_manager::ClipmapManager;
 use super::compute_pipelines::VsmComputePipelines;
 use super::page_manager::{PageManager, PageManagerStats};
 use super::resources::{VsmConfig, VsmResources};
@@ -19,18 +20,21 @@ pub struct VsmFeature {
     /// CPU-side page manager
     page_manager: PageManager,
 
+    /// Clipmap manager for directional lights
+    clipmap_manager: Option<ClipmapManager>,
+
     /// Compute pipelines
     compute_pipelines: VsmComputePipelines,
 
     /// Shadow rendering pass
-    shadow_pass: VsmShadowPass,
+    pub shadow_pass: VsmShadowPass,
 
     /// Descriptor pool for VSM
     descriptor_pool: vk::DescriptorPool,
 
     /// Descriptor sets (per frame)
-    analysis_descriptor_sets: Vec<vk::DescriptorSet>,
-    allocator_descriptor_sets: Vec<vk::DescriptorSet>,
+    _analysis_descriptor_sets: Vec<vk::DescriptorSet>,
+    _allocator_descriptor_sets: Vec<vk::DescriptorSet>,
 
     /// Current frame index
     current_frame: u32,
@@ -64,6 +68,7 @@ impl VsmFeature {
             config.virtual_resolution,
             config.physical_resolution,
             config.page_size,
+            config.clipmap_levels,
         );
 
         // Create compute pipelines
@@ -82,11 +87,11 @@ impl VsmFeature {
             },
             vk::DescriptorPoolSize {
                 ty: vk::DescriptorType::UNIFORM_BUFFER,
-                descriptor_count: frame_count * 4, // Metadata, camera, light x2
+                descriptor_count: frame_count * 6, // Metadata, camera, light x2, clipmap data
             },
             vk::DescriptorPoolSize {
                 ty: vk::DescriptorType::STORAGE_BUFFER,
-                descriptor_count: frame_count * 6, // Request, allocation, free pool x2
+                descriptor_count: frame_count * 8, // Request, allocation, free pool x2 + safety margin
             },
             vk::DescriptorPoolSize {
                 ty: vk::DescriptorType::STORAGE_IMAGE,
@@ -140,14 +145,22 @@ impl VsmFeature {
 
         log::info!("VSM feature created successfully");
 
+        // Create clipmap manager if clipmaps are enabled
+        let clipmap_manager = if config.clipmap_levels > 0 {
+            Some(ClipmapManager::new(config.clone()))
+        } else {
+            None
+        };
+
         Ok(Self {
             resources,
             page_manager,
+            clipmap_manager,
             compute_pipelines,
             shadow_pass,
             descriptor_pool,
-            analysis_descriptor_sets,
-            allocator_descriptor_sets,
+            _analysis_descriptor_sets: analysis_descriptor_sets,
+            _allocator_descriptor_sets: allocator_descriptor_sets,
             current_frame: 0,
             device,
             enabled: true,
@@ -155,9 +168,14 @@ impl VsmFeature {
     }
 
     /// Begin a new frame
-    pub fn begin_frame(&mut self, frame_index: u32) {
+    pub fn begin_frame(&mut self, frame_index: u32, camera_pos: glam::Vec3) {
         self.current_frame = frame_index;
         self.page_manager.begin_frame(frame_index);
+
+        // Update clipmap centers if enabled
+        if let Some(clipmap) = &mut self.clipmap_manager {
+            clipmap.update(camera_pos);
+        }
 
         // Update metadata buffer
         if let Err(e) = self.resources.update_metadata(frame_index) {
@@ -215,6 +233,46 @@ impl VsmFeature {
         self.resources.config()
     }
 
+    /// Get clipmap manager (if enabled)
+    pub fn clipmap_manager(&self) -> Option<&ClipmapManager> {
+        self.clipmap_manager.as_ref()
+    }
+
+    /// Get mutable clipmap manager (if enabled)
+    pub fn clipmap_manager_mut(&mut self) -> Option<&mut ClipmapManager> {
+        self.clipmap_manager.as_mut()
+    }
+
+    /// Check if clipmaps are enabled
+    pub fn has_clipmaps(&self) -> bool {
+        self.clipmap_manager.is_some()
+    }
+
+    /// Render shadows for all allocated pages
+    ///
+    /// # Safety
+    /// Command buffer must be in recording state. Draw function will be called for each page.
+    pub unsafe fn render_shadows<F>(&self, cmd: vk::CommandBuffer, draw_fn: F)
+    where
+        F: FnMut(vk::CommandBuffer, &super::resources::PageAllocation),
+    {
+        let allocations = self.page_manager.get_allocated_pages();
+        let page_size = self.resources.config().page_size;
+
+        self.shadow_pass
+            .render_shadows(cmd, &allocations, page_size, draw_fn);
+    }
+
+    /// Get shadow pipeline (if created)
+    pub fn shadow_pipeline(&self) -> Option<vk::Pipeline> {
+        self.shadow_pass.pipeline()
+    }
+
+    /// Get shadow pipeline layout (if created)
+    pub fn shadow_pipeline_layout(&self) -> Option<vk::PipelineLayout> {
+        self.shadow_pass.pipeline_layout()
+    }
+
     /// Destroy resources
     ///
     /// # Safety
@@ -258,6 +316,8 @@ pub fn high_quality_vsm_config() -> VsmConfig {
         page_size: 128,
         max_requests_per_frame: 2048,
         debug_mode: false,
+        clipmap_levels: 8,
+        clipmap_base_extent: 100.0,
     }
 }
 
@@ -269,5 +329,7 @@ pub fn performance_vsm_config() -> VsmConfig {
         page_size: 128,
         max_requests_per_frame: 512,
         debug_mode: false,
+        clipmap_levels: 6, // Fewer levels for performance
+        clipmap_base_extent: 80.0,
     }
 }

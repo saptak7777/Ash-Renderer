@@ -37,6 +37,7 @@ use crate::{
     vulkan::{self, Allocator, BindlessManager, CommandBufferContext},
     AshError, Result,
 };
+use crate::renderer::frustum_culling::Frustum;
 
 use ash::vk;
 use bytemuck::Pod;
@@ -182,6 +183,7 @@ struct RendererResources {
     default_skybox: Texture, // Procedural skybox
     default_cube_black: Texture,
     vsm_default_uint: Texture,
+    vsm_default_array: Texture, // 2DArray version for clipmaps
     material_storage_buffer: StorageBuffer<resources::uniform::MaterialUniform>,
     instance_buffers: Vec<resources::InstanceBuffer>,
 }
@@ -384,6 +386,7 @@ pub struct Renderer {
     _default_skybox: Texture, // Procedural skybox for IBL fallback
     _default_cube_black: Texture, // Keep alive
     _vsm_default_uint: Texture, // Keep alive (VSM bind default)
+    _vsm_default_array: Texture, // Keep alive (VSM clipmap bind default)
     model_renderer: ModelRenderer,
     draw_items: Vec<DrawItem>,
     swapchain: Option<vulkan::SwapchainWrapper>,
@@ -713,6 +716,7 @@ impl Renderer {
                 default_skybox,
                 default_cube_black,
                 vsm_default_uint,
+                vsm_default_array,
                 material_storage_buffer,
                 instance_buffers,
             } = renderer_resources;
@@ -729,15 +733,10 @@ impl Renderer {
                     image_view: black_texture.view(),
                     sampler: black_texture.sampler(),
                 };
-                let shadow_info = vk::DescriptorImageInfo {
-                    image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-                    image_view: default_texture.view(), // White for shadow = lit
-                    sampler: default_texture.sampler(),
-                };
                 let vsm_uint_info = vk::DescriptorImageInfo {
                     image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-                    image_view: vsm_default_uint.view(),
-                    sampler: vsm_default_uint.sampler(), // NEAREST
+                    image_view: vsm_default_array.view(), // Use array for clipmap support
+                    sampler: vsm_default_array.sampler(), // NEAREST
                 };
 
                 for i in 0..descriptor_manager.environment_set_count() {
@@ -745,7 +744,7 @@ impl Renderer {
                         i,
                         &cube_info,
                         &tex_2d_info,
-                        &shadow_info,
+
                         &vsm_uint_info,
                     )?;
                 }
@@ -820,7 +819,7 @@ impl Renderer {
 
             let set_layouts = [
                 descriptor_manager.frame_layout(),
-                bindless_manager.layout(), // Set 1: Bindless (Textures, Materials, Instances, Joints)
+                bindless_manager.descriptor_set_layout(), // Set 1: Bindless (Textures, Materials, Instances, Joints)
                 descriptor_manager.environment_layout(), // Set 2: Global Environment (Shadow + IBL)
                 forward_plus.layout(),     // Set 3: Forward+ lights
             ];
@@ -838,7 +837,7 @@ impl Renderer {
                 )?;
 
             log::info!("Initializing VSM Feature...");
-            let vsm_feature = match VsmFeature::new(
+            let mut vsm_feature = match VsmFeature::new(
                 Arc::clone(&device.device),
                 Arc::clone(&alloc),
                 default_vsm_config(),
@@ -853,6 +852,28 @@ impl Renderer {
                     None
                 }
             };
+
+            // Create shadow pipeline if VSM was initialized successfully
+            if let Some(ref mut vsm) = vsm_feature {
+                log::info!("Creating VSM shadow pipeline...");
+                
+                // Use the same descriptor set layouts as the main pipeline
+                let descriptor_layouts = vec![
+                    descriptor_manager.frame_layout(),
+                    bindless_manager.descriptor_set_layout(),
+                    descriptor_manager.environment_layout(),
+                ];
+
+                // Create the shadow rendering pipeline
+                match vsm.shadow_pass.create_pipeline(&descriptor_layouts) {
+                    Ok(()) => {
+                        log::info!("VSM shadow pipeline created successfully.");
+                    },
+                    Err(e) => {
+                        log::error!("Failed to create VSM shadow pipeline: {e}");
+                    }
+                }
+            }
 
             // DELETED: Default cube creation. Renderer now starts empty.
             // let mut mesh = Mesh::create_cube();
@@ -945,6 +966,7 @@ impl Renderer {
                 _default_skybox: default_skybox,
                 _default_cube_black: default_cube_black,
                 _vsm_default_uint: vsm_default_uint,
+                _vsm_default_array: vsm_default_array,
                 model_renderer,
                 draw_items: Vec::new(),
                 swapchain: Some(swapchain),
@@ -1497,6 +1519,15 @@ impl Renderer {
             device.graphics_queue,
         )?;
 
+        // Create R32_UINT 1x1x8 texture array for VSM clipmap default
+        let vsm_default_array = Texture::create_vsm_default_array(
+            Arc::clone(alloc),
+            Arc::clone(&device.device),
+            command_pool,
+            device.graphics_queue,
+            8, // 8 clipmap levels
+        )?;
+
         // Initialize material storage buffer (Bindless-ready)
         let max_materials = 1024;
         let mut material_storage_buffer = unsafe {
@@ -1547,6 +1578,7 @@ impl Renderer {
             default_skybox,
             default_cube_black,
             vsm_default_uint,
+            vsm_default_array,
             material_storage_buffer,
             instance_buffers,
         })
@@ -2082,6 +2114,10 @@ impl Renderer {
     }
 
     pub fn register_mesh_handle(&mut self, handle: u32, mesh: &mut Mesh) -> Result<()> {
+        // Nanite Phase 2: Build Cluster DAG
+        // This generates the hierarchical cluster structure needed for GPU selection.
+        crate::renderer::cluster_builder::build_mesh_dag(mesh);
+
         unsafe {
             let key = mesh.name.clone();
             let upload_pool = self.cmds.upload_command_pool_handle();
@@ -3485,10 +3521,6 @@ impl Renderer {
 
             // CRITICAL FIX: Re-bind Environment (Set 2) resources after recreation
             // Without this, shadow mapping and IBL break after resize
-            // OPTIMIZATION: If DescriptorManager didn't recreate sets (count matched), 
-            // defaults are already bound. Re-binding them is redundant.
-            // If frame count changed, we *should* bind, but let's test stability first.
-            /*
             // 1. Bind Defaults (Shadow Map, VSM Page Table, etc.)
             let cube_info = vk::DescriptorImageInfo {
                 image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
@@ -3500,15 +3532,11 @@ impl Renderer {
                 image_view: self._black_texture.view(),
                 sampler: self._black_texture.sampler(),
             };
-            let shadow_info = vk::DescriptorImageInfo {
-                image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-                image_view: self._default_texture.view(),
-                sampler: self._default_texture.sampler(),
-            };
+
             let vsm_uint_info = vk::DescriptorImageInfo {
                 image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-                image_view: self._vsm_default_uint.view(),
-                sampler: self._vsm_default_uint.sampler(),
+                image_view: self._vsm_default_array.view(), // Use array for clipmap support
+                sampler: self._vsm_default_array.sampler(),
             };
 
             for index in 0..manager.environment_set_count() {
@@ -3516,11 +3544,9 @@ impl Renderer {
                     index,
                     &cube_info,
                     &tex_2d_info,
-                    &shadow_info,
                     &vsm_uint_info,
                 )?;
             }
-            */
 
             // 2. Bind IBL Resources (Binding 0-3)
             for index in 0..manager.frame_set_count() {
@@ -4100,8 +4126,12 @@ impl Renderer {
             for (i, item) in self.draw_items.iter().enumerate() {
                 if let Some(uploaded) = self.model_renderer.get(&item.key) {
                     // Use mesh clusters for fine-grained culling
-                    // We assume it's a sphere for now until we have better bounds
-                    let bounds = CullBoundingBox::new(Vec3::ZERO, Vec3::ONE * 100.0);
+                    // Fallback to mesh bounds if clusters are empty
+                    let bounds = self
+                        .mesh_data
+                        .get(item.mesh_id as usize)
+                        .map(|m| m.bounds)
+                        .unwrap_or_else(|| CullBoundingBox::new(Vec3::ZERO, Vec3::ONE * 100.0));
                     self.occlusion_culling.push_clusters(
                         bounds,
                         item.transform,
@@ -4174,6 +4204,10 @@ impl Renderer {
                 };
                 self.features.before_frame(&mut feature_ctx);
 
+                // Update VSM clipmap centers and page manager
+                if let Some(vsm) = &mut self.vsm_feature {
+                    vsm.begin_frame(frame_index as u32, camera_pos);
+                }
 
                 // Matrices provided via function arguments.
                 let matrices = uniform_buffer.matrices_mut();
@@ -4297,7 +4331,99 @@ impl Renderer {
             }
 
             // Shadow Pass
+            if let Some(vsm) = &self.vsm_feature {
+                // Extract references to avoid borrow checker conflicts
+                let instancing_manager = &self.instancing_manager;
+                let model_renderer = &self.model_renderer;
+                let mesh_data = &self.mesh_data;
+                let instance_indices = &self.instance_buffer_indices;
+                let joint_indices = &self.joint_buffer_indices;
+                let material_buffer_index = self.material_buffer_index;
+                
+                // Get light direction and clipmap levels
+                let light_dir = glam::Vec3::from_slice(&self.scene_lighting.directional.direction[0..3]);
+                let device = &self.device; // Extract device for closure
+                
+                    // Pre-fetch levels to avoid borrow issues inside closure
+                    let levels: Vec<_> = if let Some(cm) = vsm.clipmap_manager() {
+                         cm.levels().cloned().collect()
+                    } else {
+                         Vec::new()
+                    };
+                    
+                    let page_table_res = vsm.clipmap_manager()
+                        .map(|cm| cm.page_table_resolution())
+                        .unwrap_or(128);
 
+                    // Pre-calculate culling for each level
+                    // Map: Layer Index -> (Light Space Matrix, Visible Batches)
+                    let mut level_culling = std::collections::HashMap::new();
+                    
+                    for level in &levels {
+                        let light_space_matrix = level.view_projection_matrix(light_dir, page_table_res);
+                        let frustum = Frustum::from_matrix(light_space_matrix);
+                        let visible_batches = instancing_manager.cull_shadow_casters(&frustum);
+                        level_culling.insert(level.layer, (light_space_matrix, visible_batches));
+                    }
+
+                    vsm.render_shadows(command_buffer, |cmd, page| {
+                        // Check dirty flag (Bit 0) - Skip rendering if clean
+                        if (page.flags & 1) == 0 {
+                            return;
+                        }
+
+                        // Get pre-calculated data for this page's layer
+                        if let Some((light_space_matrix, visible_batches)) = level_culling.get(&page.layer) {
+                            // Iterate visible batches
+                            for (batch, _indices) in visible_batches {
+                                if let Some(data) = mesh_data.get(batch.key.mesh_id as usize) {
+                                    if let Some(uploaded) = model_renderer.get(&data.name) {
+                                        // Construct material push constants
+                                        let material_push = crate::renderer::model_renderer::MaterialPushConstants::new(batch.key.material_id)
+                                            .with_material_buffer_index(material_buffer_index)
+                                            .with_receive_shadows(false) // Shadows don't receive shadows
+                                            .with_debug_visualization(false);
+                                        
+                                        // Get pipeline layout from VSM feature
+                                        let pipeline_layout = vsm.shadow_pipeline_layout()
+                                            .expect("Shadow pipeline layout not initialized");
+                                        
+                                        // Construct draw context
+                                        let ctx = crate::renderer::model_renderer::DrawContext {
+                                            command_buffer: cmd,
+                                            pipeline_layout,
+                                            uploaded,
+                                            material: &material_push,
+                                            instance_buffer_index: instance_indices[frame_index],
+                                            joint_buffer_index: joint_indices[frame_index],
+                                        };
+                                        
+                                        // Push light-space matrix
+                                        // Note: This must match the push constant range in shadow shader
+                                        device.device.cmd_push_constants(
+                                            cmd,
+                                            pipeline_layout,
+                                            vk::ShaderStageFlags::VERTEX,
+                                            160, // Offset for lightSpaceMatrix
+                                            bytemuck::bytes_of(light_space_matrix),
+                                        );
+
+                                        // Get batch offset from the batch_offsets map
+                                        let offset = batch_offsets.get(&batch.key).copied().unwrap_or(0);
+                                        
+                                        // Draw instanced mesh (Draw ALL instances in batch for Coarse Culling)
+                                        // TODO: Use _indices for Fine Culling (requires draw_indirect or buffer update)
+                                        model_renderer.draw_mesh_instanced(
+                                            &ctx,
+                                            batch.count() as u32,
+                                            offset,
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    });
+            }
 
             // --- Light Culling Compute Dispatch ---
             if let Some(ref mut fp_integration) = self.forward_plus {
@@ -5423,7 +5549,7 @@ impl Drop for Renderer {
 
             // Cleanup VSM (Explicit)
             if let Some(mut vsm) = self.vsm_feature.take() {
-                unsafe { vsm.destroy(); }
+                vsm.destroy();
             }
 
             self.flush_old_swapchains();

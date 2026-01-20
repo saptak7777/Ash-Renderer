@@ -54,6 +54,7 @@ log = "0.4"
 ahash = "0.8"
 thiserror = "2.0"
 uuid = { version = "1.11", features = ["v4"] }
+meshopt = "0.6.2"
 
 [build-dependencies]
 shaderc = "0.10.1"

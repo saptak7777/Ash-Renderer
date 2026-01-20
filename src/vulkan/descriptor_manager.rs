@@ -75,12 +75,6 @@ impl DescriptorManager {
                 1,
             )
             .add_binding(
-                4, // Shadow Map
-                vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-                vk::ShaderStageFlags::FRAGMENT,
-                1,
-            )
-            .add_binding(
                 5, // VSM Page Table
                 vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
                 vk::ShaderStageFlags::FRAGMENT,
@@ -158,26 +152,6 @@ impl DescriptorManager {
 
     pub fn environment_set(&self, index: usize) -> Option<vk::DescriptorSet> {
         self.environment_sets.get(index).map(|set| set.handle())
-    }
-
-    /// Bind shadow map texture to shadow descriptor set for given frame
-    pub fn bind_shadow_map(
-        &self,
-        frame_index: usize,
-        image_view: vk::ImageView,
-        sampler: vk::Sampler,
-    ) -> Result<()> {
-        let descriptor = self.environment_sets.get(frame_index).ok_or_else(|| {
-            AshError::VulkanError("Environment descriptor set index out of bounds".into())
-        })?;
-
-        let info = vk::DescriptorImageInfo {
-            sampler,
-            image_view,
-            image_layout: vk::ImageLayout::DEPTH_STENCIL_READ_ONLY_OPTIMAL,
-        };
-        descriptor.update_image_at(4, 0, info, vk::DescriptorType::COMBINED_IMAGE_SAMPLER)?;
-        Ok(())
     }
 
     /// Bind VSM resources (Page Table and Physical Cache) to environment descriptor set
@@ -265,7 +239,6 @@ impl DescriptorManager {
         frame_index: usize,
         default_cube: &vk::DescriptorImageInfo,
         default_2d: &vk::DescriptorImageInfo,
-        default_shadow: &vk::DescriptorImageInfo,
         default_uint_2d: &vk::DescriptorImageInfo, // R32_UINT for VSM page table
     ) -> Result<()> {
         let descriptor = self.environment_sets.get(frame_index).ok_or_else(|| {
@@ -300,13 +273,8 @@ impl DescriptorManager {
             *default_cube,
             vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
         )?;
-        // 4: Shadow Map (2D) - Binds default shadow map (white/black)
-        descriptor.update_image_at(
-            4,
-            0,
-            *default_shadow,
-            vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-        )?;
+        // 4: Shadow Map - REMOVED
+
         // 5: VSM Page Table (2D UINT) - Default to 0xFFFFFFFF (invalid page)
         descriptor.update_image_at(
             5,

@@ -6,7 +6,7 @@ use std::sync::Arc;
 use crate::vulkan::{Allocator, ComputePipeline};
 use crate::{AshError, Result};
 
-use super::resources::VsmResources;
+// use super::resources::VsmResources;
 
 /// VSM compute pipeline manager
 pub struct VsmComputePipelines {
@@ -73,6 +73,12 @@ impl VsmComputePipelines {
             vk::DescriptorSetLayoutBinding::default()
                 .binding(6)
                 .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::COMPUTE),
+            // Binding 7: Clipmap data
+            vk::DescriptorSetLayoutBinding::default()
+                .binding(7)
+                .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
                 .descriptor_count(1)
                 .stage_flags(vk::ShaderStageFlags::COMPUTE),
         ];

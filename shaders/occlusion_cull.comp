@@ -26,8 +26,8 @@ struct ObjectData {
     int vertexOffset;
     vec4 color;
     vec4 custom;
-    uint clusterOffset;
-    uint clusterCount;
+    uint parentIndex;
+    float errorMetric;
     uint flags;
     uint _padding;
 };
@@ -125,6 +125,20 @@ bool frustumCull(vec3 center, vec3 extents, vec4 planes[6]) {
 // OCCLUSION CULLING
 // ============================================================================
 
+bool frustumCullSphere(vec3 center, float radius, vec4 planes[6]) {
+    for (int i = 0; i < 6; i++) {
+        vec3 normal = planes[i].xyz;
+        float dist = planes[i].w;
+        
+        // Signed distance to plane: dot(N, P) + d
+        // If distance < -radius, the sphere is completely on the negative side (outside)
+        if (dot(normal, center) + dist < -radius) {
+            return true; // Culled
+        }
+    }
+    return false;
+}
+
 bool occlusionCull(vec3 center, vec3 extents, mat4 vp) {
     // Transform 8 corners to clip space
     vec3 corners[8] = vec3[8](
@@ -189,11 +203,15 @@ void main() {
     // Transform to world space
     vec3 worldCenter = (obj.model * vec4(obj.bounds.center.xyz, 1.0)).xyz;
     vec3 worldExtents;
+    float worldRadius = 0.0;
     
     bool isSphere = obj.bounds.center.w > 0.5;
     if (isSphere) {
         float scale = max(length(obj.model[0].xyz), max(length(obj.model[1].xyz), length(obj.model[2].xyz)));
-        worldExtents = vec3(obj.bounds.extents.x * scale);
+        // In Sphere mode, extents.x is Radius
+        worldRadius = obj.bounds.extents.x * scale;
+        // Construct AABB for Occlusion Culling (which expects box)
+        worldExtents = vec3(worldRadius);
     } else {
         worldExtents = obj.bounds.extents.xyz * vec3(
             length(obj.model[0].xyz),
@@ -206,12 +224,65 @@ void main() {
     vec4 frustumPlanes[6];
     extractFrustumPlanes(pc.viewProj, frustumPlanes);
     
-    if (frustumCull(worldCenter, worldExtents, frustumPlanes)) {
+    bool culled = false;
+    
+    if (isSphere) {
+         culled = frustumCullSphere(worldCenter, worldRadius, frustumPlanes);
+    } else {
+         culled = frustumCull(worldCenter, worldExtents, frustumPlanes);
+    }
+
+    if (culled) {
         visibility[objectIdx] = 0;
         return;
     }
+
+    // Screen Size Culling (Safety Net)
+    // Discard tiny clusters to prevent "Performance Valley of Death" during Nanite transition
+    float radius = max(worldExtents.x, max(worldExtents.y, worldExtents.z));
+    vec4 clipPos = pc.viewProj * vec4(worldCenter, 1.0);
+    // Only verify size if in front of camera (w > 0)
+    if (clipPos.w > 0.0) {
+        // Approximate normalized screen size (radius / depth)
+        // This is a rough metric but sufficient to cull sub-pixel/tiny geometry
+        float normalizedSize = radius / clipPos.w;
+        if (normalizedSize < 0.005) { // < 0.5% of "view cone"
+             visibility[objectIdx] = 0;
+             return;
+        }
+    }
     
+    // ------------------------------------------------------------------------
+    // Nanite Step 3: Local Selection (The Cut)
+    // ------------------------------------------------------------------------
+    // Check if we are the correct LOD level to render based on error metric
+    // Condition: IsParentErrorHigh? && IsMyErrorLow?
+    
+    float parentError = 1000000.0; // Infinity for root/standard meshes
+    if (obj.parentIndex != 0xFFFFFFFF) {
+        // Fetch parent error from the same buffer
+        // Note: usage of nonuniformEXT might be needed if buffer index varies, 
+        // but here we are in the same object array.
+        ObjectData parent = object_buffers[nonuniformEXT(pc.objectBufferIndex)].objects[obj.parentIndex];
+        parentError = parent.errorMetric;
+    }
+
+    // Normalized error threshold (increases with distance)
+    // Distance 0 -> Small Threshold (Accept only Low Error / Detail)
+    // Distance Far -> Large Threshold (Accept High Error / Coarse)
+    float dist = clipPos.w;
+    float errorThreshold = dist * 0.002; // Tweak this for transition distance
+    
+    bool isSelected = (obj.errorMetric <= errorThreshold) && (parentError > errorThreshold);
+    
+    if (!isSelected) {
+        visibility[objectIdx] = 0;
+        return;
+    }
+
+    // ------------------------------------------------------------------------
     // Occlusion culling
+    // ------------------------------------------------------------------------
     if (occlusionCull(worldCenter, worldExtents, pc.viewProj)) {
         visibility[objectIdx] = 0;
         return;

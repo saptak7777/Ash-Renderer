@@ -107,10 +107,10 @@ pub struct CullObjectData {
     pub color: [f32; 4],
     /// Custom data (user-defined)
     pub custom: [f32; 4],
-    /// Cluster offset in global cluster buffer
-    pub cluster_offset: u32,
-    /// Number of clusters for this object
-    pub cluster_count: u32,
+    /// Nanite: Parent cluster index (u32::MAX if root)
+    pub parent_index: u32,
+    /// Nanite: Error metric for LOD selection
+    pub error_metric: f32,
     /// Culling flags (e.g., enabled, shadow-caster)
     pub flags: u32,
     /// Padding for 16-byte alignment
@@ -133,8 +133,8 @@ impl CullObjectData {
             vertex_offset: 0,
             color: [1.0, 1.0, 1.0, 1.0],
             custom: [0.0; 4],
-            cluster_offset: 0,
-            cluster_count: 0,
+            parent_index: u32::MAX,
+            error_metric: 0.0,
             flags: 1,
             _padding: 0,
         }
@@ -148,6 +148,8 @@ impl CullObjectData {
         draw_index: u32,
         first_index: u32,
         index_count: u32,
+        parent_index: u32,
+        error_metric: f32,
     ) -> Self {
         let cols = model.to_cols_array_2d();
         // Pack sphere into CullBoundingBox for unified data structure
@@ -168,8 +170,8 @@ impl CullObjectData {
             vertex_offset: 0,
             color: [1.0, 1.0, 1.0, 1.0],
             custom: [0.0; 4],
-            cluster_offset: 0,
-            cluster_count: 0,
+            parent_index,
+            error_metric,
             flags: 1,
             _padding: 0,
         }
@@ -235,6 +237,26 @@ impl CullObjectData {
             self.model_row2,
             self.model_row3,
         ])
+    }
+
+    /// Calculate world-space radius (conservative)
+    pub fn world_radius(&self) -> f32 {
+        let extents = Vec3::new(
+            self.bounds.extents[0],
+            self.bounds.extents[1],
+            self.bounds.extents[2],
+        );
+        let local_radius = extents.length();
+
+        let scale_x =
+            Vec3::new(self.model_row0[0], self.model_row0[1], self.model_row0[2]).length();
+        let scale_y =
+            Vec3::new(self.model_row1[0], self.model_row1[1], self.model_row1[2]).length();
+        let scale_z =
+            Vec3::new(self.model_row2[0], self.model_row2[1], self.model_row2[2]).length();
+        let max_scale = scale_x.max(scale_y).max(scale_z);
+
+        local_radius * max_scale
     }
 
     /// Create from matrix with default bounds/index
@@ -375,7 +397,14 @@ impl OcclusionCulling {
             self.objects
                 .push(CullObjectData::new(bounds, model, draw_index));
         } else {
+            let cluster_start_offset = self.objects.len() as u32;
             for cluster in clusters {
+                let global_parent = if cluster.parent_index == u32::MAX {
+                    u32::MAX
+                } else {
+                    cluster_start_offset + cluster.parent_index
+                };
+
                 self.objects.push(CullObjectData::for_cluster(
                     cluster.bounds_center,
                     cluster.bounds_radius,
@@ -383,6 +412,8 @@ impl OcclusionCulling {
                     draw_index,
                     cluster.first_index,
                     cluster.index_count,
+                    global_parent,
+                    cluster.error_metric,
                 ));
             }
         }

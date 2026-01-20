@@ -35,8 +35,8 @@ layout(set = 0, binding = 3) uniform LightData {
     vec4 light_direction;
 } light;
 
-// Input/Output: Page table (read to check if page exists)
-layout(set = 0, binding = 4, r32ui) uniform uimage2D pageTable;
+// Input/Output: Page table array (one layer per clipmap level)
+layout(set = 0, binding = 4, r32ui) uniform uimage2DArray pageTable;
 
 // Output: Request buffer (atomic counter + requests)
 layout(std430, set = 0, binding = 5) buffer RequestBuffer {
@@ -49,6 +49,13 @@ layout(std430, set = 0, binding = 5) buffer RequestBuffer {
 layout(std430, set = 0, binding = 6) buffer RequestData {
     uvec4 request_data[]; // [virtual_x, virtual_y, priority_bits, padding]
 } request_entries;
+
+// Input: Clipmap data for directional lights
+layout(set = 0, binding = 7) uniform ClipmapData {
+    vec4 level_centers[16];  // (center_x, center_y, extent, layer) per level
+    uint active_levels;
+    uint _padding[3];
+} clipmap;
 
 // Constants
 const uint INVALID_PAGE = 0xFFFFFFFF;
@@ -64,8 +71,36 @@ vec3 reconstructWorldPos(vec2 uv, float depth) {
     return worldPos.xyz / worldPos.w;
 }
 
+// Select appropriate clipmap level based on world position
+int selectClipmapLevel(vec3 worldPos) {
+    // If no clipmaps active, use layer 0
+    if (clipmap.active_levels == 0) {
+        return 0;
+    }
+    
+    // Start from finest level (0) and find first level that contains position
+    for (int i = 0; i < int(clipmap.active_levels); i++) {
+        vec4 levelData = clipmap.level_centers[i];
+        vec2 center = levelData.xy;
+        float extent = levelData.z;
+        
+        // Check if worldPos is within this level's bounds
+        vec2 delta = abs(worldPos.xz - center);
+        if (delta.x <= extent * 0.5 && delta.y <= extent * 0.5) {
+            return i;
+        }
+    }
+    
+    // If outside all levels, use coarsest level
+    return int(clipmap.active_levels) - 1;
+}
+
 // Calculate virtual page coordinates from light-space position
-ivec2 calculateVirtualPage(vec3 worldPos) {
+// Returns ivec3(x, y, layer)
+ivec3 calculateVirtualPage(vec3 worldPos) {
+    // Select clipmap level
+    int layer = selectClipmapLevel(worldPos);
+    
     // Transform to light space
     vec4 lightSpace = light.light_view_proj * vec4(worldPos, 1.0);
     vec3 ndc = lightSpace.xyz / lightSpace.w;
@@ -75,12 +110,12 @@ ivec2 calculateVirtualPage(vec3 worldPos) {
     
     // Clamp to valid range
     if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) {
-        return ivec2(-1, -1);
+        return ivec3(-1, -1, -1);
     }
     
     // Calculate virtual page coordinates
     vec2 virtualPageFloat = uv * float(vsm.page_table_resolution);
-    return ivec2(virtualPageFloat);
+    return ivec3(int(virtualPageFloat.x), int(virtualPageFloat.y), layer);
 }
 
 void main() {
@@ -105,17 +140,17 @@ void main() {
     // Reconstruct world position
     vec3 worldPos = reconstructWorldPos(uv, depth);
     
-    // Calculate which virtual page this pixel needs
-    ivec2 virtualPage = calculateVirtualPage(worldPos);
+    // Calculate which virtual page this pixel needs (includes layer)
+    ivec3 virtualPage = calculateVirtualPage(worldPos);
     
     // Skip invalid pages (outside shadow frustum)
-    if (virtualPage.x < 0 || virtualPage.y < 0 || 
+    if (virtualPage.x < 0 || virtualPage.y < 0 || virtualPage.z < 0 ||
         virtualPage.x >= int(vsm.page_table_resolution) || 
         virtualPage.y >= int(vsm.page_table_resolution)) {
         return;
     }
     
-    // Check if page is already allocated
+    // Check if page is already allocated (access array layer)
     uint pageEntry = imageLoad(pageTable, virtualPage).r;
     
     // If page is not allocated (INVALID_PAGE), request it

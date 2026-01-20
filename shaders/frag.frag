@@ -73,8 +73,8 @@ layout(set = 2, binding = 0) uniform samplerCube irradianceMap;   // Diffuse IBL
 layout(set = 2, binding = 1) uniform samplerCube prefilterMap;     // Specular IBL  
 layout(set = 2, binding = 2) uniform sampler2D brdfLUT;            // BRDF LUT texture
 layout(set = 2, binding = 3) uniform samplerCube skyboxMap;        // Optional: Skybox for reflections
-layout(set = 2, binding = 4) uniform sampler2D shadowMap;          // Legacy shadow map
-layout(set = 2, binding = 5) uniform usampler2D vsmPageTable;      // VSM Page Table (R32_UINT)
+
+layout(set = 2, binding = 5) uniform usampler2DArray vsmPageTable; // VSM Page Table Array (R32_UINT)
 layout(set = 2, binding = 6) uniform sampler2D vsmPhysicalCache;   // VSM Physical Cache (R32_FLOAT)
 
 // Set 3: Forward+ Lighting (Modern tile-based deferred lighting)
@@ -112,9 +112,29 @@ vec3 srgb_to_linear(vec3 color) {
     );\
 }
 
-// VSM Shadow Calculation - Virtual Shadow Maps
+// VSM Shadow Calculation - Virtual Shadow Maps with Clipmaps
 // Uses page table lookup to find physical cache location
 float VsmShadowCalculation(vec4 fragPosLightSpace, vec3 normal, vec3 lightDir) {
+    // For now, use a simple clipmap selection based on distance from camera
+    // In a full implementation, this would use the ClipmapData uniform
+    // to select the appropriate level based on world position
+    
+    // Calculate distance from camera for level selection
+    vec3 worldPos = fragWorldPos;
+    float distFromCamera = length(worldPos - mvp.camera_pos.xyz);
+    
+    // Simple level selection (8 levels, exponentially spaced)
+    // Level 0: 0-100m, Level 1: 100-200m, etc.
+    int clipmapLayer = 0;
+    float levelSize = 100.0;
+    for (int i = 0; i < 8; i++) {
+        if (distFromCamera < levelSize * float(i + 1)) {
+            clipmapLayer = i;
+            break;
+        }
+    }
+    clipmapLayer = clamp(clipmapLayer, 0, 7);
+    
     // 1. PROJECT & NORMALIZE TO [0,1]
     vec3 projCoords = fragPosLightSpace.xyz / fragPosLightSpace.w;
     projCoords.xy = projCoords.xy * 0.5 + 0.5;
@@ -136,8 +156,9 @@ float VsmShadowCalculation(vec4 fragPosLightSpace, vec3 normal, vec3 lightDir) {
     vec2 virtualPageFloat = virtualUV * pageTableResolution;
     ivec2 virtualPage = ivec2(virtualPageFloat);
     
-    // 4. SAMPLE PAGE TABLE TO GET PHYSICAL PAGE
-    uint packedPhysical = texture(vsmPageTable, (vec2(virtualPage) + 0.5) / pageTableResolution).r;
+    // 4. SAMPLE PAGE TABLE TO GET PHYSICAL PAGE (with layer)
+    vec3 pageTableCoord = vec3((vec2(virtualPage) + 0.5) / pageTableResolution, float(clipmapLayer));
+    uint packedPhysical = texture(vsmPageTable, pageTableCoord).r;
     
     // Check if page is allocated (0xFFFFFFFF = invalid)
     const uint INVALID_PAGE = 0xFFFFFFFFu;
@@ -157,27 +178,63 @@ float VsmShadowCalculation(vec4 fragPosLightSpace, vec3 normal, vec3 lightDir) {
     vec2 physicalPixel = physicalPageBase + localUV * pageSize;
     vec2 physicalUV = physicalPixel / physicalResolution;
     
-    // 7. ADAPTIVE BIAS
+    // 7. ADAPTIVE BIAS (Slope-Scaled)
     float cosAngle = clamp(dot(normal, lightDir), 0.0, 1.0);
-    float minBias = 0.0005;
-    float maxBias = 0.005;
-    float bias = max(maxBias * (1.0 - cosAngle), minBias);
+    // Use slope-scaled bias to prevent acne on steep surfaces
+    // standard bias: max(0.005 * (1.0 - dot), 0.0005)
+    // improved: clamp(factor * tan(acos(ndotl)), min, max)
+    float NdotL = cosAngle;
+    float slopeBias = clamp(0.005 * tan(acos(NdotL)), 0.0, 0.01);
+    float bias = max(slopeBias, 0.0002);
     
-    // 8. SAMPLE PHYSICAL CACHE WITH PCF
+    // 8. SAMPLE PHYSICAL CACHE WITH VOGEL DISK (SMRT-like Filter)
     float shadow = 0.0;
     float texelSize = 1.0 / physicalResolution;
     float currentDepth = projCoords.z;
     
-    // 3x3 PCF kernel
-    for (int x = -1; x <= 1; x++) {
-        for (int y = -1; y <= 1; y++) {
-            vec2 offset = vec2(float(x), float(y)) * texelSize;
-            float pcfDepth = texture(vsmPhysicalCache, physicalUV + offset).r;
-            shadow += (currentDepth - bias) > pcfDepth ? 1.0 : 0.0;
+    const int SAMPLE_COUNT = 16;
+    const float GOLDEN_ANGLE = 2.4; // Radians
+    
+    // Interleaved Gradient Noise for rotation
+    float noise = fract(52.9829189 * fract(0.06711056 * gl_FragCoord.x + 0.00583715 * gl_FragCoord.y));
+    float rotation = noise * 6.283185;
+    float sinRot = sin(rotation);
+    float cosRot = cos(rotation);
+    
+    // Filter radius (tunable)
+    float filterRadius = 2.0;
+
+    for (int i = 0; i < SAMPLE_COUNT; ++i) {
+        // Generate Vogel Sample Offset
+        float r = sqrt(float(i) + 0.5) / sqrt(float(SAMPLE_COUNT));
+        float theta = i * GOLDEN_ANGLE + rotation;
+        
+        // Rotate the offset
+        vec2 offset = vec2(cos(theta), sin(theta)) * r * filterRadius * texelSize;
+        
+        float vsmDepth = texture(vsmPhysicalCache, physicalUV + offset).r;
+        
+        if (vsmDepth == 1.0) {
+             // 1.0 usually means "clear value" / far plane in shadow map
+             // If shadow map is cleared to 1.0, and our currentDepth < 1.0, we are lit?
+             // Need to check clear color. VSM clears to 1.0.
+             shadow += 1.0; 
+        } else {
+             shadow += (currentDepth - bias) > vsmDepth ? 1.0 : 0.0;
         }
     }
     
-    return shadow / 9.0;
+    // Invert shadow sum (logic above was: if depth > map ? 1.0 (SHADOW))
+    // Wait.
+    // Standard: if (currentDepth > closestDepth + bias) Shadow = 1.0;
+    // My logic: shadow += (currentDepth - bias) > pcfDepth ? 1.0 : 0.0;
+    // So "shadow" accumulates Occlusion.
+    // 0 = Lit, 16 = Fully Occluded.
+    
+    // We want to return visibility (1.0 = Lit, 0.0 = Shadow).
+    // So if sum is 16, Visibility is 0.
+    
+    return 1.0 - (shadow / float(SAMPLE_COUNT));
 }
 
 float ShadowCalculation(vec4 fragPosLightSpace, vec3 normal, vec3 lightDir) {

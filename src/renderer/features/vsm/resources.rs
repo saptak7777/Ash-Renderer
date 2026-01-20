@@ -19,6 +19,10 @@ pub struct VsmConfig {
     pub max_requests_per_frame: u32,
     /// Enable debug visualization
     pub debug_mode: bool,
+    /// Number of clipmap levels for directional lights (0 = disabled, typical: 8)
+    pub clipmap_levels: u32,
+    /// World-space extent of clipmap level 0 (in meters, e.g., 100.0)
+    pub clipmap_base_extent: f32,
 }
 
 impl Default for VsmConfig {
@@ -29,6 +33,8 @@ impl Default for VsmConfig {
             page_size: 128,
             max_requests_per_frame: 1024,
             debug_mode: false,
+            clipmap_levels: 8,
+            clipmap_base_extent: 100.0,
         }
     }
 }
@@ -84,8 +90,8 @@ pub struct PageRequest {
     pub virtual_y: u32,
     /// Request priority (distance from camera)
     pub priority: f32,
-    /// Padding
-    pub _padding: u32,
+    /// Layer index (Clipmap Level)
+    pub layer: u32,
 }
 
 /// Physical page allocation (written by allocator)
@@ -100,6 +106,12 @@ pub struct PageAllocation {
     pub physical_x: u32,
     /// Physical page Y
     pub physical_y: u32,
+    /// Layer index (Clipmap Level) - Added for Texture2DArray support
+    pub layer: u32,
+    /// Flags (Bit 0: Dirty/Update Required)
+    pub flags: u32,
+    /// Padding to align to 16 bytes
+    pub _padding: [u32; 2],
 }
 
 /// VSM GPU Resources
@@ -210,8 +222,9 @@ impl VsmResources {
             .create_sampler(&sampler_info, None)
             .map_err(|e| AshError::VulkanError(format!("Failed to create sampler: {e:?}")))?;
 
-        // Create page table (R32_UINT texture)
+        // Create page table (R32_UINT texture array for clipmaps)
         let table_res = config.page_table_resolution();
+        let array_layers = config.clipmap_levels.max(1); // At least 1 layer
         let table_info = vk::ImageCreateInfo::default()
             .image_type(vk::ImageType::TYPE_2D)
             .format(vk::Format::R32_UINT)
@@ -221,7 +234,7 @@ impl VsmResources {
                 depth: 1,
             })
             .mip_levels(1)
-            .array_layers(1)
+            .array_layers(array_layers)
             .samples(vk::SampleCountFlags::TYPE_1)
             .tiling(vk::ImageTiling::OPTIMAL)
             .usage(
@@ -238,14 +251,18 @@ impl VsmResources {
 
         let table_view_info = vk::ImageViewCreateInfo::default()
             .image(page_table)
-            .view_type(vk::ImageViewType::TYPE_2D)
+            .view_type(if array_layers > 1 {
+                vk::ImageViewType::TYPE_2D_ARRAY
+            } else {
+                vk::ImageViewType::TYPE_2D
+            })
             .format(vk::Format::R32_UINT)
             .subresource_range(vk::ImageSubresourceRange {
                 aspect_mask: vk::ImageAspectFlags::COLOR,
                 base_mip_level: 0,
                 level_count: 1,
                 base_array_layer: 0,
-                layer_count: 1,
+                layer_count: array_layers,
             });
 
         let page_table_view = device

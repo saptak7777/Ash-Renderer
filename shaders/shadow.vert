@@ -10,15 +10,17 @@ layout(location = 3) in vec4 inJointWeights;
 
 layout(location = 0) out vec2 outUV;
 
-// Light-space matrix (projection * view from light's POV)
+// Push constants matching DrawPushConstants layout
 layout(push_constant) uniform PushConstants {
-    // Vertex stage (0-143)
-    layout(offset = 0) mat4 lightSpaceMatrix;
-    layout(offset = 64) mat4 model;
-    layout(offset = 128) uint joint_offset;
-    layout(offset = 132) uint use_instancing;
-    layout(offset = 136) uint instance_buffer_index;
-    layout(offset = 140) uint joint_buffer_index;
+    // Vertex stage (0-127) - matches DrawPushConstants
+    layout(offset = 0) mat4 model;
+    layout(offset = 64) uint joint_offset;
+    layout(offset = 68) uint use_instancing;
+    layout(offset = 72) uint instance_buffer_index;
+    layout(offset = 76) uint joint_buffer_index;
+    // Fragment stage (128-159) - implicit padding
+    // VSM-specific (160-223)
+    layout(offset = 160) mat4 lightSpaceMatrix;
 } pc;
 
 // Bindless resources (Set 1)

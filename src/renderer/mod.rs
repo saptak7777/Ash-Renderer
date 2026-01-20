@@ -6,6 +6,7 @@
 pub mod async_readback;
 pub mod atrous_denoiser;
 pub mod cleanup_traits;
+pub mod cluster_builder;
 pub mod command_list;
 pub mod diagnostics;
 pub mod features;
@@ -20,7 +21,7 @@ pub mod hiz_pass;
 pub mod indirect_draw;
 pub mod instancing;
 pub mod light_culling_integration;
-pub mod lod_system;
+// pub mod lod_system; // Deleted for Nanite transition
 pub mod model_renderer;
 pub mod motion_pass;
 pub mod msaa_targets;
@@ -51,7 +52,6 @@ pub use gbuffer::GBuffer;
 pub use hiz_pass::HiZPass;
 pub use indirect_draw::IndirectDrawPass;
 pub use instancing::{InstanceData, InstancingManager};
-pub use lod_system::{LodManager, LodMesh, LodSelection};
 pub use model_renderer::{MaterialPushConstants, ModelRenderer};
 pub use motion_pass::MotionVectorPass;
 pub use msaa_targets::{MsaaColorTarget, MsaaDepthTarget};

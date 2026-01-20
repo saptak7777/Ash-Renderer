@@ -27,8 +27,8 @@ layout(std430, set = 0, binding = 2) buffer RequestData {
     uvec4 request_data[]; // [virtual_x, virtual_y, priority_bits, padding]
 } request_entries;
 
-// Output: Page table (write physical addresses)
-layout(set = 0, binding = 3, r32ui) uniform uimage2D pageTable;
+// Output: Page table array (write physical addresses)
+layout(set = 0, binding = 3, r32ui) uniform uimage2DArray pageTable;
 
 // Output: Allocation buffer
 layout(std430, set = 0, binding = 4) buffer AllocationBuffer {
@@ -75,7 +75,9 @@ void main() {
     uint virtual_y = request.y;
     float priority = uintBitsToFloat(request.z);
     
-    ivec2 virtualPage = ivec2(virtual_x, virtual_y);
+    // For now, use layer 0 (allocator doesn't need clipmap logic)
+    // The analysis shader already selected the correct layer
+    ivec3 virtualPage = ivec3(int(virtual_x), int(virtual_y), 0);
     
     // Check if page is already allocated (race condition check)
     uint existingEntry = imageLoad(pageTable, virtualPage).r;

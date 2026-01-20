@@ -311,6 +311,11 @@ impl BindlessManager {
         self.add_instance_buffer(buffer, offset, range)
     }
 
+    /// Get the descriptor set layout
+    pub fn descriptor_set_layout(&self) -> vk::DescriptorSetLayout {
+        self.layout.handle()
+    }
+
     pub fn validate_index(&self, index: u32) -> Result<()> {
         if index >= self.max_resources {
             return Err(AshError::VulkanError(format!(

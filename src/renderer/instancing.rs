@@ -9,12 +9,13 @@
 //! - Frustum culling of instances
 //! - Statistics tracking
 
+use crate::renderer::frustum_culling::Frustum;
 use crate::renderer::occlusion_culling::CullObjectData;
 use crate::renderer::resources::material::MaterialHandle;
+use ahash::AHasher;
 use glam::Vec3;
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
-use ahash::AHasher;
 
 /// Maximum instances per draw call
 pub const MAX_INSTANCES_PER_BATCH: usize = 65536;
@@ -128,7 +129,7 @@ impl InstanceBatch {
     }
 
     /// Calculate bounding sphere from instances
-    pub fn calculate_bounds(&mut self, mesh_radius: f32) {
+    pub fn calculate_bounds(&mut self) {
         if self.instances.is_empty() {
             return;
         }
@@ -137,14 +138,14 @@ impl InstanceBatch {
         let sum: Vec3 = self.instances.iter().map(|i| i.position()).sum();
         self.bounds_center = sum / self.instances.len() as f32;
 
-        // Find maximum distance from center
+        // Find maximum distance from center (including instance radius)
         let max_dist = self
             .instances
             .iter()
-            .map(|i| (i.position() - self.bounds_center).length())
+            .map(|i| (i.position() - self.bounds_center).length() + i.world_radius())
             .fold(0.0f32, f32::max);
 
-        self.bounds_radius = max_dist + mesh_radius;
+        self.bounds_radius = max_dist;
     }
 }
 
@@ -270,6 +271,11 @@ impl InstancingManager {
         // Remove empty batches
         self.batches.retain(|_, batch| !batch.is_empty());
 
+        // Update bounds for culling
+        for batch in self.batches.values_mut() {
+            batch.calculate_bounds();
+        }
+
         // Calculate stats
         self.stats.batch_count = self.batches.len() as u32;
         if self.stats.batch_count > 0 {
@@ -322,6 +328,24 @@ impl InstancingManager {
     pub fn is_duplicate_prevention_enabled(&self) -> bool {
         self.duplicate_prevention
     }
+
+    /// Cull shadow casting batches against a frustum
+    /// Returns a vector of tuples (batch, visible_instance_indices)
+    pub fn cull_shadow_casters(&self, frustum: &Frustum) -> Vec<(&InstanceBatch, Vec<u32>)> {
+        let mut visible_batches = Vec::new();
+
+        for batch in self.shadow_batches() {
+            // Test batch bounding sphere against frustum
+            if frustum.test_sphere(batch.bounds_center, batch.bounds_radius) {
+                // For Coarse Culling phase, assume all instances are visible if batch is visible.
+                // TODO: Implement per-instance culling if needed.
+                let indices = (0..batch.count() as u32).collect();
+                visible_batches.push((batch, indices));
+            }
+        }
+
+        visible_batches
+    }
 }
 
 impl Default for InstancingManager {
@@ -346,7 +370,13 @@ mod tests {
     #[test]
     fn test_duplicate_prevention() {
         let mut manager = InstancingManager::new();
-        let key = BatchKey::new(1, MaterialHandle { index: 1, version: 1 });
+        let key = BatchKey::new(
+            1,
+            MaterialHandle {
+                index: 1,
+                version: 1,
+            },
+        );
         let model = Mat4::from_translation(Vec3::new(1.0, 2.0, 3.0));
         let instance = InstanceData::from_matrix(model);
 
@@ -356,7 +386,7 @@ mod tests {
 
         manager.finalize();
         let stats = manager.stats();
-        
+
         assert_eq!(stats.total_instances, 1);
         assert_eq!(stats.duplicates_prevented, 1);
         assert_eq!(manager.get_batch(&key).unwrap().count(), 1);
@@ -366,7 +396,13 @@ mod tests {
     fn test_duplicate_prevention_disabled() {
         let mut manager = InstancingManager::new();
         manager.set_duplicate_prevention(false);
-        let key = BatchKey::new(1, MaterialHandle { index: 1, version: 1 });
+        let key = BatchKey::new(
+            1,
+            MaterialHandle {
+                index: 1,
+                version: 1,
+            },
+        );
         let model = Mat4::from_translation(Vec3::new(1.0, 2.0, 3.0));
         let instance = InstanceData::from_matrix(model);
 
@@ -376,7 +412,7 @@ mod tests {
 
         manager.finalize();
         let stats = manager.stats();
-        
+
         assert_eq!(stats.total_instances, 2);
         assert_eq!(stats.duplicates_prevented, 0);
         assert_eq!(manager.get_batch(&key).unwrap().count(), 2);
@@ -387,7 +423,13 @@ mod tests {
         let mut manager = InstancingManager::new();
         manager.begin_frame();
 
-        let key = BatchKey::new(1, MaterialHandle { index: 1, version: 1 });
+        let key = BatchKey::new(
+            1,
+            MaterialHandle {
+                index: 1,
+                version: 1,
+            },
+        );
         for i in 0..100 {
             let model = Mat4::from_translation(Vec3::new(i as f32, 0.0, 0.0));
             manager.add_instance(key.clone(), InstanceData::from_matrix(model));

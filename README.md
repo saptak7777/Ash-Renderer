@@ -23,7 +23,8 @@ Ash Renderer is a low-level Vulkan rendering library for Rust projects that want
 - ✅ **GPU-Driven Culling**: Hi-Z occlusion and frustum culling so your GPU doesn't melt.
 - ✅ **PBR Workflow**: Metallic/Roughness standard, with automatic GLB material ingestion.
 - ✅ **Async Readbacks**: Get data back from the GPU without stalling the whole pipeline (usually).
-- ✅ **VSM (Virtual Shadow Maps)**: 16k+ resolution shadows with virtual memory paging. Replaced legacy PCF.
+- ✅ **VSM (Virtual Shadow Maps)**: Finalized implementation. 16k+ resolution shadows with virtual memory paging, clipmap cascades, and smart cache invalidation. No artifacts, just crispy shadows.
+- ✅ **Nanite V2 (Virtual Geometry)**: "The Polish" update. Professional mesh clustering using `meshopt` for leaf generation and simplification. Spatial sorting (Morton Codes) ensures extremely high cache locality. Continuous, invisible LOD transitions.
 - ✅ **Post-Processing**: Bloom, Tonemapping, and a VSR (Temporal) implementation that's surprisingly okay.
 - ✅ **Stability First**: Fixed the infamous `0xc000041d` sporadic crash. Descriptor leaks patched. Resize is rock solid.
 - ✅ **Debug Visualization**: See exactly what's being culled with colored wireframes (Red=Gone, Green=Seen).
@@ -212,3 +213,4 @@ Acknowledgment to: Unity DOTS, archetype_ecs, and the general Rust gamedev commu
 ---
 
 *Using this in production? You're braver than I am. Let me know if it actually works.*
+
