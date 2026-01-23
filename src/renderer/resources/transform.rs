@@ -433,14 +433,15 @@ impl TemporalCamera {
         self.prev_view_proj
     }
 
-    /// Get motion data for an object with the given model matrix
     pub fn get_motion_data(
         &self,
         model: Mat4,
+        vertex_heap_ptr: u64,
     ) -> crate::renderer::resources::motion::ObjectMotionData {
         crate::renderer::resources::motion::ObjectMotionData::new(
             self.view_proj * model,
             self.prev_view_proj * model,
+            vertex_heap_ptr,
         )
     }
 

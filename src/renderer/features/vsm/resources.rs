@@ -120,7 +120,7 @@ pub struct VsmResources {
     allocator: Arc<Allocator>,
     config: VsmConfig,
 
-    /// Physical cache texture (R32_FLOAT depth values)
+    /// Physical cache texture (R32G32_FLOAT for variance moments: depth, depth^2)
     pub physical_cache: vk::Image,
     physical_cache_alloc: Option<vk_mem::Allocation>,
     pub physical_cache_view: vk::ImageView,
@@ -167,7 +167,7 @@ impl VsmResources {
         // Create physical cache (depth texture)
         let cache_info = vk::ImageCreateInfo::default()
             .image_type(vk::ImageType::TYPE_2D)
-            .format(vk::Format::R32_SFLOAT)
+            .format(vk::Format::R32G32_SFLOAT) // Store variance moments (depth, depth^2)
             .extent(vk::Extent3D {
                 width: config.physical_resolution,
                 height: config.physical_resolution,
@@ -180,7 +180,8 @@ impl VsmResources {
             .usage(
                 vk::ImageUsageFlags::SAMPLED
                     | vk::ImageUsageFlags::STORAGE
-                    | vk::ImageUsageFlags::TRANSFER_DST,
+                    | vk::ImageUsageFlags::TRANSFER_DST
+                    | vk::ImageUsageFlags::COLOR_ATTACHMENT,
             )
             .sharing_mode(vk::SharingMode::EXCLUSIVE)
             .initial_layout(vk::ImageLayout::UNDEFINED);
@@ -194,7 +195,7 @@ impl VsmResources {
         let cache_view_info = vk::ImageViewCreateInfo::default()
             .image(physical_cache)
             .view_type(vk::ImageViewType::TYPE_2D)
-            .format(vk::Format::R32_SFLOAT)
+            .format(vk::Format::R32G32_SFLOAT)
             .subresource_range(vk::ImageSubresourceRange {
                 aspect_mask: vk::ImageAspectFlags::COLOR,
                 base_mip_level: 0,

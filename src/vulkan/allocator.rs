@@ -24,12 +24,15 @@ impl Allocator {
     /// # Safety
     /// // SAFETY: Assumes a valid Vulkan instance/device. Device must outlive the allocator.
     pub unsafe fn new(device: &crate::vulkan::VulkanDevice) -> crate::Result<Self> {
-        let vma = vk_mem::Allocator::new(vk_mem::AllocatorCreateInfo::new(
+        let mut create_info = vk_mem::AllocatorCreateInfo::new(
             device.instance.instance(),
             &device.device,
             device.physical_device,
-        ))
-        .map_err(|e| crate::AshError::VulkanError(format!("VMA init failed: {e:?}")))?;
+        );
+        create_info.flags = vk_mem::AllocatorCreateFlags::BUFFER_DEVICE_ADDRESS;
+
+        let vma = vk_mem::Allocator::new(create_info)
+            .map_err(|e| crate::AshError::VulkanError(format!("VMA init failed: {e:?}")))?;
 
         log::info!("VMA allocator created");
 
@@ -86,12 +89,12 @@ fn validate_buffer_params_impl(
     }
 
     // Check 3: Conflicting usage flags
-    let vertex_related = vk::BufferUsageFlags::VERTEX_BUFFER | vk::BufferUsageFlags::INDEX_BUFFER;
+    let index_related = vk::BufferUsageFlags::INDEX_BUFFER;
     let storage_related =
         vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::UNIFORM_BUFFER;
 
-    if usage.contains(vertex_related) && usage.contains(storage_related) {
-        log::warn!("Buffer has conflicting usage flags: vertex + storage. Unusual combo.");
+    if usage.contains(index_related) && usage.contains(storage_related) {
+        log::warn!("Buffer has conflicting usage flags: index + storage. Unusual combo.");
     }
 
     // Check 4: Transfer-only buffers (warning)
@@ -355,19 +358,6 @@ impl Allocator {
             .build(self)
     }
 
-    /// Create vertex buffer (dynamic mesh data)
-    pub fn create_dynamic_vertex_buffer(
-        &self,
-        size: vk::DeviceSize,
-    ) -> crate::Result<(vk::Buffer, vk_mem::Allocation)> {
-        crate::vulkan::buffer_builder::BufferBuilder::new(size)
-            .vertex_buffer()
-            .transfer_dst()
-            .cpu_writable()
-            .named("Dynamic Vertex Buffer")
-            .build(self)
-    }
-
     /// Create joint matrix buffer (skinning data)
     pub fn create_joint_buffer(
         &self,
@@ -544,7 +534,7 @@ mod tests {
         // Test 1: Size 0 should fail
         let res = validate_buffer_params_impl(
             0,
-            vk::BufferUsageFlags::VERTEX_BUFFER,
+            vk::BufferUsageFlags::STORAGE_BUFFER,
             vk_mem::MemoryUsage::AutoPreferDevice,
             vk_mem::AllocationCreateFlags::empty(),
         );
@@ -553,7 +543,7 @@ mod tests {
         // Test 2: GPU-only + Mapped should fail
         let res = validate_buffer_params_impl(
             1024,
-            vk::BufferUsageFlags::VERTEX_BUFFER,
+            vk::BufferUsageFlags::STORAGE_BUFFER,
             vk_mem::MemoryUsage::AutoPreferDevice,
             vk_mem::AllocationCreateFlags::MAPPED,
         );
@@ -562,7 +552,7 @@ mod tests {
         // Test 3: Valid params should pass
         let res = validate_buffer_params_impl(
             1024,
-            vk::BufferUsageFlags::VERTEX_BUFFER,
+            vk::BufferUsageFlags::STORAGE_BUFFER,
             vk_mem::MemoryUsage::AutoPreferDevice,
             vk_mem::AllocationCreateFlags::empty(),
         );

@@ -68,10 +68,7 @@ layout(std430, set = 1, binding = 1) readonly buffer MaterialBuffer {
 // Tints SHOULD be in Bindless (Set 1) if they are storage buffers.
 // For now, I'll rely on MaterialUniform's fields.
 
-// Set 2: Environment (IBL + Skybox + ShadowMap + VSM)
-layout(set = 2, binding = 0) uniform samplerCube irradianceMap;   // Diffuse IBL
-layout(set = 2, binding = 1) uniform samplerCube prefilterMap;     // Specular IBL  
-layout(set = 2, binding = 2) uniform sampler2D brdfLUT;            // BRDF LUT texture
+// Set 2: Environment (Skybox + ShadowMap + VSM)
 layout(set = 2, binding = 3) uniform samplerCube skyboxMap;        // Optional: Skybox for reflections
 
 layout(set = 2, binding = 5) uniform usampler2DArray vsmPageTable; // VSM Page Table Array (R32_UINT)
@@ -180,65 +177,39 @@ float VsmShadowCalculation(vec4 fragPosLightSpace, vec3 normal, vec3 lightDir) {
     
     // 7. ADAPTIVE BIAS (Slope-Scaled)
     float cosAngle = clamp(dot(normal, lightDir), 0.0, 1.0);
-    // Use slope-scaled bias to prevent acne on steep surfaces
-    // standard bias: max(0.005 * (1.0 - dot), 0.0005)
-    // improved: clamp(factor * tan(acos(ndotl)), min, max)
     float NdotL = cosAngle;
     float slopeBias = clamp(0.005 * tan(acos(NdotL)), 0.0, 0.01);
     float bias = max(slopeBias, 0.0002);
     
-    // 8. SAMPLE PHYSICAL CACHE WITH VOGEL DISK (SMRT-like Filter)
-    float shadow = 0.0;
-    float texelSize = 1.0 / physicalResolution;
+    // 8. VARIANCE SHADOW MAPPING (Chebyshev's Inequality)
+    // Sample variance moments (depth, depth^2) from physical cache
+    vec2 moments = texture(vsmPhysicalCache, physicalUV).rg;
+    
     float currentDepth = projCoords.z;
     
-    const int SAMPLE_COUNT = 16;
-    const float GOLDEN_ANGLE = 2.4; // Radians
-    
-    // Interleaved Gradient Noise for rotation
-    float noise = fract(52.9829189 * fract(0.06711056 * gl_FragCoord.x + 0.00583715 * gl_FragCoord.y));
-    float rotation = noise * 6.283185;
-    float sinRot = sin(rotation);
-    float cosRot = cos(rotation);
-    
-    // Filter radius (tunable)
-    float filterRadius = 2.0;
-
-    for (int i = 0; i < SAMPLE_COUNT; ++i) {
-        // Generate Vogel Sample Offset
-        float r = sqrt(float(i) + 0.5) / sqrt(float(SAMPLE_COUNT));
-        float theta = i * GOLDEN_ANGLE + rotation;
-        
-        // Rotate the offset
-        vec2 offset = vec2(cos(theta), sin(theta)) * r * filterRadius * texelSize;
-        
-        float vsmDepth = texture(vsmPhysicalCache, physicalUV + offset).r;
-        
-        if (vsmDepth == 1.0) {
-             // 1.0 usually means "clear value" / far plane in shadow map
-             // If shadow map is cleared to 1.0, and our currentDepth < 1.0, we are lit?
-             // Need to check clear color. VSM clears to 1.0.
-             shadow += 1.0; 
-        } else {
-             shadow += (currentDepth - bias) > vsmDepth ? 1.0 : 0.0;
-        }
+    // If current depth is closer than mean, fully lit
+    if (currentDepth <= moments.x) {
+        return 0.0; // No shadow
     }
     
-    // Invert shadow sum (logic above was: if depth > map ? 1.0 (SHADOW))
-    // Wait.
-    // Standard: if (currentDepth > closestDepth + bias) Shadow = 1.0;
-    // My logic: shadow += (currentDepth - bias) > pcfDepth ? 1.0 : 0.0;
-    // So "shadow" accumulates Occlusion.
-    // 0 = Lit, 16 = Fully Occluded.
+    // Calculate variance and use Chebyshev's inequality
+    float variance = moments.y - (moments.x * moments.x);
+    variance = max(variance, 0.00002); // Prevent division by zero
     
-    // We want to return visibility (1.0 = Lit, 0.0 = Shadow).
-    // So if sum is 16, Visibility is 0.
+    float d = currentDepth - moments.x;
+    float p_max = variance / (variance + d * d);
     
-    return 1.0 - (shadow / float(SAMPLE_COUNT));
+    // Apply light bleeding reduction (optional, helps with artifacts)
+    float lightBleedingReduction = 0.2;
+    p_max = clamp((p_max - lightBleedingReduction) / (1.0 - lightBleedingReduction), 0.0, 1.0);
+    
+    // Return shadow factor (1.0 = fully shadowed, 0.0 = fully lit)
+    // Invert p_max because it represents visibility probability
+    return 1.0 - p_max;
 }
 
 float ShadowCalculation(vec4 fragPosLightSpace, vec3 normal, vec3 lightDir) {
-    // Use VSM by default
+    // VSM by default
     return VsmShadowCalculation(fragPosLightSpace, normal, lightDir);
 }
 
@@ -516,28 +487,8 @@ void main() {
         Lo += (diffuse + specular) * radiance * NdotL * attenuation;
     }
     
-    // ============================================================================
-    // ============================================================================
-    // IMAGE-BASED LIGHTING (IBL) + GLOBAL DIRECTIONAL
-    // ============================================================================
-
-    // Layer 1: IBL Ambient (Diffuse + Specular)
-    // Diffuse IBL: Irradiance map provides diffuse ambient
-    // Reuse F0 already calculated at line 324
-    vec3 F = fresnel_schlick_roughness(max(dot(normal, viewDir), 0.0), F0, roughness);
-    vec3 kD = (1.0 - F) * (1.0 - metallic);
-    
-    vec3 irradiance = texture(irradianceMap, normal).rgb;
-    vec3 diffuseIBL = kD * irradiance * baseColor;
-    
-    // Specular IBL: Prefiltered environment map + BRDF LUT
-    const float MAX_REFLECTION_LOD = 4.0;
-    vec3 R = reflect(-viewDir, normal);
-    vec3 prefilteredColor = textureLod(prefilterMap, R, roughness * MAX_REFLECTION_LOD).rgb;
-    vec2 envBRDF = texture(brdfLUT, vec2(max(dot(normal, viewDir), 0.0), roughness)).rg;
-    vec3 specularIBL = prefilteredColor * (F * envBRDF.x + envBRDF.y);
-    
-    vec3 ambient = (diffuseIBL + specularIBL) * occlusion;
+    // Ambient Calculation - Hemisphere Fallback
+    vec3 ambient = calculateHemisphereAmbient(normal, baseColor) * occlusion;
     
     // Layer 2: Global Directional Light
     vec3 directional = calculateDirectionalLight(

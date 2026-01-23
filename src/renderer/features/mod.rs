@@ -1,9 +1,7 @@
 pub mod ambient_lighting;
 mod auto_rotate;
 pub mod bloom;
-pub mod brdf_lut;
 mod feature_trait;
-pub mod ibl_manager;
 pub mod light_culling;
 pub mod light_manager;
 pub mod lighting;
@@ -16,7 +14,6 @@ pub use ambient_lighting::{
 };
 pub use auto_rotate::AutoRotateFeature;
 pub use bloom::{BloomConfig, BloomFeature, BloomPass, BloomPushConstants};
-pub use brdf_lut::{BrdfLutConfig, BrdfLutPass};
 pub use feature_trait::{FeatureFrameContext, FeatureManager, FeatureRenderContext, RenderFeature};
 pub use light_culling::{
     GpuLight, LightCullingConfig, LightCullingPass, MAX_LIGHTS, MAX_LIGHTS_PER_TILE, TILE_SIZE,

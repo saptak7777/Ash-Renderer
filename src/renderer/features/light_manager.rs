@@ -42,10 +42,12 @@ pub struct ForwardPlusInfo {
 pub struct LightManager {
     /// CPU-side culling logic
     culling_pass: LightCullingPass,
-    /// GPU light buffer (to be created)
-    light_buffer: Option<LightBuffer>,
-    /// GPU tile buffer (compute output)
-    tile_buffer: Option<TileBuffer>,
+    /// GPU light buffers (one per frame in flight)
+    light_buffers: Vec<Option<LightBuffer>>,
+    /// GPU tile buffers (compute output, one per frame in flight)
+    tile_buffers: Vec<Option<TileBuffer>>,
+    /// Number of frames in flight
+    frame_count: usize,
     /// Forward+ info for shaders
     fp_info: ForwardPlusInfo,
     /// Whether Forward+ is enabled
@@ -56,11 +58,19 @@ pub struct LightManager {
 
 impl LightManager {
     /// Create a new light manager
-    pub fn new() -> Self {
+    pub fn new(frame_count: usize) -> Self {
+        let mut light_buffers = Vec::with_capacity(frame_count);
+        let mut tile_buffers = Vec::with_capacity(frame_count);
+        for _ in 0..frame_count {
+            light_buffers.push(None);
+            tile_buffers.push(None);
+        }
+
         Self {
             culling_pass: LightCullingPass::new(),
-            light_buffer: None,
-            tile_buffer: None,
+            light_buffers,
+            tile_buffers,
+            frame_count,
             fp_info: ForwardPlusInfo::default(),
             enabled: true,
             dirty: true,
@@ -68,7 +78,10 @@ impl LightManager {
     }
 
     /// Create with custom culling config
-    pub fn with_config(config: LightCullingConfig) -> Result<Self, crate::error::AshError> {
+    pub fn with_config(
+        config: LightCullingConfig,
+        frame_count: usize,
+    ) -> Result<Self, crate::error::AshError> {
         if config.debug_tiles && !config.enabled {
             return Err(crate::error::AshError::HardwareCapabilityMissing(
                 "LightManager: debug_tiles requires culling to be enabled".to_string(),
@@ -77,7 +90,7 @@ impl LightManager {
 
         Ok(Self {
             culling_pass: LightCullingPass::with_config(config),
-            ..Self::new()
+            ..Self::new(frame_count)
         })
     }
 
@@ -127,6 +140,11 @@ impl LightManager {
     /// Get tile buffer size in bytes
     pub fn get_tile_buffer_size(&self) -> usize {
         self.culling_pass.get_tile_buffer_size()
+    }
+
+    /// Get number of frames in flight
+    pub fn frame_count(&self) -> usize {
+        self.frame_count
     }
 
     /// Get dispatch dimensions for compute shader
@@ -203,15 +221,18 @@ impl LightManager {
             ..Default::default()
         };
 
-        let (light_buffer, light_allocation) = allocator
-            .create_buffer(&light_buffer_info, &light_alloc_info)
-            .expect("LightManager: Base buffer allocation failed during initialization");
+        // Allocate light buffers for all frames
+        for frame_idx in 0..self.frame_count {
+            let (light_buffer, light_allocation) = allocator
+                .create_buffer(&light_buffer_info, &light_alloc_info)
+                .expect("LightManager: Light buffer allocation failed during initialization");
 
-        self.light_buffer = Some(LightBuffer {
-            buffer: light_buffer,
-            allocation: light_allocation,
-            size: light_buffer_size,
-        });
+            self.light_buffers[frame_idx] = Some(LightBuffer {
+                buffer: light_buffer,
+                allocation: light_allocation,
+                size: light_buffer_size,
+            });
+        }
 
         // Tile buffer initialization based on tile grid dimensions.
         // Formula: tiles_x * tiles_y * (MAX_LIGHTS_PER_TILE + 1) * sizeof(u32)
@@ -230,26 +251,28 @@ impl LightManager {
             ..Default::default()
         };
 
-        let (tile_buffer, tile_allocation) = allocator
-            .create_buffer(&tile_buffer_info, &tile_alloc_info)
-            .expect("LightManager: Tile buffer allocation failed");
+        // Allocate tile buffers for all frames
+        for frame_idx in 0..self.frame_count {
+            let (tile_buffer, tile_allocation) = allocator
+                .create_buffer(&tile_buffer_info, &tile_alloc_info)
+                .expect("LightManager: Tile buffer allocation failed");
 
-        // Zero out the tile buffer to prevent garbage data
-        let tile_mapped = allocator.get_allocation_info(&tile_allocation).mapped_data;
-        if !tile_mapped.is_null() {
-            unsafe {
+            // Zero out the tile buffer to prevent garbage data
+            let tile_mapped = allocator.get_allocation_info(&tile_allocation).mapped_data;
+            if !tile_mapped.is_null() {
                 std::ptr::write_bytes(tile_mapped as *mut u8, 0, tile_buffer_size as usize);
             }
+
+            self.tile_buffers[frame_idx] = Some(TileBuffer {
+                buffer: tile_buffer,
+                allocation: tile_allocation,
+                size: tile_buffer_size,
+            });
         }
 
-        self.tile_buffer = Some(TileBuffer {
-            buffer: tile_buffer,
-            allocation: tile_allocation,
-            size: tile_buffer_size,
-        });
-
         log::info!(
-            "LightManager: Created buffers (light: {}KB, tile: {}KB)",
+            "LightManager: Created buffers for {} frames (light: {}KB, tile: {}KB per frame)",
+            self.frame_count,
             light_buffer_size / 1024,
             tile_buffer_size / 1024
         );
@@ -257,40 +280,48 @@ impl LightManager {
         Ok(())
     }
 
-    /// Recreate tile buffer if screen size changed
-    ///
-    /// # Safety
-    /// GPU must be idle or synchronized. Old buffer must not be in use.
     pub unsafe fn recreate_tile_buffer_if_needed(
         &mut self,
         allocator: &vk_mem::Allocator,
-    ) -> crate::Result<()> {
+    ) -> crate::Result<bool> {
         if !self.dirty {
-            return Ok(());
+            return Ok(false);
         }
 
         let new_tile_buffer_size = self.get_tile_buffer_size().max(1024) as u64;
 
-        // Check if buffer exists and size matches
-        if let Some(ref tile_buffer) = self.tile_buffer {
-            if tile_buffer.size == new_tile_buffer_size {
-                // Size hasn't changed, no need to recreate
-                return Ok(());
+        // Check if any buffer exists and size matches
+        let needs_recreation =
+            if let Some(ref tile_buffer) = self.tile_buffers.first().and_then(|b| b.as_ref()) {
+                if tile_buffer.size == new_tile_buffer_size {
+                    // Size hasn't changed, no need to recreate
+                    self.dirty = false;
+                    return Ok(false);
+                }
+
+                log::info!(
+                    "LightManager: Recreating tile buffers ({}KB -> {}KB)",
+                    tile_buffer.size / 1024,
+                    new_tile_buffer_size / 1024
+                );
+                true
+            } else {
+                true
+            };
+
+        if !needs_recreation {
+            self.dirty = false;
+            return Ok(false);
+        }
+
+        // Destroy old buffers if they exist
+        for frame_idx in 0..self.frame_count {
+            if let Some(mut old_tile_buffer) = self.tile_buffers[frame_idx].take() {
+                allocator.destroy_buffer(old_tile_buffer.buffer, &mut old_tile_buffer.allocation);
             }
-
-            log::info!(
-                "LightManager: Recreating tile buffer ({}KB -> {}KB)",
-                tile_buffer.size / 1024,
-                new_tile_buffer_size / 1024
-            );
         }
 
-        // Destroy old buffer if it exists
-        if let Some(mut old_tile_buffer) = self.tile_buffer.take() {
-            allocator.destroy_buffer(old_tile_buffer.buffer, &mut old_tile_buffer.allocation);
-        }
-
-        // Create new tile buffer with host-accessible memory for zero-initialization
+        // Create new tile buffers with host-accessible memory for zero-initialization
         let tile_buffer_info = vk::BufferCreateInfo::default()
             .size(new_tile_buffer_size)
             .usage(vk::BufferUsageFlags::STORAGE_BUFFER)
@@ -303,42 +334,49 @@ impl LightManager {
             ..Default::default()
         };
 
-        let (tile_buffer, tile_allocation) = allocator
-            .create_buffer(&tile_buffer_info, &tile_alloc_info)
-            .map_err(|e| {
-                crate::AshError::VulkanError(format!(
-                    "LightManager: Tile buffer recreation failed: {e:?}"
-                ))
-            })?;
+        for frame_idx in 0..self.frame_count {
+            let (tile_buffer, tile_allocation) = allocator
+                .create_buffer(&tile_buffer_info, &tile_alloc_info)
+                .map_err(|e| {
+                    crate::AshError::VulkanError(format!(
+                        "LightManager: Tile buffer recreation failed: {e:?}"
+                    ))
+                })?;
 
-        // Zero out the tile buffer to prevent garbage data
-        let tile_mapped = allocator.get_allocation_info(&tile_allocation).mapped_data;
-        if !tile_mapped.is_null() {
-            unsafe {
+            // Zero out the tile buffer to prevent garbage data
+            let tile_mapped = allocator.get_allocation_info(&tile_allocation).mapped_data;
+            if !tile_mapped.is_null() {
                 std::ptr::write_bytes(tile_mapped as *mut u8, 0, new_tile_buffer_size as usize);
             }
+
+            self.tile_buffers[frame_idx] = Some(TileBuffer {
+                buffer: tile_buffer,
+                allocation: tile_allocation,
+                size: new_tile_buffer_size,
+            });
         }
 
-        self.tile_buffer = Some(TileBuffer {
-            buffer: tile_buffer,
-            allocation: tile_allocation,
-            size: new_tile_buffer_size,
-        });
-
         log::info!(
-            "LightManager: Tile buffer recreated ({}KB)",
+            "LightManager: Tile buffers recreated for {} frames ({}KB per frame)",
+            self.frame_count,
             new_tile_buffer_size / 1024
         );
 
-        Ok(())
+        self.dirty = false;
+        Ok(true)
     }
 
     /// Upload light data to GPU buffer
     ///
     /// # Safety
     /// Buffer must have been created and be valid.
-    pub unsafe fn upload_lights(&mut self, allocator: &vk_mem::Allocator) -> crate::Result<()> {
-        let Some(ref light_buffer) = self.light_buffer else {
+    pub unsafe fn upload_lights(
+        &mut self,
+        allocator: &vk_mem::Allocator,
+        frame_index: usize,
+    ) -> crate::Result<()> {
+        let Some(ref light_buffer) = self.light_buffers.get(frame_index).and_then(|b| b.as_ref())
+        else {
             return Ok(()); // Light buffer not initialized
         };
 
@@ -365,14 +403,19 @@ impl LightManager {
         Ok(())
     }
 
-    /// Get light buffer handle for descriptor binding
-    pub fn get_light_buffer(&self) -> Option<vk::Buffer> {
-        self.light_buffer.as_ref().map(|b| b.buffer)
+    pub fn get_light_buffer(&self, frame_index: usize) -> Option<vk::Buffer> {
+        self.light_buffers
+            .get(frame_index)
+            .and_then(|b| b.as_ref())
+            .map(|b| b.buffer)
     }
 
     /// Get tile buffer handle for descriptor binding
-    pub fn get_tile_buffer(&self) -> Option<vk::Buffer> {
-        self.tile_buffer.as_ref().map(|b| b.buffer)
+    pub fn get_tile_buffer(&self, frame_index: usize) -> Option<vk::Buffer> {
+        self.tile_buffers
+            .get(frame_index)
+            .and_then(|b| b.as_ref())
+            .map(|b| b.buffer)
     }
 
     /// Destroy GPU buffers
@@ -380,19 +423,24 @@ impl LightManager {
     /// # Safety
     /// Buffers must not be in use by GPU.
     pub unsafe fn destroy_buffers(&mut self, allocator: &vk_mem::Allocator) {
-        if let Some(mut light_buffer) = self.light_buffer.take() {
-            allocator.destroy_buffer(light_buffer.buffer, &mut light_buffer.allocation);
+        for frame_idx in 0..self.frame_count {
+            if let Some(mut light_buffer) = self.light_buffers[frame_idx].take() {
+                allocator.destroy_buffer(light_buffer.buffer, &mut light_buffer.allocation);
+            }
+            if let Some(mut tile_buffer) = self.tile_buffers[frame_idx].take() {
+                allocator.destroy_buffer(tile_buffer.buffer, &mut tile_buffer.allocation);
+            }
         }
-        if let Some(mut tile_buffer) = self.tile_buffer.take() {
-            allocator.destroy_buffer(tile_buffer.buffer, &mut tile_buffer.allocation);
-        }
-        log::info!("LightManager: Destroyed buffers");
+        log::info!(
+            "LightManager: Destroyed buffers for {} frames",
+            self.frame_count
+        );
     }
 }
 
 impl Default for LightManager {
     fn default() -> Self {
-        Self::new()
+        Self::new(2) // Default to 2 frames in flight
     }
 }
 
@@ -403,7 +451,7 @@ mod tests {
 
     #[test]
     fn test_light_manager_update() {
-        let mut manager = LightManager::new();
+        let mut manager = LightManager::new(2);
 
         let point_lights = vec![PointLight {
             position: Vec3::new(1.0, 2.0, 3.0),
@@ -419,7 +467,7 @@ mod tests {
 
     #[test]
     fn test_resize() {
-        let mut manager = LightManager::new();
+        let mut manager = LightManager::new(2);
         manager.on_resize(1920, 1080);
 
         let info = manager.get_forward_plus_info();

@@ -1,254 +1,217 @@
-//! Global Geometry Buffer for Vertex Pulling
+//! Dual Heap Geometry Buffer for BDA-based Vertex Pulling
 //!
-//! Replaces per-mesh vertex buffers with a single unified SSBO.
-//! All geometry is stored in one massive buffer, accessed via offsets.
+//! Separates vertex data (BDA-accessible) from index data (traditional binding)
+//! to ensure Intel Arc compatibility and prepare for Hardware Ray Tracing.
 
 use ash::vk;
 use std::sync::{
     atomic::{AtomicU64, Ordering},
-    Arc,
+    Arc, Mutex,
 };
 
 use crate::vulkan::Allocator;
 use crate::{AshError, Result};
 
-use super::gpu_buffer::GpuBuffer;
-use super::mesh::Vertex;
-use crate::renderer::SkinnedVertex;
+/// 16-byte alignment for buffer_reference_align in GLSL
+const VERTEX_ALIGNMENT: u64 = 16;
 
-/// Allocation result containing offsets into the global buffers
+/// Allocation result containing offsets and addresses
 #[derive(Debug, Clone, Copy)]
 pub struct MeshAllocation {
-    /// Byte offset into the global vertex buffer
+    /// Byte offset into the vertex heap
     pub vertex_offset: u64,
+    /// Device address for this mesh's vertices (base + offset)
+    pub vertex_device_address: vk::DeviceAddress,
     /// Number of vertices allocated
     pub vertex_count: u32,
-    /// Byte offset into the global index buffer
+    /// Byte offset into the index heap
     pub index_offset: u64,
     /// Number of indices allocated
     pub index_count: u32,
 }
 
-/// Global geometry buffer manager for vertex pulling
-pub struct GlobalGeometryBuffer {
-    /// Static vertex buffer (Vertex: 64 bytes)
-    static_vertex_buffer: GpuBuffer<u8>,
-    /// Skinned vertex buffer (SkinnedVertex: 64 bytes)
-    skinned_vertex_buffer: GpuBuffer<u8>,
-    /// Unified index buffer (all meshes)
-    index_buffer: GpuBuffer<u32>,
-    /// Current allocation offset for static vertices
-    static_vertex_offset: AtomicU64,
-    /// Current allocation offset for skinned vertices
-    skinned_vertex_offset: AtomicU64,
-    /// Current allocation offset for indices
-    index_offset: AtomicU64,
-    /// Total capacity in bytes for static vertices
-    static_vertex_capacity: u64,
-    /// Total capacity in bytes for skinned vertices
-    skinned_vertex_capacity: u64,
-    /// Total capacity in indices
+/// Dual Heap Geometry Buffer
+///
+/// - Vertex Heap: STORAGE_BUFFER | SHADER_DEVICE_ADDRESS | TRANSFER_DST
+/// - Index Heap: INDEX_BUFFER | TRANSFER_DST (No BDA flag for Intel Arc stability)
+pub struct DualHeapGeometryBuffer {
+    device: Arc<ash::Device>,
+    allocator: Arc<Allocator>,
+
+    // Vertex Heap (BDA-enabled)
+    vertex_heap: vk::Buffer,
+    vertex_allocation: Mutex<vk_mem::Allocation>,
+    vertex_device_address: vk::DeviceAddress,
+    vertex_capacity: u64,
+    vertex_offset: AtomicU64,
+
+    // Index Heap (Traditional)
+    index_buffer: vk::Buffer,
+    index_allocation: Mutex<vk_mem::Allocation>,
     index_capacity: u64,
+    index_offset: AtomicU64,
 }
 
-impl GlobalGeometryBuffer {
-    /// Create a new global geometry buffer
+impl DualHeapGeometryBuffer {
+    /// Create a new dual heap geometry buffer
     ///
     /// # Arguments
+    /// * `device` - Vulkan device
     /// * `allocator` - VMA allocator
-    /// * `vertex_capacity_mb` - Static vertex buffer size in megabytes
-    /// * `index_capacity_mb` - Index buffer size in megabytes
+    /// * `vertex_capacity_mb` - Vertex heap size in megabytes
+    /// * `index_capacity_mb` - Index heap size in megabytes
     ///
     /// # Safety
-    /// Caller must ensure allocator is valid and buffers are destroyed before allocator
+    /// Caller must ensure device and allocator are valid
     pub unsafe fn new(
+        device: Arc<ash::Device>,
         allocator: Arc<Allocator>,
         vertex_capacity_mb: u32,
         index_capacity_mb: u32,
     ) -> Result<Self> {
-        let static_vertex_capacity = (vertex_capacity_mb as u64) * 1024 * 1024;
-        let skinned_vertex_capacity = (vertex_capacity_mb as u64) * 1024 * 1024; // Same size for now
+        let vertex_capacity = (vertex_capacity_mb as u64) * 1024 * 1024;
         let index_capacity =
             ((index_capacity_mb as u64) * 1024 * 1024) / std::mem::size_of::<u32>() as u64;
 
         log::info!(
-            "Creating GlobalGeometryBuffer: static_vertex={} MB, skinned_vertex={} MB, index={} MB",
-            vertex_capacity_mb,
+            "Creating DualHeapGeometryBuffer: vertex={} MB, index={} MB",
             vertex_capacity_mb,
             index_capacity_mb
         );
 
-        // Create static vertex buffer
-        let static_vertex_buffer = GpuBuffer::new(
-            Arc::clone(&allocator),
-            static_vertex_capacity as usize,
-            vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
-            vk_mem::MemoryUsage::AutoPreferDevice,
-            None,
-        )?;
-
-        // Create skinned vertex buffer
-        let skinned_vertex_buffer = GpuBuffer::new(
-            Arc::clone(&allocator),
-            skinned_vertex_capacity as usize,
-            vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
-            vk_mem::MemoryUsage::AutoPreferDevice,
-            None,
-        )?;
-
-        // Create index buffer
-        let index_buffer = GpuBuffer::new(
-            allocator,
-            index_capacity as usize,
+        // Create Vertex Heap with BDA support
+        let (vertex_heap, vertex_allocation) = allocator.create_buffer_with_flags_and_name(
+            vertex_capacity,
             vk::BufferUsageFlags::STORAGE_BUFFER
-                | vk::BufferUsageFlags::INDEX_BUFFER
+                | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS
                 | vk::BufferUsageFlags::TRANSFER_DST,
             vk_mem::MemoryUsage::AutoPreferDevice,
-            None,
+            vk_mem::AllocationCreateFlags::empty(),
+            Some("Vertex Heap (BDA)".to_string()),
         )?;
 
-        log::info!("✅ GlobalGeometryBuffer created successfully");
+        // Get device address for vertex heap
+        let address_info = vk::BufferDeviceAddressInfo::default().buffer(vertex_heap);
+        let vertex_device_address = device.get_buffer_device_address(&address_info);
+
+        log::info!("Vertex Heap BDA: 0x{:016X}", vertex_device_address);
+
+        // Create Index Heap (No BDA flag for Intel Arc compatibility)
+        let (index_buffer, index_allocation) = allocator.create_buffer_with_flags_and_name(
+            index_capacity * std::mem::size_of::<u32>() as u64,
+            vk::BufferUsageFlags::INDEX_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
+            vk_mem::MemoryUsage::AutoPreferDevice,
+            vk_mem::AllocationCreateFlags::empty(),
+            Some("Index Heap".to_string()),
+        )?;
+
+        log::info!("✅ DualHeapGeometryBuffer created successfully");
 
         Ok(Self {
-            static_vertex_buffer,
-            skinned_vertex_buffer,
+            device,
+            allocator,
+            vertex_heap,
+            vertex_allocation: Mutex::new(vertex_allocation),
+            vertex_device_address,
+            vertex_capacity,
+            vertex_offset: AtomicU64::new(0),
             index_buffer,
-            static_vertex_offset: AtomicU64::new(0),
-            skinned_vertex_offset: AtomicU64::new(0),
-            index_offset: AtomicU64::new(0),
-            static_vertex_capacity,
-            skinned_vertex_capacity,
+            index_allocation: Mutex::new(index_allocation),
             index_capacity,
+            index_offset: AtomicU64::new(0),
         })
     }
 
-    /// Allocate space for a mesh and upload data
-    ///
-    /// # Arguments
-    /// * `device` - Vulkan device
-    /// * `command_pool` - Command pool for upload
-    /// * `queue` - Queue for upload
-    /// * `vertices` - Vertex data (standard or skinned)
-    /// * `indices` - Optional index data
-    /// * `is_skinned` - Whether this mesh uses skinned vertices
+    /// Upload vertices to the vertex heap
     ///
     /// # Safety
     /// Caller must ensure device, command pool, and queue are valid
-    pub unsafe fn allocate_mesh(
+    pub unsafe fn upload_vertices<T: bytemuck::Pod>(
         &self,
-        device: &ash::Device,
         command_pool: vk::CommandPool,
         queue: vk::Queue,
-        vertices: &[u8],
-        indices: Option<&[u32]>,
-        is_skinned: bool,
-    ) -> Result<MeshAllocation> {
-        let vertex_size = vertices.len() as u64;
-        let index_count = indices.map_or(0, |i| i.len() as u32);
+        vertices: &[T],
+    ) -> Result<u64> {
+        let size = std::mem::size_of_val(vertices) as u64;
 
-        // Allocate vertex space (route to correct buffer)
-        let (vertex_offset, vertex_capacity, vertex_buffer_handle) = if is_skinned {
-            let offset = self
-                .skinned_vertex_offset
-                .fetch_add(vertex_size, Ordering::SeqCst);
-            if offset + vertex_size > self.skinned_vertex_capacity {
-                return Err(AshError::VulkanError(
-                    "GlobalGeometryBuffer: Skinned vertex buffer full".to_string(),
-                ));
-            }
-            (
-                offset,
-                self.skinned_vertex_capacity,
-                self.skinned_vertex_buffer.handle(),
-            )
-        } else {
-            let offset = self
-                .static_vertex_offset
-                .fetch_add(vertex_size, Ordering::SeqCst);
-            if offset + vertex_size > self.static_vertex_capacity {
-                return Err(AshError::VulkanError(
-                    "GlobalGeometryBuffer: Static vertex buffer full".to_string(),
-                ));
-            }
-            (
-                offset,
-                self.static_vertex_capacity,
-                self.static_vertex_buffer.handle(),
-            )
-        };
+        // Align to 16 bytes for buffer_reference_align
+        let aligned_size = (size + VERTEX_ALIGNMENT - 1) & !(VERTEX_ALIGNMENT - 1);
 
-        // Allocate index space
-        let index_offset = if let Some(idx) = indices {
-            let offset = self
-                .index_offset
-                .fetch_add(idx.len() as u64, Ordering::SeqCst);
-            if offset + idx.len() as u64 > self.index_capacity {
-                return Err(AshError::VulkanError(
-                    "GlobalGeometryBuffer: Index buffer full".to_string(),
-                ));
-            }
-            offset
-        } else {
-            0
-        };
+        let offset = self.vertex_offset.fetch_add(aligned_size, Ordering::SeqCst);
 
-        // Upload vertex data
-        self.upload_data(
-            device,
-            command_pool,
-            queue,
-            vertex_buffer_handle,
-            vertex_offset,
-            vertices,
-        )?;
-
-        // Upload index data if present
-        if let Some(idx) = indices {
-            let index_bytes = bytemuck::cast_slice(idx);
-            self.upload_data(
-                device,
-                command_pool,
-                queue,
-                self.index_buffer.handle(),
-                index_offset * std::mem::size_of::<u32>() as u64,
-                index_bytes,
-            )?;
+        if offset + aligned_size > self.vertex_capacity {
+            return Err(AshError::VulkanError(
+                "DualHeapGeometryBuffer: Vertex heap overflow".to_string(),
+            ));
         }
 
-        Ok(MeshAllocation {
-            vertex_offset,
-            vertex_count: (vertex_size / std::mem::size_of::<Vertex>() as u64) as u32,
-            index_offset,
-            index_count,
-        })
+        self.upload_data(
+            command_pool,
+            queue,
+            self.vertex_heap,
+            offset,
+            bytemuck::cast_slice(vertices),
+        )?;
+
+        Ok(offset)
     }
 
-    /// Upload data to a buffer using staging buffer
+    /// Upload indices to the index heap
+    ///
+    /// # Safety
+    /// Caller must ensure device, command pool, and queue are valid
+    pub unsafe fn upload_indices(
+        &self,
+        command_pool: vk::CommandPool,
+        queue: vk::Queue,
+        indices: &[u32],
+    ) -> Result<u64> {
+        let count = indices.len() as u64;
+
+        let offset = self.index_offset.fetch_add(count, Ordering::SeqCst);
+
+        if offset + count > self.index_capacity {
+            return Err(AshError::VulkanError(
+                "DualHeapGeometryBuffer: Index heap overflow".to_string(),
+            ));
+        }
+
+        let byte_offset = offset * std::mem::size_of::<u32>() as u64;
+
+        self.upload_data(
+            command_pool,
+            queue,
+            self.index_buffer,
+            byte_offset,
+            bytemuck::cast_slice(indices),
+        )?;
+
+        Ok(byte_offset)
+    }
+
+    /// Upload data to a buffer using cmd_update_buffer
     unsafe fn upload_data(
         &self,
-        device: &ash::Device,
         command_pool: vk::CommandPool,
         queue: vk::Queue,
         dst_buffer: vk::Buffer,
         dst_offset: u64,
         data: &[u8],
     ) -> Result<()> {
-        // For now, use a simple approach - create staging via VMA from the vertex_buffer's allocator
-        // In production, we'd pass allocator as a parameter
-        // This is a simplified version that will be improved in Phase 2
-
-        // Create command buffer
         let cmd_info = vk::CommandBufferAllocateInfo::default()
             .command_pool(command_pool)
             .level(vk::CommandBufferLevel::PRIMARY)
             .command_buffer_count(1);
 
-        let cmd_buffers = device.allocate_command_buffers(&cmd_info).map_err(|e| {
-            AshError::VulkanError(format!("Failed to allocate command buffer: {e}"))
-        })?;
+        let cmd_buffers = self
+            .device
+            .allocate_command_buffers(&cmd_info)
+            .map_err(|e| {
+                AshError::VulkanError(format!("Failed to allocate command buffer: {e}"))
+            })?;
         let cmd_buffer = cmd_buffers[0];
 
-        device
+        self.device
             .begin_command_buffer(
                 cmd_buffer,
                 &vk::CommandBufferBeginInfo::default()
@@ -256,66 +219,80 @@ impl GlobalGeometryBuffer {
             )
             .map_err(|e| AshError::VulkanError(format!("Failed to begin command buffer: {e}")))?;
 
-        // For initial implementation, we'll use update_buffer for small uploads
-        // This is less efficient but avoids the staging buffer complexity
+        // Split into 65536-byte chunks for cmd_update_buffer
         if data.len() <= 65536 {
-            device.cmd_update_buffer(cmd_buffer, dst_buffer, dst_offset, data);
+            self.device
+                .cmd_update_buffer(cmd_buffer, dst_buffer, dst_offset, data);
         } else {
-            // For larger uploads, we'll need to implement proper staging
-            // For now, split into chunks
             for (i, chunk) in data.chunks(65536).enumerate() {
                 let chunk_offset = dst_offset + (i * 65536) as u64;
-                device.cmd_update_buffer(cmd_buffer, dst_buffer, chunk_offset, chunk);
+                self.device
+                    .cmd_update_buffer(cmd_buffer, dst_buffer, chunk_offset, chunk);
             }
         }
 
-        device
+        self.device
             .end_command_buffer(cmd_buffer)
             .map_err(|e| AshError::VulkanError(format!("Failed to end command buffer: {e}")))?;
 
         let submit_info = vk::SubmitInfo::default().command_buffers(&cmd_buffers);
 
-        device
+        self.device
             .queue_submit(queue, &[submit_info], vk::Fence::null())
             .map_err(|e| AshError::VulkanError(format!("Failed to submit queue: {e}")))?;
 
-        device
+        self.device
             .queue_wait_idle(queue)
             .map_err(|e| AshError::VulkanError(format!("Failed to wait for queue: {e}")))?;
 
-        // Cleanup
-        device.free_command_buffers(command_pool, &cmd_buffers);
+        self.device.free_command_buffers(command_pool, &cmd_buffers);
 
         Ok(())
     }
 
-    /// Get static vertex buffer handle
-    pub fn static_vertex_buffer(&self) -> vk::Buffer {
-        self.static_vertex_buffer.handle()
+    /// Get the base device address of the vertex heap
+    pub fn vertex_heap_address(&self) -> vk::DeviceAddress {
+        self.vertex_device_address
     }
 
-    /// Get skinned vertex buffer handle
-    pub fn skinned_vertex_buffer(&self) -> vk::Buffer {
-        self.skinned_vertex_buffer.handle()
-    }
-
-    /// Get index buffer handle
-    pub fn index_buffer(&self) -> vk::Buffer {
-        self.index_buffer.handle()
+    /// Get the index buffer handle for traditional binding
+    pub fn index_buffer_handle(&self) -> vk::Buffer {
+        self.index_buffer
     }
 
     /// Get current usage statistics
-    pub fn usage_stats(&self) -> (u64, u64, u64, u64, u64, u64) {
-        let static_vertex_used = self.static_vertex_offset.load(Ordering::Relaxed);
-        let skinned_vertex_used = self.skinned_vertex_offset.load(Ordering::Relaxed);
+    pub fn usage_stats(&self) -> (u64, u64, u64, u64) {
+        let vertex_used = self.vertex_offset.load(Ordering::Relaxed);
         let index_used = self.index_offset.load(Ordering::Relaxed);
         (
-            static_vertex_used,
-            self.static_vertex_capacity,
-            skinned_vertex_used,
-            self.skinned_vertex_capacity,
+            vertex_used,
+            self.vertex_capacity,
             index_used,
             self.index_capacity,
         )
+    }
+
+    /// Destroy GPU resources
+    ///
+    /// # Safety
+    /// Resources must not be in use by the GPU
+    pub unsafe fn destroy(&mut self) {
+        let mut vertex_alloc = self.vertex_allocation.lock().unwrap();
+        let mut index_alloc = self.index_allocation.lock().unwrap();
+
+        self.allocator
+            .destroy_buffer(self.vertex_heap, &mut vertex_alloc);
+        self.allocator
+            .destroy_buffer(self.index_buffer, &mut index_alloc);
+
+        log::info!("DualHeapGeometryBuffer destroyed");
+    }
+}
+
+impl Drop for DualHeapGeometryBuffer {
+    fn drop(&mut self) {
+        unsafe {
+            self.destroy();
+        }
     }
 }

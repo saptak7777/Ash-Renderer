@@ -3,7 +3,6 @@ use bytemuck::Pod;
 use std::io::Cursor;
 use std::{collections::HashMap, ffi::CString, fs, path::PathBuf, sync::Arc, time::SystemTime};
 
-use crate::renderer::resources::mesh::Vertex;
 use crate::{AshError, Result};
 
 use super::pipeline_state::PipelineState;
@@ -136,9 +135,6 @@ pub struct PipelineBuilder {
 
 impl PipelineBuilder {
     fn new(device: Arc<ash::Device>) -> Self {
-        let binding = Vertex::binding_description();
-        let attributes = Vertex::attribute_descriptions();
-
         Self {
             device,
             layout: None,
@@ -149,8 +145,8 @@ impl PipelineBuilder {
             shader_stages: Vec::new(),
             shader_watch: Vec::new(),
             specialization: HashMap::new(),
-            vertex_binding_descriptions: vec![binding],
-            vertex_attribute_descriptions: attributes.to_vec(),
+            vertex_binding_descriptions: Vec::new(),
+            vertex_attribute_descriptions: Vec::new(),
             input_assembly: vk::PipelineInputAssemblyStateCreateInfo::default()
                 .topology(vk::PrimitiveTopology::TRIANGLE_LIST)
                 .primitive_restart_enable(false),
@@ -247,6 +243,26 @@ impl PipelineBuilder {
             }
         }
 
+        self
+    }
+
+    pub fn with_depth_test(mut self, compare_op: vk::CompareOp, write_enable: bool) -> Self {
+        if let Some(ref mut state) = self.depth_stencil {
+            state.depth_compare_op = compare_op;
+            state.depth_write_enable = write_enable.into();
+            state.depth_test_enable = vk::TRUE;
+        } else {
+            self.depth_stencil = Some(
+                vk::PipelineDepthStencilStateCreateInfo::default()
+                    .depth_test_enable(true)
+                    .depth_write_enable(write_enable)
+                    .depth_compare_op(compare_op)
+                    .depth_bounds_test_enable(false)
+                    .stencil_test_enable(false)
+                    .min_depth_bounds(0.0)
+                    .max_depth_bounds(1.0),
+            );
+        }
         self
     }
 

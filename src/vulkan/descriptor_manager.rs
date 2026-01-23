@@ -42,38 +42,9 @@ impl DescriptorManager {
             .build(Arc::clone(&device))?;
 
         // Environment layout (Set 2)
-        // 0: Irradiance Map
-        // 1: Prefiltered Map
-        // 2: BRDF LUT
-        // 3: Skybox Map
-        // 4: Shadow Map
         // 5: VSM Page Table
         // 6: VSM Physical Cache
         let environment_layout = DescriptorSetLayoutBuilder::new()
-            .add_binding(
-                0, // Irradiance Map
-                vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-                vk::ShaderStageFlags::FRAGMENT,
-                1,
-            )
-            .add_binding(
-                1, // Prefiltered Map
-                vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-                vk::ShaderStageFlags::FRAGMENT,
-                1,
-            )
-            .add_binding(
-                2, // BRDF LUT
-                vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-                vk::ShaderStageFlags::FRAGMENT,
-                1,
-            )
-            .add_binding(
-                3, // Skybox Map
-                vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-                vk::ShaderStageFlags::FRAGMENT,
-                1,
-            )
             .add_binding(
                 5, // VSM Page Table
                 vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
@@ -171,7 +142,7 @@ impl DescriptorManager {
         let page_table_info = vk::DescriptorImageInfo {
             sampler: page_table_sampler,
             image_view: page_table_view,
-            image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+            image_layout: vk::ImageLayout::GENERAL,
         };
         descriptor.update_image_at(
             5,
@@ -184,7 +155,7 @@ impl DescriptorManager {
         let physical_cache_info = vk::DescriptorImageInfo {
             sampler: physical_cache_sampler,
             image_view: physical_cache_view,
-            image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+            image_layout: vk::ImageLayout::GENERAL,
         };
         descriptor.update_image_at(
             6,
@@ -194,19 +165,6 @@ impl DescriptorManager {
         )?;
 
         Ok(())
-    }
-
-    /// Bind IBL resources to the environment descriptor set
-    pub fn bind_ibl_resources(
-        &self,
-        frame_index: usize,
-        resources: &crate::vulkan::IBLResources,
-    ) -> Result<()> {
-        let descriptor = self.environment_sets.get(frame_index).ok_or_else(|| {
-            AshError::VulkanError("Environment descriptor set index out of bounds".into())
-        })?;
-
-        crate::vulkan::IBLDescriptorSet::update(descriptor, resources)
     }
 
     pub fn recreate_frame_sets(&mut self, frame_count: u32) -> Result<()> {
@@ -237,42 +195,13 @@ impl DescriptorManager {
     pub fn bind_defaults(
         &self,
         frame_index: usize,
-        default_cube: &vk::DescriptorImageInfo,
-        default_2d: &vk::DescriptorImageInfo,
         default_uint_2d: &vk::DescriptorImageInfo, // R32_UINT for VSM page table
+        default_2d: &vk::DescriptorImageInfo,
     ) -> Result<()> {
         let descriptor = self.environment_sets.get(frame_index).ok_or_else(|| {
             AshError::VulkanError("Environment descriptor set index out of bounds".into())
         })?;
 
-        // 0: Irradiance Map (Cube)
-        descriptor.update_image_at(
-            0,
-            0,
-            *default_cube,
-            vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-        )?;
-        // 1: Prefiltered Map (Cube)
-        descriptor.update_image_at(
-            1,
-            0,
-            *default_cube,
-            vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-        )?;
-        // 2: BRDF LUT (2D)
-        descriptor.update_image_at(
-            2,
-            0,
-            *default_2d,
-            vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-        )?;
-        // 3: Skybox Map (Cube)
-        descriptor.update_image_at(
-            3,
-            0,
-            *default_cube,
-            vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-        )?;
         // 4: Shadow Map - REMOVED
 
         // 5: VSM Page Table (2D UINT) - Default to 0xFFFFFFFF (invalid page)
@@ -283,12 +212,11 @@ impl DescriptorManager {
             vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
         )?;
         // 6: VSM Physical Cache (2D) - Default to white (no shadow)
-        descriptor.update_image_at(
-            6,
-            0,
-            *default_2d,
-            vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-        )?;
+        let cache_info = vk::DescriptorImageInfo {
+            image_layout: vk::ImageLayout::GENERAL,
+            ..*default_2d
+        };
+        descriptor.update_image_at(6, 0, cache_info, vk::DescriptorType::COMBINED_IMAGE_SAMPLER)?;
 
         Ok(())
     }

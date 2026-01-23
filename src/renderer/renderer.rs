@@ -15,7 +15,7 @@ use crate::{
         indirect_draw::IndirectDrawPass,
         instancing::{BatchKey, InstanceData, InstancingManager},
         model_renderer::{
-            DrawContext, MaterialPushConstants, ModelRenderer, DRAW_PUSH_FRAGMENT_BYTES,
+            DrawContext, MaterialPushConstants, ModelRenderer, UploadedMesh, DRAW_PUSH_FRAGMENT_BYTES,
             DRAW_PUSH_VERTEX_BYTES,
         },
         motion_pass::MotionVectorPass,
@@ -24,7 +24,6 @@ use crate::{
         resource_registry::{ResourceId, ResourceRegistry},
         resources,
         resources::uniform::{StorageBuffer, UniformBuffer},
-        ssgi_pass::{SsgiConfig, SsgiPass, SsgiQuality},
         temporal_aa::{
             detect_config_change, ConfigChangeType, ConfigMetrics, ConfigMetricsReport,
             ConfigValidationError, SharpeningMode, TaaConfig, Validate,
@@ -32,7 +31,7 @@ use crate::{
         vsr_pass::{SharpenConfig, VsrConfig, VsrInputs, VsrPass, VsrQuality, VsrUpscaleConfig},
         hiz_pass::AdaptiveHiZManager,
         vram_budget, DepthBuffer, GBuffer, Material, MaterialHandle, MaterialManager, Mesh,
-        PipelineCache, SkinnedVertex, Texture, TextureData, Transform,
+        PipelineCache, Texture, TextureData, Transform,
     },
     vulkan::{self, Allocator, BindlessManager, CommandBufferContext},
     AshError, Result,
@@ -370,6 +369,13 @@ impl Default for RendererConfig {
 ///    buffer is destroyed or the allocator is dropped.
 /// 3. **Validation**: Use Vulkan validation layers (`VK_LAYER_KHRONOS_validation`) in
 ///    development to verify that no resources leak or are accessed after destruction.
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct SkyboxPushConstants {
+    _padding: [u32; 20],
+    vertex_heap_ptr: u64,
+}
+
 pub struct Renderer {
     // Resources dependent on allocator/device - dropped in reverse order.
     buffer_pool: Arc<BufferPool>,
@@ -383,7 +389,7 @@ pub struct Renderer {
     prev_view_proj: Mat4,
     _default_texture: Texture,
     _black_texture: Texture,
-    _default_skybox: Texture, // Procedural skybox for IBL fallback
+    _default_skybox: Texture, // Procedural skybox fallback
     _default_cube_black: Texture, // Keep alive
     _vsm_default_uint: Texture, // Keep alive (VSM bind default)
     _vsm_default_array: Texture, // Keep alive (VSM clipmap bind default)
@@ -397,6 +403,14 @@ pub struct Renderer {
     hdr_render_pass_id: Option<ResourceId>,
     pipeline: Option<vulkan::Pipeline>,
     pipeline_id: Option<ResourceId>,
+    
+    // Skybox Rendering
+    skybox_pipeline: Option<vulkan::Pipeline>,
+    // skybox_pipeline_id: Option<ResourceId>,
+    skybox_pipeline_layout: Option<vulkan::PipelineLayout>,
+    // skybox_pipeline_layout_id: Option<ResourceId>,
+    skybox_mesh: Option<UploadedMesh>,
+    
     depth_buffer: Option<DepthBuffer>,
     uniform_buffers: Vec<UniformBuffer>,
     material_storage_buffer: Option<StorageBuffer<resources::uniform::MaterialUniform>>,
@@ -449,8 +463,6 @@ pub struct Renderer {
     occlusion_culling: OcclusionCulling,
     // Temporal Super-Resolution
     vsr_pass: Option<VsrPass>,
-    // Screen-Space Global Illumination
-    ssgi_pass: Option<SsgiPass>,
     // Motion Vector Pass for VSR/TAA
     motion_pass: Option<MotionVectorPass>,
     motion_framebuffer: Option<vk::Framebuffer>,
@@ -483,11 +495,6 @@ pub struct Renderer {
     // Pass management
     pass_manager: RenderPassManager,
     // Image-Based Lighting
-    brdf_lut_pass: Option<crate::renderer::features::brdf_lut::BrdfLutPass>,
-    irradiance_map: Option<resources::ImageHandle>,
-    prefiltered_map: Option<resources::ImageHandle>,
-    ibl_sampler: vk::Sampler,
-    ibl_manager: crate::renderer::features::ibl_manager::IblManager,
     allow_auto_material: bool,
     strict_mode: bool,
     // Headless support
@@ -499,7 +506,6 @@ pub struct Renderer {
     /// TAA configuration metrics (tracking changes/validation)
     taa_config_metrics: ConfigMetrics,
 
-    pub ssgi_config: SsgiConfig,
     pub vsr_config: VsrConfig,
 
     // Bindless Buffer Indices
@@ -689,8 +695,15 @@ impl Renderer {
                 worker_count,
             } = frame_data;
 
+            let geometry_buffer = Arc::new(resources::DualHeapGeometryBuffer::new(
+                Arc::clone(&device.device),
+                Arc::clone(&alloc),
+                256, // 256MB for vertices
+                128, // 128MB for indices
+            )?);
+
             let model_renderer =
-                ModelRenderer::new(Arc::clone(&alloc), Arc::clone(&device.device));
+                ModelRenderer::new(Arc::clone(&alloc), Arc::clone(&device.device), Arc::clone(&geometry_buffer));
 
             let mut descriptor_manager = vulkan::DescriptorManager::new(
                 Arc::clone(&device.device),
@@ -723,11 +736,6 @@ impl Renderer {
 
             // Bind IBL defaults to all environment sets
             {
-                let cube_info = vk::DescriptorImageInfo {
-                    image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-                    image_view: default_cube_black.view(),
-                    sampler: default_cube_black.sampler(),
-                };
                 let tex_2d_info = vk::DescriptorImageInfo {
                     image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
                     image_view: black_texture.view(),
@@ -742,10 +750,8 @@ impl Renderer {
                 for i in 0..descriptor_manager.environment_set_count() {
                     descriptor_manager.bind_defaults(
                         i,
-                        &cube_info,
-                        &tex_2d_info,
-
                         &vsm_uint_info,
+                        &tex_2d_info,
                     )?;
                 }
             }
@@ -810,8 +816,11 @@ impl Renderer {
             log::info!("Registered default texture at bindless index {default_tex_index}");
 
             // Forward+ lighting integration
-            let mut forward_plus =
-                ForwardPlusIntegration::new(Arc::clone(&device.device), &alloc.vma)?;
+            let mut forward_plus = ForwardPlusIntegration::new(
+                Arc::clone(&device.device),
+                &alloc.vma,
+                frame_syncs.len() as u32,
+            )?;
             forward_plus.init(&alloc.vma);
             forward_plus.on_resize(swapchain.extent.width, swapchain.extent.height);
             
@@ -820,7 +829,7 @@ impl Renderer {
             let set_layouts = [
                 descriptor_manager.frame_layout(),
                 bindless_manager.descriptor_set_layout(), // Set 1: Bindless (Textures, Materials, Instances, Joints)
-                descriptor_manager.environment_layout(), // Set 2: Global Environment (Shadow + IBL)
+                descriptor_manager.environment_layout(), // Set 2: Global Environment (Shadow)
                 forward_plus.layout(),     // Set 3: Forward+ lights
             ];
 
@@ -873,6 +882,80 @@ impl Renderer {
                         log::error!("Failed to create VSM shadow pipeline: {e}");
                     }
                 }
+
+                // --- VSM INITIALIZATION ---
+                // Transition images to GENERAL layout and clear them
+                let physical_cache = vsm.resources.physical_cache;
+                let page_table = vsm.resources.page_table;
+                let page_table_layers = vsm.config().clipmap_levels.max(1);
+
+                device.execute_single_use(command_manager.upload_command_pool_handle(), |cmd| {
+                    // 1. Transition to GENERAL
+                    let barriers = [
+                        vk::ImageMemoryBarrier::default()
+                            .image(physical_cache)
+                            .old_layout(vk::ImageLayout::UNDEFINED)
+                            .new_layout(vk::ImageLayout::GENERAL)
+                            .src_access_mask(vk::AccessFlags::empty())
+                            .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE | vk::AccessFlags::COLOR_ATTACHMENT_WRITE)
+                            .subresource_range(vk::ImageSubresourceRange {
+                                aspect_mask: vk::ImageAspectFlags::COLOR,
+                                base_mip_level: 0,
+                                level_count: 1,
+                                base_array_layer: 0,
+                                layer_count: 1,
+                            }),
+                        vk::ImageMemoryBarrier::default()
+                            .image(page_table)
+                            .old_layout(vk::ImageLayout::UNDEFINED)
+                            .new_layout(vk::ImageLayout::GENERAL)
+                            .src_access_mask(vk::AccessFlags::empty())
+                            .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE | vk::AccessFlags::SHADER_WRITE)
+                            .subresource_range(vk::ImageSubresourceRange {
+                                aspect_mask: vk::ImageAspectFlags::COLOR,
+                                base_mip_level: 0,
+                                level_count: 1,
+                                base_array_layer: 0,
+                                layer_count: page_table_layers,
+                            }),
+                    ];
+
+                    device.device.cmd_pipeline_barrier(
+                        cmd,
+                        vk::PipelineStageFlags::TOP_OF_PIPE,
+                        vk::PipelineStageFlags::TRANSFER | vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT | vk::PipelineStageFlags::COMPUTE_SHADER,
+                        vk::DependencyFlags::empty(),
+                        &[],
+                        &[],
+                        &barriers,
+                    );
+
+                    // 2. Clear Page Table to 0xFFFFFFFF
+                    let clear_color = vk::ClearColorValue {
+                        uint32: [0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF],
+                    };
+                    let range = vk::ImageSubresourceRange {
+                        aspect_mask: vk::ImageAspectFlags::COLOR,
+                        base_mip_level: 0,
+                        level_count: 1,
+                        base_array_layer: 0,
+                        layer_count: page_table_layers,
+                    };
+                    device.device.cmd_clear_color_image(cmd, page_table, vk::ImageLayout::GENERAL, &clear_color, &[range]);
+
+                    // 3. Clear Physical Cache to 1.0 (Far)
+                    let clear_depth = vk::ClearColorValue {
+                        float32: [1.0, 1.0, 1.0, 1.0],
+                    };
+                    let range_cache = vk::ImageSubresourceRange {
+                        aspect_mask: vk::ImageAspectFlags::COLOR,
+                        base_mip_level: 0,
+                        level_count: 1,
+                        base_array_layer: 0,
+                        layer_count: 1,
+                    };
+                    device.device.cmd_clear_color_image(cmd, physical_cache, vk::ImageLayout::GENERAL, &clear_depth, &[range_cache]);
+                })?;
             }
 
             // DELETED: Default cube creation. Renderer now starts empty.
@@ -914,16 +997,9 @@ impl Renderer {
                 swapchain_extent.height,
             )?;
 
-            // Image-Based Lighting Initialization
-            let (brdf_lut_pass, ibl_sampler, ibl_manager) = Self::init_ibl(
-                &device,
-                &alloc,
-                command_manager.upload_command_pool_handle(),
-            )?;
-
             forward_plus.init_pipeline(
                 Arc::clone(&device.device), 
-                ibl_sampler,
+                black_texture.sampler(),
                 depth_buffer.view()
             )?;
 
@@ -944,6 +1020,31 @@ impl Renderer {
                 None
             };
 
+            // Initialize Skybox
+            log::info!("Initializing Skybox...");
+            let (skybox_pl_layout, _skybox_pl_layout_id, skybox_pipe, _skybox_pipe_id) = 
+                Self::create_skybox_pipeline(
+                    &device,
+                    &resources,
+                    render_pass.handle(),
+                    swapchain.extent,
+                    pipeline_cache.handle(),
+                    depth_buffer.format(),
+                    &pipeline_cfg,
+                    &set_layouts,
+                )?;
+            
+            // Create Skybox Mesh (Unit Cube)
+            let skybox_mesh = {
+                let mesh = crate::renderer::Mesh::create_cube(); 
+                model_renderer.upload_mesh_data(
+                    &mesh,
+                    command_manager.upload_command_pool_handle(),
+                    device.graphics_queue
+                )?
+            };
+            log::info!("Skybox initialized.");
+            
             let pass_manager = RenderPassManager::new(RenderingMode::GPUDriven);
 
             let mesh_data: Vec<MeshData> = Vec::new();
@@ -976,6 +1077,13 @@ impl Renderer {
                 hdr_render_pass_id: None,
                 pipeline: Some(pipeline),
                 pipeline_id: Some(pipeline_id),
+                
+                skybox_pipeline: Some(skybox_pipe),
+                // skybox_pipeline_id: Some(skybox_pipe_id),
+                skybox_pipeline_layout: Some(skybox_pl_layout),
+                // skybox_pipeline_layout_id: Some(skybox_pl_layout_id),
+                skybox_mesh: Some(skybox_mesh),
+                
                 depth_buffer: Some(depth_buffer),
                 // DELETED: Legacy fields
                 // mesh: Some(mesh),
@@ -1023,7 +1131,6 @@ impl Renderer {
                 indirect_draw_pass: None,
                 occlusion_culling: OcclusionCulling::new(),
                 vsr_pass: None,
-                ssgi_pass: None,
                 motion_pass: None,
                 motion_framebuffer: None,
                 gbuffer: Some(gbuffer),
@@ -1051,152 +1158,17 @@ impl Renderer {
                 instance_buffer_indices,
                 joint_buffer_indices,
                 pass_manager,
-                brdf_lut_pass: Some(brdf_lut_pass),
-                irradiance_map: None,
-                prefiltered_map: None,
-                ibl_sampler,
-                ibl_manager,
                 allow_auto_material: renderer_config.allow_auto_material,
                 strict_mode: renderer_config.strict_mode,
                 readback_buffer,
                 last_image_index: 0,
                 taa_config: TaaConfig::default(),
                 taa_config_metrics: ConfigMetrics::default(),
-                ssgi_config: SsgiConfig::default(),
                 vsr_config: VsrConfig::default(),
                 adaptive_hiz_manager: AdaptiveHiZManager::new(3.0), // Target 3ms for Hi-Z
             };
 
-            // Initialize dummy IBL cubemaps to prevent descriptor mismatches (samplerCube vs sampler2D)
-            let dummy_irradiance = resources::ImageHandle::create_cubemap(
-                Arc::clone(&renderer.device.device),
-                Arc::clone(&renderer.alloc),
-                1,
-                1,
-                vk::Format::R16G16B16A16_SFLOAT,
-                vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST,
-                Some("Default_Irradiance_Dummy".to_string()),
-            )?;
-            let dummy_prefiltered = resources::ImageHandle::create_cubemap(
-                Arc::clone(&renderer.device.device),
-                Arc::clone(&renderer.alloc),
-                1,
-                1,
-                vk::Format::R16G16B16A16_SFLOAT,
-                vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST,
-                Some("Default_Prefiltered_Dummy".to_string()),
-            )?;
-            
-            // Clear dummy cubemaps to white to prevent permanently black sides
-            renderer.device.execute_single_use(renderer.cmds.upload_command_pool_handle(), |cmd| {
-                let range = vk::ImageSubresourceRange {
-                    aspect_mask: vk::ImageAspectFlags::COLOR,
-                    base_mip_level: 0,
-                    level_count: 1,
-                    base_array_layer: 0,
-                    layer_count: 6,
-                };
-                
-                let barrier_to_dst = vk::ImageMemoryBarrier::default()
-                    .old_layout(vk::ImageLayout::UNDEFINED)
-                    .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
-                    .image(dummy_irradiance.handle())
-                    .subresource_range(range)
-                    .src_access_mask(vk::AccessFlags::empty())
-                    .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE);
-                
-                let barrier_to_dst_2 = vk::ImageMemoryBarrier::default()
-                    .old_layout(vk::ImageLayout::UNDEFINED)
-                    .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
-                    .image(dummy_prefiltered.handle())
-                    .subresource_range(range)
-                    .src_access_mask(vk::AccessFlags::empty())
-                    .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE);
-                
-                {
-                    renderer.device.device.cmd_pipeline_barrier(
-                        cmd,
-                        vk::PipelineStageFlags::TOP_OF_PIPE,
-                        vk::PipelineStageFlags::TRANSFER,
-                        vk::DependencyFlags::empty(),
-                        &[],
-                        &[],
-                        &[barrier_to_dst, barrier_to_dst_2],
-                    );
-                    
-                    let clear_color = vk::ClearColorValue { float32: [0.0, 0.0, 0.0, 1.0] };
-                    renderer.device.device.cmd_clear_color_image(cmd, dummy_irradiance.handle(), vk::ImageLayout::TRANSFER_DST_OPTIMAL, &clear_color, &[range]);
-                    renderer.device.device.cmd_clear_color_image(cmd, dummy_prefiltered.handle(), vk::ImageLayout::TRANSFER_DST_OPTIMAL, &clear_color, &[range]);
-                    
-                    let barrier_to_read = vk::ImageMemoryBarrier::default()
-                        .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
-                        .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
-                        .image(dummy_irradiance.handle())
-                        .subresource_range(range)
-                        .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
-                        .dst_access_mask(vk::AccessFlags::SHADER_READ);
-                        
-                    let barrier_to_read_2 = vk::ImageMemoryBarrier::default()
-                        .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
-                        .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
-                        .image(dummy_prefiltered.handle())
-                        .subresource_range(range)
-                        .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
-                        .dst_access_mask(vk::AccessFlags::SHADER_READ);
-                        
-                    renderer.device.device.cmd_pipeline_barrier(
-                        cmd,
-                        vk::PipelineStageFlags::TRANSFER,
-                        vk::PipelineStageFlags::FRAGMENT_SHADER,
-                        vk::DependencyFlags::empty(),
-                        &[],
-                        &[],
-                        &[barrier_to_read, barrier_to_read_2],
-                    );
-                }
-            })?;
-            
-            renderer.irradiance_map = Some(dummy_irradiance);
-            renderer.prefiltered_map = Some(dummy_prefiltered);
 
-            if let Some(manager) = renderer.descriptors.as_ref() {
-                for index in 0..manager.frame_set_count() {
-                    // Initial Shadow Map binding
-
-
-                    // Initial IBL binding (dummy/default textures until baked)
-                    let dummy_resources = crate::vulkan::IBLResources {
-                        irradiance_view: renderer
-                            .irradiance_map
-                            .as_ref()
-                            .ok_or_else(|| AshError::VulkanError("Irradiance map not initialized".into()))?
-                            .view(),
-                        prefiltered_view: renderer
-                            .prefiltered_map
-                            .as_ref()
-                            .ok_or_else(|| AshError::VulkanError("Prefiltered map not initialized".into()))?
-                            .view(),
-                        brdf_lut_view: renderer
-                            .brdf_lut_pass
-                            .as_ref()
-                            .ok_or_else(|| AshError::VulkanError("BRDF LUT pass not initialized".into()))?
-                            .get_lut_view()
-                            .ok_or_else(|| AshError::VulkanError("BRDF LUT texture missing".into()))?,
-                        skybox_view: renderer
-                            .irradiance_map
-                            .as_ref()
-                            .ok_or_else(|| AshError::VulkanError("Irradiance map not initialized for skybox".into()))?
-                            .view(),
-                        sampler: renderer.ibl_sampler,
-                    };
-                    manager.bind_ibl_resources(index, &dummy_resources)?;
-                }
-            }
-
-            // Initial Forward+ upload and binding
-            if let Some(forward_plus) = renderer.forward_plus.as_mut() {
-                forward_plus.upload_to_gpu(&renderer.alloc.vma, &renderer.device.device)?;
-            }
 
             // Initialize motion vector pass
             renderer.init_motion_pass()?;
@@ -1584,46 +1556,6 @@ impl Renderer {
         })
     }
 
-    fn init_ibl(
-        device: &vulkan::VulkanDevice,
-        alloc: &Arc<vulkan::Allocator>,
-        command_pool: vk::CommandPool,
-    ) -> Result<(
-        crate::renderer::features::brdf_lut::BrdfLutPass,
-        vk::Sampler,
-        crate::renderer::features::ibl_manager::IblManager,
-    )> {
-        log::info!("Initializing BrdfLutPass...");
-        let mut brdf_lut_pass = crate::renderer::features::brdf_lut::BrdfLutPass::new();
-
-        log::info!("Baking BRDF LUT...");
-        unsafe {
-            brdf_lut_pass.bake(device, command_pool, Arc::clone(alloc))?;
-        }
-        log::info!("BRDF LUT Baked.");
-
-        let ibl_sampler_info = vk::SamplerCreateInfo::default()
-            .mag_filter(vk::Filter::LINEAR)
-            .min_filter(vk::Filter::LINEAR)
-            .mipmap_mode(vk::SamplerMipmapMode::LINEAR)
-            .address_mode_u(vk::SamplerAddressMode::CLAMP_TO_EDGE)
-            .address_mode_v(vk::SamplerAddressMode::CLAMP_TO_EDGE)
-            .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_EDGE)
-            .compare_enable(false)
-            .anisotropy_enable(false)
-            .min_lod(0.0)
-            .max_lod(vk::LOD_CLAMP_NONE);
-
-        let ibl_sampler = unsafe { device.device.create_sampler(&ibl_sampler_info, None)? };
-
-        log::info!("Initializing IblManager...");
-        let ibl_manager = crate::renderer::features::ibl_manager::IblManager::new(
-            Arc::clone(&device.device),
-            Arc::clone(alloc),
-        )?;
-
-        Ok((brdf_lut_pass, ibl_sampler, ibl_manager))
-    }
 
     unsafe fn create_swapchain_data(
         device: &vulkan::VulkanDevice,
@@ -1847,6 +1779,68 @@ impl Renderer {
         Ok((pipeline_layout, pipeline_layout_id, pipeline, pipeline_id))
     }
 
+    unsafe fn create_skybox_pipeline(
+        device: &vulkan::VulkanDevice,
+        resources: &Arc<ResourceRegistry>,
+        render_pass: vk::RenderPass,
+        extent: vk::Extent2D,
+        pipeline_cache: vk::PipelineCache,
+        depth_format: vk::Format,
+        pipeline_cfg: &PipelineConfig,
+        set_layouts: &[vk::DescriptorSetLayout],
+    ) -> Result<(
+        vulkan::PipelineLayout,
+        ResourceId,
+        vulkan::Pipeline,
+        ResourceId,
+    )> {
+        // reuse set layouts from main pipeline (Frame, Bindless, Environment)
+        let mut pipeline_layout_builder =
+            vulkan::PipelineLayout::builder(Arc::clone(&device.device));
+        for layout in set_layouts {
+            pipeline_layout_builder = pipeline_layout_builder.add_set_layout(*layout);
+        }
+        
+        let mut pipeline_layout = pipeline_layout_builder.build()?;
+        let pipeline_layout_id = resources
+            .register_pipeline_layout(pipeline_layout.handle())
+            .map_err(|e| {
+                AshError::VulkanError(format!("Failed to register skybox pipeline layout: {e}"))
+            })?;
+        pipeline_layout.mark_managed_by_registry();
+
+        let pipeline_builder = vulkan::Pipeline::builder(Arc::clone(&device.device))
+            .with_layout(pipeline_layout.handle())
+            .with_render_pass(render_pass)
+            .with_extent(extent)
+            .with_pipeline_cache(pipeline_cache)
+            .with_depth_format(depth_format)
+            // REVERSE-Z: Skybox at 0.0 (Far)
+            // Depth Test: GREATER_OR_EQUAL handles z=0.0 (far) vs z=0.0 (clear) correctly.
+            .with_depth_test(vk::CompareOp::GREATER_OR_EQUAL, false) 
+            .with_cull_mode(vk::CullModeFlags::FRONT) // Inside cube
+            .with_front_face(vk::FrontFace::CLOCKWISE)
+            .with_multisampling(pipeline_cfg.multisample_config())
+            .add_shader_from_bytes(
+                include_bytes!(concat!(env!("OUT_DIR"), "/skybox.vert.spv")),
+                vk::ShaderStageFlags::VERTEX,
+                "main",
+            )?
+            .add_shader_from_bytes(
+                include_bytes!(concat!(env!("OUT_DIR"), "/skybox.frag.spv")),
+                vk::ShaderStageFlags::FRAGMENT,
+                "main",
+            )?;
+
+        let mut pipeline = pipeline_builder.build()?;
+        let pipeline_id = resources
+            .register_pipeline(pipeline.pipeline, &[pipeline_layout_id])
+            .map_err(|e| AshError::VulkanError(format!("Failed to register skybox pipeline: {e}")))?;
+        pipeline.mark_managed_by_registry();
+
+        Ok((pipeline_layout, pipeline_layout_id, pipeline, pipeline_id))
+    }
+
 
 
     fn worker_index_for_frame(&self, frame_index: usize) -> usize {
@@ -1968,65 +1962,6 @@ impl Renderer {
         Ok(())
     }
 
-    /// Uploads pre-loaded IBL data to the GPU and binds it.
-    pub fn upload_ibl(
-        &mut self,
-        header: &resources::ibl_asset::IblAssetHeader,
-        cubemap_data: &[u8],
-        irradiance_data: &[u8],
-        prefiltered_data: &[u8],
-    ) -> Result<()> {
-        log::info!("Uploading IBL assets to GPU...");
-
-        let (_env_cubemap, irradiance, prefiltered) = resources::ibl_asset::upload_ibl(
-            Arc::clone(&self.device.device),
-            Arc::clone(&self.alloc),
-            self.cmds.upload_command_pool_handle(),
-            self.device.graphics_queue,
-            header,
-            cubemap_data,
-            irradiance_data,
-            prefiltered_data,
-        )?;
-
-        // Update renderer state
-        self.irradiance_map = Some(irradiance);
-        self.prefiltered_map = Some(prefiltered);
-
-        // Update descriptors
-        if let Some(manager) = self.descriptors.as_ref() {
-            let res = crate::vulkan::IBLResources {
-                irradiance_view: self
-                    .irradiance_map
-                    .as_ref()
-                    .ok_or_else(|| AshError::VulkanError("Irradiance map not initialized".into()))?
-                    .view(),
-                prefiltered_view: self
-                    .prefiltered_map
-                    .as_ref()
-                    .ok_or_else(|| AshError::VulkanError("Prefiltered map not initialized".into()))?
-                    .view(),
-                brdf_lut_view: self
-                    .brdf_lut_pass
-                    .as_ref()
-                    .ok_or_else(|| AshError::VulkanError("BRDF LUT pass not initialized".into()))?
-                    .get_lut_view()
-                    .ok_or_else(|| AshError::VulkanError("BRDF LUT texture missing".into()))?,
-                skybox_view: self
-                    .irradiance_map
-                    .as_ref()
-                    .ok_or_else(|| AshError::VulkanError("Irradiance map not initialized for skybox".into()))?
-                    .view(),
-                sampler: self.ibl_sampler,
-            };
-            for i in 0..manager.frame_set_count() {
-                manager.bind_ibl_resources(i, &res)?;
-            }
-        }
-        
-        log::info!("âœ“ IBL assets uploaded and bound.");
-        Ok(())
-    }
 
 
     // DELETED: set_mesh() method. Use submit_render_commands instead.
@@ -2066,10 +2001,6 @@ impl Renderer {
         // Sync with Forward+ if available
         if let Some(forward_plus) = &mut self.forward_plus {
             forward_plus.update_lights(&self.point_lights, &self.directional_lights, &self.spot_lights);
-            // Upload to GPU so lights are visible
-            unsafe {
-                let _ = forward_plus.upload_to_gpu(&self.alloc.vma, &self.device.device);
-            }
         }
     }
 
@@ -2663,41 +2594,6 @@ impl Renderer {
     /// This function converts an equirectangular environment map to cubemap format
     /// and generates irradiance and prefiltered maps for image-based lighting.
     /// Currently unused but preserved for runtime environment map loading features.
-    pub fn bake_ibl_from_equirect(&mut self, equirect: &resources::Texture) -> Result<()> {
-        log::info!("Baking IBL maps from equirectangular texture...");
-
-        log::info!("Baking environment cubemap...");
-        let env_cubemap = self.ibl_manager.create_cubemap_from_equirect(
-            &self.device,
-            self.cmds.upload_command_pool_handle(),
-            equirect.view(),
-            equirect.sampler(),
-            512, // Standard resolution
-        )?;
-
-        log::info!("Baking irradiance map...");
-        let irradiance_map = self.ibl_manager.generate_irradiance(
-            &self.device,
-            self.cmds.upload_command_pool_handle(),
-            env_cubemap.view(),
-            equirect.sampler(),
-        )?;
-
-        log::info!("Baking prefiltered reflection map...");
-        // 3. Generate Prefiltered Map
-        let prefiltered_map = self.ibl_manager.generate_prefiltered(
-            &self.device,
-            self.cmds.upload_command_pool_handle(),
-            env_cubemap.view(),
-            equirect.sampler(),
-        )?;
-
-        self.irradiance_map = Some(irradiance_map);
-        self.prefiltered_map = Some(prefiltered_map);
-
-        log::info!("IBL maps baked successfully.");
-        Ok(())
-    }
 
     pub fn request_swapchain_resize(&mut self, new_extent: vk::Extent2D) {
         self.pending_extent = Some(new_extent);
@@ -2832,8 +2728,6 @@ impl Renderer {
         self.recreate_depth_buffer(swapchain_extent)?;
         // 5b. Recreate G-Buffer.
         self.recreate_gbuffer(swapchain_extent)?;
-        // 5c. Recreate SSGI pass
-        self.recreate_ssgi_pass(swapchain_extent)?;
         // 6. Create new render pass and framebuffers.
         self.create_render_pass_and_framebuffers(swapchain_extent, swapchain_format, &image_views)?;
 
@@ -3040,11 +2934,7 @@ impl Renderer {
             .with_pipeline_cache(cache)
             .with_depth_format(depth_format)
             .with_cull_mode(vk::CullModeFlags::BACK)
-            .with_multisampling(multisample_config)
-            .with_vertex_input(
-                vec![SkinnedVertex::binding_description()],
-                SkinnedVertex::attribute_descriptions().to_vec(),
-            );
+            .with_multisampling(multisample_config);
 
         if self.gbuffer.is_some() {
             let blend_attachments = vec![
@@ -3179,21 +3069,6 @@ impl Renderer {
         Ok(())
     }
 
-    fn recreate_ssgi_pass(&mut self, extent: vk::Extent2D) -> Result<()> {
-        if let Some(ref mut ssgi) = self.ssgi_pass {
-            unsafe {
-                ssgi.destroy(&self.alloc.vma);
-                ssgi.init(
-                    &self.alloc.vma,
-                    &self.device,
-                    extent.width,
-                    extent.height,
-                    self.ssgi_config.clone(),
-                );
-            }
-        }
-        Ok(())
-    }
 
     fn recreate_vsr_pass(&mut self, display_extent: vk::Extent2D) -> Result<()> {
         if let Some(ref mut vsr) = self.vsr_pass {
@@ -3522,11 +3397,6 @@ impl Renderer {
             // CRITICAL FIX: Re-bind Environment (Set 2) resources after recreation
             // Without this, shadow mapping and IBL break after resize
             // 1. Bind Defaults (Shadow Map, VSM Page Table, etc.)
-            let cube_info = vk::DescriptorImageInfo {
-                image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-                image_view: self._default_cube_black.view(),
-                sampler: self._default_cube_black.sampler(),
-            };
             let tex_2d_info = vk::DescriptorImageInfo {
                 image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
                 image_view: self._black_texture.view(),
@@ -3542,49 +3412,14 @@ impl Renderer {
             for index in 0..manager.environment_set_count() {
                 manager.bind_defaults(
                     index,
-                    &cube_info,
-                    &tex_2d_info,
                     &vsm_uint_info,
+                    &tex_2d_info,
                 )?;
             }
 
-            // 2. Bind IBL Resources (Binding 0-3)
-            for index in 0..manager.frame_set_count() {
-                if let (Some(irr), Some(pre), Some(brdf)) = (
-                    &self.irradiance_map,
-                    &self.prefiltered_map,
-                    &self.brdf_lut_pass,
-                ) {
-                    let resources = crate::vulkan::IBLResources {
-                        irradiance_view: irr.view(),
-                        prefiltered_view: pre.view(),
-                        brdf_lut_view: brdf.get_lut_view().unwrap_or(self._default_texture.view()),
-                        skybox_view: irr.view(), // Fallback to irradiance map for now
-                        sampler: self.ibl_sampler,
-                    };
-                    manager.bind_ibl_resources(index, &resources)?;
-                } else {
-                    // Fallback: Bind BRDF LUT and black textures if IBL is not loaded yet
-                    let dummy_resources = crate::vulkan::IBLResources {
-                        irradiance_view: self._black_texture.view(),
-                        prefiltered_view: self._black_texture.view(),
-                        brdf_lut_view: self.brdf_lut_pass.as_ref()
-                            .and_then(|p| p.get_lut_view())
-                            .unwrap_or(self._black_texture.view()),
-                        skybox_view: self._black_texture.view(),
-                        sampler: self.ibl_sampler,
-                    };
-                    manager.bind_ibl_resources(index, &dummy_resources)?;
-                }
-            }
 
             // CRITICAL FIX: Update Forward+ Descriptors (Set 3)
             // ForwardPlusIntegration's pool is separate but its bindings need to be refreshed
-            if let Some(forward_plus) = self.forward_plus.as_mut() {
-                unsafe {
-                    forward_plus.upload_to_gpu(&self.alloc.vma, &self.device.device)?;
-                }
-            }
         }
 
         Ok(())
@@ -3916,6 +3751,75 @@ impl Renderer {
             }
         }
 
+        // 4. Render Skybox (Reverse-Z: Draw last, depth >= 0.0)
+        self.render_skybox(&cmd_ctx, frame_index, view, projection)?;
+
+        Ok(())
+    }
+
+    pub fn render_skybox(
+        &mut self,
+        cmd_ctx: &CommandBufferContext,
+        frame_index: usize,
+        _view: Mat4,
+        _projection: Mat4,
+    ) -> Result<()> {
+        if let (Some(pipeline), Some(mesh)) = (self.skybox_pipeline.as_ref(), self.skybox_mesh.as_ref()) {
+            unsafe {
+                cmd_ctx.bind_pipeline(vk::PipelineBindPoint::GRAPHICS, pipeline.pipeline);
+
+                if let Some(descriptor_manager) = self.descriptors.as_ref() {
+                    let layout = self.skybox_pipeline_layout.as_ref().unwrap().handle();
+                    let frame_set = descriptor_manager.frame_set(frame_index).unwrap();
+                    let env_set = descriptor_manager.environment_set(frame_index).unwrap();
+                    
+                    // Bind sets 0 (Frame/MVP) and 2 (Environment/Skybox)
+                    // We also bind Set 1 (Bindless) as middle set to preserve layout compatibility if needed
+                    // But typically we can sparse bind or bind all.
+                    // Given create_skybox_pipeline uses [frame, bindless, environment], we must bind ALL 3.
+                    if let Some(bindless_manager) = self.bindless_manager.as_ref() {
+                         self.device.device.cmd_bind_descriptor_sets(
+                            cmd_ctx.handle(),
+                            vk::PipelineBindPoint::GRAPHICS,
+                            layout,
+                            0, 
+                            &[frame_set, bindless_manager.descriptor_set(), env_set],
+                            &[],
+                        );
+                    }
+                }
+
+                // Push Constants: Skybox View/Proj + Vertex Ptr
+                let vertex_ptr = mesh.vertex_heap_address.unwrap_or(0);
+                
+                // CRITICAL BDA SAFETY: Check for null vertex heap address
+                if vertex_ptr == 0 {
+                    log::error!(
+                        "CRITICAL: Skybox mesh has null BDA (vertex_heap_address=0). Skipping skybox draw to prevent DEVICE_LOST."
+                    );
+                    return Ok(());
+                }
+                
+                // Construct SkyboxPushConstants
+                // Must match skybox.vert layout: model(64) + uints(16) = 80 bytes padding, then ptr(8)
+                let push = SkyboxPushConstants {
+                    _padding: [0; 20],
+                    vertex_heap_ptr: vertex_ptr,
+                };
+                
+                let push_bytes = bytemuck::bytes_of(&push);
+                
+                self.device.device.cmd_push_constants(
+                    cmd_ctx.handle(),
+                    self.skybox_pipeline_layout.as_ref().unwrap().handle(),
+                    vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                    0,
+                    push_bytes,
+                );
+
+                self.device.device.cmd_draw(cmd_ctx.handle(), 36, 1, 0, 0);
+            }
+        }
         Ok(())
     }
 
@@ -4332,6 +4236,17 @@ impl Renderer {
 
             // Shadow Pass
             if let Some(vsm) = &self.vsm_feature {
+                // Update VSM resources in environment descriptor set
+                if let Some(descriptors) = &self.descriptors {
+                     descriptors.bind_vsm_resources(
+                        frame_index,
+                        vsm.resources.page_table_view,
+                        vsm.resources.page_table_sampler,
+                        vsm.resources.physical_cache_view,
+                        vsm.resources.physical_cache_sampler,
+                    ).unwrap_or_else(|e| log::error!("Failed to bind VSM resources: {}", e));
+                }
+
                 // Extract references to avoid borrow checker conflicts
                 let instancing_manager = &self.instancing_manager;
                 let model_renderer = &self.model_renderer;
@@ -4339,6 +4254,12 @@ impl Renderer {
                 let instance_indices = &self.instance_buffer_indices;
                 let joint_indices = &self.joint_buffer_indices;
                 let material_buffer_index = self.material_buffer_index;
+                let frame_descriptor_set = self.descriptors.as_ref()
+                    .and_then(|d| d.frame_set(frame_index))
+                    .unwrap_or(vk::DescriptorSet::null());
+                let bindless_descriptor_set = self.bindless_manager.as_ref()
+                    .map(|bm| bm.descriptor_set())
+                    .unwrap_or(vk::DescriptorSet::null());
                 
                 // Get light direction and clipmap levels
                 let light_dir = glam::Vec3::from_slice(&self.scene_lighting.directional.direction[0..3]);
@@ -4366,7 +4287,25 @@ impl Renderer {
                         level_culling.insert(level.layer, (light_space_matrix, visible_batches));
                     }
 
-                    vsm.render_shadows(command_buffer, |cmd, page| {
+                    // Get primary light space matrix (use first clipmap level)
+                    let primary_light_matrix = if let Some(first_level) = levels.first() {
+                        let light_dir = glam::vec3(0.0, -1.0, -0.5).normalize();
+                        let light_pos = camera_pos - light_dir * first_level.extent;
+                        let light_view = glam::Mat4::look_at_rh(light_pos, camera_pos, glam::Vec3::Y);
+                        let light_proj = glam::Mat4::orthographic_rh(
+                            -first_level.extent,
+                            first_level.extent,
+                            -first_level.extent,
+                            first_level.extent,
+                            0.1,
+                            first_level.extent * 2.0,
+                        );
+                        light_proj * light_view
+                    } else {
+                        glam::Mat4::IDENTITY
+                    };
+
+                    vsm.render_shadows(command_buffer, &primary_light_matrix, frame_descriptor_set, bindless_descriptor_set, |cmd, page| {
                         // Check dirty flag (Bit 0) - Skip rendering if clean
                         if (page.flags & 1) == 0 {
                             return;
@@ -4403,7 +4342,7 @@ impl Renderer {
                                         device.device.cmd_push_constants(
                                             cmd,
                                             pipeline_layout,
-                                            vk::ShaderStageFlags::VERTEX,
+                                            vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
                                             160, // Offset for lightSpaceMatrix
                                             bytemuck::bytes_of(light_space_matrix),
                                         );
@@ -4411,8 +4350,19 @@ impl Renderer {
                                         // Get batch offset from the batch_offsets map
                                         let offset = batch_offsets.get(&batch.key).copied().unwrap_or(0);
                                         
+                                        // CRITICAL BDA SAFETY: Check for null vertex heap address
+                                        let vertex_ptr = uploaded.vertex_heap_address.unwrap_or(0);
+                                        if vertex_ptr == 0 {
+                                            log::error!(
+                                                "CRITICAL: Mesh '{}' has null BDA (vertex_heap_address=0). Skipping shadow draw to prevent DEVICE_LOST.",
+                                                data.name
+                                            );
+                                            continue;
+                                        }
+                                        
+                                        log::debug!("Shadow Draw: mesh={}, ptr=0x{:X}, count={}", data.name, vertex_ptr, batch.count());
+
                                         // Draw instanced mesh (Draw ALL instances in batch for Coarse Culling)
-                                        // TODO: Use _indices for Fine Culling (requires draw_indirect or buffer update)
                                         model_renderer.draw_mesh_instanced(
                                             &ctx,
                                             batch.count() as u32,
@@ -4423,25 +4373,68 @@ impl Renderer {
                             }
                         }
                     });
+
+                    // --- VSM TO MAIN PASS SYNCHRONIZATION ---
+                    // Barrier to ensure all shadow writes are visible to the main pass
+                    
+                    /*
+                    self.device.device.cmd_pipeline_barrier(
+                        command_buffer,
+                        vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                        vk::PipelineStageFlags::FRAGMENT_SHADER,
+                        vk::DependencyFlags::empty(),
+                        &[],
+                        &[],
+                        &[vsm_barrier],
+                    );
+                    */
             }
 
             // --- Light Culling Compute Dispatch ---
             if let Some(ref mut fp_integration) = self.forward_plus {
                 // Ensure pipeline is initialized before dispatching
                 if fp_integration.is_enabled() {
+                    // Update GPU buffers and descriptors for the current frame
+                    fp_integration.upload_to_gpu(&self.alloc.vma, &self.device.device, frame_index as usize)?;
+
                     // Update camera buffer with current view/projection matrices
                     // We use the NON-JITTERED projection for culling to match frustum
                     fp_integration.update_camera(
                         &self.alloc.vma,
+                        frame_index as usize,
                         &view.to_cols_array_2d(),
                         &projection.to_cols_array_2d(),
-                        &camera_pos.extend(1.0).into(),
+                        &camera_pos.extend(1.0).to_array(),
                     )?;
 
                     // Dispatch the compute shader
+                    // DEBUG: Commented out
+                    /*
                     fp_integration.dispatch(
                         command_buffer,
                         &self.device.device,
+                        frame_index as usize
+                    );
+                    */
+
+                    // Barrier: Ensure light buffers are ready for the fragment shader
+                    let light_barrier = vk::BufferMemoryBarrier::default()
+                        .buffer(fp_integration.lights().get_light_buffer(frame_index as usize).unwrap_or(vk::Buffer::null()))
+                        .src_access_mask(vk::AccessFlags::SHADER_WRITE)
+                        .dst_access_mask(vk::AccessFlags::SHADER_READ)
+                        .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                        .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                        .offset(0)
+                        .size(vk::WHOLE_SIZE);
+
+                    self.device.device.cmd_pipeline_barrier(
+                        command_buffer,
+                        vk::PipelineStageFlags::COMPUTE_SHADER,
+                        vk::PipelineStageFlags::FRAGMENT_SHADER,
+                        vk::DependencyFlags::empty(),
+                        &[],
+                        &[light_barrier],
+                        &[],
                     );
                 }
             }
@@ -4574,37 +4567,10 @@ impl Renderer {
                         );
                     }
 
-                    // Bind Global Environment descriptor (Set 2: ShadowMap + IBL)
+                    // Bind Global Environment descriptor (Set 2: ShadowMap)
                     if let Some(env_set) = manager.environment_set(frame_index) {
 
-
-                        if let (Some(irradiance), Some(prefilter), Some(brdf_view)) = (
-                            &self.irradiance_map,
-                            &self.prefiltered_map,
-                            self.brdf_lut_pass.as_ref().and_then(|p| p.get_lut_view()),
-                        ) {
-                            let ibl_resources = vulkan::IBLResources {
-                                irradiance_view: irradiance.view(),
-                                prefiltered_view: prefilter.view(),
-                                brdf_lut_view: brdf_view,
-                                skybox_view: irradiance.view(), // Fallback
-                                sampler: self.ibl_sampler,
-                            };
-                            manager.bind_ibl_resources(frame_index, &ibl_resources)?;
-                        } else {
-                            // CRITICAL FIX: Bind fallback Procedural Skybox
-                            // This provides plausible ambient light instead of pitch black
-                            log::debug!("IBL assets missing, using procedural skybox fallback");
-                            let fallback_resources = vulkan::IBLResources {
-                                irradiance_view: self._default_skybox.view(),
-                                prefiltered_view: self._default_skybox.view(),
-                                brdf_lut_view: self._black_texture.view(), // 2D Texture (can't use cube)
-                                skybox_view: self._default_skybox.view(),
-                                sampler: self.ibl_sampler,
-                            };
-                            manager.bind_ibl_resources(frame_index, &fallback_resources)?;
-                        }
-
+                        
                         cmd_ctx.bind_descriptor_sets(
                             vk::PipelineBindPoint::GRAPHICS,
                             pipeline_layout_handle,
@@ -4621,6 +4587,7 @@ impl Renderer {
                             &self.device.device,
                             command_buffer,
                             pipeline_layout_handle,
+                            frame_index as usize,
                         );
                     }
 
@@ -4645,26 +4612,6 @@ impl Renderer {
 
             cmd_ctx.end_render_pass();
 
-            // --- SSGI Pass ---
-            if let (Some(ref mut gbuffer), Some(ref mut ssgi)) =
-                (&mut self.gbuffer, &mut self.ssgi_pass)
-            {
-                let depth_buffer = self
-                    .depth_buffer
-                    .as_ref()
-                    .ok_or_else(|| AshError::VulkanError("Depth buffer missing".to_string()))?;
-                let inv_view_proj = (jittered_projection * view).inverse();
-
-                let inputs = crate::renderer::ssgi_pass::SsgiInputs {
-                    depth_view: depth_buffer.view(),
-                    normal_view: gbuffer.normal_view(),
-                    albedo_view: gbuffer.albedo_view(),
-                    velocity_view: gbuffer.motion_view(),
-                };
-
-                ssgi.record_commands(command_buffer, &inputs, inv_view_proj)?;
-                ssgi.next_frame();
-            }
 
             // --- VSR (Upscaling) Pass ---
             if let (Some(ref mut vsr), Some(ref mut gbuffer)) =
@@ -4878,10 +4825,6 @@ impl Renderer {
     pub fn update_point_lights(&mut self, lights: &[crate::renderer::features::PointLight]) {
         if let Some(ref mut forward_plus) = self.forward_plus {
             forward_plus.update_lights(lights, &[], &[]);
-            // Upload to GPU
-            unsafe {
-                let _ = forward_plus.upload_to_gpu(&self.alloc.vma, &self.device.device);
-            }
         }
     }
 
@@ -4892,9 +4835,6 @@ impl Renderer {
     ) {
         if let Some(ref mut forward_plus) = self.forward_plus {
             forward_plus.update_lights(&[], lights, &[]);
-            unsafe {
-                let _ = forward_plus.upload_to_gpu(&self.alloc.vma, &self.device.device);
-            }
         }
     }
 
@@ -4902,9 +4842,6 @@ impl Renderer {
     pub fn update_spot_lights(&mut self, lights: &[crate::renderer::features::SpotLight]) {
         if let Some(ref mut forward_plus) = self.forward_plus {
             forward_plus.update_lights(&[], &[], lights);
-            unsafe {
-                let _ = forward_plus.upload_to_gpu(&self.alloc.vma, &self.device.device);
-            }
         }
     }
 
@@ -4916,10 +4853,6 @@ impl Renderer {
     ) {
         if let Some(ref mut forward_plus) = self.forward_plus {
             forward_plus.update_lights(point_lights, directional_lights, &[]);
-            // SAFETY: `forward_plus.upload_to_gpu` manages its own internal buffers. We provide the VMA allocator which is valid.
-            unsafe {
-                let _ = forward_plus.upload_to_gpu(&self.alloc.vma, &self.device.device);
-            }
         }
     }
 
@@ -5074,65 +5007,6 @@ impl Renderer {
         }
     }
 
-    // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-    // Screen-Space Global Illumination API
-    // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
-    /// Enables Screen-Space Global Illumination (SSGI)
-    ///
-    /// SSGI provides real-time indirect lighting by tracing rays
-    /// against the depth buffer. Runs at half resolution with
-    /// temporal accumulation for improved quality.
-    ///
-    /// # Arguments
-    /// * `quality` - The SSGI quality preset (affects ray/step counts)
-    pub fn enable_ssgi(&mut self, quality: SsgiQuality) -> Result<()> {
-        if self.ssgi_pass.is_some() {
-            return Ok(()); // Already enabled
-        }
-
-        let extent = self
-            .swapchain
-            .as_ref()
-            .map(|s| s.extent)
-            .unwrap_or(vk::Extent2D {
-                width: 1920,
-                height: 1080,
-            });
-
-        let mut ssgi = SsgiPass::new(Arc::clone(&self.device.device));
-        self.ssgi_config.quality = quality;
-        unsafe {
-            ssgi.init(
-                &self.alloc.vma,
-                &self.device,
-                extent.width,
-                extent.height,
-                self.ssgi_config.clone(),
-            );
-        }
- 
-        self.ssgi_pass = Some(ssgi);
-        log::info!("SSGI enabled with {quality:?} quality");
-        Ok(())
-    }
-
-    /// Returns whether SSGI is enabled
-    pub fn ssgi_enabled(&self) -> bool {
-        self.ssgi_pass.is_some()
-    }
-
-    /// Returns the current SSGI quality preset
-    pub fn ssgi_quality(&self) -> Option<SsgiQuality> {
-        self.ssgi_pass.as_ref().map(|s| s.quality())
-    }
-
-    /// Set SSGI intensity
-    pub fn set_ssgi_intensity(&mut self, intensity: f32) {
-        if let Some(ref mut ssgi) = self.ssgi_pass {
-            ssgi.set_intensity(intensity);
-        }
-    }
 
     // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     // Post-Processing Initialization & Application
@@ -5214,7 +5088,7 @@ impl Renderer {
 
         let pool_sizes = [vk::DescriptorPoolSize {
             ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-            descriptor_count: count * 3, // HDR, Bloom, SSGI
+            descriptor_count: count * 3, // Sampler, HDR input, Bloom input (3 bindings total)
         }];
 
         let pool_info = vk::DescriptorPoolCreateInfo::default()
@@ -5285,17 +5159,11 @@ impl Renderer {
             vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL
         };
 
-        let ssgi_view = self
-            .ssgi_pass
-            .as_ref()
-            .map(|s| s.gi_view())
-            .unwrap_or(color_view);
         
         // --- CRITICAL FIX: Bloom Placeholder ---
         // Binding the color view directly to bloom causes over-brightness because the tonemapping 
         // shader adds 'bloom' to the original color. Until a real bloom pass is implemented, 
         // we should bind a target that is logically black.
-        // PREVIOUS BUG: let bloom_view = ssgi_view; // This caused flickering SSGI to appear as blinking glow
         let bloom_view = self._black_texture.view(); 
         
         log::debug!("Updating post-processing descriptors (HDR: {}, Bloom: {})", 
@@ -5314,15 +5182,9 @@ impl Renderer {
                 image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
             };
 
-            let ssgi_info = vk::DescriptorImageInfo {
-                sampler,
-                image_view: ssgi_view,
-                image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-            };
 
             let color_infos = [color_info];
             let bloom_infos = [bloom_info];
-            let ssgi_infos = [ssgi_info];
 
             let descriptor_writes = [
                 vk::WriteDescriptorSet::default()
@@ -5335,11 +5197,6 @@ impl Renderer {
                     .dst_binding(1)
                     .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
                     .image_info(&bloom_infos),
-                vk::WriteDescriptorSet::default()
-                    .dst_set(*descriptor_set)
-                    .dst_binding(2)
-                    .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-                    .image_info(&ssgi_infos),
             ];
 
             unsafe {
@@ -5579,9 +5436,6 @@ impl Drop for Renderer {
             if let Some(mut vsr) = self.vsr_pass.take() {
                 vsr.destroy(&self.alloc.vma);
             }
-            if let Some(mut ssgi) = self.ssgi_pass.take() {
-                ssgi.destroy(&self.alloc.vma);
-            }
 
             // Cleanup async readback manager
             if let Some(mut readback) = self.async_readback.take() {
@@ -5607,14 +5461,6 @@ impl Drop for Renderer {
             self.render_pass = None;
             self.swapchain = None;
 
-            // IBL Cleanup
-            if self.ibl_sampler != vk::Sampler::null() {
-                self.device.device.destroy_sampler(self.ibl_sampler, None);
-            }
-            if let Some(mut pass) = self.brdf_lut_pass.take() {
-                pass.destroy(&self.alloc.vma, &self.device.device);
-            }
-            self.ibl_manager.destroy();
 
             log::info!("Ash Renderer shut down successfully");
         }

@@ -30,10 +30,26 @@ impl VulkanDevice {
                 AshError::DeviceInitFailed(format!("Failed to enumerate devices: {e:?}"))
             })?;
 
+            log::info!("Found {} physical device(s)", physical_devices.len());
+
             if physical_devices.is_empty() {
                 return Err(AshError::DeviceInitFailed(
                     "No Vulkan-capable GPU found".to_string(),
                 ));
+            }
+
+            // Log all available devices
+            for (idx, &device) in physical_devices.iter().enumerate() {
+                let props = vk_instance.get_physical_device_properties(device);
+                let device_name = CStr::from_ptr(props.device_name.as_ptr());
+                let device_type = match props.device_type {
+                    vk::PhysicalDeviceType::DISCRETE_GPU => "Discrete GPU",
+                    vk::PhysicalDeviceType::INTEGRATED_GPU => "Integrated GPU",
+                    vk::PhysicalDeviceType::VIRTUAL_GPU => "Virtual GPU",
+                    vk::PhysicalDeviceType::CPU => "CPU",
+                    _ => "Other",
+                };
+                log::info!("  [{}] {device_name:?} ({device_type})", idx);
             }
 
             let mut selected = None;
@@ -48,6 +64,7 @@ impl VulkanDevice {
 
             let (physical_device, graphics_queue_family, present_queue_family) = selected
                 .ok_or_else(|| {
+                    log::error!("No suitable GPU found. All devices were rejected due to missing graphics or present queue support.");
                     AshError::DeviceInitFailed(
                         "No GPU found with graphics+present support".to_string(),
                     )
@@ -92,8 +109,8 @@ impl VulkanDevice {
                 .multi_draw_indirect(true)
                 .sample_rate_shading(sample_rate_shading_supported);
 
-            let mut vulnerability_features = vk::PhysicalDeviceVulkan12Features::default()
-                .buffer_device_address(false)
+            let mut vulkan12_features = vk::PhysicalDeviceVulkan12Features::default()
+                .buffer_device_address(true)
                 .descriptor_indexing(true)
                 .draw_indirect_count(true)
                 .shader_sampled_image_array_non_uniform_indexing(true)
@@ -102,11 +119,12 @@ impl VulkanDevice {
                 .descriptor_binding_variable_descriptor_count(true)
                 .descriptor_binding_partially_bound(true)
                 .descriptor_binding_sampled_image_update_after_bind(true)
-                .descriptor_binding_storage_buffer_update_after_bind(true);
+                .descriptor_binding_storage_buffer_update_after_bind(true)
+                .scalar_block_layout(true); // CRITICAL: Required for BDA vertex pulling with scalar layout
 
             let mut features2 = vk::PhysicalDeviceFeatures2::default()
                 .features(device_features)
-                .push_next(&mut vulnerability_features);
+                .push_next(&mut vulkan12_features);
 
             let device_create_info = vk::DeviceCreateInfo::default()
                 .queue_create_infos(&queue_infos)
@@ -150,12 +168,28 @@ impl VulkanDevice {
         let queue_families =
             unsafe { vk_instance.get_physical_device_queue_family_properties(physical_device) };
 
+        // Log device being evaluated
+        unsafe {
+            let props = vk_instance.get_physical_device_properties(physical_device);
+            let device_name = CStr::from_ptr(props.device_name.as_ptr());
+            log::debug!("Evaluating queue families for {device_name:?}");
+            log::debug!("  Found {} queue families", queue_families.len());
+        }
+
         let mut graphics_family = None;
         let mut present_family = None;
 
         for (index, queue_family) in queue_families.iter().enumerate() {
+            log::debug!(
+                "    Family {}: flags={:?}, count={}",
+                index,
+                queue_family.queue_flags,
+                queue_family.queue_count
+            );
+
             if queue_family.queue_flags.contains(vk::QueueFlags::GRAPHICS) {
                 graphics_family = Some(index as u32);
+                log::debug!("      -> Graphics support found");
             }
 
             if headless {
@@ -174,6 +208,9 @@ impl VulkanDevice {
 
                 if present_support {
                     present_family = Some(index as u32);
+                    log::debug!("      -> Present support found");
+                } else {
+                    log::debug!("      -> No present support");
                 }
             }
 
@@ -183,8 +220,22 @@ impl VulkanDevice {
         }
 
         match (graphics_family, present_family) {
-            (Some(graphics), Some(present)) => Some((graphics, present)),
-            _ => None,
+            (Some(graphics), Some(present)) => {
+                log::debug!(
+                    "  ✓ Device suitable: graphics={}, present={}",
+                    graphics,
+                    present
+                );
+                Some((graphics, present))
+            }
+            _ => {
+                log::debug!(
+                    "  ✗ Device rejected: graphics={:?}, present={:?}",
+                    graphics_family,
+                    present_family
+                );
+                None
+            }
         }
     }
 

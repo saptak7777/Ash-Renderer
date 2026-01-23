@@ -2,6 +2,8 @@
 // Single Source of Truth for shader-side structures
 // Matches Rust definitions in src/renderer/model_renderer.rs
 
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+
 struct InstanceData {
     vec4 bounds_center;
     vec4 bounds_extents;
@@ -18,6 +20,7 @@ struct InstanceData {
     uint _padding;
 };
 
+#ifndef SKIP_PUSH_CONSTANTS
 // Push Constants - Strict 160-byte block
 // Matches DrawPushConstants in Rust
 layout(push_constant) uniform PushConstants {
@@ -27,7 +30,9 @@ layout(push_constant) uniform PushConstants {
     layout(offset = 68) uint use_instancing;
     layout(offset = 72) uint instance_buffer_index;
     layout(offset = 76) uint joint_buffer_index;
-    layout(offset = 80) uint _vertex_padding[12]; // Pad to 128 bytes
+    layout(offset = 80) uint64_t vertex_heap_ptr; // BDA pointer to vertex data
+    layout(offset = 88) uint is_skinned;
+    layout(offset = 92) uint _vertex_padding[9]; // Pad to 128 bytes
 
     // Fragment stage (128-159)
     layout(offset = 128) uint material_index;
@@ -39,6 +44,7 @@ layout(push_constant) uniform PushConstants {
     layout(offset = 152) float uv_max;
     layout(offset = 156) float texel_size;
 } push;
+#endif
 
 // RAGE Hemisphere Ambient
 struct HemisphereAmbient {

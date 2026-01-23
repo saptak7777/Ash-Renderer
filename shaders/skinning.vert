@@ -1,11 +1,14 @@
 #version 450
+// BDA Skinned Vertex Pulling Implementation
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_scalar_block_layout : require
+#extension GL_EXT_nonuniform_qualifier : enable
 
-layout(location = 0) in vec3 inPosition;
-layout(location = 1) in vec3 inNormal;
-layout(location = 2) in vec2 inUV;
-layout(location = 3) in uvec4 inJointIndices;
-layout(location = 4) in vec4 inJointWeights;
+#include "include/structures.glsl"
+#include "include/skinned_vertex_pulling.glsl"
 
+// Output attributes
 layout(location = 0) out vec3 fragColor;
 layout(location = 1) out vec2 fragUV;
 layout(location = 2) centroid out vec3 fragNormal;
@@ -22,26 +25,23 @@ layout(set = 0, binding = 0) uniform MVP {
     mat4 light_space_matrix;
     mat4 normal_matrix;
     vec4 camera_pos;
-    vec4 light_direction;
-    vec4 light_color;
-    vec4 ambient_color;
+    SceneLighting scene_lighting;
 } mvp;
 
-#extension GL_EXT_nonuniform_qualifier : enable
-
-layout(push_constant) uniform PushConstants {
-    mat4 model;
-    uint joint_offset;
-    uint use_instancing;
-    uint instance_buffer_index;
-    uint joint_buffer_index;
-} push;
-
-layout(set = 2, binding = 2) readonly buffer JointBuffers {
+layout(set = 1, binding = 3) readonly buffer JointBuffers {
     mat4 joints[];
 } joint_buffers[];
 
 void main() {
+    // BDA Skinned Vertex Pulling: Load vertex data from global vertex heap
+    SkinnedVertexBuffer vertex = load_skinned_vertex(push.vertex_heap_ptr, gl_VertexIndex);
+    
+    vec3 inPosition = vertex.position;
+    vec3 inNormal = vertex.normal;
+    vec2 inUV = vertex.uv;
+    uvec4 inJointIndices = uvec4(vertex.joint_indices); // Convert u16vec4 to uvec4
+    vec4 inJointWeights = vertex.joint_weights;
+
     // Linear Blend Skinning
     mat4 skinMatrix = mat4(0.0);
     uint base_offset = push.joint_offset;

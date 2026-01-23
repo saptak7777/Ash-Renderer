@@ -15,7 +15,7 @@ use super::shadow_pass::VsmShadowPass;
 /// VSM Feature - Complete virtual shadow map system
 pub struct VsmFeature {
     /// GPU resources
-    resources: VsmResources,
+    pub resources: VsmResources,
 
     /// CPU-side page manager
     page_manager: PageManager,
@@ -41,6 +41,9 @@ pub struct VsmFeature {
 
     /// VSM device handle
     device: Arc<ash::Device>,
+
+    /// Allocator for resource cleanup
+    allocator: Arc<Allocator>,
 
     /// Enabled state
     enabled: bool,
@@ -163,6 +166,7 @@ impl VsmFeature {
             _allocator_descriptor_sets: allocator_descriptor_sets,
             current_frame: 0,
             device,
+            allocator,
             enabled: true,
         })
     }
@@ -252,15 +256,28 @@ impl VsmFeature {
     ///
     /// # Safety
     /// Command buffer must be in recording state. Draw function will be called for each page.
-    pub unsafe fn render_shadows<F>(&self, cmd: vk::CommandBuffer, draw_fn: F)
-    where
+    pub unsafe fn render_shadows<F>(
+        &self,
+        cmd: vk::CommandBuffer,
+        light_space_matrix: &glam::Mat4,
+        frame_set: vk::DescriptorSet,
+        bindless_set: vk::DescriptorSet,
+        draw_fn: F,
+    ) where
         F: FnMut(vk::CommandBuffer, &super::resources::PageAllocation),
     {
         let allocations = self.page_manager.get_allocated_pages();
         let page_size = self.resources.config().page_size;
 
-        self.shadow_pass
-            .render_shadows(cmd, &allocations, page_size, draw_fn);
+        self.shadow_pass.render_shadows(
+            cmd,
+            &allocations,
+            page_size,
+            light_space_matrix,
+            frame_set,
+            bindless_set,
+            draw_fn,
+        );
     }
 
     /// Get shadow pipeline (if created)
@@ -280,7 +297,7 @@ impl VsmFeature {
     pub unsafe fn destroy(&mut self) {
         log::debug!("Destroying VSM feature");
 
-        self.shadow_pass.destroy();
+        self.shadow_pass.destroy(&self.allocator);
         self.compute_pipelines.destroy();
 
         if self.descriptor_pool != vk::DescriptorPool::null() {

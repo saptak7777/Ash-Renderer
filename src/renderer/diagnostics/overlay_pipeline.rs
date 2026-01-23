@@ -11,9 +11,8 @@ pub struct OverlayPipeline {
     render_pass: vk::RenderPass,
     pipeline_layout: vk::PipelineLayout,
     pipeline: vk::Pipeline,
-    /// Vertex buffer for overlay (recreated each frame)
-    vertex_buffer: Option<vk::Buffer>,
-    vertex_buffer_memory: Option<vk::DeviceMemory>,
+    /// BDA Vertex heap for overlay (recreated each frame)
+    vertex_heap: Option<crate::renderer::resources::BufferHandle>,
 }
 
 impl OverlayPipeline {
@@ -82,8 +81,7 @@ impl OverlayPipeline {
             render_pass,
             pipeline_layout,
             pipeline: vk::Pipeline::null(),
-            vertex_buffer: None,
-            vertex_buffer_memory: None,
+            vertex_heap: None,
         })
     }
 
@@ -118,12 +116,7 @@ impl Drop for OverlayPipeline {
                 .destroy_pipeline_layout(self.pipeline_layout, None);
             self.device.destroy_render_pass(self.render_pass, None);
 
-            if let Some(buffer) = self.vertex_buffer.take() {
-                self.device.destroy_buffer(buffer, None);
-            }
-            if let Some(memory) = self.vertex_buffer_memory.take() {
-                self.device.free_memory(memory, None);
-            }
+            self.vertex_heap = None;
 
             log::info!("[OverlayPipeline] Overlay pipeline destroyed");
         }

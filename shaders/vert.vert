@@ -1,14 +1,13 @@
 #version 450
-// Force recompile for push constant fix
+// BDA Vertex Pulling Implementation
 #extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_scalar_block_layout : require
 
 #include "include/structures.glsl"
+#include "include/vertex_pulling.glsl"
 
-layout(location = 0) in vec3 inPosition;
-layout(location = 1) in vec3 inNormal;
-layout(location = 2) in vec2 inUV;
-layout(location = 3) in vec3 inColor;
-layout(location = 4) in vec4 inTangent;
+// Output attributes
 layout(location = 0) out vec3 fragColor;
 layout(location = 1) out vec2 fragUV;
 layout(location = 2) centroid out vec3 fragNormal;
@@ -38,6 +37,15 @@ layout(set = 1, binding = 2) readonly buffer InstanceBuffers {
 } instance_buffers[];
 
 void main() {
+    // BDA Vertex Pulling: Load vertex data from global vertex heap
+    VertexBuffer vertex = load_vertex(push.vertex_heap_ptr, gl_VertexIndex);
+    
+    vec3 inPosition = vertex.position;
+    vec3 inNormal = vertex.normal;
+    vec2 inUV = vertex.uv;
+    vec3 inColor = vertex.color;
+    vec4 inTangent = vertex.tangent;
+
     mat4 modelMatrix;
     if (push.use_instancing != 0) {
         modelMatrix = instance_buffers[nonuniformEXT(push.instance_buffer_index)].instances[gl_InstanceIndex].model;

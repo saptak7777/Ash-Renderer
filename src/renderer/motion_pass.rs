@@ -120,36 +120,7 @@ impl MotionVectorPass {
 
         self.pipeline_layout = self.device.create_pipeline_layout(&layout_info, None)?;
 
-        // Vertex input (matches Vertex struct)
-        let binding = vk::VertexInputBindingDescription::default()
-            .binding(0)
-            .stride(std::mem::size_of::<crate::renderer::resources::Vertex>() as u32)
-            .input_rate(vk::VertexInputRate::VERTEX);
-
-        let attributes = [
-            // Position
-            vk::VertexInputAttributeDescription::default()
-                .location(0)
-                .binding(0)
-                .format(vk::Format::R32G32B32_SFLOAT)
-                .offset(0),
-            // Normal
-            vk::VertexInputAttributeDescription::default()
-                .location(1)
-                .binding(0)
-                .format(vk::Format::R32G32B32_SFLOAT)
-                .offset(12),
-            // TexCoord
-            vk::VertexInputAttributeDescription::default()
-                .location(2)
-                .binding(0)
-                .format(vk::Format::R32G32_SFLOAT)
-                .offset(24),
-        ];
-
-        let vertex_input = vk::PipelineVertexInputStateCreateInfo::default()
-            .vertex_binding_descriptions(std::slice::from_ref(&binding))
-            .vertex_attribute_descriptions(&attributes);
+        let vertex_input = vk::PipelineVertexInputStateCreateInfo::default();
 
         let input_assembly = vk::PipelineInputAssemblyStateCreateInfo::default()
             .topology(vk::PrimitiveTopology::TRIANGLE_LIST)

@@ -12,7 +12,7 @@ categories = ["graphics", "rendering", "game-development"]
 readme = "README.md"
 
 [workspace]
-members = [".", "tools/ibl_baker"]
+members = ["."]
 
 [dependencies]
 # Vulkan

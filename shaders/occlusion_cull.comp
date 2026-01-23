@@ -154,7 +154,9 @@ bool occlusionCull(vec3 center, vec3 extents, mat4 vp) {
     
     vec2 minScreen = vec2(1.0);
     vec2 maxScreen = vec2(0.0);
-    float minZ = 1.0;
+    // REVERSE-Z: Track MAXIMUM depth (nearest point to camera)
+    // In Reverse-Z: 1.0 = near, 0.0 = far
+    float maxZ = 0.0;
     
     for (int i = 0; i < 8; i++) {
         vec4 clip = vp * vec4(corners[i], 1.0);
@@ -168,9 +170,11 @@ bool occlusionCull(vec3 center, vec3 extents, mat4 vp) {
         
         minScreen = min(minScreen, screen);
         maxScreen = max(maxScreen, screen);
-        minZ = min(minZ, ndc.z);
+        // REVERSE-Z: Track maximum (nearest) depth
+        maxZ = max(maxZ, ndc.z);
     }
     
+    // Clamp screen coordinates to valid range
     minScreen = clamp(minScreen, vec2(0.0), vec2(1.0));
     maxScreen = clamp(maxScreen, vec2(0.0), vec2(1.0));
     
@@ -179,11 +183,16 @@ bool occlusionCull(vec3 center, vec3 extents, mat4 vp) {
     float mipLevel = ceil(log2(max(screenSize.x, screenSize.y)));
     mipLevel = clamp(mipLevel, 0.0, float(pc.hizLevels - 1));
     
-    // Sample Hi-Z depth
-    float hizDepth = textureLod(hizPyramid, (minScreen + maxScreen) * 0.5, mipLevel).r;
+    // Safety: Ensure UV is in valid range [0, 1]
+    vec2 sampleUV = clamp((minScreen + maxScreen) * 0.5, vec2(0.0), vec2(1.0));
     
-    // Occluded if object's nearest point is behind Hi-Z depth
-    return minZ > hizDepth;
+    // Sample Hi-Z depth
+    float hizDepth = textureLod(hizPyramid, sampleUV, mipLevel).r;
+    
+    // REVERSE-Z: Object is occluded if its nearest point (maxZ) is LESS than Hi-Z depth
+    // In Reverse-Z, larger values are closer to camera
+    // If maxZ < hizDepth, the object is entirely behind the occluder
+    return maxZ < hizDepth;
 }
 
 // ============================================================================
@@ -243,12 +252,15 @@ void main() {
     vec4 clipPos = pc.viewProj * vec4(worldCenter, 1.0);
     // Only verify size if in front of camera (w > 0)
     if (clipPos.w > 0.0) {
-        // Approximate normalized screen size (radius / depth)
-        // This is a rough metric but sufficient to cull sub-pixel/tiny geometry
-        float normalizedSize = radius / clipPos.w;
-        if (normalizedSize < 0.005) { // < 0.5% of "view cone"
-             visibility[objectIdx] = 0;
-             return;
+        // Safety: Prevent division by zero or very small values
+        if (abs(clipPos.w) > 0.0001) {
+            // Approximate normalized screen size (radius / depth)
+            // This is a rough metric but sufficient to cull sub-pixel/tiny geometry
+            float normalizedSize = radius / clipPos.w;
+            if (normalizedSize < 0.005) { // < 0.5% of "view cone"
+                 visibility[objectIdx] = 0;
+                 return;
+            }
         }
     }
     

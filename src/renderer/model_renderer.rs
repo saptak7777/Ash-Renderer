@@ -1,27 +1,24 @@
-use std::{collections::HashMap, ptr, sync::Arc};
+use std::{collections::HashMap, sync::Arc};
 
 use ash::{vk, Device};
 use bytemuck::{bytes_of, Pod, Zeroable};
-use vk_mem::Alloc;
 
-use crate::renderer::resources::GpuBuffer;
-use crate::renderer::{MaterialHandle, Mesh, SkinnedVertex, Vertex};
+use crate::renderer::resources::global_geometry_buffer::DualHeapGeometryBuffer;
+use crate::renderer::{MaterialHandle, Mesh};
 use crate::vulkan::Allocator;
 use crate::{AshError, Result};
 
-/// Vertex buffer type for uploaded meshes.
-enum VertexBufferType {
-    Standard(GpuBuffer<Vertex>),
-    Skinned(GpuBuffer<SkinnedVertex>),
-}
-
 /// GPU-resident mesh data managed by `ModelRenderer`.
 pub struct UploadedMesh {
-    vertex_buffer: VertexBufferType,
-    index_buffer: Option<GpuBuffer<u32>>,
+    pub index_offset: Option<u64>, // Byte offset into Global Index Heap
     vertex_count: u32,
     index_count: u32,
     pub clusters: Vec<crate::renderer::resources::mesh::MeshCluster>,
+
+    // BDA Fields for Vertex Pulling
+    pub vertex_heap_address: Option<vk::DeviceAddress>, // Device address for this mesh's vertices
+    pub vertex_offset: Option<u64>,                     // Byte offset into the Vertex Heap
+    pub is_skinned: bool,                               // True if uploaded as SkinnedVertex
 }
 
 impl MaterialPushConstants {
@@ -58,15 +55,8 @@ impl MaterialPushConstants {
 }
 
 impl UploadedMesh {
-    pub fn vertex_buffer(&self) -> vk::Buffer {
-        match &self.vertex_buffer {
-            VertexBufferType::Standard(buf) => buf.handle(),
-            VertexBufferType::Skinned(buf) => buf.handle(),
-        }
-    }
-
-    pub fn index_buffer(&self) -> Option<vk::Buffer> {
-        self.index_buffer.as_ref().map(|buffer| buffer.handle())
+    pub fn has_indices(&self) -> bool {
+        self.index_offset.is_some()
     }
 
     pub fn vertex_count(&self) -> u32 {
@@ -84,8 +74,8 @@ impl UploadedMesh {
 
 /// Caches GPU-side data for meshes.
 pub struct ModelRenderer {
-    alloc: Arc<Allocator>,
     device: Arc<Device>,
+    pub geometry_buffer: Arc<DualHeapGeometryBuffer>,
     cache: HashMap<String, UploadedMesh>,
 }
 
@@ -123,7 +113,9 @@ struct DrawPushConstants {
     use_instancing: u32,
     instance_buffer_index: u32,
     joint_buffer_index: u32,
-    _vertex_padding: [u32; 12],
+    vertex_heap_ptr: u64,
+    is_skinned: u32,
+    _vertex_padding: [u32; 9],
 
     // Fragment stage (128-159)
     material_index: u32,
@@ -155,10 +147,14 @@ pub struct IndirectDrawCountParams {
 }
 
 impl ModelRenderer {
-    pub fn new(alloc: Arc<Allocator>, device: Arc<Device>) -> Self {
+    pub fn new(
+        _alloc: Arc<Allocator>,
+        device: Arc<Device>,
+        geometry_buffer: Arc<DualHeapGeometryBuffer>,
+    ) -> Self {
         Self {
-            alloc,
             device,
+            geometry_buffer,
             cache: HashMap::new(),
         }
     }
@@ -209,178 +205,46 @@ impl ModelRenderer {
         command_pool: vk::CommandPool,
         queue: vk::Queue,
     ) -> Result<UploadedMesh> {
-        let vertex_buffer = if !mesh.skinned_vertices.is_empty() {
-            let buffer = self.create_gpu_buffer(
-                &mesh.skinned_vertices,
-                vk::BufferUsageFlags::VERTEX_BUFFER,
-                command_pool,
-                queue,
-            )?;
-            VertexBufferType::Skinned(buffer)
-        } else {
-            let buffer = self.create_gpu_buffer(
-                &mesh.vertices,
-                vk::BufferUsageFlags::VERTEX_BUFFER,
-                command_pool,
-                queue,
-            )?;
-            VertexBufferType::Standard(buffer)
-        };
-
         let v_count = if !mesh.skinned_vertices.is_empty() {
             mesh.skinned_vertices.len() as u32
         } else {
             mesh.vertices.len() as u32
         };
 
-        let (index_buffer, i_count) = if let Some(indices) = mesh.indices.as_ref() {
-            let buffer = self.create_gpu_buffer(
-                indices,
-                vk::BufferUsageFlags::INDEX_BUFFER,
-                command_pool,
-                queue,
-            )?;
-            (Some(buffer), indices.len() as u32)
+        // Upload vertices to the Vertex Heap
+        let (vertex_offset, vertex_heap_address) = unsafe {
+            let offset = if !mesh.skinned_vertices.is_empty() {
+                self.geometry_buffer
+                    .upload_vertices(command_pool, queue, &mesh.skinned_vertices)?
+            } else {
+                self.geometry_buffer
+                    .upload_vertices(command_pool, queue, &mesh.vertices)?
+            };
+
+            let address = self.geometry_buffer.vertex_heap_address() + offset;
+            (Some(offset), Some(address))
+        };
+
+        // Upload indices to the Index Heap
+        let (index_offset, i_count) = if let Some(indices) = mesh.indices.as_ref() {
+            let offset = unsafe {
+                self.geometry_buffer
+                    .upload_indices(command_pool, queue, indices)?
+            };
+            (Some(offset), indices.len() as u32)
         } else {
             (None, 0)
         };
 
         Ok(UploadedMesh {
-            vertex_buffer,
-            index_buffer,
+            index_offset,
             vertex_count: v_count,
             index_count: i_count,
             clusters: mesh.clusters.clone(),
+            vertex_heap_address,
+            vertex_offset,
+            is_skinned: !mesh.skinned_vertices.is_empty(),
         })
-    }
-
-    /// Creates a GPU buffer and uploads data via staging buffer.
-    fn create_gpu_buffer<T: Copy + bytemuck::Pod>(
-        &self,
-        data: &[T],
-        usage: vk::BufferUsageFlags,
-        command_pool: vk::CommandPool,
-        queue: vk::Queue,
-    ) -> Result<GpuBuffer<T>> {
-        unsafe {
-            let size = std::mem::size_of_val(data) as vk::DeviceSize;
-
-            // Create staging buffer
-            let (staging_buffer, mut staging_alloc) = self
-                .alloc
-                .vma
-                .create_buffer(
-                    &vk::BufferCreateInfo::default()
-                        .size(size)
-                        .usage(vk::BufferUsageFlags::TRANSFER_SRC)
-                        .sharing_mode(vk::SharingMode::EXCLUSIVE),
-                    &vk_mem::AllocationCreateInfo {
-                        usage: vk_mem::MemoryUsage::AutoPreferHost,
-                        flags: vk_mem::AllocationCreateFlags::HOST_ACCESS_SEQUENTIAL_WRITE,
-                        ..Default::default()
-                    },
-                )
-                .map_err(|e| {
-                    AshError::VulkanError(format!("Failed to create staging buffer: {e}"))
-                })?;
-
-            {
-                let mut guard = self
-                    .alloc
-                    .map_allocation_guarded(&mut staging_alloc, size)?;
-                ptr::copy_nonoverlapping(
-                    data.as_ptr() as *const u8,
-                    guard.as_mut_ptr(),
-                    size as usize,
-                );
-            }
-
-            // Create device buffer
-            let device_buffer = GpuBuffer::new(
-                Arc::clone(&self.alloc),
-                data.len(),
-                usage | vk::BufferUsageFlags::TRANSFER_DST,
-                vk_mem::MemoryUsage::AutoPreferDevice,
-                None,
-            )?;
-
-            self.copy_buffer(
-                command_pool,
-                queue,
-                staging_buffer,
-                device_buffer.handle(),
-                size,
-            )?;
-
-            self.alloc
-                .vma
-                .destroy_buffer(staging_buffer, &mut staging_alloc);
-
-            Ok(device_buffer)
-        }
-    }
-
-    fn copy_buffer(
-        &self,
-        command_pool: vk::CommandPool,
-        queue: vk::Queue,
-        src: vk::Buffer,
-        dst: vk::Buffer,
-        size: vk::DeviceSize,
-    ) -> Result<()> {
-        unsafe {
-            let alloc_info = vk::CommandBufferAllocateInfo::default()
-                .command_pool(command_pool)
-                .level(vk::CommandBufferLevel::PRIMARY)
-                .command_buffer_count(1);
-
-            let command_buffers =
-                self.device
-                    .allocate_command_buffers(&alloc_info)
-                    .map_err(|e| {
-                        AshError::VulkanError(format!("Failed to allocate command buffer: {e}"))
-                    })?;
-            let command_buffer = command_buffers[0];
-
-            self.device
-                .begin_command_buffer(
-                    command_buffer,
-                    &vk::CommandBufferBeginInfo::default()
-                        .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
-                )
-                .map_err(|e| {
-                    AshError::VulkanError(format!("Failed to begin command buffer: {e}"))
-                })?;
-
-            let region = vk::BufferCopy {
-                src_offset: 0,
-                dst_offset: 0,
-                size,
-            };
-
-            self.device
-                .cmd_copy_buffer(command_buffer, src, dst, &[region]);
-
-            self.device
-                .end_command_buffer(command_buffer)
-                .map_err(|e| AshError::VulkanError(format!("Failed to end command buffer: {e}")))?;
-
-            let submit_buffers = [command_buffer];
-            let submit_info = vk::SubmitInfo::default().command_buffers(&submit_buffers);
-
-            self.device
-                .queue_submit(queue, &[submit_info], vk::Fence::null())
-                .map_err(|e| {
-                    AshError::VulkanError(format!("Failed to submit copy command: {e}"))
-                })?;
-            self.device.queue_wait_idle(queue).map_err(|e| {
-                AshError::VulkanError(format!("Failed to wait for queue idle: {e}"))
-            })?;
-            self.device
-                .free_command_buffers(command_pool, &command_buffers);
-        }
-
-        Ok(())
     }
 
     /// Record a draw call for a single uploaded mesh using push constants.
@@ -395,20 +259,13 @@ impl ModelRenderer {
             return;
         }
 
-        let vertex_buffer = ctx.uploaded.vertex_buffer();
-        if vertex_buffer == vk::Buffer::null() {
-            log::warn!("Uploaded mesh missing vertex buffer, skipping draw");
-            return;
-        }
+        // BDA Vertex Pulling: No vertex buffer binding needed
 
-        self.device
-            .cmd_bind_vertex_buffers(ctx.command_buffer, 0, &[vertex_buffer], &[0]);
-
-        if let Some(index_buffer) = ctx.uploaded.index_buffer() {
+        if let Some(index_offset) = ctx.uploaded.index_offset {
             self.device.cmd_bind_index_buffer(
                 ctx.command_buffer,
-                index_buffer,
-                0,
+                self.geometry_buffer.index_buffer_handle(),
+                index_offset,
                 vk::IndexType::UINT32,
             );
         }
@@ -436,13 +293,37 @@ impl ModelRenderer {
             0
         };
 
+        let vertex_ptr = ctx.uploaded.vertex_heap_address.unwrap_or(0);
+
+        // DIAGNOSTIC: Check for Silent Killer #1 - Null Pointer
+        if vertex_ptr == 0 {
+            log::error!(
+                "CRITICAL: vertex_heap_ptr is NULL (0x0)! Skipping draw to prevent GPU hang. Mesh: vertex_count={}, index_count={}",
+                ctx.uploaded.vertex_count(),
+                ctx.uploaded.index_count()
+            );
+            return; // SAFETY: Do not submit draw calls with NULL BDA pointers
+        }
+
+        log::debug!(
+            "Draw mesh: Ptr=0x{:X}, Indices={}, Vertices={}, IndexOffset={:?}, Skinned={}, JointBuf={}",
+            vertex_ptr,
+            ctx.uploaded.index_count(),
+            ctx.uploaded.vertex_count(),
+            ctx.uploaded.index_offset,
+            ctx.uploaded.is_skinned,
+            ctx.joint_buffer_index
+        );
+
         let push = DrawPushConstants {
             model: model_matrix.into(),
             joint_offset,
             use_instancing: 0,
             instance_buffer_index: ctx.instance_buffer_index,
             joint_buffer_index: ctx.joint_buffer_index,
-            _vertex_padding: [0; 12],
+            vertex_heap_ptr: vertex_ptr,
+            is_skinned: ctx.uploaded.is_skinned as u32,
+            _vertex_padding: [0; 9],
             material_index: ((material_handle.version as u32) << 16) | material_index as u32,
             debug_path: ctx.material.debug_path,
             flags: ctx.material.flags,
@@ -461,43 +342,16 @@ impl ModelRenderer {
             push_bytes,
         );
 
-        if let Some(index_buffer) = ctx.uploaded.index_buffer() {
-            let count = ctx.uploaded.index_count();
-            // log::debug!(
-            //     "DEBUG: Binding index buffer {:?}, count={}",
-            //     index_buffer,
-            //     count
-            // );
-            self.device.cmd_bind_index_buffer(
+        if let Some(_index_offset) = ctx.uploaded.index_offset {
+            self.device.cmd_draw_indexed(
                 ctx.command_buffer,
-                index_buffer,
+                ctx.uploaded.index_count(),
+                1,
                 0,
-                vk::IndexType::UINT32,
+                0,
+                0,
             );
-
-            // log::info!(
-            //     "DEBUG: draw_mesh - index_count={}, vertex_count={}",
-            //     count,
-            //     ctx.uploaded.vertex_count()
-            // );
-            if count == 0 {
-                // log::info!(
-                //     "DEBUG: Calling cmd_draw with vertex_count={}",
-                //     ctx.uploaded.vertex_count()
-                // );
-                self.device
-                    .cmd_draw(ctx.command_buffer, ctx.uploaded.vertex_count(), 1, 0, 0);
-            } else {
-                // log::info!("DEBUG: Calling cmd_draw_indexed with index_count={count}");
-                self.device
-                    .cmd_draw_indexed(ctx.command_buffer, count, 1, 0, 0, 0);
-                // log::info!("DEBUG: cmd_draw_indexed completed successfully");
-            }
         } else {
-            // log::info!(
-            //     "DEBUG: draw_mesh - NO index_buffer! Calling cmd_draw with vertex_count={}",
-            //     ctx.uploaded.vertex_count()
-            // );
             self.device
                 .cmd_draw(ctx.command_buffer, ctx.uploaded.vertex_count(), 1, 0, 0);
         }
@@ -517,9 +371,7 @@ impl ModelRenderer {
             return;
         }
 
-        let vertex_buffer = ctx.uploaded.vertex_buffer();
-        self.device
-            .cmd_bind_vertex_buffers(ctx.command_buffer, 0, &[vertex_buffer], &[0]);
+        // BDA Vertex Pulling: No vertex buffer binding needed
 
         let material_handle = ctx.material.material_handle;
         log::debug!(
@@ -532,13 +384,38 @@ impl ModelRenderer {
             ctx.material.debug_path,
             ctx.material.flags
         );
+
+        let vertex_ptr = ctx.uploaded.vertex_heap_address.unwrap_or(0);
+
+        // DIAGNOSTIC: Check for Silent Killer #1 - Null Pointer (Instanced Path)
+        if vertex_ptr == 0 {
+            log::error!(
+                "CRITICAL (Instanced): vertex_heap_ptr is NULL (0x0)! Skipping draw to prevent GPU hang. Instances={}, Indices={}",
+                instance_count,
+                ctx.uploaded.index_count()
+            );
+            return; // SAFETY: Do not submit instanced draw calls with NULL BDA pointers
+        }
+
+        log::debug!(
+            "Draw mesh instanced: Ptr=0x{:X}, Instances={}, Indices={}, FirstInstance={}, Skinned={}, JointBuf={}",
+            vertex_ptr,
+            instance_count,
+            ctx.uploaded.index_count(),
+            first_instance,
+            ctx.uploaded.is_skinned,
+            ctx.joint_buffer_index
+        );
+
         let push = DrawPushConstants {
             model: glam::Mat4::IDENTITY.into(),
             joint_offset: 0,
             use_instancing: 1,
             instance_buffer_index: ctx.instance_buffer_index,
             joint_buffer_index: ctx.joint_buffer_index,
-            _vertex_padding: [0; 12],
+            vertex_heap_ptr: vertex_ptr,
+            is_skinned: ctx.uploaded.is_skinned as u32,
+            _vertex_padding: [0; 9],
             material_index: ((material_handle.version as u32) << 16) | material_handle.index as u32,
             debug_path: ctx.material.debug_path,
             flags: ctx.material.flags,
@@ -557,11 +434,11 @@ impl ModelRenderer {
             push_bytes,
         );
 
-        if let Some(index_buffer) = ctx.uploaded.index_buffer() {
+        if let Some(index_offset) = ctx.uploaded.index_offset {
             self.device.cmd_bind_index_buffer(
                 ctx.command_buffer,
-                index_buffer,
-                0,
+                self.geometry_buffer.index_buffer_handle(),
+                index_offset,
                 vk::IndexType::UINT32,
             );
             self.device.cmd_draw_indexed(
@@ -595,9 +472,7 @@ impl ModelRenderer {
         draw_count: u32,
         stride: u32,
     ) {
-        let vertex_buffer = ctx.uploaded.vertex_buffer();
-        self.device
-            .cmd_bind_vertex_buffers(ctx.command_buffer, 0, &[vertex_buffer], &[0]);
+        // BDA Vertex Pulling: No vertex buffer binding needed
 
         let material_handle = ctx.material.material_handle;
         log::debug!(
@@ -616,7 +491,9 @@ impl ModelRenderer {
             use_instancing: 1,
             instance_buffer_index: ctx.instance_buffer_index,
             joint_buffer_index: ctx.joint_buffer_index,
-            _vertex_padding: [0; 12],
+            vertex_heap_ptr: ctx.uploaded.vertex_heap_address.unwrap_or(0),
+            is_skinned: ctx.uploaded.is_skinned as u32,
+            _vertex_padding: [0; 9],
             material_index: ((material_handle.version as u32) << 16) | material_handle.index as u32,
             debug_path: ctx.material.debug_path,
             flags: ctx.material.flags,
@@ -635,11 +512,11 @@ impl ModelRenderer {
             push_bytes,
         );
 
-        if let Some(index_buffer) = ctx.uploaded.index_buffer() {
+        if let Some(index_offset) = ctx.uploaded.index_offset {
             self.device.cmd_bind_index_buffer(
                 ctx.command_buffer,
-                index_buffer,
-                0,
+                self.geometry_buffer.index_buffer_handle(),
+                index_offset,
                 vk::IndexType::UINT32,
             );
             self.device.cmd_draw_indexed_indirect(
@@ -669,9 +546,7 @@ impl ModelRenderer {
         ctx: &DrawContext,
         params: &IndirectDrawCountParams,
     ) {
-        let vertex_buffer = ctx.uploaded.vertex_buffer();
-        self.device
-            .cmd_bind_vertex_buffers(ctx.command_buffer, 0, &[vertex_buffer], &[0]);
+        // BDA Vertex Pulling: No vertex buffer binding needed
 
         let material_handle = ctx.material.material_handle;
         let push = DrawPushConstants {
@@ -680,7 +555,9 @@ impl ModelRenderer {
             use_instancing: 1,
             instance_buffer_index: ctx.instance_buffer_index,
             joint_buffer_index: ctx.joint_buffer_index,
-            _vertex_padding: [0; 12],
+            vertex_heap_ptr: ctx.uploaded.vertex_heap_address.unwrap_or(0),
+            is_skinned: ctx.uploaded.is_skinned as u32,
+            _vertex_padding: [0; 9],
             material_index: ((material_handle.version as u32) << 16) | material_handle.index as u32,
             debug_path: ctx.material.debug_path,
             flags: ctx.material.flags,
@@ -699,11 +576,11 @@ impl ModelRenderer {
             push_bytes,
         );
 
-        if let Some(index_buffer) = ctx.uploaded.index_buffer() {
+        if let Some(index_offset) = ctx.uploaded.index_offset {
             self.device.cmd_bind_index_buffer(
                 ctx.command_buffer,
-                index_buffer,
-                0,
+                self.geometry_buffer.index_buffer_handle(),
+                index_offset,
                 vk::IndexType::UINT32,
             );
             self.device.cmd_draw_indexed_indirect_count(
@@ -727,5 +604,14 @@ impl ModelRenderer {
                 params.stride,
             );
         }
+    }
+    /// Public method to upload a mesh directly (used for internal meshes like Skybox)
+    pub fn upload_mesh_data(
+        &self,
+        mesh: &Mesh,
+        command_pool: vk::CommandPool,
+        queue: vk::Queue,
+    ) -> Result<UploadedMesh> {
+        self.upload_mesh(mesh, command_pool, queue)
     }
 }

@@ -15,12 +15,6 @@ impl BufferBuilder {
         }
     }
 
-    /// Buffer will store dynamic vertex data
-    pub fn vertex_buffer(mut self) -> Self {
-        self.descriptor.usage |= vk::BufferUsageFlags::VERTEX_BUFFER;
-        self
-    }
-
     /// Buffer will store index data
     pub fn index_buffer(mut self) -> Self {
         self.descriptor.usage |= vk::BufferUsageFlags::INDEX_BUFFER;

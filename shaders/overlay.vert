@@ -1,15 +1,22 @@
 #version 450
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_scalar_block_layout : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
 
-// Simple overlay vertex shader for diagnostics text
-// Input: 2D position in NDC, color
+layout(buffer_reference, scalar) readonly buffer TextVertexHeap {
+    vec2 pos;
+    vec2 uv;
+    vec4 color;
+};
 
-layout(location = 0) in vec2 inPos;
-layout(location = 1) in vec2 inUV;
-layout(location = 2) in vec4 inColor;
+layout(push_constant) uniform PushConstants {
+    uint64_t vertex_heap_ptr;
+} pc;
 
 layout(location = 0) out vec4 fragColor;
 
 void main() {
-    gl_Position = vec4(inPos, 0.0, 1.0);
-    fragColor = inColor;
+    TextVertexHeap vertex = TextVertexHeap(pc.vertex_heap_ptr + gl_VertexIndex * 32);
+    gl_Position = vec4(vertex.pos, 0.0, 1.0);
+    fragColor = vertex.color;
 }

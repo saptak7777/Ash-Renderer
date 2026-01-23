@@ -23,24 +23,30 @@ pub struct ObjectMotionData {
     pub current_mvp: [[f32; 4]; 4],
     /// Previous frame Model-View-Projection matrix
     pub previous_mvp: [[f32; 4]; 4],
+    /// BDA pointer to vertex data
+    pub vertex_heap_ptr: u64,
+    /// Padding to maintain 16-byte alignment (required for Pod)
+    pub _padding: u64,
 }
 
-// Compile-time size verification (GPU expects exactly 128 bytes)
-const _: () = assert!(std::mem::size_of::<ObjectMotionData>() == 128);
+// Compile-time size verification (64 + 64 + 8 + 8 = 144 bytes)
+const _: () = assert!(std::mem::size_of::<ObjectMotionData>() == 144);
 const _: () = assert!(std::mem::align_of::<ObjectMotionData>() == 16);
 
 impl ObjectMotionData {
     /// Create motion data from current and previous MVP matrices
-    pub fn new(current_mvp: Mat4, previous_mvp: Mat4) -> Self {
+    pub fn new(current_mvp: Mat4, previous_mvp: Mat4, vertex_heap_ptr: u64) -> Self {
         Self {
             current_mvp: current_mvp.to_cols_array_2d(),
             previous_mvp: previous_mvp.to_cols_array_2d(),
+            vertex_heap_ptr,
+            _padding: 0,
         }
     }
 
     /// Create motion data with identity previous matrix (for first frame)
-    pub fn from_current(current_mvp: Mat4) -> Self {
-        Self::new(current_mvp, Mat4::IDENTITY)
+    pub fn from_current(current_mvp: Mat4, vertex_heap_ptr: u64) -> Self {
+        Self::new(current_mvp, Mat4::IDENTITY, vertex_heap_ptr)
     }
 }
 
@@ -49,6 +55,8 @@ impl Default for ObjectMotionData {
         Self {
             current_mvp: Mat4::IDENTITY.to_cols_array_2d(),
             previous_mvp: Mat4::IDENTITY.to_cols_array_2d(),
+            vertex_heap_ptr: 0,
+            _padding: 0,
         }
     }
 }
@@ -59,7 +67,7 @@ mod tests {
 
     #[test]
     fn test_motion_data_size() {
-        assert_eq!(std::mem::size_of::<ObjectMotionData>(), 128);
+        assert_eq!(std::mem::size_of::<ObjectMotionData>(), 144);
     }
 
     #[test]
@@ -77,7 +85,7 @@ mod tests {
     #[test]
     fn test_motion_data_from_current() {
         let mvp = Mat4::from_translation(glam::Vec3::new(1.0, 2.0, 3.0));
-        let data = ObjectMotionData::from_current(mvp);
+        let data = ObjectMotionData::from_current(mvp, 0);
 
         assert_eq!(data.current_mvp, mvp.to_cols_array_2d());
         assert_eq!(data.previous_mvp, Mat4::IDENTITY.to_cols_array_2d());

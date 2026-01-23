@@ -17,7 +17,7 @@ use crate::Result;
 pub struct ForwardPlusDescriptor {
     layout: vk::DescriptorSetLayout,
     pool: vk::DescriptorPool,
-    descriptor_set: vk::DescriptorSet,
+    descriptor_sets: Vec<vk::DescriptorSet>,
     device: Arc<ash::Device>,
 }
 
@@ -26,7 +26,7 @@ impl ForwardPlusDescriptor {
     ///
     /// # Safety
     /// Device must be valid.
-    pub unsafe fn new(device: Arc<ash::Device>) -> Result<Self> {
+    pub unsafe fn new(device: Arc<ash::Device>, frame_count: u32) -> Result<Self> {
         // Layout bindings
         let bindings = [
             // Binding 0: Light buffer (storage)
@@ -61,16 +61,16 @@ impl ForwardPlusDescriptor {
         let pool_sizes = [
             vk::DescriptorPoolSize {
                 ty: vk::DescriptorType::STORAGE_BUFFER,
-                descriptor_count: 2, // Light + Tile
+                descriptor_count: 2 * frame_count, // Light + Tile
             },
             vk::DescriptorPoolSize {
                 ty: vk::DescriptorType::UNIFORM_BUFFER,
-                descriptor_count: 1, // ForwardPlusInfo
+                descriptor_count: 1 * frame_count, // ForwardPlusInfo
             },
         ];
 
         let pool_info = vk::DescriptorPoolCreateInfo::default()
-            .max_sets(1)
+            .max_sets(frame_count)
             .pool_sizes(&pool_sizes);
 
         let pool = device
@@ -79,8 +79,12 @@ impl ForwardPlusDescriptor {
                 crate::AshError::VulkanError(format!("Forward+ pool creation failed: {e:?}"))
             })?;
 
-        // Allocate descriptor set
-        let layouts = [layout];
+        // Allocate descriptor sets
+        let mut layouts = Vec::with_capacity(frame_count as usize);
+        for _ in 0..frame_count {
+            layouts.push(layout);
+        }
+
         let alloc_info = vk::DescriptorSetAllocateInfo::default()
             .descriptor_pool(pool)
             .set_layouts(&layouts);
@@ -89,12 +93,12 @@ impl ForwardPlusDescriptor {
             crate::AshError::VulkanError(format!("Forward+ set allocation failed: {e:?}"))
         })?;
 
-        log::info!("Forward+ descriptor set created (Set 4)");
+        log::info!("Forward+ descriptor sets created (count: {})", sets.len());
 
         Ok(Self {
             layout,
             pool,
-            descriptor_set: sets[0],
+            descriptor_sets: sets,
             device,
         })
     }
@@ -113,6 +117,7 @@ impl ForwardPlusDescriptor {
     /// All buffers must be valid and allocated.
     pub unsafe fn update(
         &self,
+        frame_index: usize,
         light_buffer: vk::Buffer,
         light_buffer_size: u64,
         tile_buffer: vk::Buffer,
@@ -138,19 +143,21 @@ impl ForwardPlusDescriptor {
             range: info_buffer_size,
         };
 
+        let descriptor_set = self.descriptor_sets[frame_index];
+
         let writes = [
             vk::WriteDescriptorSet::default()
-                .dst_set(self.descriptor_set)
+                .dst_set(descriptor_set)
                 .dst_binding(0)
                 .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
                 .buffer_info(std::slice::from_ref(&light_info)),
             vk::WriteDescriptorSet::default()
-                .dst_set(self.descriptor_set)
+                .dst_set(descriptor_set)
                 .dst_binding(1)
                 .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
                 .buffer_info(std::slice::from_ref(&tile_info)),
             vk::WriteDescriptorSet::default()
-                .dst_set(self.descriptor_set)
+                .dst_set(descriptor_set)
                 .dst_binding(2)
                 .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
                 .buffer_info(std::slice::from_ref(&fp_info)),
@@ -166,8 +173,8 @@ impl ForwardPlusDescriptor {
     }
 
     /// Get the allocated descriptor set
-    pub fn descriptor_set(&self) -> vk::DescriptorSet {
-        self.descriptor_set
+    pub fn descriptor_set(&self, frame_index: usize) -> vk::DescriptorSet {
+        self.descriptor_sets[frame_index]
     }
 
     /// Record bind command for Set 4
@@ -179,13 +186,14 @@ impl ForwardPlusDescriptor {
         device: &ash::Device,
         command_buffer: vk::CommandBuffer,
         pipeline_layout: vk::PipelineLayout,
+        frame_index: usize,
     ) {
         device.cmd_bind_descriptor_sets(
             command_buffer,
             vk::PipelineBindPoint::GRAPHICS,
             pipeline_layout,
-            3, // Set 3 (was 4)
-            &[self.descriptor_set],
+            3, // Set 3
+            &[self.descriptor_sets[frame_index]],
             &[],
         );
     }

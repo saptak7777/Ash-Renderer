@@ -1,7 +1,6 @@
 #[cfg(feature = "gltf_loading")]
 use ash::vk;
 use std::sync::Arc;
-use vk_mem::Alloc;
 
 use super::texture::{Texture, TextureData};
 use super::texture_compressor::{CompressionFormat, TextureCompressor};
@@ -76,53 +75,6 @@ impl Default for MaterialProperties {
     }
 }
 
-impl Vertex {
-    /// Vulkan vertex binding description
-    pub fn binding_description() -> vk::VertexInputBindingDescription {
-        vk::VertexInputBindingDescription {
-            binding: 0,
-            stride: std::mem::size_of::<Vertex>() as u32,
-            input_rate: vk::VertexInputRate::VERTEX,
-        }
-    }
-
-    /// Vulkan vertex attribute descriptions
-    pub fn attribute_descriptions() -> [vk::VertexInputAttributeDescription; 5] {
-        [
-            vk::VertexInputAttributeDescription {
-                location: 0,
-                binding: 0,
-                format: vk::Format::R32G32B32_SFLOAT,
-                offset: 0,
-            },
-            vk::VertexInputAttributeDescription {
-                location: 1,
-                binding: 0,
-                format: vk::Format::R32G32B32_SFLOAT,
-                offset: 12,
-            },
-            vk::VertexInputAttributeDescription {
-                location: 2,
-                binding: 0,
-                format: vk::Format::R32G32_SFLOAT,
-                offset: 24,
-            },
-            vk::VertexInputAttributeDescription {
-                location: 3,
-                binding: 0,
-                format: vk::Format::R32G32B32_SFLOAT,
-                offset: 32,
-            },
-            vk::VertexInputAttributeDescription {
-                location: 4,
-                binding: 0,
-                format: vk::Format::R32G32B32A32_SFLOAT,
-                offset: 44,
-            },
-        ]
-    }
-}
-
 /// Submesh descriptor for multi-material meshes (Phase 2)
 #[derive(Debug, Clone, Default)]
 pub struct SubmeshDescriptor {
@@ -162,12 +114,6 @@ pub struct Mesh {
     pub emissive_texture_path: Option<std::path::PathBuf>,
     pub material_properties: Option<MaterialProperties>,
 
-    // Phase 3: GPU buffers
-    pub vertex_buffer: Option<vk::Buffer>,
-    pub vertex_allocation: Option<vk_mem::Allocation>,
-    pub index_buffer: Option<vk::Buffer>,
-    pub index_allocation: Option<vk_mem::Allocation>,
-
     // Phase 6: Bindless indices
     pub texture_index: Option<u32>,
     pub normal_texture_index: Option<u32>,
@@ -176,8 +122,21 @@ pub struct Mesh {
     pub emissive_texture_index: Option<u32>,
 
     pub clusters: Vec<MeshCluster>,
+}
 
-    allocator: Option<Arc<crate::vulkan::Allocator>>,
+/// Handle to a mesh uploaded to the Global Geometry Heap (BDA)
+#[derive(Debug, Clone, Copy, Default)]
+pub struct MeshHandle {
+    /// Address of vertices in the global heap
+    pub vertex_heap_address: u64,
+    /// Offset of indices in the global heap
+    pub index_offset: u32,
+    /// Number of indices to draw
+    pub index_count: u32,
+    /// Number of vertices (for bounds/etc)
+    pub vertex_count: u32,
+    /// Base vertex offset (if using traditional draw_indexed)
+    pub vertex_offset: i32,
 }
 
 impl Mesh {
@@ -387,36 +346,9 @@ impl Mesh {
             vertices,
             skinned_vertices: Vec::new(),
             indices: Some(indices),
-            texture_data: None,
-            texture: None,
-            texture_path: None,
-            material_handle: None,
-            material_handles: Vec::new(),
-            submeshes: Vec::new(),
-            normal_texture_data: None,
-            normal_texture: None,
-            normal_texture_path: None,
-            metallic_roughness_texture_data: None,
-            metallic_roughness_texture: None,
-            metallic_roughness_texture_path: None,
-            occlusion_texture_data: None,
-            occlusion_texture: None,
-            occlusion_texture_path: None,
-            emissive_texture_data: None,
-            emissive_texture: None,
-            emissive_texture_path: None,
-            material_properties: Some(MaterialProperties::default()),
-            vertex_buffer: None,
-            vertex_allocation: None,
-            index_buffer: None,
-            index_allocation: None,
-            texture_index: None,
-            normal_texture_index: None,
-            metallic_roughness_texture_index: None,
-            occlusion_texture_index: None,
-            emissive_texture_index: None,
             clusters,
-            allocator: None,
+            material_properties: Some(MaterialProperties::default()),
+            ..Default::default()
         }
     }
 
@@ -487,35 +419,13 @@ impl Mesh {
             skinned_vertices: Vec::new(),
             indices: descriptor.indices.clone(),
             texture_data: descriptor.texture.clone(),
-            texture: None,
-            texture_path: None,
-            material_handle: None,
-            material_handles: Vec::new(),
-            submeshes: Vec::new(),
             normal_texture_data: descriptor.normal_texture.clone(),
-            normal_texture: None,
-            normal_texture_path: None,
             metallic_roughness_texture_data: descriptor.metallic_roughness_texture.clone(),
-            metallic_roughness_texture: None,
-            metallic_roughness_texture_path: None,
             occlusion_texture_data: descriptor.occlusion_texture.clone(),
-            occlusion_texture: None,
-            occlusion_texture_path: None,
             emissive_texture_data: descriptor.emissive_texture.clone(),
-            emissive_texture: None,
-            emissive_texture_path: None,
             material_properties: descriptor.material_properties,
-            vertex_buffer: None,
-            vertex_allocation: None,
-            index_buffer: None,
-            index_allocation: None,
-            texture_index: None,
-            normal_texture_index: None,
-            metallic_roughness_texture_index: None,
-            occlusion_texture_index: None,
-            emissive_texture_index: None,
             clusters,
-            allocator: None,
+            ..Default::default()
         }
     }
 
@@ -562,175 +472,6 @@ impl Mesh {
         }
 
         Ok(merged)
-    }
-
-    /// Upload mesh data to GPU (Phase 3)
-    /// # Safety
-    /// Caller must ensure device and queues are valid
-    pub unsafe fn upload_to_gpu(
-        &mut self,
-        allocator: Arc<crate::vulkan::Allocator>,
-        device: Arc<ash::Device>,
-        command_pool: vk::CommandPool,
-        queue: vk::Queue,
-    ) -> crate::Result<()> {
-        log::info!("Uploading mesh '{}' to GPU...", self.name);
-
-        // Create vertex buffer
-        let vertex_size = (self.vertices.len() * std::mem::size_of::<Vertex>()) as u64;
-        log::info!(
-            "  Vertex buffer size: {} bytes ({} vertices)",
-            vertex_size,
-            self.vertices.len()
-        );
-
-        let (staging_buffer, mut staging_alloc) = allocator
-            .vma
-            .create_buffer(
-                &vk::BufferCreateInfo::default()
-                    .size(vertex_size)
-                    .usage(vk::BufferUsageFlags::TRANSFER_SRC)
-                    .sharing_mode(vk::SharingMode::EXCLUSIVE),
-                &vk_mem::AllocationCreateInfo {
-                    usage: vk_mem::MemoryUsage::AutoPreferHost,
-                    flags: vk_mem::AllocationCreateFlags::HOST_ACCESS_SEQUENTIAL_WRITE,
-                    ..Default::default()
-                },
-            )
-            .map_err(|e| {
-                crate::AshError::VulkanError(format!("Failed to create staging buffer: {e}"))
-            })?;
-
-        // Copy vertex data to staging buffer
-        {
-            let mut guard =
-                unsafe { allocator.map_allocation_guarded(&mut staging_alloc, vertex_size)? };
-            guard.copy_from_slice(&self.vertices);
-        }
-
-        // Create device-local vertex buffer
-        let (vertex_buffer, vertex_alloc) = allocator
-            .vma
-            .create_buffer(
-                &vk::BufferCreateInfo::default()
-                    .size(vertex_size)
-                    .usage(vk::BufferUsageFlags::VERTEX_BUFFER | vk::BufferUsageFlags::TRANSFER_DST)
-                    .sharing_mode(vk::SharingMode::EXCLUSIVE),
-                &vk_mem::AllocationCreateInfo {
-                    usage: vk_mem::MemoryUsage::AutoPreferDevice,
-                    ..Default::default()
-                },
-            )
-            .map_err(|e| {
-                crate::AshError::VulkanError(format!("Failed to create vertex buffer: {e}"))
-            })?;
-
-        // Copy from staging to device buffer
-        Self::copy_buffer(
-            device.as_ref(),
-            command_pool,
-            queue,
-            staging_buffer,
-            vertex_buffer,
-            vertex_size,
-        )?;
-
-        // Cleanup staging buffer
-        allocator
-            .vma
-            .destroy_buffer(staging_buffer, &mut staging_alloc);
-
-        self.vertex_buffer = Some(vertex_buffer);
-        self.vertex_allocation = Some(vertex_alloc);
-
-        // Upload indices if present
-        if let Some(ref indices) = self.indices {
-            let index_size = (indices.len() * std::mem::size_of::<u32>()) as u64;
-            log::info!(
-                "  Index buffer size: {} bytes ({} indices)",
-                index_size,
-                indices.len()
-            );
-
-            let (staging_buffer, mut staging_alloc) = allocator
-                .vma
-                .create_buffer(
-                    &vk::BufferCreateInfo::default()
-                        .size(index_size)
-                        .usage(vk::BufferUsageFlags::TRANSFER_SRC)
-                        .sharing_mode(vk::SharingMode::EXCLUSIVE),
-                    &vk_mem::AllocationCreateInfo {
-                        usage: vk_mem::MemoryUsage::AutoPreferHost,
-                        flags: vk_mem::AllocationCreateFlags::HOST_ACCESS_SEQUENTIAL_WRITE,
-                        ..Default::default()
-                    },
-                )
-                .map_err(|e| {
-                    crate::AshError::VulkanError(format!("Failed to create staging buffer: {e}"))
-                })?;
-
-            {
-                let mut guard =
-                    unsafe { allocator.map_allocation_guarded(&mut staging_alloc, index_size)? };
-                guard.copy_from_slice(indices);
-            }
-
-            let (index_buffer, index_alloc) = allocator
-                .vma
-                .create_buffer(
-                    &vk::BufferCreateInfo::default()
-                        .size(index_size)
-                        .usage(
-                            vk::BufferUsageFlags::INDEX_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
-                        )
-                        .sharing_mode(vk::SharingMode::EXCLUSIVE),
-                    &vk_mem::AllocationCreateInfo {
-                        usage: vk_mem::MemoryUsage::AutoPreferDevice,
-                        ..Default::default()
-                    },
-                )
-                .map_err(|e| {
-                    crate::AshError::VulkanError(format!("Failed to create index buffer: {e}"))
-                })?;
-
-            Self::copy_buffer(
-                device.as_ref(),
-                command_pool,
-                queue,
-                staging_buffer,
-                index_buffer,
-                index_size,
-            )?;
-
-            allocator
-                .vma
-                .destroy_buffer(staging_buffer, &mut staging_alloc);
-
-            self.index_buffer = Some(index_buffer);
-            self.index_allocation = Some(index_alloc);
-        }
-
-        self.allocator = Some(allocator);
-        log::info!("✅ Mesh '{}' uploaded to GPU successfully", self.name);
-
-        if self.texture.is_none() {
-            if let Some(ref texture_data) = self.texture_data {
-                log::info!("Uploading texture for mesh '{}'", self.name);
-                let texture = Texture::from_data(
-                    Arc::clone(self.allocator.as_ref().expect("allocator set after upload")),
-                    Arc::clone(&device),
-                    command_pool,
-                    queue,
-                    texture_data,
-                    vk::Format::R8G8B8A8_SRGB,
-                    Some(&self.name),
-                )?;
-                self.texture = Some(Arc::new(texture));
-                self.texture_data = None;
-            }
-        }
-
-        Ok(())
     }
 
     /// Ensure the mesh's texture is uploaded to GPU memory.
@@ -924,50 +665,6 @@ impl Mesh {
         Ok(())
     }
 
-    /// Helper: Copy buffer using a command buffer
-    /// # Safety
-    /// Caller must ensure device and queues are valid
-    unsafe fn copy_buffer(
-        device: &ash::Device,
-        command_pool: vk::CommandPool,
-        queue: vk::Queue,
-        src: vk::Buffer,
-        dst: vk::Buffer,
-        size: u64,
-    ) -> crate::Result<()> {
-        let alloc_info = vk::CommandBufferAllocateInfo::default()
-            .command_pool(command_pool)
-            .level(vk::CommandBufferLevel::PRIMARY)
-            .command_buffer_count(1);
-
-        let command_buffers = device.allocate_command_buffers(&alloc_info)?;
-        let command_buffer = command_buffers[0];
-
-        device.begin_command_buffer(
-            command_buffer,
-            &vk::CommandBufferBeginInfo::default()
-                .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
-        )?;
-
-        let copy_region = vk::BufferCopy {
-            src_offset: 0,
-            dst_offset: 0,
-            size,
-        };
-        device.cmd_copy_buffer(command_buffer, src, dst, &[copy_region]);
-
-        device.end_command_buffer(command_buffer)?;
-
-        let submit_buffers = [command_buffer];
-        let submit_info = vk::SubmitInfo::default().command_buffers(&submit_buffers);
-
-        device.queue_submit(queue, &[submit_info], vk::Fence::null())?;
-        device.queue_wait_idle(queue)?;
-        device.free_command_buffers(command_pool, &command_buffers);
-
-        Ok(())
-    }
-
     /// Returns vertex count
     pub fn vertex_count(&self) -> u32 {
         self.vertices.len() as u32
@@ -976,11 +673,6 @@ impl Mesh {
     /// Returns index count (if available)
     pub fn index_count(&self) -> Option<u32> {
         self.indices.as_ref().map(|i| i.len() as u32)
-    }
-
-    /// Check if mesh has GPU buffers uploaded
-    pub fn is_uploaded(&self) -> bool {
-        self.vertex_buffer.is_some()
     }
 
     /// Returns the GPU texture if available
@@ -1081,30 +773,6 @@ impl Mesh {
                 }
             }
         }
-    }
-}
-
-impl Drop for Mesh {
-    fn drop(&mut self) {
-        if let Some(ref allocator) = self.allocator {
-            unsafe {
-                // Destroy vertex buffer if still allocated
-                if let (Some(buffer), Some(mut allocation)) =
-                    (self.vertex_buffer.take(), self.vertex_allocation.take())
-                {
-                    allocator.vma.destroy_buffer(buffer, &mut allocation);
-                }
-
-                // Destroy index buffer if still allocated
-                if let (Some(buffer), Some(mut allocation)) =
-                    (self.index_buffer.take(), self.index_allocation.take())
-                {
-                    allocator.vma.destroy_buffer(buffer, &mut allocation);
-                }
-            }
-        }
-
-        log::debug!("Mesh '{}' dropped", self.name);
     }
 }
 

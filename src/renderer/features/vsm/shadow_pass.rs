@@ -18,6 +18,14 @@ pub struct VsmShadowPass {
     /// Framebuffer for physical cache
     pub framebuffer: vk::Framebuffer,
 
+    /// Physical cache resolution (framebuffer size)
+    physical_resolution: u32,
+
+    /// Depth buffer for hardware depth testing
+    depth_image: vk::Image,
+    depth_image_alloc: Option<vk_mem::Allocation>,
+    depth_view: vk::ImageView,
+
     /// Pipeline for shadow rendering
     shadow_pipeline: Option<vk::Pipeline>,
     shadow_pipeline_layout: Option<vk::PipelineLayout>,
@@ -30,46 +38,80 @@ impl VsmShadowPass {
     /// Device and allocator must remain valid for the lifetime of this pass.
     pub unsafe fn new(
         device: Arc<ash::Device>,
-        _allocator: Arc<Allocator>,
+        allocator: Arc<Allocator>,
         resources: &VsmResources,
     ) -> Result<Self> {
         log::info!("Creating VSM shadow pass");
 
-        // Create render pass (depth-only)
-        let depth_attachment = vk::AttachmentDescription {
-            format: vk::Format::R32_SFLOAT,
+        // Create render pass (dual-attachment: color for variance + depth for testing)
+        // Color attachment: R32G32_SFLOAT for storing (depth, depth^2) moments
+        let color_attachment = vk::AttachmentDescription {
+            format: vk::Format::R32G32_SFLOAT, // Store variance moments
             samples: vk::SampleCountFlags::TYPE_1,
-            load_op: vk::AttachmentLoadOp::LOAD, // Load existing data
+            load_op: vk::AttachmentLoadOp::CLEAR,
             store_op: vk::AttachmentStoreOp::STORE,
             stencil_load_op: vk::AttachmentLoadOp::DONT_CARE,
             stencil_store_op: vk::AttachmentStoreOp::DONT_CARE,
-            initial_layout: vk::ImageLayout::GENERAL,
-            final_layout: vk::ImageLayout::GENERAL,
+            initial_layout: vk::ImageLayout::UNDEFINED,
+            final_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
             ..Default::default()
         };
 
-        let depth_ref = vk::AttachmentReference {
+        // Depth attachment: D32_SFLOAT for hardware depth testing
+        let depth_attachment = vk::AttachmentDescription {
+            format: vk::Format::D32_SFLOAT,
+            samples: vk::SampleCountFlags::TYPE_1,
+            load_op: vk::AttachmentLoadOp::CLEAR,
+            store_op: vk::AttachmentStoreOp::DONT_CARE, // We don't need to keep depth after the pass
+            stencil_load_op: vk::AttachmentLoadOp::DONT_CARE,
+            stencil_store_op: vk::AttachmentStoreOp::DONT_CARE,
+            initial_layout: vk::ImageLayout::UNDEFINED,
+            final_layout: vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+            ..Default::default()
+        };
+
+        let color_ref = vk::AttachmentReference {
             attachment: 0,
             layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
         };
 
-        let subpass = vk::SubpassDescription::default()
-            .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
-            .color_attachments(std::slice::from_ref(&depth_ref));
-
-        let dependency = vk::SubpassDependency {
-            src_subpass: vk::SUBPASS_EXTERNAL,
-            dst_subpass: 0,
-            src_stage_mask: vk::PipelineStageFlags::COMPUTE_SHADER,
-            dst_stage_mask: vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
-            src_access_mask: vk::AccessFlags::SHADER_WRITE,
-            dst_access_mask: vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
-            ..Default::default()
+        let depth_ref = vk::AttachmentReference {
+            attachment: 1,
+            layout: vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
         };
 
-        let attachments = [depth_attachment];
+        let subpass = vk::SubpassDescription::default()
+            .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
+            .color_attachments(std::slice::from_ref(&color_ref))
+            .depth_stencil_attachment(&depth_ref);
+
+        let dependency_in = vk::SubpassDependency {
+            src_subpass: vk::SUBPASS_EXTERNAL,
+            dst_subpass: 0,
+            src_stage_mask: vk::PipelineStageFlags::LATE_FRAGMENT_TESTS, // Wait for depth writes
+            dst_stage_mask: vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS
+                | vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+            src_access_mask: vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
+            dst_access_mask: vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE
+                | vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
+            dependency_flags: vk::DependencyFlags::BY_REGION,
+        };
+
+        let dependency_out = vk::SubpassDependency {
+            src_subpass: 0,
+            dst_subpass: vk::SUBPASS_EXTERNAL,
+            src_stage_mask: vk::PipelineStageFlags::LATE_FRAGMENT_TESTS
+                | vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+            dst_stage_mask: vk::PipelineStageFlags::FRAGMENT_SHADER,
+            src_access_mask: vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE
+                | vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
+            dst_access_mask: vk::AccessFlags::SHADER_READ,
+            dependency_flags: vk::DependencyFlags::BY_REGION,
+        };
+
+        let attachments = [color_attachment, depth_attachment];
         let subpasses = [subpass];
-        let dependencies = [dependency];
+        let dependencies = [dependency_in, dependency_out];
 
         let render_pass_info = vk::RenderPassCreateInfo::default()
             .attachments(&attachments)
@@ -82,13 +124,56 @@ impl VsmShadowPass {
                 AshError::VulkanError(format!("VSM render pass creation failed: {e:?}"))
             })?;
 
-        // Create framebuffer
-        let attachments = [resources.physical_cache_view];
+        // Create depth buffer for hardware depth testing
+        let physical_res = resources.config().physical_resolution;
+        let depth_info = vk::ImageCreateInfo::default()
+            .image_type(vk::ImageType::TYPE_2D)
+            .format(vk::Format::D32_SFLOAT)
+            .extent(vk::Extent3D {
+                width: physical_res,
+                height: physical_res,
+                depth: 1,
+            })
+            .mip_levels(1)
+            .array_layers(1)
+            .samples(vk::SampleCountFlags::TYPE_1)
+            .tiling(vk::ImageTiling::OPTIMAL)
+            .usage(vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT)
+            .sharing_mode(vk::SharingMode::EXCLUSIVE)
+            .initial_layout(vk::ImageLayout::UNDEFINED);
+
+        let (depth_image, depth_image_alloc) = allocator
+            .create_image(&depth_info, vk_mem::MemoryUsage::AutoPreferDevice)
+            .map_err(|e| {
+                AshError::VulkanError(format!("Failed to create VSM depth buffer: {e:?}"))
+            })?;
+
+        let depth_view_info = vk::ImageViewCreateInfo::default()
+            .image(depth_image)
+            .view_type(vk::ImageViewType::TYPE_2D)
+            .format(vk::Format::D32_SFLOAT)
+            .subresource_range(vk::ImageSubresourceRange {
+                aspect_mask: vk::ImageAspectFlags::DEPTH,
+                base_mip_level: 0,
+                level_count: 1,
+                base_array_layer: 0,
+                layer_count: 1,
+            });
+
+        let depth_view = device
+            .create_image_view(&depth_view_info, None)
+            .map_err(|e| {
+                AshError::VulkanError(format!("Failed to create VSM depth view: {e:?}"))
+            })?;
+
+        // Create framebuffer with both color and depth attachments
+        let attachments = [resources.physical_cache_view, depth_view];
+        let physical_res = resources.config().physical_resolution;
         let framebuffer_info = vk::FramebufferCreateInfo::default()
             .render_pass(render_pass)
             .attachments(&attachments)
-            .width(resources.config().physical_resolution)
-            .height(resources.config().physical_resolution)
+            .width(physical_res)
+            .height(physical_res)
             .layers(1);
 
         let framebuffer = device
@@ -103,6 +188,10 @@ impl VsmShadowPass {
             device,
             render_pass,
             framebuffer,
+            physical_resolution: 4096,
+            depth_image,
+            depth_image_alloc: Some(depth_image_alloc),
+            depth_view,
             shadow_pipeline: None,
             shadow_pipeline_layout: None,
         })
@@ -178,40 +267,9 @@ impl VsmShadowPass {
                 .name(entry_point),
         ];
 
-        // Vertex input (matches main pass - Position, Normal, UV, etc.)
-        let binding_desc = vk::VertexInputBindingDescription {
-            binding: 0,
-            stride: std::mem::size_of::<crate::renderer::resources::Vertex>() as u32,
-            input_rate: vk::VertexInputRate::VERTEX,
-        };
-
-        let attribute_descs = [
-            // Position
-            vk::VertexInputAttributeDescription {
-                location: 0,
-                binding: 0,
-                format: vk::Format::R32G32B32_SFLOAT,
-                offset: 0,
-            },
-            // Normal
-            vk::VertexInputAttributeDescription {
-                location: 1,
-                binding: 0,
-                format: vk::Format::R32G32B32_SFLOAT,
-                offset: 12,
-            },
-            // UV
-            vk::VertexInputAttributeDescription {
-                location: 2,
-                binding: 0,
-                format: vk::Format::R32G32_SFLOAT,
-                offset: 24,
-            },
-        ];
-
-        let vertex_input_info = vk::PipelineVertexInputStateCreateInfo::default()
-            .vertex_binding_descriptions(std::slice::from_ref(&binding_desc))
-            .vertex_attribute_descriptions(&attribute_descs);
+        // BDA-only pipeline: No vertex input bindings/attributes
+        // The shader pulls vertices from the global heap using the push constant pointer.
+        let vertex_input_info = vk::PipelineVertexInputStateCreateInfo::default();
 
         let input_assembly = vk::PipelineInputAssemblyStateCreateInfo::default()
             .topology(vk::PrimitiveTopology::TRIANGLE_LIST)
@@ -240,12 +298,12 @@ impl VsmShadowPass {
         let depth_stencil = vk::PipelineDepthStencilStateCreateInfo::default()
             .depth_test_enable(true)
             .depth_write_enable(true)
-            .depth_compare_op(vk::CompareOp::LESS)
+            .depth_compare_op(vk::CompareOp::GREATER_OR_EQUAL) // FIX: Reverse-Z support
             .depth_bounds_test_enable(false)
             .stencil_test_enable(false);
 
         let color_blend_attachment = vk::PipelineColorBlendAttachmentState::default()
-            .color_write_mask(vk::ColorComponentFlags::R)
+            .color_write_mask(vk::ColorComponentFlags::R | vk::ColorComponentFlags::G)
             .blend_enable(false);
 
         let color_blending = vk::PipelineColorBlendStateCreateInfo::default()
@@ -307,6 +365,9 @@ impl VsmShadowPass {
         cmd: vk::CommandBuffer,
         allocations: &[PageAllocation],
         page_size: u32,
+        light_space_matrix: &glam::Mat4,
+        frame_set: vk::DescriptorSet,
+        bindless_set: vk::DescriptorSet,
         mut draw_fn: F,
     ) where
         F: FnMut(vk::CommandBuffer, &PageAllocation),
@@ -316,6 +377,54 @@ impl VsmShadowPass {
         }
 
         log::debug!("Rendering {} shadow pages", allocations.len());
+
+        // CRITICAL FIX: Begin Render Pass with proper clear values
+        let clear_values = [
+            vk::ClearValue {
+                color: vk::ClearColorValue {
+                    float32: [1.0, 1.0, 0.0, 0.0], // Clear variance to (1.0, 1.0) for far depth
+                },
+            },
+            vk::ClearValue {
+                depth_stencil: vk::ClearDepthStencilValue {
+                    depth: 0.0, // Reverse-Z: 0.0 = far plane
+                    stencil: 0,
+                },
+            },
+        ];
+
+        let render_pass_begin = vk::RenderPassBeginInfo::default()
+            .render_pass(self.render_pass)
+            .framebuffer(self.framebuffer)
+            .render_area(vk::Rect2D {
+                offset: vk::Offset2D { x: 0, y: 0 },
+                extent: vk::Extent2D {
+                    width: self.physical_resolution,
+                    height: self.physical_resolution,
+                },
+            })
+            .clear_values(&clear_values);
+
+        self.device
+            .cmd_begin_render_pass(cmd, &render_pass_begin, vk::SubpassContents::INLINE);
+
+        // Bind Pipeline
+        if let Some(pipeline) = self.shadow_pipeline {
+            self.device
+                .cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, pipeline);
+        }
+
+        // Bind Bindless Descriptor Set (Set 1 for BDA vertex pulling)
+        if let Some(layout) = self.shadow_pipeline_layout {
+            self.device.cmd_bind_descriptor_sets(
+                cmd,
+                vk::PipelineBindPoint::GRAPHICS,
+                layout,
+                0,                          // Start at Set 0
+                &[frame_set, bindless_set], // Bind Set 0 and Set 1
+                &[],
+            );
+        }
 
         // For each allocated page, set viewport and render
         for allocation in allocations {
@@ -346,31 +455,33 @@ impl VsmShadowPass {
             self.device.cmd_set_viewport(cmd, 0, &[viewport]);
             self.device.cmd_set_scissor(cmd, 0, &[scissor]);
 
-            // Push lightSpaceMatrix (placeholder identity for MVP stabilization)
-            // TODO: Calculate proper light-space matrix from PageAllocation and ClipmapManager
-            let light_space_matrix = glam::Mat4::IDENTITY;
-            let matrix_bytes = bytemuck::bytes_of(&light_space_matrix);
+            // Push lightSpaceMatrix from parameter (not hardcoded IDENTITY)
+            let matrix_bytes = bytemuck::bytes_of(light_space_matrix);
 
             if let Some(layout) = self.shadow_pipeline_layout {
                 self.device.cmd_push_constants(
                     cmd,
                     layout,
                     vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
-                    160, // Offset for lightSpaceMatrix
+                    160,
                     matrix_bytes,
                 );
             }
 
             // Call user draw function for this page
+            // Call user draw function for this page
             draw_fn(cmd, allocation);
         }
+
+        // CRITICAL FIX: End Render Pass
+        self.device.cmd_end_render_pass(cmd);
     }
 
     /// Destroy resources
     ///
     /// # Safety
     /// Must be called before device is destroyed. Resources must not be in use.
-    pub unsafe fn destroy(&mut self) {
+    pub unsafe fn destroy(&mut self, allocator: &Allocator) {
         log::debug!("Destroying VSM shadow pass");
 
         if let Some(pipeline) = self.shadow_pipeline.take() {
@@ -386,6 +497,16 @@ impl VsmShadowPass {
             self.framebuffer = vk::Framebuffer::null();
         }
 
+        // Destroy depth buffer
+        if self.depth_view != vk::ImageView::null() {
+            self.device.destroy_image_view(self.depth_view, None);
+            self.depth_view = vk::ImageView::null();
+        }
+        if let Some(mut alloc) = self.depth_image_alloc.take() {
+            allocator.vma.destroy_image(self.depth_image, &mut alloc);
+            self.depth_image = vk::Image::null();
+        }
+
         if self.render_pass != vk::RenderPass::null() {
             self.device.destroy_render_pass(self.render_pass, None);
             self.render_pass = vk::RenderPass::null();
@@ -397,8 +518,8 @@ impl VsmShadowPass {
 
 impl Drop for VsmShadowPass {
     fn drop(&mut self) {
-        unsafe {
-            self.destroy();
-        }
+        // Note: destroy() requires allocator, which we don't have in Drop
+        // The allocator will clean up the depth buffer when it's destroyed
+        log::warn!("VsmShadowPass dropped without explicit destroy() call");
     }
 }

@@ -1,4 +1,4 @@
-// Build script to compile shaders and bake IBL assets
+// Build script to compile shaders
 use std::fs;
 use std::path::Path;
 use std::process::Command;
@@ -9,9 +9,6 @@ fn main() {
 
     // Compile shaders
     compile_shaders();
-
-    // Bake IBL assets
-    bake_ibl_assets();
 }
 
 fn compile_shaders() {
@@ -29,7 +26,6 @@ fn compile_shaders() {
         ),
         ("shaders/shadow.vert", "shadow.vert.spv", "vert", &[]),
         ("shaders/overlay.vert", "overlay.vert.spv", "vert", &[]),
-        ("shaders/triangle.vert", "triangle.vert.spv", "vert", &[]),
         ("shaders/skinning.vert", "skinning.vert.spv", "vert", &[]),
         ("shaders/motion.vert", "motion.vert.spv", "vert", &[]),
         // Fragment shaders
@@ -47,8 +43,6 @@ fn compile_shaders() {
         ),
         ("shaders/shadow.frag", "shadow.frag.spv", "frag", &[]),
         ("shaders/overlay.frag", "overlay.frag.spv", "frag", &[]),
-        ("shaders/triangle.frag", "triangle.frag.spv", "frag", &[]),
-        ("shaders/brdf_lut.frag", "brdf_lut.frag.spv", "frag", &[]),
         (
             "shaders/bloom_threshold.frag",
             "bloom_threshold.frag.spv",
@@ -112,35 +106,9 @@ fn compile_shaders() {
             "comp",
             &[],
         ),
-        ("shaders/ssgi.comp", "ssgi.comp.spv", "comp", &[]),
-        (
-            "shaders/atrous_denoise.comp",
-            "atrous_denoise.comp.spv",
-            "comp",
-            &[],
-        ),
         (
             "shaders/cluster_cull.comp",
             "cluster_cull.comp.spv",
-            "comp",
-            &[],
-        ),
-        // IBL shaders
-        (
-            "shaders/ibl/equirect_to_cubemap.comp",
-            "equirect_to_cubemap.comp.spv",
-            "comp",
-            &[],
-        ),
-        (
-            "shaders/ibl/irradiance_convolution.comp",
-            "irradiance_convolution.comp.spv",
-            "comp",
-            &[],
-        ),
-        (
-            "shaders/ibl/prefilter_envmap.comp",
-            "prefilter_envmap.comp.spv",
             "comp",
             &[],
         ),
@@ -148,6 +116,12 @@ fn compile_shaders() {
 
     for (input, output, kind, defines) in shaders {
         let input_path = Path::new(input);
+
+        // Skip if input doesn't exist (prevents build failure of unneeded shaders)
+        if !input_path.exists() {
+            continue;
+        }
+
         let output_path = out_dir.join(output);
 
         // Check if recompilation is needed
@@ -188,77 +162,6 @@ fn compile_shaders() {
             );
             for line in stderr.lines() {
                 println!("cargo:warning={line}");
-            }
-        }
-    }
-}
-
-fn bake_ibl_assets() {
-    // Check if ibl_baker binary exists
-    let baker_path = if cfg!(windows) {
-        "target/debug/ibl_baker.exe"
-    } else {
-        "target/debug/ibl_baker"
-    };
-
-    // Only bake if the baker tool exists (avoid build failures on first compile)
-    if !Path::new(baker_path).exists() {
-        println!("cargo:warning=ibl_baker not found, skipping asset baking");
-        println!(
-            "cargo:warning=Run 'cargo build -p ibl_baker' first to enable automatic asset baking"
-        );
-        return;
-    }
-
-    // List of HDR files to bake
-    let hdr_files = [("assets/textures/skybox.hdr", "assets/textures/skybox.ibl")];
-
-    for (input, output) in &hdr_files {
-        let input_path = Path::new(input);
-        let output_path = Path::new(output);
-
-        // Skip if input doesn't exist
-        if !input_path.exists() {
-            println!("cargo:warning=HDR file not found: {input}");
-            continue;
-        }
-
-        // Check if we need to rebuild (output missing or input newer)
-        let needs_rebuild = !output_path.exists() || {
-            let input_time = std::fs::metadata(input_path)
-                .and_then(|m| m.modified())
-                .ok();
-            let output_time = std::fs::metadata(output_path)
-                .and_then(|m| m.modified())
-                .ok();
-
-            match (input_time, output_time) {
-                (Some(i), Some(o)) => i > o,
-                _ => true,
-            }
-        };
-
-        if needs_rebuild {
-            println!("cargo:warning=Baking IBL asset: {input} -> {output}");
-
-            let status = Command::new(baker_path)
-                .args(["--input", input, "--output", output])
-                .status();
-
-            match status {
-                Ok(s) if s.success() => {
-                    println!("cargo:warning=Successfully baked {output}");
-                }
-                Ok(s) => {
-                    println!(
-                        "cargo:warning=Failed to bake {} (exit code: {:?})",
-                        output,
-                        s.code()
-                    );
-                }
-                Err(e) => {
-                    println!("cargo:warning=Failed to run ibl_baker: {e}");
-                }
             }
         }
     }

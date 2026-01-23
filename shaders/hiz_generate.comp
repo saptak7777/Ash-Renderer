@@ -27,15 +27,24 @@ void main() {
         return;
     }
     
+    // Safety: Check for valid texture size to prevent division by zero
+    ivec2 inputSize = textureSize(inputDepth, 0);
+    if (inputSize.x == 0 || inputSize.y == 0) {
+        imageStore(outputMip, ivec2(pos), vec4(0.0, 0.0, 0.0, 0.0));
+        return;
+    }
+    
     // Calculate UV for sampling (center of 2x2 block in source)
-    vec2 uv = (vec2(pos) * 2.0 + 1.0) / vec2(textureSize(inputDepth, 0));
+    vec2 uv = (vec2(pos) * 2.0 + 1.0) / vec2(inputSize);
     
     // Sample 4 texels using gather (much faster than 4 texture calls)
     // textureGather returns values in counter-clockwise order starting from bottom-left
     vec4 depths = textureGather(inputDepth, uv, 0);
     
-    // Take maximum depth (furthest from camera = most conservative)
-    float maxDepth = max(max(depths.x, depths.y), max(depths.z, depths.w));
+    // REVERSE-Z: Take MINIMUM depth (furthest from camera = most conservative)
+    // In Reverse-Z: 1.0 = near plane, 0.0 = far plane
+    // We want the furthest point (smallest value) to ensure conservative occlusion
+    float minDepth = min(min(depths.x, depths.y), min(depths.z, depths.w));
     
-    imageStore(outputMip, ivec2(pos), vec4(maxDepth, 0.0, 0.0, 0.0));
+    imageStore(outputMip, ivec2(pos), vec4(minDepth, 0.0, 0.0, 0.0));
 }

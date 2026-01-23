@@ -12,7 +12,6 @@ pub mod descriptor_manager;
 pub mod descriptor_set;
 pub mod device;
 pub mod framebuffer;
-pub mod ibl_descriptor;
 pub mod instance;
 pub mod light_culling_pipeline;
 #[cfg(feature = "parallel")]
@@ -28,8 +27,6 @@ pub mod swapchain;
 pub mod sync;
 pub mod transfer_context;
 pub mod utils;
-
-pub use ibl_descriptor::{IBLDescriptorSet, IBLResources};
 
 pub use allocator::Allocator;
 pub use buffer_builder::BufferBuilder;

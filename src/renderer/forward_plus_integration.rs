@@ -44,24 +44,29 @@ pub struct ForwardPlusIntegration {
     lights: LightManager,
     /// Descriptor set for Set 3 (Fragment)
     descriptor: ForwardPlusDescriptor,
-    /// ForwardPlusInfo UBO buffer
-    info_buf: vk::Buffer,
-    info_alloc: vk_mem::Allocation,
+    /// ForwardPlusInfo UBO buffers (per-frame)
+    info_bufs: Vec<vk::Buffer>,
+    info_allocs: Vec<vk_mem::Allocation>,
 
-    /// Camera Data UBO for Compute Shader
-    camera_buf: vk::Buffer,
-    camera_alloc: vk_mem::Allocation,
+    /// Camera Data UBO for Compute Shader (per-frame)
+    camera_bufs: Vec<vk::Buffer>,
+    camera_allocs: Vec<vk_mem::Allocation>,
 
     /// Compute Pipeline Resources
     compute_pipeline: Option<ComputePipeline>,
     compute_descriptor_pool: vk::DescriptorPool,
-    compute_descriptor_set: vk::DescriptorSet,
+    compute_descriptor_sets: Vec<vk::DescriptorSet>,
     compute_descriptor_layout: vk::DescriptorSetLayout,
+
+    /// Number of frames in flight
+    frame_count: usize,
 
     /// Whether the integration is initialized
     initialized: bool,
     /// Cached info data
     cached_info: ForwardPlusInfo,
+    // Whether this is the first frame (needs full descriptor update)
+    // first_frame: bool,
 }
 
 impl ForwardPlusIntegration {
@@ -69,11 +74,15 @@ impl ForwardPlusIntegration {
     ///
     /// # Safety
     /// Device and allocator must be valid.
-    pub unsafe fn new(device: Arc<ash::Device>, allocator: &vk_mem::Allocator) -> Result<Self> {
-        let lights = LightManager::new();
-        let descriptor = ForwardPlusDescriptor::new(device)?;
+    pub unsafe fn new(
+        device: Arc<ash::Device>,
+        allocator: &vk_mem::Allocator,
+        frame_count: u32,
+    ) -> Result<Self> {
+        let lights = LightManager::new(frame_count as usize);
+        let descriptor = ForwardPlusDescriptor::new(device, frame_count)?;
 
-        // Create ForwardPlusInfo UBO
+        // Create per-frame ForwardPlusInfo UBOs
         let info_size = std::mem::size_of::<ForwardPlusInfo>() as u64;
         let info_buffer_info = vk::BufferCreateInfo::default()
             .size(info_size)
@@ -87,42 +96,58 @@ impl ForwardPlusIntegration {
             ..Default::default()
         };
 
-        let (info_buf, info_alloc) = allocator
-            .create_buffer(&info_buffer_info, &info_alloc_info)
-            .map_err(|e| {
-                crate::AshError::VulkanError(format!(
-                    "ForwardPlusInfo buffer creation failed: {e:?}"
-                ))
-            })?;
+        let mut info_bufs = Vec::with_capacity(frame_count as usize);
+        let mut info_allocs = Vec::with_capacity(frame_count as usize);
 
-        // Create Camera Buffer for Compute Shader
+        for _ in 0..frame_count {
+            let (buf, alloc) = allocator
+                .create_buffer(&info_buffer_info, &info_alloc_info)
+                .map_err(|e| {
+                    crate::AshError::VulkanError(format!(
+                        "ForwardPlusInfo buffer creation failed: {e:?}"
+                    ))
+                })?;
+            info_bufs.push(buf);
+            info_allocs.push(alloc);
+        }
+
+        // Create per-frame Camera Data UBOs for Compute Shader
         let camera_size = std::mem::size_of::<CullingCameraData>() as u64;
         let camera_buffer_info = vk::BufferCreateInfo::default()
             .size(camera_size)
             .usage(vk::BufferUsageFlags::UNIFORM_BUFFER)
             .sharing_mode(vk::SharingMode::EXCLUSIVE);
 
-        let (camera_buf, camera_alloc) = allocator
-            .create_buffer(&camera_buffer_info, &info_alloc_info)
-            .map_err(|e| {
-                crate::AshError::VulkanError(format!("Camera data buffer creation failed: {e:?}"))
-            })?;
+        let mut camera_bufs = Vec::with_capacity(frame_count as usize);
+        let mut camera_allocs = Vec::with_capacity(frame_count as usize);
+
+        for _ in 0..frame_count {
+            let (buf, alloc) = allocator
+                .create_buffer(&camera_buffer_info, &info_alloc_info)
+                .map_err(|e| {
+                    crate::AshError::VulkanError(format!(
+                        "Camera data buffer creation failed: {e:?}"
+                    ))
+                })?;
+            camera_bufs.push(buf);
+            camera_allocs.push(alloc);
+        }
 
         Ok(Self {
             lights,
             descriptor,
-            info_buf,
-            info_alloc,
-
-            camera_buf,
-            camera_alloc,
+            info_bufs,
+            info_allocs,
+            camera_bufs,
+            camera_allocs,
             compute_pipeline: None,
             compute_descriptor_pool: vk::DescriptorPool::null(),
-            compute_descriptor_set: vk::DescriptorSet::null(),
+            compute_descriptor_sets: Vec::new(),
             compute_descriptor_layout: vk::DescriptorSetLayout::null(),
-
+            frame_count: frame_count as usize,
             initialized: false,
             cached_info: ForwardPlusInfo::default(),
+            // first_frame: true,
         })
     }
 
@@ -175,25 +200,23 @@ impl ForwardPlusIntegration {
                 ))
             })?;
 
-        // 2. Create Descriptor Pool
+        // 2. Create Descriptor Pool (sized for frame_count sets)
+        // Each set contains: 1 COMBINED_IMAGE_SAMPLER (depth) + 1 UNIFORM_BUFFER (camera)
+        // Total pool must accommodate: frame_count sets × descriptors_per_set
         let pool_sizes = [
             vk::DescriptorPoolSize {
-                ty: vk::DescriptorType::STORAGE_BUFFER,
-                descriptor_count: 1, // Only light buffer now
-            },
-            vk::DescriptorPoolSize {
                 ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-                descriptor_count: 1,
+                descriptor_count: self.frame_count as u32, // 1 depth sampler per set × frame_count sets
             },
             vk::DescriptorPoolSize {
                 ty: vk::DescriptorType::UNIFORM_BUFFER,
-                descriptor_count: 1, // Camera buffer
+                descriptor_count: self.frame_count as u32, // 1 camera UBO per set × frame_count sets
             },
         ];
 
         let pool_info = vk::DescriptorPoolCreateInfo::default()
             .pool_sizes(&pool_sizes)
-            .max_sets(1);
+            .max_sets(self.frame_count as u32);
 
         self.compute_descriptor_pool =
             device
@@ -202,15 +225,16 @@ impl ForwardPlusIntegration {
                     AshError::VulkanError(format!("Failed to create compute descriptor pool: {e}"))
                 })?;
 
-        // 3. Allocate Descriptor Set
+        // 3. Allocate Descriptor Sets (one per frame)
+        let layouts = vec![self.compute_descriptor_layout; self.frame_count];
         let alloc_info = vk::DescriptorSetAllocateInfo::default()
             .descriptor_pool(self.compute_descriptor_pool)
-            .set_layouts(std::slice::from_ref(&self.compute_descriptor_layout));
+            .set_layouts(&layouts);
 
-        let sets = device.allocate_descriptor_sets(&alloc_info).map_err(|e| {
-            AshError::VulkanError(format!("Failed to allocate compute descriptor set: {e}"))
-        })?;
-        self.compute_descriptor_set = sets[0];
+        self.compute_descriptor_sets =
+            device.allocate_descriptor_sets(&alloc_info).map_err(|e| {
+                AshError::VulkanError(format!("Failed to allocate compute descriptor sets: {e}"))
+            })?;
 
         // 4. Create Pipeline
         let push_constant_range = vk::PushConstantRange {
@@ -234,32 +258,39 @@ impl ForwardPlusIntegration {
                 .build()?,
         );
 
-        // Initial Descriptor Update (for immutable parts like Depth Buffer if it doesn't change)
-        // Actually, buffers are created in init(), so we can update them now.
-        // Or do it in upload_to_gpu. The depth buffer might change (resize).
-        // For now, assume depth buffer view follows resize logic.
-        // We'll update descriptors in upload_to_gpu to be safe.
-
-        // Wait, we need to bind the depth buffer NOW or at least store the sampler/view.
-        // We pass depth_sampler/view to this function.
-        // We should update the descriptor set here with the depth buffer.
-        // AND re-update it if depth buffer changes (resize).
-        // Since `init()` creates buffers, we can bind them too.
-
+        // 5. Update all descriptor sets with depth buffer and their respective camera buffers
         let depth_image_info = vk::DescriptorImageInfo {
             sampler: depth_sampler,
             image_view: depth_image_view,
             image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
         };
 
-        let writes = [vk::WriteDescriptorSet::default()
-            .dst_set(self.compute_descriptor_set)
-            .dst_binding(0)
-            .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-            .image_info(std::slice::from_ref(&depth_image_info))];
-        device.update_descriptor_sets(&writes, &[]);
+        for frame_idx in 0..self.frame_count {
+            let camera_info = vk::DescriptorBufferInfo {
+                buffer: self.camera_bufs[frame_idx],
+                offset: 0,
+                range: std::mem::size_of::<CullingCameraData>() as u64,
+            };
 
-        log::info!("Forward+ Compute Pipeline initialized");
+            let writes = [
+                vk::WriteDescriptorSet::default()
+                    .dst_set(self.compute_descriptor_sets[frame_idx])
+                    .dst_binding(0)
+                    .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                    .image_info(std::slice::from_ref(&depth_image_info)),
+                vk::WriteDescriptorSet::default()
+                    .dst_set(self.compute_descriptor_sets[frame_idx])
+                    .dst_binding(1)
+                    .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+                    .buffer_info(std::slice::from_ref(&camera_info)),
+            ];
+            device.update_descriptor_sets(&writes, &[]);
+        }
+
+        log::info!(
+            "Forward+ Compute Pipeline initialized with {} descriptor sets",
+            self.frame_count
+        );
         Ok(())
     }
 
@@ -304,6 +335,7 @@ impl ForwardPlusIntegration {
     pub unsafe fn update_camera(
         &mut self,
         allocator: &vk_mem::Allocator,
+        frame_index: usize,
         view: &[[f32; 4]; 4],
         projection: &[[f32; 4]; 4],
         camera_pos: &[f32; 4],
@@ -318,7 +350,7 @@ impl ForwardPlusIntegration {
             camera_pos: *camera_pos,
         };
 
-        let info = allocator.get_allocation_info(&self.camera_alloc);
+        let info = allocator.get_allocation_info(&self.camera_allocs[frame_index]);
         let ptr = info.mapped_data;
         if !ptr.is_null() {
             std::ptr::copy_nonoverlapping(&data, ptr as *mut CullingCameraData, 1);
@@ -334,7 +366,8 @@ impl ForwardPlusIntegration {
     pub unsafe fn upload_to_gpu(
         &mut self,
         allocator: &vk_mem::Allocator,
-        device: &ash::Device,
+        _device: &ash::Device,
+        frame_index: usize,
     ) -> Result<()> {
         if !self.initialized {
             return Ok(());
@@ -343,17 +376,16 @@ impl ForwardPlusIntegration {
         // CRITICAL: Recreate tile buffer if screen size changed
         // Must happen before upload_lights and descriptor update
         // This also handles min size 1024 logic internally now
-        self.lights.recreate_tile_buffer_if_needed(allocator)?;
+        let buffers_recreated = self.lights.recreate_tile_buffer_if_needed(allocator)?;
 
         // Upload lights
-        self.lights.upload_lights(allocator)?;
+        self.lights.upload_lights(allocator, frame_index)?;
 
-        // Upload ForwardPlusInfo (direct UBO update)
+        // Upload ForwardPlusInfo to the current frame's UBO
         self.cached_info = self.lights.get_forward_plus_info();
-        let info_data = allocator.get_allocation_info(&self.info_alloc);
+        let info_data = allocator.get_allocation_info(&self.info_allocs[frame_index]);
         let mapped_ptr = info_data.mapped_data;
         if !mapped_ptr.is_null() {
-            // Avoid extra copies by writing directly if possible, though info is small
             std::ptr::copy_nonoverlapping(
                 &self.cached_info as *const ForwardPlusInfo as *const u8,
                 mapped_ptr as *mut u8,
@@ -361,44 +393,42 @@ impl ForwardPlusIntegration {
             );
         }
 
-        // Update descriptor bindings - we only do this if buffers exist
-        if let (Some(l_buf), Some(t_buf)) = (
-            self.lights.get_light_buffer(),
-            self.lights.get_tile_buffer(),
-        ) {
-            let info_size = std::mem::size_of::<ForwardPlusInfo>() as u64;
-            // CRITICAL FIX: Use correct light buffer size (MAX_LIGHTS * 64 bytes)
-            let light_buffer_size = (crate::renderer::features::MAX_LIGHTS
-                * std::mem::size_of::<crate::renderer::features::GpuLight>())
-                as u64;
+        let info_size = std::mem::size_of::<ForwardPlusInfo>() as u64;
+        let light_buffer_size = (crate::renderer::features::MAX_LIGHTS
+            * std::mem::size_of::<crate::renderer::features::GpuLight>())
+            as u64;
 
-            // Update Fragment Shader Descriptor (Set 3)
-            self.descriptor.update(
-                l_buf,
-                light_buffer_size,
-                t_buf,
-                self.lights.get_tile_buffer_size() as u64,
-                self.info_buf,
-                info_size,
-            );
+        // If buffers were recreated, update all descriptor sets to point to new buffers
+        // Recreate happens on resize (idle) so it is safe to update all sets.
+        // Otherwise, update only the current frame's set to avoid touching in-flight sets.
+        let update_range = if buffers_recreated {
+            0..self.lights.frame_count()
+        } else {
+            frame_index..frame_index + 1
+        };
 
-            // Update Compute Shader Descriptor (Set 0)
-            // NOTE: LightBuffer moved to Set 3, so we only update camera buffer here
-            if self.compute_descriptor_set != vk::DescriptorSet::null() {
-                let camera_info = vk::DescriptorBufferInfo {
-                    buffer: self.camera_buf,
-                    offset: 0,
-                    range: std::mem::size_of::<CullingCameraData>() as u64,
-                };
-
-                let writes = [vk::WriteDescriptorSet::default()
-                    .dst_set(self.compute_descriptor_set)
-                    .dst_binding(1) // Camera Buffer
-                    .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
-                    .buffer_info(std::slice::from_ref(&camera_info))];
-                device.update_descriptor_sets(&writes, &[]);
+        for idx in update_range {
+            // Update descriptor bindings - we only do this if buffers exist
+            if let (Some(l_buf), Some(t_buf)) = (
+                self.lights.get_light_buffer(idx),
+                self.lights.get_tile_buffer(idx),
+            ) {
+                // Update Fragment Shader Descriptor (Set 3) with frame-specific info buffer
+                self.descriptor.update(
+                    idx,
+                    l_buf,
+                    light_buffer_size,
+                    t_buf,
+                    self.lights.get_tile_buffer_size() as u64,
+                    self.info_bufs[idx],
+                    info_size,
+                );
             }
         }
+
+        // Update Compute Shader Descriptor (Set 0) - only for current frame
+        // NOTE: Camera buffer is already bound in init_pipeline, but we may need to update it
+        // if the camera data changes. For now, we rely on update_camera_data() being called separately.
 
         Ok(())
     }
@@ -409,9 +439,14 @@ impl ForwardPlusIntegration {
     /// Command buffer must be in recording state. Device must be valid. All internal
     /// buffers (light, tile, info, camera) must have been initialized via `init()`
     /// and `upload_to_gpu()`.
-    pub unsafe fn dispatch(&self, command_buffer: vk::CommandBuffer, device: &ash::Device) {
+    pub unsafe fn dispatch(
+        &self,
+        command_buffer: vk::CommandBuffer,
+        device: &ash::Device,
+        frame_index: usize,
+    ) {
         if let Some(pipeline) = &self.compute_pipeline {
-            if self.compute_descriptor_set == vk::DescriptorSet::null() {
+            if self.compute_descriptor_sets.is_empty() {
                 return;
             }
 
@@ -421,13 +456,13 @@ impl ForwardPlusIntegration {
                 pipeline.handle(),
             );
 
-            // Bind Set 0: Depth buffer, camera buffer
+            // Bind Set 0: Depth buffer, camera buffer (frame-specific)
             device.cmd_bind_descriptor_sets(
                 command_buffer,
                 vk::PipelineBindPoint::COMPUTE,
                 pipeline.layout(),
                 0,
-                &[self.compute_descriptor_set],
+                &[self.compute_descriptor_sets[frame_index]],
                 &[],
             );
 
@@ -437,7 +472,7 @@ impl ForwardPlusIntegration {
                 vk::PipelineBindPoint::COMPUTE,
                 pipeline.layout(),
                 3,
-                &[self.descriptor.descriptor_set()],
+                &[self.descriptor.descriptor_set(frame_index)],
                 &[],
             );
 
@@ -466,7 +501,7 @@ impl ForwardPlusIntegration {
 
             // Pipeline barrier to ensure writes are visible to fragment shader
             // LightManager owns tile buffer, used in Set 2 binding 2.
-            if let Some(t_buf) = self.lights.get_tile_buffer() {
+            if let Some(t_buf) = self.lights.get_tile_buffer(frame_index) {
                 let barrier = vk::BufferMemoryBarrier::default()
                     .src_access_mask(vk::AccessFlags::SHADER_WRITE)
                     .dst_access_mask(vk::AccessFlags::SHADER_READ)
@@ -498,10 +533,11 @@ impl ForwardPlusIntegration {
         device: &ash::Device,
         command_buffer: vk::CommandBuffer,
         pipeline_layout: vk::PipelineLayout,
+        frame_index: usize,
     ) {
         if self.initialized {
             self.descriptor
-                .bind(device, command_buffer, pipeline_layout);
+                .bind(device, command_buffer, pipeline_layout, frame_index);
         }
     }
 
@@ -553,8 +589,17 @@ impl ForwardPlusIntegration {
         // ComputePipeline drops itself
 
         self.lights.destroy_buffers(allocator);
-        allocator.destroy_buffer(self.info_buf, &mut self.info_alloc);
-        allocator.destroy_buffer(self.camera_buf, &mut self.camera_alloc);
+
+        // Destroy all per-frame info buffers
+        for (buf, alloc) in self.info_bufs.iter().zip(self.info_allocs.iter_mut()) {
+            allocator.destroy_buffer(*buf, alloc);
+        }
+
+        // Destroy all per-frame camera buffers
+        for (buf, alloc) in self.camera_bufs.iter().zip(self.camera_allocs.iter_mut()) {
+            allocator.destroy_buffer(*buf, alloc);
+        }
+
         self.initialized = false;
     }
 }
