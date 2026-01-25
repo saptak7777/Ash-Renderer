@@ -187,7 +187,10 @@ impl UniformBuffer {
             .create_buffer(
                 &vk::BufferCreateInfo::default()
                     .size(size)
-                    .usage(vk::BufferUsageFlags::UNIFORM_BUFFER)
+                    .usage(
+                        vk::BufferUsageFlags::UNIFORM_BUFFER
+                            | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
+                    )
                     .sharing_mode(vk::SharingMode::EXCLUSIVE),
                 &vk_mem::AllocationCreateInfo {
                     usage: vk_mem::MemoryUsage::AutoPreferHost,
@@ -258,6 +261,12 @@ impl UniformBuffer {
         &self.data
     }
 
+    /// Get the GPU device address for BDA pulling
+    pub fn device_address(&self) -> u64 {
+        let info = vk::BufferDeviceAddressInfo::default().buffer(self.buffer);
+        unsafe { self.device.get_buffer_device_address(&info) }
+    }
+
     /// Phase 5: Proper cleanup - called before destruction
     pub fn cleanup(&mut self) -> crate::Result<()> {
         if self.destroyed {
@@ -314,7 +323,10 @@ impl MaterialBuffer {
             .create_buffer(
                 &vk::BufferCreateInfo::default()
                     .size(size)
-                    .usage(vk::BufferUsageFlags::UNIFORM_BUFFER)
+                    .usage(
+                        vk::BufferUsageFlags::UNIFORM_BUFFER
+                            | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
+                    )
                     .sharing_mode(vk::SharingMode::EXCLUSIVE),
                 &vk_mem::AllocationCreateInfo {
                     usage: vk_mem::MemoryUsage::AutoPreferHost,
@@ -383,6 +395,12 @@ impl MaterialBuffer {
         &self.data
     }
 
+    /// Get the GPU device address for BDA pulling
+    pub fn device_address(&self) -> u64 {
+        let info = vk::BufferDeviceAddressInfo::default().buffer(self.buffer);
+        unsafe { self.device.get_buffer_device_address(&info) }
+    }
+
     pub fn cleanup(&mut self) -> crate::Result<()> {
         if self.destroyed {
             return Ok(());
@@ -438,7 +456,9 @@ impl InstanceBuffer {
                 &vk::BufferCreateInfo::default()
                     .size(size)
                     .usage(
-                        vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
+                        vk::BufferUsageFlags::STORAGE_BUFFER
+                            | vk::BufferUsageFlags::TRANSFER_DST
+                            | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
                     )
                     .sharing_mode(vk::SharingMode::EXCLUSIVE),
                 &vk_mem::AllocationCreateInfo {
@@ -491,6 +511,12 @@ impl InstanceBuffer {
             })?;
 
         Ok(())
+    }
+
+    /// Get the GPU device address for BDA pulling
+    pub fn device_address(&self) -> u64 {
+        let info = vk::BufferDeviceAddressInfo::default().buffer(self.buffer);
+        unsafe { self.device.get_buffer_device_address(&info) }
     }
 
     pub fn cleanup(&mut self) -> crate::Result<()> {
@@ -547,7 +573,9 @@ impl<T: Copy> StorageBuffer<T> {
                 &vk::BufferCreateInfo::default()
                     .size(size)
                     .usage(
-                        vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
+                        vk::BufferUsageFlags::STORAGE_BUFFER
+                            | vk::BufferUsageFlags::TRANSFER_DST
+                            | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
                     )
                     .sharing_mode(vk::SharingMode::EXCLUSIVE),
                 &vk_mem::AllocationCreateInfo {
@@ -723,6 +751,12 @@ impl<T: Copy> StorageBuffer<T> {
     /// Get current capacity
     pub fn capacity(&self) -> usize {
         self.capacity
+    }
+
+    /// Get the GPU device address for BDA pulling
+    pub fn device_address(&self) -> u64 {
+        let info = vk::BufferDeviceAddressInfo::default().buffer(self.buffer);
+        unsafe { self.device.get_buffer_device_address(&info) }
     }
 }
 

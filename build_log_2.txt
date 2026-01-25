@@ -1,0 +1,35 @@
+﻿cargo :    Compiling ash_renderer v0.4.99 
+(C:\Users\tilok\Downloads\Ash Renderer)
+At line:1 char:1
++ cargo build 2>&1 | Out-File -FilePath build_log_2.txt 
+-Encoding utf8
++ ~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (   Compili 
+   ng as...s\Ash Renderer):String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+error: failed to run custom build command for 
+`ash_renderer v0.4.99 (C:\Users\tilok\Downloads\Ash 
+Renderer)`
+
+Caused by:
+  process didn't exit successfully: 
+`C:\Users\tilok\Downloads\Ash Renderer\target\debug\buil
+d\ash_renderer-f7702dabe9eb74ee\build-script-build` 
+(exit code: 101)
+  --- stdout
+  cargo:rerun-if-changed=assets/textures
+  cargo:rerun-if-changed=shaders
+
+  --- stderr
+
+  thread 'main' panicked at build.rs:159:13:
+  SHADER COMPILATION FAILED:
+  File: shaders/frag.frag
+  Exit Code: Some(1)
+  Error: shaders/frag.frag:36: error: '' :  syntax 
+error, unexpected IDENTIFIER
+  1 error generated.
+
+  note: run with `RUST_BACKTRACE=1` environment 
+variable to display a backtrace

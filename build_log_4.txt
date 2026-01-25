@@ -1,0 +1,79 @@
+﻿cargo :    Compiling ash_renderer v0.4.99 
+(C:\Users\tilok\Downloads\Ash Renderer)
+At line:1 char:1
++ cargo build 2>&1 | Out-File -FilePath build_log_4.txt 
+-Encoding utf8
++ ~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (   Compili 
+   ng as...s\Ash Renderer):String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+   Compiling glam v0.30.9
+   Compiling log v0.4.29
+error: couldn't read `C:\Users\tilok\Downloads\Ash Rende
+rer\target\debug\build\ash_renderer-91ebbe78c17f823a\out
+/skybox.vert.spv`: The system cannot find the file 
+specified. (os error 2)
+    --> src\renderer\renderer.rs:1825:17
+     |
+1825 |                 
+include_bytes!(concat!(env!("OUT_DIR"), 
+"/skybox.vert.spv")),
+     |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: couldn't read `C:\Users\tilok\Downloads\Ash Rende
+rer\target\debug\build\ash_renderer-91ebbe78c17f823a\out
+/skybox.frag.spv`: The system cannot find the file 
+specified. (os error 2)
+    --> src\renderer\renderer.rs:1830:17
+     |
+1830 |                 
+include_bytes!(concat!(env!("OUT_DIR"), 
+"/skybox.frag.spv")),
+     |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `bytes_of`
+ --> src\renderer\model_renderer.rs:4:16
+  |
+4 | use bytemuck::{bytes_of, Pod, Zeroable};
+  |                ^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` on by default
+
+warning: unused variable: `texture_compression`
+   --> src\renderer\renderer.rs:666:17
+    |
+666 |             let texture_compression = 
+renderer_config.texture_compression;
+    |                 ^^^^^^^^^^^^^^^^^^^ help: if this 
+is intentional, prefix it with an underscore: 
+`_texture_compression`
+    |
+    = note: `#[warn(unused_variables)]` on by default
+
+warning: unused variable: `main_pass_params`
+    --> src\renderer\renderer.rs:4605:17
+     |
+4605 |             let main_pass_params = 
+MainPassParameters {
+     |                 ^^^^^^^^^^^^^^^^ help: if this 
+is intentional, prefix it with an underscore: 
+`_main_pass_params`
+
+warning: unnecessary `unsafe` block
+    --> src\renderer\renderer.rs:4210:13
+     |
+3975 |         unsafe {
+     |         ------ because it's nested under this 
+`unsafe` block
+...
+4210 |             unsafe {
+     |             ^^^^^^ unnecessary `unsafe` block
+     |
+     = note: `#[warn(unused_unsafe)]` on by default
+
+warning: `ash_renderer` (lib) generated 4 warnings
+error: could not compile `ash_renderer` (lib) due to 2 
+previous errors; 4 warnings emitted

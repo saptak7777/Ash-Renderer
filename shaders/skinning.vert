@@ -16,25 +16,14 @@ layout(location = 3) sample out vec3 fragWorldPos;
 layout(location = 4) out vec4 fragPosLightSpace;
 layout(location = 6) out vec2 motionVector;
 
-layout(set = 0, binding = 0) uniform MVP {
-    mat4 model;
-    mat4 view;
-    mat4 projection;
-    mat4 view_proj;
-    mat4 prev_view_proj;
-    mat4 light_space_matrix;
-    mat4 normal_matrix;
-    vec4 camera_pos;
-    SceneLighting scene_lighting;
-} mvp;
-
-layout(set = 1, binding = 3) readonly buffer JointBuffers {
-    mat4 joints[];
-} joint_buffers[];
-
 void main() {
+    // Access Frame Data via BDA
+    FrameData frame = FrameData(push.frame_ptr);
+    // Access Joint Data via BDA
+    JointBuffer joint_buffer = JointBuffer(push.joint_ptr);
+
     // BDA Skinned Vertex Pulling: Load vertex data from global vertex heap
-    SkinnedVertexBuffer vertex = load_skinned_vertex(push.vertex_heap_ptr, gl_VertexIndex);
+    SkinnedVertexBuffer vertex = load_skinned_vertex(push.vertex_ptr, gl_VertexIndex);
     
     vec3 inPosition = vertex.position;
     vec3 inNormal = vertex.normal;
@@ -45,28 +34,46 @@ void main() {
     // Linear Blend Skinning
     mat4 skinMatrix = mat4(0.0);
     uint base_offset = push.joint_offset;
-    skinMatrix += inJointWeights.x * joint_buffers[nonuniformEXT(push.joint_buffer_index)].joints[inJointIndices.x + base_offset];
-    skinMatrix += inJointWeights.y * joint_buffers[nonuniformEXT(push.joint_buffer_index)].joints[inJointIndices.y + base_offset];
-    skinMatrix += inJointWeights.z * joint_buffers[nonuniformEXT(push.joint_buffer_index)].joints[inJointIndices.z + base_offset];
-    skinMatrix += inJointWeights.w * joint_buffers[nonuniformEXT(push.joint_buffer_index)].joints[inJointIndices.w + base_offset];
+    
+    // Access joints directly from BDA buffer
+    skinMatrix += inJointWeights.x * joint_buffer.joints[inJointIndices.x + base_offset];
+    skinMatrix += inJointWeights.y * joint_buffer.joints[inJointIndices.y + base_offset];
+    skinMatrix += inJointWeights.z * joint_buffer.joints[inJointIndices.z + base_offset];
+    skinMatrix += inJointWeights.w * joint_buffer.joints[inJointIndices.w + base_offset];
 
     vec4 skinnedPosition = skinMatrix * vec4(inPosition, 1.0);
     vec3 skinnedNormal = mat3(skinMatrix) * inNormal;
 
     vec4 worldPosition = push.model * skinnedPosition;
 
-    gl_Position = mvp.view_proj * worldPosition;
+    gl_Position = frame.view_proj * worldPosition;
 
     fragColor = vec3(1.0);
     fragUV = inUV;
-    mat3 normalMatrix = mat3(mvp.normal_matrix);
+    // Normal matrix from frame data (or derived from model matrix if instancing, but skinning implies model matrix)
+    // For skinning, the normal is transformed by the skinMatrix which includes model transform if joints are world space,
+    // or we apply model matrix rotation.
+    // The previous code used mvp.normal_matrix * skinnedNormal.
+    // However, skinMatrix usually transforms to Model space or World space depending on implementation.
+    // If joints are in Model space, we need to apply Model matrix (or Normal matrix) afterwards.
+    // Assuming standard glTF: joints are relative to root. push.model transforms to world.
+    
+    // Previous code:
+    // vec4 worldPosition = push.model * skinnedPosition; 
+    // gl_Position = mvp.view_proj * worldPosition;
+    // mat3 normalMatrix = mat3(mvp.normal_matrix);
+    // fragNormal = normalize(normalMatrix * skinnedNormal);
+    
+    // So we use frame.normal_matrix.
+    mat3 normalMatrix = mat3(frame.normal_matrix);
     fragNormal = normalize(normalMatrix * skinnedNormal);
+    
     fragWorldPos = worldPosition.xyz;
-    fragPosLightSpace = mvp.light_space_matrix * worldPosition;
+    fragPosLightSpace = frame.light_space_matrix * worldPosition;
 
     // Motion vectors for TAA
-    vec4 currentClip = mvp.view_proj * worldPosition;
-    vec4 prevClip = mvp.prev_view_proj * worldPosition;
+    vec4 currentClip = frame.view_proj * worldPosition;
+    vec4 prevClip = frame.prev_view_proj * worldPosition;
     
     vec2 currentNdc = currentClip.xy / currentClip.w;
     vec2 prevNdc = prevClip.xy / prevClip.w;

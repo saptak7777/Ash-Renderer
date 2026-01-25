@@ -22,7 +22,7 @@ SkinnedVertexBuffer load_skinned_vertex(uint64_t base_address, uint vertex_index
     // BDA SAFETY: Check for null pointer to prevent DEVICE_LOST
     if (base_address == 0) {
         // Return a safe zero address that will be caught by the caller
-        return SkinnedVertexBuffer(0);
+        return SkinnedVertexBuffer(uint64_t(0));
     }
     
     // Calculate vertex address: base + (index * 56)

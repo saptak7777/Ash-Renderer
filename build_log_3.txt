@@ -1,0 +1,62 @@
+﻿cargo :    Compiling ash_renderer v0.4.99 
+(C:\Users\tilok\Downloads\Ash Renderer)
+At line:1 char:1
++ cargo build 2>&1 | Out-File -FilePath build_log_3.txt 
+-Encoding utf8
++ ~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (   Compili 
+   ng as...s\Ash Renderer):String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+error: failed to run custom build command for 
+`ash_renderer v0.4.99 (C:\Users\tilok\Downloads\Ash 
+Renderer)`
+
+Caused by:
+  process didn't exit successfully: 
+`C:\Users\tilok\Downloads\Ash Renderer\target\debug\buil
+d\ash_renderer-f7702dabe9eb74ee\build-script-build` 
+(exit code: 101)
+  --- stdout
+  cargo:rerun-if-changed=assets/textures
+  cargo:rerun-if-changed=shaders
+
+  --- stderr
+
+  thread 'main' panicked at build.rs:159:13:
+  SHADER COMPILATION FAILED:
+  File: shaders/frag.frag
+  Exit Code: Some(1)
+  Error: shaders/frag.frag:35: error: 'MaterialBuffer' 
+: block name cannot redefine a non-block name
+  shaders/frag.frag:285: error: 'material_buffer_index' 
+: no such field in structure 'push'
+  shaders/frag.frag:285: error: '[]' : scalar integer 
+expression required
+  shaders/frag.frag:285: error: 'material_buffers' : 
+undeclared identifier
+  shaders/frag.frag:285: error: 'material_buffers' :  
+left of '[' is not of type array, matrix, or vector
+  shaders/frag.frag:285: error: 'materials' : vector 
+swizzle too long
+  shaders/frag.frag:285: error: 'materials' : unknown 
+swizzle selection
+  shaders/frag.frag:285: error: 'materials' : unknown 
+swizzle selection
+  shaders/frag.frag:285: error: 'materials' : vector 
+swizzle selection out of range
+  shaders/frag.frag:285: error: 'expression' :  left of 
+'[' is not of type array, matrix, or vector
+  shaders/frag.frag:285: error: '=' :  cannot convert 
+from ' const float' to ' temp structure{ global highp 
+4-component vector of float base_color_factor,  global 
+highp 4-component vector of float emissive_factor,  
+global highp 4-component vector of float parameters,  
+global highp 4-component vector of int texture_indices, 
+ global highp int emissive_texture_index,  global highp 
+int tint_index,  global highp float alpha_cutoff,  
+global highp float _padding}'
+  11 errors generated.
+
+  note: run with `RUST_BACKTRACE=1` environment 
+variable to display a backtrace

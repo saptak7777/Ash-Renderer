@@ -22,7 +22,7 @@ struct RegisteredBuffer {
     range: vk::DeviceSize,
 }
 
-/// Manages bindless descriptor resources (images/buffers) with variable descriptor counts.
+/// Manages bindless descriptor resources (images) with variable descriptor counts.
 pub struct BindlessManager {
     #[allow(dead_code)]
     device: Arc<ash::Device>,
@@ -30,19 +30,14 @@ pub struct BindlessManager {
     descriptor_set: DescriptorSet,
     max_resources: u32,
     next_image_index: u32,
-    next_material_index: u32,
-    next_instance_index: u32,
-    next_indirect_index: u32,
+    next_buffer_index: u32,
     // Resource tracking for recreation
     registered_images: Vec<RegisteredImage>,
-    registered_materials: Vec<RegisteredBuffer>,
-    registered_instances: Vec<RegisteredBuffer>,
-    registered_indirects: Vec<RegisteredBuffer>,
+    registered_buffers: Vec<RegisteredBuffer>,
 }
 
 impl BindlessManager {
-    pub const DEFAULT_MAX_TEXTURES: u32 = 16384;
-    pub const DEFAULT_MAX_BUFFERS: u32 = 1024;
+    pub const DEFAULT_MAX_TEXTURES: u32 = 65536; // Increased for modern hardware
 
     pub fn new(
         device: Arc<ash::Device>,
@@ -58,19 +53,7 @@ impl BindlessManager {
             )
             .add_bindless_binding(
                 1,
-                vk::DescriptorType::STORAGE_BUFFER, // Materials
-                vk::ShaderStageFlags::ALL_GRAPHICS | vk::ShaderStageFlags::COMPUTE,
-                max_resources,
-            )
-            .add_bindless_binding(
-                2,
-                vk::DescriptorType::STORAGE_BUFFER, // Instance Data
-                vk::ShaderStageFlags::ALL_GRAPHICS | vk::ShaderStageFlags::COMPUTE,
-                max_resources,
-            )
-            .add_bindless_binding(
-                3,
-                vk::DescriptorType::STORAGE_BUFFER, // Indirect/Joints
+                vk::DescriptorType::STORAGE_BUFFER,
                 vk::ShaderStageFlags::ALL_GRAPHICS | vk::ShaderStageFlags::COMPUTE,
                 max_resources,
             )
@@ -86,13 +69,9 @@ impl BindlessManager {
             descriptor_set,
             max_resources,
             next_image_index: 0,
-            next_material_index: 0,
-            next_instance_index: 0,
-            next_indirect_index: 0,
+            next_buffer_index: 0,
             registered_images: Vec::new(),
-            registered_materials: Vec::new(),
-            registered_instances: Vec::new(),
-            registered_indirects: Vec::new(),
+            registered_buffers: Vec::new(),
         })
     }
 
@@ -137,8 +116,8 @@ impl BindlessManager {
             )?;
         }
 
-        // Re-register material buffers
-        for buf in &self.registered_materials {
+        // Re-register buffers
+        for buf in &self.registered_buffers {
             self.descriptor_set.update_buffer_at(
                 1,
                 buf.index,
@@ -149,36 +128,10 @@ impl BindlessManager {
             )?;
         }
 
-        // Re-register instance buffers
-        for buf in &self.registered_instances {
-            self.descriptor_set.update_buffer_at(
-                2,
-                buf.index,
-                buf.buffer,
-                buf.offset,
-                buf.range,
-                vk::DescriptorType::STORAGE_BUFFER,
-            )?;
-        }
-
-        // Re-register indirect buffers
-        for buf in &self.registered_indirects {
-            self.descriptor_set.update_buffer_at(
-                3,
-                buf.index,
-                buf.buffer,
-                buf.offset,
-                buf.range,
-                vk::DescriptorType::STORAGE_BUFFER,
-            )?;
-        }
-
         log::debug!(
-            "Re-registered {} images, {} materials, {} instances, {} indirects",
+            "Re-registered {} images and {} buffers",
             self.registered_images.len(),
-            self.registered_materials.len(),
-            self.registered_instances.len(),
-            self.registered_indirects.len()
+            self.registered_buffers.len()
         );
 
         Ok(())
@@ -220,13 +173,13 @@ impl BindlessManager {
         Ok(index)
     }
 
-    pub fn add_material_buffer(
+    pub fn add_storage_buffer(
         &mut self,
         buffer: vk::Buffer,
         offset: vk::DeviceSize,
         range: vk::DeviceSize,
     ) -> Result<u32> {
-        let index = self.allocate_material_index()?;
+        let index = self.allocate_buffer_index()?;
         self.descriptor_set.update_buffer_at(
             1,
             index,
@@ -237,7 +190,7 @@ impl BindlessManager {
         )?;
 
         // Track for recreation
-        self.registered_materials.push(RegisteredBuffer {
+        self.registered_buffers.push(RegisteredBuffer {
             index,
             buffer,
             offset,
@@ -245,70 +198,6 @@ impl BindlessManager {
         });
 
         Ok(index)
-    }
-
-    pub fn add_instance_buffer(
-        &mut self,
-        buffer: vk::Buffer,
-        offset: vk::DeviceSize,
-        range: vk::DeviceSize,
-    ) -> Result<u32> {
-        let index = self.allocate_instance_index()?;
-        self.descriptor_set.update_buffer_at(
-            2,
-            index,
-            buffer,
-            offset,
-            range,
-            vk::DescriptorType::STORAGE_BUFFER,
-        )?;
-
-        // Track for recreation
-        self.registered_instances.push(RegisteredBuffer {
-            index,
-            buffer,
-            offset,
-            range,
-        });
-
-        Ok(index)
-    }
-
-    pub fn add_indirect_buffer(
-        &mut self,
-        buffer: vk::Buffer,
-        offset: vk::DeviceSize,
-        range: vk::DeviceSize,
-    ) -> Result<u32> {
-        let index = self.allocate_indirect_index()?;
-        self.descriptor_set.update_buffer_at(
-            3,
-            index,
-            buffer,
-            offset,
-            range,
-            vk::DescriptorType::STORAGE_BUFFER,
-        )?;
-
-        // Track for recreation
-        self.registered_indirects.push(RegisteredBuffer {
-            index,
-            buffer,
-            offset,
-            range,
-        });
-
-        Ok(index)
-    }
-
-    /// Backwards compatibility method - maps to texture binding
-    pub fn add_storage_buffer(
-        &mut self,
-        buffer: vk::Buffer,
-        offset: vk::DeviceSize,
-        range: vk::DeviceSize,
-    ) -> Result<u32> {
-        self.add_instance_buffer(buffer, offset, range)
     }
 
     /// Get the descriptor set layout
@@ -338,39 +227,15 @@ impl BindlessManager {
         Ok(index)
     }
 
-    fn allocate_material_index(&mut self) -> Result<u32> {
-        if self.next_material_index >= self.max_resources {
+    fn allocate_buffer_index(&mut self) -> Result<u32> {
+        if self.next_buffer_index >= self.max_resources {
             return Err(AshError::VulkanError(format!(
-                "Exceeded maximum number of bindless materials: {}/{}",
-                self.next_material_index, self.max_resources
+                "Exceeded maximum number of bindless buffers: {}/{}",
+                self.next_buffer_index, self.max_resources
             )));
         }
-        let index = self.next_material_index;
-        self.next_material_index += 1;
-        Ok(index)
-    }
-
-    fn allocate_instance_index(&mut self) -> Result<u32> {
-        if self.next_instance_index >= self.max_resources {
-            return Err(AshError::VulkanError(format!(
-                "Exceeded maximum number of bindless instances: {}/{}",
-                self.next_instance_index, self.max_resources
-            )));
-        }
-        let index = self.next_instance_index;
-        self.next_instance_index += 1;
-        Ok(index)
-    }
-
-    fn allocate_indirect_index(&mut self) -> Result<u32> {
-        if self.next_indirect_index >= self.max_resources {
-            return Err(AshError::VulkanError(format!(
-                "Exceeded maximum number of bindless indirect commands: {}/{}",
-                self.next_indirect_index, self.max_resources
-            )));
-        }
-        let index = self.next_indirect_index;
-        self.next_indirect_index += 1;
+        let index = self.next_buffer_index;
+        self.next_buffer_index += 1;
         Ok(index)
     }
 }

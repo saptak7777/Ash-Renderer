@@ -107,33 +107,40 @@ pub const DRAW_PUSH_FRAGMENT_BYTES: u32 = 32;
 #[repr(C, align(16))]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct DrawPushConstants {
-    // Vertex stage (0-127)
-    model: Mat4Push,
-    joint_offset: u32,
-    use_instancing: u32,
-    instance_buffer_index: u32,
-    joint_buffer_index: u32,
-    vertex_heap_ptr: u64,
-    is_skinned: u32,
-    _vertex_padding: [u32; 9],
+    // Pointer stage (0-47)
+    frame_ptr: u64,    // 0
+    vertex_ptr: u64,   // 8
+    instance_ptr: u64, // 16
+    material_ptr: u64, // 24
+    joint_ptr: u64,    // 32
+    _ptr_padding: u64, // 40
 
-    // Fragment stage (128-159)
-    material_index: u32,
-    debug_path: u32,
-    flags: u32,
-    material_buffer_index: u32,
-    debug_visualization_enabled: u32,
-    _padding: [u32; 3],
+    // Control stage (48-111)
+    model: Mat4Push,     // 48 (64 bytes)
+    joint_offset: u32,   // 112
+    use_instancing: u32, // 116
+    is_skinned: u32,     // 120
+    material_index: u32, // 124
+
+    // Fragment/Debug stage (128-159)
+    flags: u32,                       // 128
+    debug_path: u32,                  // 132
+    debug_visualization_enabled: u32, // 136
+    _padding: [u32; 5],               // 140 (20 bytes) -> 160
 }
 
-/// Context for draw calls to reduce argument count
+/// Context for draw calls with BDA support
 pub struct DrawContext<'a> {
     pub command_buffer: vk::CommandBuffer,
     pub pipeline_layout: vk::PipelineLayout,
     pub uploaded: &'a UploadedMesh,
     pub material: &'a MaterialPushConstants,
-    pub instance_buffer_index: u32,
-    pub joint_buffer_index: u32,
+
+    // BDA Pointers for the current frame
+    pub frame_ptr: u64,
+    pub instance_ptr: u64,
+    pub material_ptr: u64,
+    pub joint_ptr: u64,
 }
 
 /// Parameters for indirect draw with count buffer
@@ -271,28 +278,6 @@ impl ModelRenderer {
         }
 
         let material_handle = ctx.material.material_handle;
-        log::debug!(
-            target: "renderer::push_constants",
-            "draw_mesh: material_handle={:?} (idx={}, ver={}), buffer_index={}, debug_path={}, flags={:#X}",
-            material_handle,
-            material_handle.index,
-            material_handle.version,
-            ctx.material.material_buffer_index,
-            ctx.material.debug_path,
-            ctx.material.flags
-        );
-
-        // RAGE pattern: Validate material index, fallback to default if invalid
-        let material_index = if material_handle.index < 1024 {
-            material_handle.index
-        } else {
-            log::warn!(
-                "Invalid material index {}, using default (0)",
-                material_handle.index
-            );
-            0
-        };
-
         let vertex_ptr = ctx.uploaded.vertex_heap_address.unwrap_or(0);
 
         // DIAGNOSTIC: Check for Silent Killer #1 - Null Pointer
@@ -302,37 +287,28 @@ impl ModelRenderer {
                 ctx.uploaded.vertex_count(),
                 ctx.uploaded.index_count()
             );
-            return; // SAFETY: Do not submit draw calls with NULL BDA pointers
+            return;
         }
 
-        log::debug!(
-            "Draw mesh: Ptr=0x{:X}, Indices={}, Vertices={}, IndexOffset={:?}, Skinned={}, JointBuf={}",
-            vertex_ptr,
-            ctx.uploaded.index_count(),
-            ctx.uploaded.vertex_count(),
-            ctx.uploaded.index_offset,
-            ctx.uploaded.is_skinned,
-            ctx.joint_buffer_index
-        );
-
         let push = DrawPushConstants {
+            frame_ptr: ctx.frame_ptr,
+            vertex_ptr,
+            instance_ptr: ctx.instance_ptr,
+            material_ptr: ctx.material_ptr,
+            joint_ptr: ctx.joint_ptr,
+            _ptr_padding: 0,
             model: model_matrix.into(),
             joint_offset,
             use_instancing: 0,
-            instance_buffer_index: ctx.instance_buffer_index,
-            joint_buffer_index: ctx.joint_buffer_index,
-            vertex_heap_ptr: vertex_ptr,
             is_skinned: ctx.uploaded.is_skinned as u32,
-            _vertex_padding: [0; 9],
-            material_index: ((material_handle.version as u32) << 16) | material_index as u32,
-            debug_path: ctx.material.debug_path,
+            material_index: material_handle.index as u32,
             flags: ctx.material.flags,
-            material_buffer_index: ctx.material.material_buffer_index,
+            debug_path: ctx.material.debug_path,
             debug_visualization_enabled: ctx.material.debug_visualization_enabled,
-            _padding: [0; 3],
+            _padding: [0; 5],
         };
 
-        let push_bytes = bytes_of(&push);
+        let push_bytes = bytemuck::bytes_of(&push);
 
         self.device.cmd_push_constants(
             ctx.command_buffer,
@@ -374,57 +350,32 @@ impl ModelRenderer {
         // BDA Vertex Pulling: No vertex buffer binding needed
 
         let material_handle = ctx.material.material_handle;
-        log::debug!(
-            target: "renderer::push_constants",
-            "draw_mesh_instanced: material_handle={:?} (idx={}, ver={}), buffer_index={}, debug_path={}, flags={:#X}",
-            material_handle,
-            material_handle.index,
-            material_handle.version,
-            ctx.material.material_buffer_index,
-            ctx.material.debug_path,
-            ctx.material.flags
-        );
-
         let vertex_ptr = ctx.uploaded.vertex_heap_address.unwrap_or(0);
 
-        // DIAGNOSTIC: Check for Silent Killer #1 - Null Pointer (Instanced Path)
         if vertex_ptr == 0 {
-            log::error!(
-                "CRITICAL (Instanced): vertex_heap_ptr is NULL (0x0)! Skipping draw to prevent GPU hang. Instances={}, Indices={}",
-                instance_count,
-                ctx.uploaded.index_count()
-            );
-            return; // SAFETY: Do not submit instanced draw calls with NULL BDA pointers
+            log::error!("CRITICAL (Instanced): vertex_heap_ptr is NULL!");
+            return;
         }
 
-        log::debug!(
-            "Draw mesh instanced: Ptr=0x{:X}, Instances={}, Indices={}, FirstInstance={}, Skinned={}, JointBuf={}",
-            vertex_ptr,
-            instance_count,
-            ctx.uploaded.index_count(),
-            first_instance,
-            ctx.uploaded.is_skinned,
-            ctx.joint_buffer_index
-        );
-
         let push = DrawPushConstants {
+            frame_ptr: ctx.frame_ptr,
+            vertex_ptr,
+            instance_ptr: ctx.instance_ptr,
+            material_ptr: ctx.material_ptr,
+            joint_ptr: ctx.joint_ptr,
+            _ptr_padding: 0,
             model: glam::Mat4::IDENTITY.into(),
             joint_offset: 0,
             use_instancing: 1,
-            instance_buffer_index: ctx.instance_buffer_index,
-            joint_buffer_index: ctx.joint_buffer_index,
-            vertex_heap_ptr: vertex_ptr,
             is_skinned: ctx.uploaded.is_skinned as u32,
-            _vertex_padding: [0; 9],
-            material_index: ((material_handle.version as u32) << 16) | material_handle.index as u32,
-            debug_path: ctx.material.debug_path,
+            material_index: material_handle.index as u32,
             flags: ctx.material.flags,
-            material_buffer_index: ctx.material.material_buffer_index,
+            debug_path: ctx.material.debug_path,
             debug_visualization_enabled: ctx.material.debug_visualization_enabled,
-            _padding: [0; 3],
+            _padding: [0; 5],
         };
 
-        let push_bytes = bytes_of(&push);
+        let push_bytes = bytemuck::bytes_of(&push);
 
         self.device.cmd_push_constants(
             ctx.command_buffer,
@@ -472,37 +423,26 @@ impl ModelRenderer {
         draw_count: u32,
         stride: u32,
     ) {
-        // BDA Vertex Pulling: No vertex buffer binding needed
-
         let material_handle = ctx.material.material_handle;
-        log::debug!(
-            target: "renderer::push_constants",
-            "draw_mesh_indirect: material_handle={:?} (idx={}, ver={}), buffer_index={}, debug_path={}, flags={:#X}",
-            material_handle,
-            material_handle.index,
-            material_handle.version,
-            ctx.material.material_buffer_index,
-            ctx.material.debug_path,
-            ctx.material.flags
-        );
         let push = DrawPushConstants {
+            frame_ptr: ctx.frame_ptr,
+            vertex_ptr: ctx.uploaded.vertex_heap_address.unwrap_or(0),
+            instance_ptr: ctx.instance_ptr,
+            material_ptr: ctx.material_ptr,
+            joint_ptr: ctx.joint_ptr,
+            _ptr_padding: 0,
             model: glam::Mat4::IDENTITY.into(),
             joint_offset: 0,
             use_instancing: 1,
-            instance_buffer_index: ctx.instance_buffer_index,
-            joint_buffer_index: ctx.joint_buffer_index,
-            vertex_heap_ptr: ctx.uploaded.vertex_heap_address.unwrap_or(0),
             is_skinned: ctx.uploaded.is_skinned as u32,
-            _vertex_padding: [0; 9],
-            material_index: ((material_handle.version as u32) << 16) | material_handle.index as u32,
-            debug_path: ctx.material.debug_path,
+            material_index: material_handle.index as u32,
             flags: ctx.material.flags,
-            material_buffer_index: ctx.material.material_buffer_index,
+            debug_path: ctx.material.debug_path,
             debug_visualization_enabled: ctx.material.debug_visualization_enabled,
-            _padding: [0; 3],
+            _padding: [0; 5],
         };
 
-        let push_bytes = bytes_of(&push);
+        let push_bytes = bytemuck::bytes_of(&push);
 
         self.device.cmd_push_constants(
             ctx.command_buffer,
@@ -546,27 +486,26 @@ impl ModelRenderer {
         ctx: &DrawContext,
         params: &IndirectDrawCountParams,
     ) {
-        // BDA Vertex Pulling: No vertex buffer binding needed
-
         let material_handle = ctx.material.material_handle;
         let push = DrawPushConstants {
+            frame_ptr: ctx.frame_ptr,
+            vertex_ptr: ctx.uploaded.vertex_heap_address.unwrap_or(0),
+            instance_ptr: ctx.instance_ptr,
+            material_ptr: ctx.material_ptr,
+            joint_ptr: ctx.joint_ptr,
+            _ptr_padding: 0,
             model: glam::Mat4::IDENTITY.into(),
             joint_offset: 0,
             use_instancing: 1,
-            instance_buffer_index: ctx.instance_buffer_index,
-            joint_buffer_index: ctx.joint_buffer_index,
-            vertex_heap_ptr: ctx.uploaded.vertex_heap_address.unwrap_or(0),
             is_skinned: ctx.uploaded.is_skinned as u32,
-            _vertex_padding: [0; 9],
-            material_index: ((material_handle.version as u32) << 16) | material_handle.index as u32,
-            debug_path: ctx.material.debug_path,
+            material_index: material_handle.index as u32,
             flags: ctx.material.flags,
-            material_buffer_index: ctx.material.material_buffer_index,
+            debug_path: ctx.material.debug_path,
             debug_visualization_enabled: ctx.material.debug_visualization_enabled,
-            _padding: [0; 3],
+            _padding: [0; 5],
         };
 
-        let push_bytes = bytes_of(&push);
+        let push_bytes = bytemuck::bytes_of(&push);
 
         self.device.cmd_push_constants(
             ctx.command_buffer,
@@ -593,7 +532,6 @@ impl ModelRenderer {
                 params.stride,
             );
         } else {
-            // Non-indexed indirect count draw not typically used for meshes but supported
             self.device.cmd_draw_indirect_count(
                 ctx.command_buffer,
                 params.indirect_buffer,

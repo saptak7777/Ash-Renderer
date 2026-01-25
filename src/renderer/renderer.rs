@@ -185,6 +185,7 @@ struct RendererResources {
     vsm_default_array: Texture, // 2DArray version for clipmaps
     material_storage_buffer: StorageBuffer<resources::uniform::MaterialUniform>,
     instance_buffers: Vec<resources::InstanceBuffer>,
+    post_sampler: vk::Sampler,
 }
 
 fn compute_worker_index(worker_count: usize, frame_index: usize) -> usize {
@@ -414,7 +415,7 @@ pub struct Renderer {
     depth_buffer: Option<DepthBuffer>,
     uniform_buffers: Vec<UniformBuffer>,
     material_storage_buffer: Option<StorageBuffer<resources::uniform::MaterialUniform>>,
-    material_buffer_index: u32,
+    // material_buffer_index: u32, // DELETED: Using BDA
     pipeline_layout: Option<vulkan::PipelineLayout>,
     pipeline_layout_id: Option<ResourceId>,
     descriptors: Option<vulkan::DescriptorManager>,
@@ -480,6 +481,7 @@ pub struct Renderer {
     // Post-processing descriptors
     post_descriptor_pool: vk::DescriptorPool,
     post_descriptor_sets: Vec<vk::DescriptorSet>,
+    _post_sampler: vk::Sampler,
     post_pipeline: Option<vulkan::Pipeline>,
     post_framebuffers: Vec<vulkan::Framebuffer>,
     // GPU skinning
@@ -508,9 +510,10 @@ pub struct Renderer {
 
     pub vsr_config: VsrConfig,
 
-    // Bindless Buffer Indices
-    pub instance_buffer_indices: Vec<u32>,
-    pub joint_buffer_indices: Vec<u32>,
+    // BDA Addresses
+    pub instance_buffer_addresses: Vec<u64>,
+    pub joint_buffer_addresses: Vec<u64>,
+    pub material_heap_address: u64,
 
     // Core foundation - dropped in declaration order (Top to Bottom)
     // So these should be at the VERY END to be dropped LAST.
@@ -732,6 +735,7 @@ impl Renderer {
                 vsm_default_array,
                 material_storage_buffer,
                 instance_buffers,
+                post_sampler,
             } = renderer_resources;
 
             // Bind IBL defaults to all environment sets
@@ -771,42 +775,18 @@ impl Renderer {
                 }
             }
 
-            // Register global material storage buffer (Set 1)
-            let max_materials = material_storage_buffer.capacity();
-            let material_size = (max_materials
-                * std::mem::size_of::<crate::renderer::resources::uniform::MaterialUniform>())
-                as vk::DeviceSize;
-            let material_buffer_index = bindless_manager.add_material_buffer(
-                material_storage_buffer.buffer,
-                0,
-                material_size,
-            )?;
-            log::info!(
-                "Registered global material buffer at bindless index {material_buffer_index}"
-            );
+            // BDA Migration: No longer need to manually register buffers with bindless manager
+            let material_heap_address = material_storage_buffer.device_address();
+            log::info!("Global material heap BDA: 0x{material_heap_address:X}");
 
-            // Register instance buffers (Bindless Storage Buffers - Set 1, Binding 2)
-            let mut instance_buffer_indices = Vec::with_capacity(instance_buffers.len());
-            let instance_buffer_size = (crate::renderer::occlusion_culling::MAX_CULLABLE_OBJECTS
-                * std::mem::size_of::<crate::renderer::occlusion_culling::CullObjectData>())
-                as vk::DeviceSize;
+            let mut instance_buffer_addresses = Vec::with_capacity(instance_buffers.len());
             for buffer in &instance_buffers {
-                let index = bindless_manager
-                    .add_instance_buffer(buffer.buffer, 0, instance_buffer_size)
-                    .unwrap_or(0);
-                instance_buffer_indices.push(index);
-                log::info!("Registered instance buffer at bindless index {index}");
+                instance_buffer_addresses.push(buffer.device_address());
             }
 
-            // Register joint matrices buffers (Bindless Storage Buffers - Set 1, Binding 3)
-            let mut joint_buffer_indices = Vec::with_capacity(joint_matrices_buffer.len());
-            let joint_size = (max_bones * std::mem::size_of::<Mat4>()) as vk::DeviceSize;
+            let mut joint_buffer_addresses = Vec::with_capacity(joint_matrices_buffer.len());
             for buffer in &joint_matrices_buffer {
-                let index = bindless_manager
-                    .add_indirect_buffer(buffer.buffer(), 0, joint_size)
-                    .unwrap_or(0);
-                joint_buffer_indices.push(index);
-                log::info!("Registered joint buffer at bindless index {index}");
+                joint_buffer_addresses.push(buffer.device_address());
             }
 
             // Register default texture as a fallback for all slots.
@@ -827,11 +807,14 @@ impl Renderer {
 
 
             let set_layouts = [
-                descriptor_manager.frame_layout(),
-                bindless_manager.descriptor_set_layout(), // Set 1: Bindless (Textures, Materials, Instances, Joints)
-                descriptor_manager.environment_layout(), // Set 2: Global Environment (Shadow)
-                forward_plus.layout(),     // Set 3: Forward+ lights
+                bindless_manager.descriptor_set_layout(), // Set 0: Bindless Textures
+                descriptor_manager.environment_layout(), // Set 1: Global Environment (Shadow)
+                forward_plus.layout(),                    // Set 2: Forward+ lights
             ];
+            
+            // DIAGNOSTIC: Log layout handles for verification
+            log::debug!("Main Pipeline Set Layouts: Bindless={:?}, Env={:?}, F+={:?}", 
+                set_layouts[0], set_layouts[1], set_layouts[2]);
 
             let (pipeline_layout, pipeline_layout_id, pipeline, pipeline_id) =
                 Self::create_main_pipeline(
@@ -868,7 +851,6 @@ impl Renderer {
                 
                 // Use the same descriptor set layouts as the main pipeline
                 let descriptor_layouts = vec![
-                    descriptor_manager.frame_layout(),
                     bindless_manager.descriptor_set_layout(),
                     descriptor_manager.environment_layout(),
                 ];
@@ -1046,13 +1028,16 @@ impl Renderer {
             log::info!("Skybox initialized.");
             
             let pass_manager = RenderPassManager::new(RenderingMode::GPUDriven);
-
             let mesh_data: Vec<MeshData> = Vec::new();
             let material_manager = MaterialManager::new();
+            let instancing_manager = InstancingManager::new();
+            let transform_system = resources::TransformSystem::new();
+            let instance_buffer = instance_buffers;
+            let config = &renderer_config;
 
             let mut renderer = Self {
                 texture_streamer: Mutex::new(Some(texture_streamer)),
-                buffer_pool,
+                buffer_pool: buffer_pool,
                 resources,
                 features,
                 _pipeline_cache: pipeline_cache,
@@ -1091,7 +1076,9 @@ impl Renderer {
                 // transform,
                 uniform_buffers,
                 material_storage_buffer: Some(material_storage_buffer),
-                material_buffer_index,
+                instance_buffer_addresses,
+                joint_buffer_addresses,
+                material_heap_address,
                 pipeline_layout: Some(pipeline_layout),
                 pipeline_layout_id: Some(pipeline_layout_id),
                 descriptors: Some(descriptor_manager),
@@ -1128,6 +1115,7 @@ impl Renderer {
                 bindless_manager: Some(bindless_manager),
                 forward_plus: Some(forward_plus),
                 hiz_pass: None,
+                adaptive_hiz_manager: AdaptiveHiZManager::new(3.0), // Target 3ms for Hi-Z
                 indirect_draw_pass: None,
                 occlusion_culling: OcclusionCulling::new(),
                 vsr_pass: None,
@@ -1135,37 +1123,35 @@ impl Renderer {
                 motion_framebuffer: None,
                 gbuffer: Some(gbuffer),
                 culling_manager: CullingManager::new(),
-                debug_mode: DebugMode::None,
                 use_gpu_driven: pass_manager.use_gpu_driven(),
                 scene_lighting: crate::renderer::features::SceneLighting::default(),
                 point_lights: Vec::new(),
                 directional_lights: Vec::new(),
                 spot_lights: Vec::new(),
 
+                debug_mode: DebugMode::None,
                 post_descriptor_pool: vk::DescriptorPool::null(),
                 post_descriptor_sets: Vec::new(),
+                _post_sampler: post_sampler,
                 post_pipeline: None,
                 post_framebuffers: Vec::new(),
-                joint_matrices_buffer,
-                max_bones,
                 skinned_pipeline: None,
                 skinned_pipeline_id: None,
+                joint_matrices_buffer,
+                max_bones,
                 vram_budget,
-                texture_compression,
-                instancing_manager: InstancingManager::new(),
-                instance_buffer: instance_buffers,
-                transform_system: resources::TransformSystem::new(),
-                instance_buffer_indices,
-                joint_buffer_indices,
+                texture_compression: config.texture_compression,
+                instancing_manager,
+                instance_buffer,
+                transform_system,
                 pass_manager,
-                allow_auto_material: renderer_config.allow_auto_material,
-                strict_mode: renderer_config.strict_mode,
+                allow_auto_material: config.allow_auto_material,
+                strict_mode: config.strict_mode,
                 readback_buffer,
                 last_image_index: 0,
                 taa_config: TaaConfig::default(),
                 taa_config_metrics: ConfigMetrics::default(),
                 vsr_config: VsrConfig::default(),
-                adaptive_hiz_manager: AdaptiveHiZManager::new(3.0), // Target 3ms for Hi-Z
             };
 
 
@@ -1542,6 +1528,19 @@ impl Renderer {
             instance_buffers.push(buffer);
         }
 
+        let post_sampler = unsafe {
+            device.device.create_sampler(
+                &vk::SamplerCreateInfo::default()
+                    .mag_filter(vk::Filter::LINEAR)
+                    .min_filter(vk::Filter::LINEAR)
+                    .mipmap_mode(vk::SamplerMipmapMode::LINEAR)
+                    .address_mode_u(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+                    .address_mode_v(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+                    .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_EDGE),
+                None,
+            ).map_err(|e| AshError::VulkanError(format!("Failed to create post_sampler: {e}")))?
+        };
+
         Ok(RendererResources {
             uniform_buffers,
             joint_matrices_buffer,
@@ -1553,6 +1552,7 @@ impl Renderer {
             vsm_default_array,
             material_storage_buffer,
             instance_buffers,
+            post_sampler,
         })
     }
 
@@ -3484,7 +3484,6 @@ impl Renderer {
                     log::debug!("Batch for mesh {mesh_key} using main GPU-driven/instanced path");
 
                     let material_push = MaterialPushConstants::new(batch.key.material_id)
-                        .with_material_buffer_index(self.material_buffer_index)
                         .with_receive_shadows(batch.receives_shadows())
                         .with_debug_visualization(debug_enabled);
 
@@ -3537,9 +3536,10 @@ impl Renderer {
                             pipeline_layout: pipeline_layout_handle,
                             uploaded,
                             material: &material_push,
-                            instance_buffer_index: indirect.object_buffer_index().unwrap_or(0),
-                            joint_buffer_index: self.joint_buffer_indices[frame_index],
-
+                            frame_ptr: self.uniform_buffers[frame_index].device_address(),
+                            instance_ptr: indirect.object_buffer_address(),
+                            material_ptr: self.material_heap_address,
+                            joint_ptr: self.joint_buffer_addresses[frame_index],
                         };
                         unsafe {
                             self.model_renderer.draw_mesh_indirect_count(
@@ -3569,8 +3569,10 @@ impl Renderer {
                             pipeline_layout: pipeline_layout_handle,
                             uploaded,
                             material: &material_push,
-                            instance_buffer_index: self.instance_buffer_indices[frame_index],
-                            joint_buffer_index: self.joint_buffer_indices[frame_index],
+                            frame_ptr: self.uniform_buffers[frame_index].device_address(),
+                            instance_ptr: self.instance_buffer_addresses[frame_index],
+                            material_ptr: self.material_heap_address,
+                            joint_ptr: self.joint_buffer_addresses[frame_index],
 
                         };
 
@@ -3632,7 +3634,6 @@ impl Renderer {
                     let material_handle = item.material_handle;
                     let final_path = debug_path_override.unwrap_or(2); // 2: Legacy
                     let material_push = MaterialPushConstants::new(material_handle)
-                        .with_material_buffer_index(self.material_buffer_index)
                         .with_receive_shadows(item.receive_shadows)
                         .with_debug_path(final_path)
                         .with_debug_visualization(debug_enabled);
@@ -3642,9 +3643,10 @@ impl Renderer {
                         pipeline_layout: pipeline_layout_handle,
                         uploaded,
                         material: &material_push,
-                        instance_buffer_index: self.instance_buffer_indices[frame_index],
-                        joint_buffer_index: self.joint_buffer_indices[frame_index],
-
+                        frame_ptr: self.uniform_buffers[frame_index].device_address(),
+                        instance_ptr: self.instance_buffer_addresses[frame_index],
+                        material_ptr: self.material_heap_address,
+                        joint_ptr: self.joint_buffer_addresses[frame_index],
                     };
 
                     unsafe {
@@ -3668,7 +3670,6 @@ impl Renderer {
 
                         let final_path = debug_path_override.unwrap_or(2); // 2: Legacy
                         let material_push = MaterialPushConstants::new(batch.key.material_id)
-                            .with_material_buffer_index(self.material_buffer_index)
                             .with_receive_shadows(batch.receives_shadows())
                             .with_debug_path(final_path)
                             .with_debug_visualization(debug_enabled);
@@ -3678,8 +3679,10 @@ impl Renderer {
                             pipeline_layout: pipeline_layout_handle,
                             uploaded,
                             material: &material_push,
-                            instance_buffer_index: self.instance_buffer_indices[frame_index],
-                            joint_buffer_index: self.joint_buffer_indices[frame_index],
+                            frame_ptr: self.uniform_buffers[frame_index].device_address(),
+                            instance_ptr: self.instance_buffer_addresses[frame_index],
+                            material_ptr: self.material_heap_address,
+                            joint_ptr: self.joint_buffer_addresses[frame_index],
 
                         };
 
@@ -3729,18 +3732,19 @@ impl Renderer {
 
                     let material_handle = item.material_handle;
                     let material_push = MaterialPushConstants::new(material_handle)
-                        .with_material_buffer_index(self.material_buffer_index)
                         .with_receive_shadows(item.receive_shadows)
-                        .with_debug_path(2); // 2: Legacy (Direct path)
+                        .with_debug_path(2) // 2: Legacy (Direct path)
+                        .with_debug_visualization(debug_enabled);
 
                     let ctx = DrawContext {
                         command_buffer: cmd_ctx.handle(),
                         pipeline_layout: pipeline_layout_handle,
                         uploaded,
                         material: &material_push,
-                        instance_buffer_index: self.instance_buffer_indices[frame_index],
-                        joint_buffer_index: self.joint_buffer_indices[frame_index],
-
+                        frame_ptr: self.uniform_buffers[frame_index].device_address(),
+                        instance_ptr: self.instance_buffer_addresses[frame_index],
+                        material_ptr: self.material_heap_address,
+                        joint_ptr: self.joint_buffer_addresses[frame_index],
                     };
 
                     unsafe {
@@ -4140,37 +4144,8 @@ impl Renderer {
                 self.prev_view_proj = view_proj;
             }
 
-            // CRITICAL: Ensure all host-written buffers (including bindless storage buffers) are visible to GPU
-            // This is required because examples might update buffers directly on the host.
-            //
-            // Synchronization Pattern (UE5/RAGE/Unity):
-            // - HOST_WRITE: All CPU-side buffer writes complete
-            // - SHADER_READ: Vertex/fragment/compute shaders can read all buffer types (uniform, storage, etc.)
-            // - UNIFORM_READ: Explicit uniform buffer reads in all stages
-            //
-            // Note: Vulkan's SHADER_READ flag already covers storage buffer reads. There is no separate
-            // SHADER_STORAGE_READ flag in Ash/Vulkan - SHADER_READ is the comprehensive flag for all shader reads.
-            //
-            // This barrier ensures GPU cache coherency for all buffer types before rendering begins.
-            let global_barrier = vk::MemoryBarrier::default()
-                .src_access_mask(vk::AccessFlags::HOST_WRITE)
-                .dst_access_mask(
-                    vk::AccessFlags::SHADER_READ
-                    | vk::AccessFlags::UNIFORM_READ
-                );
-
-            self.device.device.cmd_pipeline_barrier(
-                command_buffer,
-                vk::PipelineStageFlags::HOST,
-                vk::PipelineStageFlags::ALL_GRAPHICS | vk::PipelineStageFlags::COMPUTE_SHADER,
-                vk::DependencyFlags::empty(),
-                &[global_barrier],
-                &[],
-                &[],
-            );
-
-            // Update post-processing descriptors once per frame to ensure they point to the correct VSR output.
-            self.update_post_descriptors()?;
+            // Matrix updates complete.
+            // Note: global_barrier moved inside command buffer recording block below for BDA/Uniform safety.
 
             let device_arc = Arc::clone(&self.device.device);
             let cmd_ctx = CommandBufferContext::new(device_arc.as_ref(), command_buffer);
@@ -4219,6 +4194,32 @@ impl Renderer {
             );
 
             cmd_ctx.begin(vk::CommandBufferUsageFlags::empty())?;
+
+            // CRITICAL: Ensure all host-written buffers (including bindless storage buffers) are visible to GPU
+            // This is required because examples might update buffers directly on the host.
+            // Moved inside cmd_ctx block to fix DEVICE_LOST crash on Intel Arc/Discrete GPUs.
+            let global_barrier = vk::MemoryBarrier::default()
+                .src_access_mask(vk::AccessFlags::HOST_WRITE)
+                .dst_access_mask(
+                    vk::AccessFlags::SHADER_READ
+                    | vk::AccessFlags::UNIFORM_READ
+                    | vk::AccessFlags::INDEX_READ
+                    | vk::AccessFlags::VERTEX_ATTRIBUTE_READ
+                );
+
+            unsafe {
+                self.device.device.cmd_pipeline_barrier(
+                    command_buffer,
+                    vk::PipelineStageFlags::HOST,
+                    vk::PipelineStageFlags::ALL_GRAPHICS | vk::PipelineStageFlags::COMPUTE_SHADER,
+                    vk::DependencyFlags::empty(),
+                    &[global_barrier],
+                    &[],
+                    &[],
+                );
+            }
+
+            // DELETED: update_post_descriptors call moved to end of main passes for efficiency
             // --- Phase 8: Instance Data Preparation ---
             // 1. Prepare and upload all instances to the InstanceBuffer
             let mut all_instances = Vec::new();
@@ -4251,9 +4252,11 @@ impl Renderer {
                 let instancing_manager = &self.instancing_manager;
                 let model_renderer = &self.model_renderer;
                 let mesh_data = &self.mesh_data;
-                let instance_indices = &self.instance_buffer_indices;
-                let joint_indices = &self.joint_buffer_indices;
-                let material_buffer_index = self.material_buffer_index;
+                let instance_buffer_addresses = &self.instance_buffer_addresses;
+                let joint_buffer_addresses = &self.joint_buffer_addresses;
+                let material_heap_address = self.material_heap_address;
+                let uniform_buffers = &self.uniform_buffers;
+
                 let frame_descriptor_set = self.descriptors.as_ref()
                     .and_then(|d| d.frame_set(frame_index))
                     .unwrap_or(vk::DescriptorSet::null());
@@ -4318,8 +4321,7 @@ impl Renderer {
                                 if let Some(data) = mesh_data.get(batch.key.mesh_id as usize) {
                                     if let Some(uploaded) = model_renderer.get(&data.name) {
                                         // Construct material push constants
-                                        let material_push = crate::renderer::model_renderer::MaterialPushConstants::new(batch.key.material_id)
-                                            .with_material_buffer_index(material_buffer_index)
+                                         let material_push = crate::renderer::model_renderer::MaterialPushConstants::new(batch.key.material_id)
                                             .with_receive_shadows(false) // Shadows don't receive shadows
                                             .with_debug_visualization(false);
                                         
@@ -4328,13 +4330,15 @@ impl Renderer {
                                             .expect("Shadow pipeline layout not initialized");
                                         
                                         // Construct draw context
-                                        let ctx = crate::renderer::model_renderer::DrawContext {
+                                         let ctx = crate::renderer::model_renderer::DrawContext {
                                             command_buffer: cmd,
                                             pipeline_layout,
                                             uploaded,
                                             material: &material_push,
-                                            instance_buffer_index: instance_indices[frame_index],
-                                            joint_buffer_index: joint_indices[frame_index],
+                                            frame_ptr: uniform_buffers[frame_index].device_address(),
+                                            instance_ptr: instance_buffer_addresses[frame_index],
+                                            material_ptr: material_heap_address,
+                                            joint_ptr: joint_buffer_addresses[frame_index],
                                         };
                                         
                                         // Push light-space matrix
@@ -4608,7 +4612,7 @@ impl Renderer {
                 projection: jittered_projection,
                 swapchain_extent,
             };
-            self.render_main_pass(&main_pass_params)?;
+            // self.render_main_pass(&main_pass_params)?;
 
             cmd_ctx.end_render_pass();
 
@@ -4671,7 +4675,7 @@ impl Renderer {
 
             // Resolve HDR target to swapchain (always needed even if tonemapping is disabled)
             log::debug!("DEBUG: About to call render_post_processing");
-            self.render_post_processing(command_buffer, image_index as usize)?;
+            // self.render_post_processing(command_buffer, image_index as usize)?;
             log::debug!("DEBUG: render_post_processing completed successfully");
 
             cmd_ctx.end()?;
@@ -5082,10 +5086,10 @@ impl Renderer {
         // Cleanup old pool if exists
         if self.post_descriptor_pool != vk::DescriptorPool::null() {
             unsafe {
-                device.destroy_descriptor_pool(self.post_descriptor_pool, None);
+                self.device.device.destroy_descriptor_pool(self.post_descriptor_pool, None);
+                self.device.device.destroy_sampler(self._post_sampler, None);
             }
         }
-
         let pool_sizes = [vk::DescriptorPoolSize {
             ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
             descriptor_count: count * 3, // Sampler, HDR input, Bloom input (3 bindings total)
@@ -5144,13 +5148,7 @@ impl Renderer {
         let sampler = if let Some(hdr) = hdr {
             hdr.sampler()
         } else {
-            // Default sampler if HDR not available (though it should be)
-            // SAFETY: `create_sampler` is called with valid default parameters.
-            unsafe {
-                self.device
-                    .device
-                    .create_sampler(&vk::SamplerCreateInfo::default(), None)?
-            }
+            self._post_sampler
         };
 
         let layout = if vsr.is_some() {

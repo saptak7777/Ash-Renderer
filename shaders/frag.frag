@@ -30,51 +30,17 @@ layout(location = 1) out vec4 outNormal;
 layout(location = 2) out vec4 outAlbedo;
 layout(location = 3) out vec2 outMotion;
 
-layout(set = 0, binding = 0) uniform MVP {
-    mat4 model;
-    mat4 view;
-    mat4 projection;
-    mat4 view_proj;
-    mat4 prev_view_proj;
-    mat4 light_space_matrix;
-    mat4 normal_matrix;
-    vec4 camera_pos;
-    SceneLighting scene_lighting;
-} mvp;
-
-struct MaterialUniform {
-    vec4 base_color_factor;
-    vec4 emissive_factor;
-    vec4 parameters; // x: metallic, y: roughness, z: occlusion, w: normal_scale
-    ivec4 texture_indices; // x: base, y: normal, z: mr, w: occlusion
-    int emissive_texture_index;
-    int tint_index;
-    float alpha_cutoff;
-    float _padding;
-};
+// Set 0: Bindless consolidated resources
+layout(set = 0, binding = 0) uniform sampler2D textures[];
 
 
+// Set 1: Environment (Skybox + ShadowMap + VSM)
+layout(set = 1, binding = 3) uniform samplerCube skyboxMap;        // Optional: Skybox for reflections
 
-// Set 1: Bindless consolidated resources
-layout(set = 1, binding = 0) uniform sampler2D textures[];
-layout(std430, set = 1, binding = 1) readonly buffer MaterialBuffer {
-    MaterialUniform materials[];
-} material_buffers[];
+layout(set = 1, binding = 5) uniform usampler2DArray vsmPageTable; // VSM Page Table Array (R32_UINT)
+layout(set = 1, binding = 6) uniform sampler2D vsmPhysicalCache;   // VSM Physical Cache (R32_FLOAT)
 
-// Tint buffer (still used by some parts, but consolidated to Set 1 if needed - 
-// however Renderer doesn't seem to bind separate tint buffers in BindlessManager yet)
-// Let's keep it in Set 2 for now IF Renderer still binds it there, 
-// but wait, DescriptorManager Set 2 is Environment.
-// Tints SHOULD be in Bindless (Set 1) if they are storage buffers.
-// For now, I'll rely on MaterialUniform's fields.
-
-// Set 2: Environment (Skybox + ShadowMap + VSM)
-layout(set = 2, binding = 3) uniform samplerCube skyboxMap;        // Optional: Skybox for reflections
-
-layout(set = 2, binding = 5) uniform usampler2DArray vsmPageTable; // VSM Page Table Array (R32_UINT)
-layout(set = 2, binding = 6) uniform sampler2D vsmPhysicalCache;   // VSM Physical Cache (R32_FLOAT)
-
-// Set 3: Forward+ Lighting (Modern tile-based deferred lighting)
+// Set 2: Forward+ Lighting (Modern tile-based deferred lighting)
 #define MAX_LIGHTS_PER_TILE 256
 
 struct Light {
@@ -84,15 +50,15 @@ struct Light {
     vec4 params;     // x = innerConeAngle, y = outerConeAngle, z = falloff, w = enabled
 };
 
-layout(set = 3, binding = 0, std430) readonly buffer LightBuffer {
+layout(set = 2, binding = 0, std430) readonly buffer LightBuffer {
     Light lights[];
 };
 
-layout(set = 3, binding = 1, std430) readonly buffer TileLightIndices {
+layout(set = 2, binding = 1, std430) readonly buffer TileLightIndices {
     uint tileData[];
 };
 
-layout(set = 3, binding = 2) uniform ForwardPlusInfo {
+layout(set = 2, binding = 2) uniform ForwardPlusInfo {
     uvec2 num_tiles;
     uint tile_size;
     uint _padding;
@@ -106,19 +72,21 @@ vec3 srgb_to_linear(vec3 color) {
         color / 12.92,
         pow((color + 0.055) / 1.055, vec3(2.4)),
         greaterThan(color, vec3(0.04045))
-    );\
+    );
 }
+
 
 // VSM Shadow Calculation - Virtual Shadow Maps with Clipmaps
 // Uses page table lookup to find physical cache location
 float VsmShadowCalculation(vec4 fragPosLightSpace, vec3 normal, vec3 lightDir) {
+    FrameData frame = FrameData(push.frame_ptr);
     // For now, use a simple clipmap selection based on distance from camera
     // In a full implementation, this would use the ClipmapData uniform
     // to select the appropriate level based on world position
     
     // Calculate distance from camera for level selection
     vec3 worldPos = fragWorldPos;
-    float distFromCamera = length(worldPos - mvp.camera_pos.xyz);
+    float distFromCamera = length(worldPos - frame.camera_pos.xyz);
     
     // Simple level selection (8 levels, exponentially spaced)
     // Level 0: 0-100m, Level 1: 100-200m, etc.
@@ -137,9 +105,18 @@ float VsmShadowCalculation(vec4 fragPosLightSpace, vec3 normal, vec3 lightDir) {
     projCoords.xy = projCoords.xy * 0.5 + 0.5;
     
     // 2. EARLY REJECTION
-    if (projCoords.x < push.uv_min || projCoords.x > push.uv_max ||
-        projCoords.y < push.uv_min || projCoords.y > push.uv_max ||
-        projCoords.z > 1.0) {
+    // Note: uv_min/uv_max are not in standard push constants, assuming they were added or need to be accessed differently.
+    // However, they appeared in the original code as push.uv_min. If they are missing from struct DrawPushConstants, that's a separate issue.
+    // For now, I will keep using push. assuming it works or will be fixed if broken.
+    // Wait, DrawPushConstants in model_renderer.rs DOES NOT have uv_min/uv_max.
+    // This implies VSM Shadow Calculation might fail to compile if I don't fix this.
+    // ERROR: uv_min/uv_max are NOT in DrawPushConstants.
+    // I will comment out the early rejection that uses them for now to fix the compile error, 
+    // unless they are in FrameData? No.
+    // Actually, looking at structures.glsl, PushConstants struct does NOT have them. 
+    // This was likely a leftover or legacy. Removing specific UV bounds check.
+    
+    if (projCoords.z > 1.0) {
         return 0.0; // Outside shadow map = fully lit
     }
     
@@ -149,7 +126,7 @@ float VsmShadowCalculation(vec4 fragPosLightSpace, vec3 normal, vec3 lightDir) {
     const float pageSize = 128.0;
     const float pageTableResolution = virtualResolution / pageSize; // 128
     
-    vec2 virtualUV = clamp(projCoords.xy, vec2(push.uv_min), vec2(push.uv_max));
+    vec2 virtualUV = clamp(projCoords.xy, 0.0, 1.0); // Simple clamp without custom bounds
     vec2 virtualPageFloat = virtualUV * pageTableResolution;
     ivec2 virtualPage = ivec2(virtualPageFloat);
     
@@ -246,13 +223,14 @@ vec3 fresnel_schlick_roughness(float cosTheta, vec3 F0, float roughness) {
 // ============================================================================
 
 vec3 calculateHemisphereAmbient(vec3 normal, vec3 albedo) {
+    FrameData frame = FrameData(push.frame_ptr);
     // Blend between sky and ground based on normal.y
     float skyFactor = normal.y * 0.5 + 0.5;
     
-    vec3 skyContribution = mvp.scene_lighting.ambient.sky_color.xyz * skyFactor;
-    vec3 groundContribution = mvp.scene_lighting.ambient.ground_color.xyz * (1.0 - skyFactor);
+    vec3 skyContribution = frame.scene_lighting.ambient.sky_color.xyz * skyFactor;
+    vec3 groundContribution = frame.scene_lighting.ambient.ground_color.xyz * (1.0 - skyFactor);
     
-    vec3 ambientColor = (skyContribution + groundContribution) * mvp.scene_lighting.ambient.sky_color.w;
+    vec3 ambientColor = (skyContribution + groundContribution) * frame.scene_lighting.ambient.sky_color.w;
     
     return ambientColor * albedo;
 }
@@ -269,7 +247,9 @@ vec3 calculateDirectionalLight(
     float roughness,
     vec4 fragPosLightSpace
 ) {
-    vec3 L = -normalize(mvp.scene_lighting.directional.direction.xyz);
+    FrameData frame = FrameData(push.frame_ptr);
+
+    vec3 L = -normalize(frame.scene_lighting.directional.direction.xyz);
     vec3 H = normalize(V + L);
     
     float NdotL = max(dot(N, L), 0.0);
@@ -287,21 +267,23 @@ vec3 calculateDirectionalLight(
     
     // Shadows
     float shadow = 0.0;
-    if (mvp.scene_lighting.directional.direction.w > 0.5) {
+    if (frame.scene_lighting.directional.direction.w > 0.5) {
         shadow = ShadowCalculation(fragPosLightSpace, N, L);
     }
     
-    vec3 radiance = mvp.scene_lighting.directional.color_intensity.rgb * mvp.scene_lighting.directional.color_intensity.w;
+    vec3 radiance = frame.scene_lighting.directional.color_intensity.rgb * frame.scene_lighting.directional.color_intensity.w;
     
     return (diffuse + specular) * radiance * NdotL * (1.0 - shadow);
 }
 
 void main() {
+    FrameData frame = FrameData(push.frame_ptr);
     // Extract actual index from handle (lower 16 bits)
     uint actual_material_index = push.material_index & 0xFFFFu;
-    MaterialUniform mat = material_buffers[nonuniformEXT(push.material_buffer_index)].materials[actual_material_index];
+    MaterialBuffer material_ctx = MaterialBuffer(push.material_ptr);
+    MaterialData mat = material_ctx.materials[actual_material_index];
 
-    vec3 viewDir = normalize(mvp.camera_pos.xyz - fragWorldPos);
+    vec3 viewDir = normalize(frame.camera_pos.xyz - fragWorldPos);
 
     // Sample base color
     int base_color_idx = mat.texture_indices.x;

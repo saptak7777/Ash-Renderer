@@ -2,7 +2,11 @@
 // Single Source of Truth for shader-side structures
 // Matches Rust definitions in src/renderer/model_renderer.rs
 
+#extension GL_EXT_buffer_reference2 : require
+#extension GL_EXT_scalar_block_layout : require
 #extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+
+// --- Basic Structs (Leaf nodes first) ---
 
 struct InstanceData {
     vec4 bounds_center;
@@ -20,33 +24,17 @@ struct InstanceData {
     uint _padding;
 };
 
-#ifndef SKIP_PUSH_CONSTANTS
-// Push Constants - Strict 160-byte block
-// Matches DrawPushConstants in Rust
-layout(push_constant) uniform PushConstants {
-    // Vertex stage (0-127)
-    layout(offset = 0) mat4 model;
-    layout(offset = 64) uint joint_offset;
-    layout(offset = 68) uint use_instancing;
-    layout(offset = 72) uint instance_buffer_index;
-    layout(offset = 76) uint joint_buffer_index;
-    layout(offset = 80) uint64_t vertex_heap_ptr; // BDA pointer to vertex data
-    layout(offset = 88) uint is_skinned;
-    layout(offset = 92) uint _vertex_padding[9]; // Pad to 128 bytes
+struct MaterialData {
+    vec4 base_color_factor;
+    vec4 emissive_factor;
+    vec4 parameters; // x: metallic, y: roughness, z: occlusion strength, w: normal scale
+    ivec4 texture_indices; // x: base_color, y: normal, z: metallic_roughness, w: occlusion
+    int emissive_texture_index;
+    int tint_index;
+    float alpha_cutoff;
+    float _padding;
+};
 
-    // Fragment stage (128-159)
-    layout(offset = 128) uint material_index;
-    layout(offset = 132) uint debug_path; // 0: None, 1: GPU-Driven, 2: Legacy
-    layout(offset = 136) uint flags; // bit 0: receive_shadows
-    layout(offset = 140) uint material_buffer_index;
-    layout(offset = 144) uint debug_visualization_enabled;
-    layout(offset = 148) float uv_min;
-    layout(offset = 152) float uv_max;
-    layout(offset = 156) float texel_size;
-} push;
-#endif
-
-// RAGE Hemisphere Ambient
 struct HemisphereAmbient {
     vec4 sky_color;       // xyz = color, w = intensity
     vec4 ground_color;    // xyz = color, w = unused
@@ -65,3 +53,56 @@ struct SceneLighting {
     uint _pad2;
     uint _pad3;
 };
+
+// --- BDA Buffer References (Require structs above) ---
+
+layout(buffer_reference, scalar) readonly buffer FrameData {
+    mat4 model;
+    mat4 view;
+    mat4 projection;
+    mat4 view_proj;
+    mat4 prev_view_proj;
+    mat4 light_space_matrix;
+    mat4 normal_matrix;
+    vec4 camera_pos;
+    SceneLighting scene_lighting;
+};
+
+layout(buffer_reference, scalar) readonly buffer InstanceBuffer {
+    InstanceData instances[];
+};
+
+layout(buffer_reference, scalar) readonly buffer MaterialBuffer {
+    MaterialData materials[];
+};
+
+layout(buffer_reference, scalar) readonly buffer JointBuffer {
+    mat4 joints[];
+};
+
+// --- Push Constants ---
+
+#ifndef SKIP_PUSH_CONSTANTS
+// Modern Push Constants - Full Bindless/BDA
+layout(push_constant) uniform PushConstants {
+    // Pointer stage (0-47)
+    uint64_t frame_ptr;
+    uint64_t vertex_ptr;
+    uint64_t instance_ptr;
+    uint64_t material_ptr;
+    uint64_t joint_ptr;
+    uint64_t _ptr_padding;
+
+    // Control stage (48-111)
+    layout(offset = 48) mat4 model; 
+    layout(offset = 112) uint joint_offset;
+    layout(offset = 116) uint use_instancing;
+    layout(offset = 120) uint is_skinned;
+    layout(offset = 124) uint material_index;
+
+    // Fragment/Debug stage (128-159)
+    layout(offset = 128) uint flags;
+    layout(offset = 132) uint debug_path;
+    layout(offset = 136) uint debug_visualization_enabled;
+} push;
+#endif

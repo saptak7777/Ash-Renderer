@@ -85,6 +85,12 @@ impl JointMatricesBuffer {
     pub fn capacity(&self) -> usize {
         self.capacity
     }
+
+    /// Get the GPU device address for BDA pulling
+    pub fn device_address(&self) -> u64 {
+        let info = vk::BufferDeviceAddressInfo::default().buffer(self.buffer);
+        unsafe { self.allocator.device.get_buffer_device_address(&info) }
+    }
 }
 
 impl Drop for JointMatricesBuffer {

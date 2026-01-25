@@ -139,9 +139,9 @@ impl IndirectDrawPass {
         };
 
         // Object buffer (CPU writable)
-        let object_info = vk::BufferCreateInfo::default()
-            .size(object_size)
-            .usage(vk::BufferUsageFlags::STORAGE_BUFFER);
+        let object_info = vk::BufferCreateInfo::default().size(object_size).usage(
+            vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
+        );
         let (object_buffer, object_alloc) = allocator
             .create_buffer(&object_info, &buffer_alloc_info)
             .map_err(|e| crate::AshError::VulkanError(format!("Object buffer: {e:?}")))?;
@@ -150,9 +150,9 @@ impl IndirectDrawPass {
         self.object_buffer_size = object_size;
 
         // Template buffer (CPU writable)
-        let template_info = vk::BufferCreateInfo::default()
-            .size(command_size)
-            .usage(vk::BufferUsageFlags::STORAGE_BUFFER);
+        let template_info = vk::BufferCreateInfo::default().size(command_size).usage(
+            vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
+        );
         let (template_buffer, template_alloc) = allocator
             .create_buffer(&template_info, &buffer_alloc_info)
             .map_err(|e| crate::AshError::VulkanError(format!("Template buffer: {e:?}")))?;
@@ -160,9 +160,11 @@ impl IndirectDrawPass {
         self.template_allocation = Some(template_alloc);
 
         // Indirect buffer (GPU only, indirect draw source)
-        let indirect_info = vk::BufferCreateInfo::default()
-            .size(command_size)
-            .usage(vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::INDIRECT_BUFFER);
+        let indirect_info = vk::BufferCreateInfo::default().size(command_size).usage(
+            vk::BufferUsageFlags::STORAGE_BUFFER
+                | vk::BufferUsageFlags::INDIRECT_BUFFER
+                | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
+        );
         let (indirect_buffer, indirect_alloc) = allocator
             .create_buffer(&indirect_info, &device_alloc_info)
             .map_err(|e| crate::AshError::VulkanError(format!("Indirect buffer: {e:?}")))?;
@@ -170,9 +172,9 @@ impl IndirectDrawPass {
         self.indirect_allocation = Some(indirect_alloc);
 
         // Visibility buffer (GPU only)
-        let visibility_info = vk::BufferCreateInfo::default()
-            .size(visibility_size)
-            .usage(vk::BufferUsageFlags::STORAGE_BUFFER);
+        let visibility_info = vk::BufferCreateInfo::default().size(visibility_size).usage(
+            vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
+        );
         let (visibility_buffer, visibility_alloc) = allocator
             .create_buffer(&visibility_info, &device_alloc_info)
             .map_err(|e| crate::AshError::VulkanError(format!("Visibility buffer: {e:?}")))?;
@@ -180,9 +182,11 @@ impl IndirectDrawPass {
         self.visibility_allocation = Some(visibility_alloc);
 
         // Count buffer (GPU readback)
-        let count_info = vk::BufferCreateInfo::default()
-            .size(count_size)
-            .usage(vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_DST);
+        let count_info = vk::BufferCreateInfo::default().size(count_size).usage(
+            vk::BufferUsageFlags::STORAGE_BUFFER
+                | vk::BufferUsageFlags::TRANSFER_DST
+                | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
+        );
         let (count_buffer, count_alloc) = allocator
             .create_buffer(&count_info, &buffer_alloc_info)
             .map_err(|e| crate::AshError::VulkanError(format!("Count buffer: {e:?}")))?;
@@ -600,6 +604,12 @@ impl IndirectDrawPass {
 
     pub fn object_buffer_index(&self) -> Option<u32> {
         self.object_buffer_index
+    }
+
+    /// Get object buffer device address for BDA pulling
+    pub fn object_buffer_address(&self) -> u64 {
+        let info = vk::BufferDeviceAddressInfo::default().buffer(self.object_buffer);
+        unsafe { self.device.get_buffer_device_address(&info) }
     }
 
     /// Get count buffer for indirect count

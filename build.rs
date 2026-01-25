@@ -112,6 +112,8 @@ fn compile_shaders() {
             "comp",
             &[],
         ),
+        ("shaders/skybox.vert", "skybox.vert.spv", "vert", &[]),
+        ("shaders/skybox.frag", "skybox.frag.spv", "frag", &[]),
     ];
 
     for (input, output, kind, defines) in shaders {
@@ -156,13 +158,12 @@ fn compile_shaders() {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            println!(
-                "cargo:warning=Failed to compile shader {input}: exit code {:?}",
-                output.status.code()
+            panic!(
+                "SHADER COMPILATION FAILED:\nFile: {}\nExit Code: {:?}\nError: {}",
+                input,
+                output.status.code(),
+                stderr
             );
-            for line in stderr.lines() {
-                println!("cargo:warning={line}");
-            }
         }
     }
 }
