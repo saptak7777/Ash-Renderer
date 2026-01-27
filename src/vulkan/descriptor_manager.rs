@@ -46,6 +46,12 @@ impl DescriptorManager {
         // 6: VSM Physical Cache
         let environment_layout = DescriptorSetLayoutBuilder::new()
             .add_binding(
+                3, // skyboxMap
+                vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+                vk::ShaderStageFlags::FRAGMENT,
+                1,
+            )
+            .add_binding(
                 5, // VSM Page Table
                 vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
                 vk::ShaderStageFlags::FRAGMENT,
@@ -197,10 +203,19 @@ impl DescriptorManager {
         frame_index: usize,
         default_uint_2d: &vk::DescriptorImageInfo, // R32_UINT for VSM page table
         default_2d: &vk::DescriptorImageInfo,
+        default_cube: &vk::DescriptorImageInfo,
     ) -> Result<()> {
         let descriptor = self.environment_sets.get(frame_index).ok_or_else(|| {
             AshError::VulkanError("Environment descriptor set index out of bounds".into())
         })?;
+
+        // 3: Skybox Map
+        descriptor.update_image_at(
+            3,
+            0,
+            *default_cube,
+            vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+        )?;
 
         // 4: Shadow Map - REMOVED
 

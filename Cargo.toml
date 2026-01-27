@@ -1,6 +1,6 @@
 [package]
 name = "ash_renderer"
-version = "0.4.99"
+version = "0.5.25"
 edition = "2021"
 authors = ["Saptak Santra"]
 license = "Apache-2.0"
@@ -24,7 +24,7 @@ shaderc = { version = "0.10.1", optional = true }
 spirv-reflect = { version = "0.2", optional = true }
 
 # Math
-glam = { version = "0.30", features = ["bytemuck"] }
+glam = { version = "0.31.0", features = ["bytemuck"] }
 
 # Memory
 bytemuck = { version = "1.14", features = ["derive"] }

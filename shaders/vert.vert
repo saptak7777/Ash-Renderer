@@ -16,53 +16,42 @@ layout(location = 3) sample out vec3 fragWorldPos;
 layout(location = 4) out vec4 fragPosLightSpace;
 layout(location = 5) out vec4 fragTangent;
 layout(location = 6) out vec2 motionVector;
+layout(location = 7) flat out uint fragInstanceIndex;
 
 void main() {
     // Access Frame Data via BDA
     FrameData frame = FrameData(push.frame_ptr);
     
+    mat4 model = push.model;
+    int vertex_offset = 0;
+    
+    // Modern BDA Instancing
+    if (push.use_instancing == 1 && push.instance_ptr != 0) {
+        InstanceBuffer instance_ctx = InstanceBuffer(push.instance_ptr);
+        // gl_InstanceIndex correctly accounts for firstInstance in indirect draws
+        InstanceData instance = instance_ctx.instances[gl_InstanceIndex];
+        model = instance.model;
+        vertex_offset = instance.vertex_offset;
+    }
+
     // BDA Vertex Pulling: Load vertex data from global vertex heap
-    VertexBuffer vertex = load_vertex(push.vertex_ptr, gl_VertexIndex);
+    VertexBuffer vertex = load_vertex(push.vertex_ptr, gl_VertexIndex + vertex_offset);
     
-    vec3 inPosition = vertex.position;
-    vec3 inNormal = vertex.normal;
-    vec2 inUV = vertex.uv;
-    vec3 inColor = vertex.color;
-    vec4 inTangent = vertex.tangent;
-
-    mat4 modelMatrix;
-    if (push.use_instancing != 0) {
-        InstanceBuffer instance_buffer = InstanceBuffer(push.instance_ptr);
-        modelMatrix = instance_buffer.instances[gl_InstanceIndex].model;
-    } else {
-        modelMatrix = push.model;
-    }
-
-    vec4 worldPosition = modelMatrix * vec4(inPosition, 1.0);
+    // Transform position to world space
+    vec4 worldPosition = model * vec4(vertex.position, 1.0);
+    
+    // Calculate world-space normal
+    vec3 worldNormal = normalize(mat3(model) * vertex.normal);
+    
+    // Output to clip space
     gl_Position = frame.view_proj * worldPosition;
-
-    fragColor = inColor;
-    if (push.use_instancing != 0) {
-        InstanceBuffer instance_buffer = InstanceBuffer(push.instance_ptr);
-        fragColor *= instance_buffer.instances[gl_InstanceIndex].color.rgb;
-    }
-    fragUV = inUV;
     
-    mat3 normalMat;
-    if (push.use_instancing != 0) {
-        // PER-INSTANCE NORMAL MATRIX: Calculate from instance model matrix to fix lighting on rotated objects
-        normalMat = transpose(inverse(mat3(modelMatrix)));
-    } else {
-        normalMat = mat3(frame.normal_matrix);
-    }
-    
-    fragNormal = normalize(normalMat * inNormal);
-    fragTangent = vec4(normalize(normalMat * inTangent.xyz), inTangent.w);
-    
+    // Pass through to fragment shader
+    fragColor = vertex.color;
+    fragUV = vertex.uv;
+    fragNormal = worldNormal;
     fragWorldPos = worldPosition.xyz;
-    fragPosLightSpace = frame.light_space_matrix * worldPosition;
-
-    vec4 currentClip = frame.view_proj * worldPosition;
-    vec4 prevClip = frame.prev_view_proj * worldPosition;
-    motionVector = (currentClip.xy / currentClip.w - prevClip.xy / prevClip.w) * 0.5;
+    fragTangent = vec4(mat3(push.model) * vertex.tangent.xyz, vertex.tangent.w);
+    motionVector = vec2(0.0);
+    fragInstanceIndex = gl_InstanceIndex;
 }

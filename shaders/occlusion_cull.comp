@@ -1,81 +1,51 @@
+// Output: Current mip level
 #version 450
 #extension GL_EXT_nonuniform_qualifier : enable
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_buffer_reference2 : require
+#extension GL_EXT_scalar_block_layout : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
 
-//! GPU Occlusion Culling Shader - FUNCTIONAL IMPLEMENTATION
+//! GPU Occlusion Culling Shader - FULL BDA IMPLEMENTATION
 //!
 //! Tests object bounding boxes against the Hi-Z pyramid and frustum planes.
 //! Generates indirect draw commands for visible objects.
 
 layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 
-// ============================================================================
-// STRUCTURES
-// ============================================================================
-
-struct BoundingBox {
-    vec4 center;   // xyz = center, w = sphere mode flag
-    vec4 extents;  // xyz = half-sizes, w = padding
-};
-
-struct ObjectData {
-    BoundingBox bounds;
-    mat4 model;
-    uint drawIndex;
-    uint firstIndex;
-    uint indexCount;
-    int vertexOffset;
-    vec4 color;
-    vec4 custom;
-    uint parentIndex;
-    float errorMetric;
-    uint flags;
-    uint _padding;
-};
-
-struct DrawCommand {
-    uint indexCount;
-    uint instanceCount;
-    uint firstIndex;
-    int vertexOffset;
-    uint firstInstance;
-};
+// Define this to prevent structures.glsl from defining the standard PushConstants
+// We need custom push constants for this specific compute shader
+#define SKIP_PUSH_CONSTANTS
+#include "include/structures.glsl"
 
 // ============================================================================
-// DESCRIPTOR SETS (Aligned with IndirectDrawPass.rs)
+// DESCRIPTOR SETS
 // ============================================================================
 
 // Set 0: Indirect Draw Pass Resources
 layout(set = 0, binding = 1) uniform sampler2D hizPyramid;
-layout(std430, set = 0, binding = 2) readonly buffer DrawTemplates {
-    DrawCommand templates[];
-};
 layout(std430, set = 0, binding = 3) writeonly buffer VisibilityFlags {
     uint visibility[];
 };
 layout(std430, set = 0, binding = 4) writeonly buffer IndirectCommands {
-    DrawCommand commands[];
+    IndirectDrawCommand commands[];
 };
 layout(std430, set = 0, binding = 5) buffer VisibleCount {
     uint count;
 };
 
-// Set 1: Bindless Resources (Instance/Object Data)
-layout(std430, set = 1, binding = 2) readonly buffer ObjectBuffers {
-    ObjectData objects[];
-} object_buffers[];
-
 // ============================================================================
 // PUSH CONSTANTS
 // ============================================================================
 
-layout(push_constant) uniform PushConstants {
+layout(push_constant) uniform CullingPushConstants {
     mat4 viewProj;
     vec4 screenParams;  // width, height, 1/width, 1/height
     uint objectCount;
     uint hizLevels;
     uint baseIndex;
     uint indirectStart;
-    uint objectBufferIndex;
+    uint64_t objectBufferPtr; // BDA Pointer to object data
 } pc;
 
 // ============================================================================
@@ -170,7 +140,7 @@ bool occlusionCull(vec3 center, vec3 extents, mat4 vp) {
         
         minScreen = min(minScreen, screen);
         maxScreen = max(maxScreen, screen);
-        // REVERSE-Z: Track maximum (nearest) depth
+        // REVERSE-Z: Track maximum (nearest) depth - largest Z value is closest to 1.0 (Near)
         maxZ = max(maxZ, ndc.z);
     }
     
@@ -187,11 +157,12 @@ bool occlusionCull(vec3 center, vec3 extents, mat4 vp) {
     vec2 sampleUV = clamp((minScreen + maxScreen) * 0.5, vec2(0.0), vec2(1.0));
     
     // Sample Hi-Z depth
+    // In Reverse-Z High-Z generation, we store the MIN depth (furthest/closest to 0.0)
     float hizDepth = textureLod(hizPyramid, sampleUV, mipLevel).r;
     
-    // REVERSE-Z: Object is occluded if its nearest point (maxZ) is LESS than Hi-Z depth
-    // In Reverse-Z, larger values are closer to camera
-    // If maxZ < hizDepth, the object is entirely behind the occluder
+    // REVERSE-Z: Object is occluded if its nearest point (maxZ) is SMALLER than Hi-Z depth
+    // This means the object's closest point is "behind" (further away/smaller Z) the furthest visible surface.
+    // Visible if ObjectClosest (MaxZ) >= HiZ (Furthest Occluder).
     return maxZ < hizDepth;
 }
 
@@ -202,27 +173,32 @@ bool occlusionCull(vec3 center, vec3 extents, mat4 vp) {
 void main() {
     uint objectIdx = gl_GlobalInvocationID.x;
     
+    // SAFETY: BDA null pointer check
+    if (pc.objectBufferPtr == 0) {
+        return;
+    }
+    
     if (objectIdx >= pc.objectCount) {
         return;
     }
     
-    // Fetch object data from bindless buffer array
-    ObjectData obj = object_buffers[nonuniformEXT(pc.objectBufferIndex)].objects[pc.baseIndex + objectIdx];
+    // Fetch object data via BDA Pointer
+    InstanceData obj = ObjectBuffer(pc.objectBufferPtr).objects[pc.baseIndex + objectIdx];
     
     // Transform to world space
-    vec3 worldCenter = (obj.model * vec4(obj.bounds.center.xyz, 1.0)).xyz;
+    vec3 worldCenter = (obj.model * vec4(obj.bounds_center.xyz, 1.0)).xyz;
     vec3 worldExtents;
     float worldRadius = 0.0;
     
-    bool isSphere = obj.bounds.center.w > 0.5;
+    bool isSphere = obj.bounds_center.w > 0.5;
     if (isSphere) {
         float scale = max(length(obj.model[0].xyz), max(length(obj.model[1].xyz), length(obj.model[2].xyz)));
         // In Sphere mode, extents.x is Radius
-        worldRadius = obj.bounds.extents.x * scale;
+        worldRadius = obj.bounds_extents.x * scale;
         // Construct AABB for Occlusion Culling (which expects box)
         worldExtents = vec3(worldRadius);
     } else {
-        worldExtents = obj.bounds.extents.xyz * vec3(
+        worldExtents = obj.bounds_extents.xyz * vec3(
             length(obj.model[0].xyz),
             length(obj.model[1].xyz),
             length(obj.model[2].xyz)
@@ -271,12 +247,11 @@ void main() {
     // Condition: IsParentErrorHigh? && IsMyErrorLow?
     
     float parentError = 1000000.0; // Infinity for root/standard meshes
-    if (obj.parentIndex != 0xFFFFFFFF) {
-        // Fetch parent error from the same buffer
-        // Note: usage of nonuniformEXT might be needed if buffer index varies, 
-        // but here we are in the same object array.
-        ObjectData parent = object_buffers[nonuniformEXT(pc.objectBufferIndex)].objects[obj.parentIndex];
-        parentError = parent.errorMetric;
+    // SAFETY: BDA bounds check required! Check against total object count.
+    if (obj.parent_index != 0xFFFFFFFF && obj.parent_index < pc.objectCount) {
+        // Fetch parent error from the same buffer (via BDA)
+        InstanceData parent = ObjectBuffer(pc.objectBufferPtr).objects[obj.parent_index];
+        parentError = parent.error_metric;
     }
 
     // Normalized error threshold (increases with distance)
@@ -285,7 +260,7 @@ void main() {
     float dist = clipPos.w;
     float errorThreshold = dist * 0.002; // Tweak this for transition distance
     
-    bool isSelected = (obj.errorMetric <= errorThreshold) && (parentError > errorThreshold);
+    bool isSelected = (obj.error_metric <= errorThreshold) && (parentError > errorThreshold);
     
     if (!isSelected) {
         visibility[objectIdx] = 0;
@@ -306,15 +281,12 @@ void main() {
     // Atomic increment visible count
     uint visibleIndex = atomicAdd(count, 1);
     
-    // Fetch template command
-    DrawCommand drawTemplate = templates[obj.drawIndex];
-    
-    // Build indirect command
-    DrawCommand cmd;
-    cmd.indexCount = (obj.indexCount > 0) ? obj.indexCount : drawTemplate.indexCount;
+    // Build indirect command directly from InstanceData
+    IndirectDrawCommand cmd;
+    cmd.indexCount = obj.index_count;
     cmd.instanceCount = 1;
-    cmd.firstIndex = (obj.firstIndex > 0) ? obj.firstIndex : drawTemplate.firstIndex;
-    cmd.vertexOffset = (obj.vertexOffset != 0) ? obj.vertexOffset : drawTemplate.vertexOffset;
+    cmd.firstIndex = obj.first_index;
+    cmd.vertexOffset = 0; // Fixed: Command offset must be 0 if shader adds it manually
     cmd.firstInstance = pc.baseIndex + objectIdx;
     
     // Write to indirect buffer

@@ -189,12 +189,16 @@ impl UniformBuffer {
                     .size(size)
                     .usage(
                         vk::BufferUsageFlags::UNIFORM_BUFFER
+                            | vk::BufferUsageFlags::STORAGE_BUFFER
                             | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
                     )
                     .sharing_mode(vk::SharingMode::EXCLUSIVE),
                 &vk_mem::AllocationCreateInfo {
-                    usage: vk_mem::MemoryUsage::AutoPreferHost,
-                    flags: vk_mem::AllocationCreateFlags::HOST_ACCESS_SEQUENTIAL_WRITE,
+                    // CRITICAL FIX: Use AutoPreferDevice for BDA support on Intel Arc
+                    // Intel Arc doesn't support BDA on host-visible memory for uniform buffers
+                    usage: vk_mem::MemoryUsage::AutoPreferDevice,
+                    flags: vk_mem::AllocationCreateFlags::HOST_ACCESS_SEQUENTIAL_WRITE
+                        | vk_mem::AllocationCreateFlags::MAPPED,
                     ..Default::default()
                 },
             )
@@ -325,6 +329,7 @@ impl MaterialBuffer {
                     .size(size)
                     .usage(
                         vk::BufferUsageFlags::UNIFORM_BUFFER
+                            | vk::BufferUsageFlags::STORAGE_BUFFER
                             | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
                     )
                     .sharing_mode(vk::SharingMode::EXCLUSIVE),

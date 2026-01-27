@@ -43,7 +43,8 @@ void main() {
     
     // REVERSE-Z: Take MINIMUM depth (furthest from camera = most conservative)
     // In Reverse-Z: 1.0 = near plane, 0.0 = far plane
-    // We want the furthest point (smallest value) to ensure conservative occlusion
+    // We want the furthest point (smallest value, closest to 0.0) to ensure conservative occlusion.
+    // This preserves "holes" (0.0) so we can see through them.
     float minDepth = min(min(depths.x, depths.y), min(depths.z, depths.w));
     
     imageStore(outputMip, ivec2(pos), vec4(minDepth, 0.0, 0.0, 0.0));

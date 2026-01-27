@@ -15,7 +15,7 @@ use crate::{
         indirect_draw::IndirectDrawPass,
         instancing::{BatchKey, InstanceData, InstancingManager},
         model_renderer::{
-            DrawContext, MaterialPushConstants, ModelRenderer, UploadedMesh, DRAW_PUSH_FRAGMENT_BYTES,
+            MaterialPushConstants, ModelRenderer, UploadedMesh, DRAW_PUSH_FRAGMENT_BYTES,
             DRAW_PUSH_VERTEX_BYTES,
         },
         motion_pass::MotionVectorPass,
@@ -144,10 +144,6 @@ pub struct RenderCommand {
     pub material_handle: MaterialHandle,
     /// Transform matrix for positioning the mesh in world space
     pub transform: Mat4,
-    /// Whether this is a skinned mesh
-    pub is_skinned: bool,
-    /// Offset into the joint matrices SSBO (for skeletal animation)
-    pub joint_offset: u32,
     /// Whether this object should cast shadows
     pub cast_shadows: bool,
     /// Whether this object should receive shadows
@@ -164,8 +160,6 @@ impl Default for RenderCommand {
             mesh_handle: 0,
             material_handle: MaterialHandle::null(),
             transform: Mat4::IDENTITY,
-            is_skinned: false,
-            joint_offset: 0,
             cast_shadows: true,
             receive_shadows: true,
             is_transparent: false,
@@ -176,9 +170,9 @@ impl Default for RenderCommand {
 
 struct RendererResources {
     uniform_buffers: Vec<UniformBuffer>,
-    joint_matrices_buffer: Vec<resources::JointMatricesBuffer>,
     default_texture: Texture,
     black_texture: Texture,
+    white_texture: Texture,
     default_skybox: Texture, // Procedural skybox
     default_cube_black: Texture,
     vsm_default_uint: Texture,
@@ -373,7 +367,8 @@ impl Default for RendererConfig {
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct SkyboxPushConstants {
-    _padding: [u32; 20],
+    frame_ptr: u64,
+    _padding: [u32; 18],
     vertex_heap_ptr: u64,
 }
 
@@ -390,6 +385,7 @@ pub struct Renderer {
     prev_view_proj: Mat4,
     _default_texture: Texture,
     _black_texture: Texture,
+    _white_texture: Texture,
     _default_skybox: Texture, // Procedural skybox fallback
     _default_cube_black: Texture, // Keep alive
     _vsm_default_uint: Texture, // Keep alive (VSM bind default)
@@ -407,7 +403,6 @@ pub struct Renderer {
     
     // Skybox Rendering
     skybox_pipeline: Option<vulkan::Pipeline>,
-    // skybox_pipeline_id: Option<ResourceId>,
     skybox_pipeline_layout: Option<vulkan::PipelineLayout>,
     // skybox_pipeline_layout_id: Option<ResourceId>,
     skybox_mesh: Option<UploadedMesh>,
@@ -471,7 +466,7 @@ pub struct Renderer {
     gbuffer: Option<GBuffer>,
     // Pipeline optimization
     culling_manager: CullingManager,
-    use_gpu_driven: bool,
+    _use_gpu_driven: bool,
     // Lighting
     scene_lighting: crate::renderer::features::SceneLighting,
     point_lights: Vec<PointLight>,
@@ -484,11 +479,6 @@ pub struct Renderer {
     _post_sampler: vk::Sampler,
     post_pipeline: Option<vulkan::Pipeline>,
     post_framebuffers: Vec<vulkan::Framebuffer>,
-    // GPU skinning
-    joint_matrices_buffer: Vec<resources::JointMatricesBuffer>,
-    max_bones: usize,
-    skinned_pipeline: Option<vulkan::Pipeline>,
-    skinned_pipeline_id: Option<ResourceId>,
     vram_budget: vram_budget::VramBudget,
     texture_compression: bool,
     instancing_manager: InstancingManager,
@@ -512,7 +502,6 @@ pub struct Renderer {
 
     // BDA Addresses
     pub instance_buffer_addresses: Vec<u64>,
-    pub joint_buffer_addresses: Vec<u64>,
     pub material_heap_address: u64,
 
     // Core foundation - dropped in declaration order (Top to Bottom)
@@ -538,8 +527,6 @@ pub struct DrawItem {
     pub texture_flags: TexturePresenceFlags,
     pub texture_indices: [i32; 4], // base, normal, mr, occ
     pub emissive_index: i32,
-    pub is_skinned: bool,
-    pub joint_offset: u32,
     pub alpha_cutoff: f32,
     pub cast_shadows: bool,
     pub receive_shadows: bool,
@@ -642,18 +629,24 @@ impl Renderer {
 
     /// Initializes the renderer.
     pub fn new<S: vulkan::SurfaceProvider>(surface_provider: &S) -> Result<Self> {
+        log::info!("Renderer::new: Starting initialization");
         unsafe {
+            log::info!("Creating VulkanInstance");
             let instance = Arc::new(vulkan::VulkanInstance::new(
                 surface_provider,
                 cfg!(debug_assertions),
             )?);
+            log::info!("Creating VulkanDevice");
             let device =
                 vulkan::VulkanDevice::new(Arc::clone(&instance), surface_provider.is_headless())?;
+            log::info!("Creating Allocator");
             let alloc = Arc::new(vulkan::Allocator::new(&device)?);
+            log::info!("Creating ResourceRegistry");
             let resources = Arc::new(ResourceRegistry::new(Arc::clone(&device.device)));
             let dev_mem_props = device.memory_properties;
             let vram_budget = vram_budget::VramBudget::new(&dev_mem_props);
 
+            log::info!("Initializing Features");
             let mut features = FeatureManager::new();
             features.set_device(Arc::clone(&device.device));
             features.add_feature(AutoRotateFeature::new());
@@ -661,9 +654,10 @@ impl Renderer {
 
             // VSM replaces legacy shadow system
             // Initialize Pipeline Cache
+            log::info!("Creating PipelineCache");
             let pipeline_cache = PipelineCache::new(Arc::clone(&device.device))?;
             let renderer_config = RendererConfig::default();
-            let texture_compression = renderer_config.texture_compression;
+            let _texture_compression = renderer_config.texture_compression;
             let mut pipeline_cfg = renderer_config.pipeline.clone();
             
             // Hardware fallback for sample shading
@@ -672,10 +666,13 @@ impl Renderer {
                 pipeline_cfg.sample_shading = SampleShadingQuality::Disabled;
             }
 
+            log::info!("Creating BufferPool");
             let buffer_pool = Arc::new(BufferPool::new(Arc::clone(&alloc)));
             let (width, height) = surface_provider.physical_size();
             let extent = vk::Extent2D { width, height };
+            log::info!("Creating SwapchainData for extent {}x{}", width, height);
             let swapchain_data = Self::create_swapchain_data(&device, &alloc, &resources, extent)?;
+            log::info!("Creating FrameData");
             let frame_data = Self::create_frame_resources(&device, &resources, &swapchain_data)?;
 
             // Unpack for use in the rest of initialization
@@ -697,7 +694,9 @@ impl Renderer {
                 frame_sync_ids,
                 worker_count,
             } = frame_data;
+            log::info!("Frame resources created successfully");
 
+            log::info!("Initializing GeometryBuffer and ModelRenderer");
             let geometry_buffer = Arc::new(resources::DualHeapGeometryBuffer::new(
                 Arc::clone(&device.device),
                 Arc::clone(&alloc),
@@ -708,27 +707,43 @@ impl Renderer {
             let model_renderer =
                 ModelRenderer::new(Arc::clone(&alloc), Arc::clone(&device.device), Arc::clone(&geometry_buffer));
 
+            log::info!("Initializing DescriptorManager and BindlessManager");
             let mut descriptor_manager = vulkan::DescriptorManager::new(
                 Arc::clone(&device.device),
                 framebuffers.len() as u32,
-                None,
+                Some(Arc::clone(&resources)),
             )?;
 
             let aspect = swapchain.extent.width as f32 / swapchain.extent.height as f32;
-            let max_bones = 1024;
+
+            let mut bindless_manager = crate::vulkan::BindlessManager::new(
+                Arc::clone(&device.device),
+                descriptor_manager.allocator_mut(),
+                crate::vulkan::BindlessManager::DEFAULT_MAX_TEXTURES,
+            )?;
+
+            log::info!("Initializing Forward+ Integration");
+            let mut forward_plus = ForwardPlusIntegration::new(
+                Arc::clone(&device.device),
+                &alloc.vma,
+                frame_syncs.len() as u32,
+            )?;
+            forward_plus.init(&alloc.vma);
+            forward_plus.on_resize(swapchain.extent.width, swapchain.extent.height);
+            
+            log::info!("Initializing Renderer Resources (Uniforms, Textures, Materials)");
             let renderer_resources = Self::init_resources(
                 &alloc,
                 &device,
                 command_manager.upload_command_pool_handle(),
                 framebuffers.len(),
                 aspect,
-                max_bones,
             )?;
             let RendererResources {
                 uniform_buffers,
-                joint_matrices_buffer,
                 default_texture,
                 black_texture,
+                white_texture,
                 default_skybox,
                 default_cube_black,
                 vsm_default_uint,
@@ -751,20 +766,21 @@ impl Renderer {
                     sampler: vsm_default_array.sampler(), // NEAREST
                 };
 
+                let skybox_info = vk::DescriptorImageInfo {
+                    image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                    image_view: default_skybox.view(),
+                    sampler: default_skybox.sampler(),
+                };
+
                 for i in 0..descriptor_manager.environment_set_count() {
                     descriptor_manager.bind_defaults(
                         i,
                         &vsm_uint_info,
                         &tex_2d_info,
+                        &skybox_info,
                     )?;
                 }
             }
-
-            let mut bindless_manager = crate::vulkan::BindlessManager::new(
-                Arc::clone(&device.device),
-                descriptor_manager.allocator_mut(),
-                crate::vulkan::BindlessManager::DEFAULT_MAX_TEXTURES,
-            )?;
 
             let buffer_size =
                 std::mem::size_of::<crate::renderer::resources::uniform::MvpMatrices>()
@@ -784,38 +800,25 @@ impl Renderer {
                 instance_buffer_addresses.push(buffer.device_address());
             }
 
-            let mut joint_buffer_addresses = Vec::with_capacity(joint_matrices_buffer.len());
-            for buffer in &joint_matrices_buffer {
-                joint_buffer_addresses.push(buffer.device_address());
-            }
-
             // Register default texture as a fallback for all slots.
             let default_tex_index = bindless_manager
                 .add_sampled_image(default_texture.view(), default_texture.sampler())
                 .unwrap_or(0); // Fallback to index 0 if registration fails.
             log::info!("Registered default texture at bindless index {default_tex_index}");
 
-            // Forward+ lighting integration
-            let mut forward_plus = ForwardPlusIntegration::new(
-                Arc::clone(&device.device),
-                &alloc.vma,
-                frame_syncs.len() as u32,
-            )?;
-            forward_plus.init(&alloc.vma);
-            forward_plus.on_resize(swapchain.extent.width, swapchain.extent.height);
-            
-
-
+            log::info!("Configuring Pipeline Set Layouts");
             let set_layouts = [
-                bindless_manager.descriptor_set_layout(), // Set 0: Bindless Textures
-                descriptor_manager.environment_layout(), // Set 1: Global Environment (Shadow)
-                forward_plus.layout(),                    // Set 2: Forward+ lights
+                descriptor_manager.frame_layout(),        // Set 0: Frame Data
+                bindless_manager.descriptor_set_layout(), // Set 1: Bindless Textures
+                descriptor_manager.environment_layout(), // Set 2: Global Environment (Shadow)
+                forward_plus.layout(),                    // Set 3: Forward+ lights
             ];
             
             // DIAGNOSTIC: Log layout handles for verification
             log::debug!("Main Pipeline Set Layouts: Bindless={:?}, Env={:?}, F+={:?}", 
                 set_layouts[0], set_layouts[1], set_layouts[2]);
 
+            log::info!("Creating Main Graphics Pipeline");
             let (pipeline_layout, pipeline_layout_id, pipeline, pipeline_id) =
                 Self::create_main_pipeline(
                     &device,
@@ -851,8 +854,8 @@ impl Renderer {
                 
                 // Use the same descriptor set layouts as the main pipeline
                 let descriptor_layouts = vec![
-                    bindless_manager.descriptor_set_layout(),
-                    descriptor_manager.environment_layout(),
+                    descriptor_manager.frame_layout(),        // Set 0
+                    bindless_manager.descriptor_set_layout(), // Set 1
                 ];
 
                 // Create the shadow rendering pipeline
@@ -972,6 +975,7 @@ impl Renderer {
 
             let swapchain_extent = swapchain.extent;
 
+            log::info!("Initializing GBuffer");
             let gbuffer = GBuffer::new(
                 Arc::clone(&device.device),
                 Arc::clone(&alloc),
@@ -1034,7 +1038,23 @@ impl Renderer {
             let transform_system = resources::TransformSystem::new();
             let instance_buffer = instance_buffers;
             let config = &renderer_config;
+            let swapchain_extent = swapchain.extent;
 
+            // Initialize GPU-driven pipeline components
+            log::info!("Initializing Hi-Z Pass");
+            let mut hiz_pass = HiZPass::new(Arc::clone(&device.device));
+            hiz_pass.init(&alloc.vma, &device, swapchain_extent.width, swapchain_extent.height)?;
+
+            log::info!("Initializing Indirect Draw Pass");
+            let mut indirect_draw_pass = IndirectDrawPass::new(Arc::clone(&device.device));
+            indirect_draw_pass.init(
+                &alloc.vma,
+                &device,
+                &mut bindless_manager,
+                crate::renderer::indirect_draw::MAX_INDIRECT_OBJECTS,
+            )?;
+
+            log::info!("Finalizing Renderer construction");
             let mut renderer = Self {
                 texture_streamer: Mutex::new(Some(texture_streamer)),
                 buffer_pool: buffer_pool,
@@ -1049,6 +1069,7 @@ impl Renderer {
                 prev_view_proj: Mat4::IDENTITY,
                 _default_texture: default_texture,
                 _black_texture: black_texture,
+                _white_texture: white_texture,
                 _default_skybox: default_skybox,
                 _default_cube_black: default_cube_black,
                 _vsm_default_uint: vsm_default_uint,
@@ -1077,7 +1098,6 @@ impl Renderer {
                 uniform_buffers,
                 material_storage_buffer: Some(material_storage_buffer),
                 instance_buffer_addresses,
-                joint_buffer_addresses,
                 material_heap_address,
                 pipeline_layout: Some(pipeline_layout),
                 pipeline_layout_id: Some(pipeline_layout_id),
@@ -1114,16 +1134,16 @@ impl Renderer {
                 vsm_feature,
                 bindless_manager: Some(bindless_manager),
                 forward_plus: Some(forward_plus),
-                hiz_pass: None,
+                hiz_pass: Some(hiz_pass),
                 adaptive_hiz_manager: AdaptiveHiZManager::new(3.0), // Target 3ms for Hi-Z
-                indirect_draw_pass: None,
+                indirect_draw_pass: Some(indirect_draw_pass),
                 occlusion_culling: OcclusionCulling::new(),
                 vsr_pass: None,
                 motion_pass: None,
                 motion_framebuffer: None,
                 gbuffer: Some(gbuffer),
                 culling_manager: CullingManager::new(),
-                use_gpu_driven: pass_manager.use_gpu_driven(),
+                _use_gpu_driven: true,
                 scene_lighting: crate::renderer::features::SceneLighting::default(),
                 point_lights: Vec::new(),
                 directional_lights: Vec::new(),
@@ -1135,10 +1155,6 @@ impl Renderer {
                 _post_sampler: post_sampler,
                 post_pipeline: None,
                 post_framebuffers: Vec::new(),
-                skinned_pipeline: None,
-                skinned_pipeline_id: None,
-                joint_matrices_buffer,
-                max_bones,
                 vram_budget,
                 texture_compression: config.texture_compression,
                 instancing_manager,
@@ -1162,6 +1178,7 @@ impl Renderer {
             // Initialize async readback manager
             renderer.init_async_readback()?;
 
+            log::info!("Renderer initialization COMPLETE");
             Ok(renderer)
         }
     }
@@ -1392,7 +1409,6 @@ impl Renderer {
         command_pool: vk::CommandPool,
         frame_count: usize,
         aspect: f32,
-        max_bones: usize,
     ) -> Result<RendererResources> {
         // Initialize uniform buffers
         let mut uniform_buffers = Vec::with_capacity(frame_count);
@@ -1415,13 +1431,6 @@ impl Renderer {
             uniform_buffers.push(buffer);
         }
 
-        // Initialize joint matrices buffers
-        let mut joint_matrices_buffer = Vec::with_capacity(frame_count);
-        for _ in 0..frame_count {
-            let buffer =
-                unsafe { resources::JointMatricesBuffer::new(Arc::clone(alloc), max_bones)? };
-            joint_matrices_buffer.push(buffer);
-        }
 
         // Create default texture
         let default_texture_data = TextureData::solid_color([255, 255, 255, 255]);
@@ -1448,6 +1457,20 @@ impl Renderer {
                 &black_texture_data,
                 vk::Format::R8G8B8A8_SRGB,
                 Some("black_texture"),
+            )?
+        };
+
+        // Create white texture for Occlusion Culling fallback (Standard-Z Far Plane = 1.0)
+        let white_texture_data = TextureData::solid_color([255, 255, 255, 255]);
+        let white_texture = unsafe {
+            Texture::from_data(
+                Arc::clone(alloc),
+                Arc::clone(&device.device),
+                command_pool,
+                device.graphics_queue,
+                &white_texture_data,
+                vk::Format::R8G8B8A8_UNORM, // Use UNORM for precise 1.0 mapping
+                Some("white_texture"),
             )?
         };
 
@@ -1543,9 +1566,9 @@ impl Renderer {
 
         Ok(RendererResources {
             uniform_buffers,
-            joint_matrices_buffer,
             default_texture,
             black_texture,
+            white_texture,
             default_skybox,
             default_cube_black,
             vsm_default_uint,
@@ -1748,6 +1771,8 @@ impl Renderer {
             .with_extent(extent)
             .with_pipeline_cache(pipeline_cache)
             .with_depth_format(depth_format)
+            // CRITICAL FIX: Reverse-Z uses GREATER_OR_EQUAL (Z=1 Near, Z=0 Far)
+            .with_depth_test(vk::CompareOp::GREATER_OR_EQUAL, true)
             .with_cull_mode(vk::CullModeFlags::NONE)
             .with_front_face(vk::FrontFace::CLOCKWISE)
             .with_multisampling(pipeline_cfg.multisample_config())
@@ -1800,6 +1825,12 @@ impl Renderer {
         for layout in set_layouts {
             pipeline_layout_builder = pipeline_layout_builder.add_set_layout(*layout);
         }
+
+        let push_range = vk::PushConstantRange::default()
+            .stage_flags(vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT)
+            .offset(0)
+            .size(std::mem::size_of::<SkyboxPushConstants>() as u32);
+        pipeline_layout_builder = pipeline_layout_builder.add_push_constant(push_range);
         
         let mut pipeline_layout = pipeline_layout_builder.build()?;
         let pipeline_layout_id = resources
@@ -2343,69 +2374,14 @@ impl Renderer {
         }
     }
 
-    /// Update the joint matrices buffer for GPU skinning
-    ///
-    /// # Safety
-    /// Caller must ensure matrices slice does not exceed max_bones capacity
-    pub unsafe fn update_joint_ssbo(&mut self, matrices: &[Mat4]) -> Result<()> {
-        self.update_joint_ssbo_offset(matrices, 0)
-    }
 
-    /// Update the joint matrices buffer for GPU skinning at a specific offset
-    ///
-    /// # Safety
-    /// Caller must ensure matrices slice and offset do not exceed max_bones capacity
-    pub unsafe fn update_joint_ssbo_offset(
-        &mut self,
-        matrices: &[Mat4],
-        offset: usize,
-    ) -> Result<()> {
-        if offset + matrices.len() > self.max_bones {
-            return Err(AshError::VulkanError(format!(
-                "Joint matrices update (offset: {}, count: {}) exceeds max_bones ({})",
-                offset,
-                matrices.len(),
-                self.max_bones
-            )));
-        }
-
-        if let Some(buffer) = self.joint_matrices_buffer.get_mut(self.current_frame) {
-            buffer.update_offset(matrices, offset)?;
-        }
-
-        Ok(())
-    }
-
-    pub fn max_bones(&self) -> usize {
-        self.max_bones
-    }
-
-    /// Queues a skinned mesh for rendering.
-    pub fn draw_skinned_mesh(
-        &mut self,
-        mesh_handle: u32,
-        material_handle: MaterialHandle,
-        transform: Mat4,
-        joint_offset: u32,
-    ) {
-        let _ = self.submit_render_commands(&[RenderCommand {
-            mesh_handle,
-            material_handle,
-            transform,
-            is_skinned: true,
-            joint_offset,
-            cast_shadows: true,
-            receive_shadows: true,
-            is_transparent: false,
-            is_hidden: false,
-        }]);
-    }
 
     /// Submit render commands for the current frame.
     ///
     /// Each `RenderCommand` specifies a mesh handle, material handle, and transform.
     /// For large command counts (>1000), uses parallel processing across all CPU cores.
     pub fn submit_render_commands(&mut self, commands: &[RenderCommand]) -> Result<()> {
+        log::debug!("Submitting {} render commands", commands.len());
         self.draw_items.clear();
         self.instancing_manager.begin_frame();
 
@@ -2424,7 +2400,7 @@ impl Renderer {
                 .par_iter()
                 .fold(
                     || (Vec::new(), HashMap::<BatchKey, Vec<InstanceData>>::new()),
-                    |(mut items, mut batches), command| {
+                    |(items, mut batches), command| {
                         if let Some(mesh_data_entry) = mesh_data.get(command.mesh_handle as usize) {
                             let mesh_key = &mesh_data_entry.name;
 
@@ -2450,42 +2426,44 @@ impl Renderer {
                             let texture_flags = mesh_data_entry.texture_flags;
                             let (indices, emissive_index) = (mesh_data_entry.texture_indices, mesh_data_entry.emissive_index);
 
-                            if command.is_skinned {
-                                items.push(DrawItem {
-                                    key: mesh_key.clone(),
-                                    mesh_id: command.mesh_handle,
-                                    transform: command.transform,
-                                    material: material.clone(),
-                                    material_handle,
-                                    texture_flags,
-                                    texture_indices: indices,
-                                    emissive_index,
-                                    is_skinned: true,
-                                    joint_offset: command.joint_offset,
-                                    alpha_cutoff: material.alpha_cutoff,
-                                    cast_shadows: command.cast_shadows,
-                                    receive_shadows: command.receive_shadows,
-                                    is_hidden: command.is_hidden,
-                                });
-                            } else {
-                                let key = BatchKey::new(command.mesh_handle, material_handle);
-                                let mut instance = InstanceData::from_matrix(command.transform)
-                                    .with_bounds(mesh_data_entry.bounds);
-                                if command.cast_shadows {
-                                    instance.set_flag(crate::renderer::occlusion_culling::CULL_FLAG_CAST_SHADOWS, true);
-                                }
-                                if command.is_hidden {
-                                    instance.set_flag(crate::renderer::occlusion_culling::CULL_FLAG_HIDDEN, true);
-                                }
-                                batches
-                                    .entry(key)
-                                    .or_default()
-                                    .push(instance);
+                            let key = BatchKey::new(command.mesh_handle, material_handle);
+                            let mut instance = InstanceData::from_matrix(command.transform)
+                                .with_bounds(mesh_data_entry.bounds);
+                            if command.cast_shadows {
+                                instance.set_flag(crate::renderer::occlusion_culling::CULL_FLAG_CAST_SHADOWS, true);
                             }
+                            if command.is_hidden {
+                                instance.set_flag(crate::renderer::occlusion_culling::CULL_FLAG_HIDDEN, true);
+                            }
+                            let item = DrawItem {
+                                key: mesh_key.clone(),
+                                mesh_id: command.mesh_handle,
+                                transform: command.transform,
+                                material: material.clone(),
+                                material_handle,
+                                texture_flags,
+                                texture_indices: indices,
+                                emissive_index,
+                                alpha_cutoff: material.alpha_cutoff,
+                                cast_shadows: command.cast_shadows,
+                                receive_shadows: command.receive_shadows,
+                                is_hidden: command.is_hidden,
+                            };
+                            
+                            let mut items = items;
+                            items.push(item);
+
+                            batches
+                                .entry(key)
+                                .or_default()
+                                .push(instance);
+                            (items, batches)
                         } else if strict_mode {
                             log::error!("Mesh handle {} not found in registry", command.mesh_handle);
+                            (items, batches)
+                        } else {
+                            (items, batches)
                         }
-                        (items, batches)
                     },
                 )
                 .reduce(
@@ -2519,7 +2497,6 @@ impl Renderer {
                         command.material_handle
                     };
 
-                    // Unreal-Style validation: get material or fallback to default
                     let material = self.material_manager.get_material(material_handle);
                     
                     // Safety check: log if version mismatch (rare but possible)
@@ -2532,12 +2509,13 @@ impl Renderer {
                         }
                     }
 
-                    let texture_flags = mesh_data.texture_flags;
-                    let (indices, emissive_index) =
-                        (mesh_data.texture_indices, mesh_data.emissive_index);
+                    // We must fetch the uploaded mesh to get the actual buffer offsets
+                    if let Some(uploaded) = self.model_renderer.get(&mesh_data.name) {
+                        let texture_flags = mesh_data.texture_flags;
+                        let (indices, emissive_index) = (mesh_data.texture_indices, mesh_data.emissive_index);
 
-                    if command.is_skinned {
-                        self.draw_items.push(DrawItem {
+                        let key = BatchKey::new(command.mesh_handle, material_handle);
+                        let item = DrawItem {
                             key: mesh_key.clone(),
                             mesh_id: command.mesh_handle,
                             transform: command.transform,
@@ -2546,21 +2524,24 @@ impl Renderer {
                             texture_flags,
                             texture_indices: indices,
                             emissive_index,
-                            is_skinned: true,
-                            joint_offset: command.joint_offset,
                             alpha_cutoff: material.alpha_cutoff,
                             cast_shadows: command.cast_shadows,
                             receive_shadows: command.receive_shadows,
                             is_hidden: command.is_hidden,
-                        });
-                    } else {
-                        let key = BatchKey::new(command.mesh_handle, material_handle);
+                        };
+                        self.draw_items.push(item);
+
                         let instance = InstanceData::from_matrix(command.transform)
                             .with_bounds(mesh_data.bounds)
                             .with_cast_shadows(command.cast_shadows)
                             .with_receive_shadows(command.receive_shadows)
-                            .with_hidden(command.is_hidden);
+                            .with_hidden(command.is_hidden)
+                            .with_index_count(uploaded.index_count())
+                            .with_first_index((uploaded.index_offset.unwrap_or(0) / 4) as u32)
+                            .with_vertex_offset((uploaded.vertex_offset.unwrap_or(0) / 64) as i32);
                         self.instancing_manager.add_instance(key, instance);
+                    } else {
+                        log::error!("Mesh '{}' found in registry but not in model renderer cache!", mesh_data.name);
                     }
                 } else {
                     let msg = format!("Mesh handle {} not found in registry", command.mesh_handle);
@@ -2580,9 +2561,8 @@ impl Renderer {
 
         // Sort draw items to minimize pipeline and material changes
         self.draw_items.sort_by(|a, b| {
-            a.is_skinned
-                .cmp(&b.is_skinned)
-                .then_with(|| a.material.name.cmp(&b.material.name))
+            a.material.name
+                .cmp(&b.material.name)
                 .then_with(|| a.key.cmp(&b.key))
         });
 
@@ -2672,6 +2652,16 @@ impl Renderer {
     }
 
     fn recreate_swapchain_resources(&mut self) -> Result<()> {
+        log::info!("Starting swapchain recreation...");
+        
+        // CRITICAL SYNC: Wait for GPU to finish all work before destroying resources.
+        // Without this, recreation during window resize triggers 0xc000041d / DEVICE_LOST.
+        unsafe {
+            self.device.device.device_wait_idle().map_err(|e| {
+                AshError::VulkanError(format!("Failed to wait for device idle during resize: {e:?}"))
+            })?;
+        }
+
         // Paranoid Validation for enterprise reliability.
         // We cannot proceed with swapchain recreation if surfaces are zero-dimensioned.
         if let Some(extent) = self.pending_extent {
@@ -2724,23 +2714,23 @@ impl Renderer {
         self.cleanup_render_pass();
         // 4. Update image views.
         self.update_image_views(&image_views)?;
-        // 5. Recreate depth buffer.
+        
+        // 5. Recreate offscreen buffers (used as attachments in main pass)
         self.recreate_depth_buffer(swapchain_extent)?;
-        // 5b. Recreate G-Buffer.
         self.recreate_gbuffer(swapchain_extent)?;
-        // 6. Create new render pass and framebuffers.
+        
+        if self.fullscreen_pass.is_some() {
+            self.initialize_hdr(swapchain_extent.width, swapchain_extent.height)?;
+        }
+        
+        self.recreate_vsr_pass(swapchain_extent)?;
+
+        // 6. Create new render pass and framebuffers (uses the new offscreen views)
         self.create_render_pass_and_framebuffers(swapchain_extent, swapchain_format, &image_views)?;
 
-        self.recreate_joint_buffers(image_count)?;
         self.recreate_frame_syncs(image_count)?;
         self.recreate_command_buffers()?;
         self.recreate_uniform_buffers(image_count)?;
-        self.recreate_vsr_pass(
-            self.swapchain
-                .as_ref()
-                .ok_or_else(|| AshError::VulkanError("Swapchain missing".to_string()))?
-                .extent,
-        )?;
         
         // CRITICAL FIX: Update Forward+ tile calculations for new screen size
         // Without this, tile buffer remains at old size -> crash or black screen
@@ -2752,9 +2742,12 @@ impl Renderer {
         self.recreate_descriptor_sets()?;
         // 7. Recreate pipeline.
         self.recreate_pipeline()?;
+        self.recreate_skybox_pipeline()?;
 
-        // 8. Recreate post-processing pipeline (depends on swapchain extent)
+        // 8. Recreate post-processing resources (Descriptors + Pipeline)
+        // HDR buffer already recreated in step 5.
         if self.fullscreen_pass.is_some() {
+            self.create_post_descriptors()?;
             self.recreate_post_pipeline()?;
         }
 
@@ -2846,6 +2839,8 @@ impl Renderer {
             .with_extent(extent)
             .with_pipeline_cache(cache)
             .with_depth_format(depth_format)
+            // CRITICAL FIX: Ensure recreated pipeline matches Reverse-Z (Greater/Equal)
+            .with_depth_test(vk::CompareOp::GREATER_OR_EQUAL, true)
             .with_cull_mode(vk::CullModeFlags::NONE)
             .with_front_face(vk::FrontFace::CLOCKWISE)
             .with_multisampling(multisample_config);
@@ -2925,87 +2920,68 @@ impl Renderer {
         self.pipeline = Some(new_pipeline);
         self.pipeline_id = Some(pipeline_id);
 
-        // Build Skinned Pipeline
-        log::info!("Compiling skinned pipeline...");
-        let mut skinned_builder = vulkan::Pipeline::builder(Arc::clone(&self.device.device))
-            .with_layout(layout)
-            .with_render_pass(render_pass)
-            .with_extent(extent)
-            .with_pipeline_cache(cache)
-            .with_depth_format(depth_format)
-            .with_cull_mode(vk::CullModeFlags::BACK)
-            .with_multisampling(multisample_config);
+        log::info!("Pipeline recompiled successfully!");
+        Ok(())
+    }
 
-        if self.gbuffer.is_some() {
-            let blend_attachments = vec![
-                vk::PipelineColorBlendAttachmentState {
-                    color_write_mask: vk::ColorComponentFlags::R
-                        | vk::ColorComponentFlags::G
-                        | vk::ColorComponentFlags::B
-                        | vk::ColorComponentFlags::A,
-                    blend_enable: vk::TRUE,
-                    src_color_blend_factor: vk::BlendFactor::SRC_ALPHA,
-                    dst_color_blend_factor: vk::BlendFactor::ONE_MINUS_SRC_ALPHA,
-                    color_blend_op: vk::BlendOp::ADD,
-                    src_alpha_blend_factor: vk::BlendFactor::ONE,
-                    dst_alpha_blend_factor: vk::BlendFactor::ZERO,
-                    alpha_blend_op: vk::BlendOp::ADD,
-                },
-                vk::PipelineColorBlendAttachmentState {
-                    color_write_mask: vk::ColorComponentFlags::R
-                        | vk::ColorComponentFlags::G
-                        | vk::ColorComponentFlags::B
-                        | vk::ColorComponentFlags::A,
-                    blend_enable: vk::FALSE,
-                    ..Default::default()
-                },
-                vk::PipelineColorBlendAttachmentState {
-                    color_write_mask: vk::ColorComponentFlags::R
-                        | vk::ColorComponentFlags::G
-                        | vk::ColorComponentFlags::B
-                        | vk::ColorComponentFlags::A,
-                    blend_enable: vk::FALSE,
-                    ..Default::default()
-                },
-                vk::PipelineColorBlendAttachmentState {
-                    color_write_mask: vk::ColorComponentFlags::R
-                        | vk::ColorComponentFlags::G
-                        | vk::ColorComponentFlags::B
-                        | vk::ColorComponentFlags::A,
-                    blend_enable: vk::FALSE,
-                    ..Default::default()
-                },
-            ];
-            skinned_builder = skinned_builder.with_color_blend_attachments(blend_attachments);
+    fn recreate_skybox_pipeline(&mut self) -> Result<()> {
+        log::info!("Recreating skybox pipeline...");
+
+        // Ensure we have a valid render pass
+        let render_pass = self.render_pass
+            .as_ref()
+            .ok_or_else(|| AshError::VulkanError("Render pass missing during skybox recreation".to_string()))?
+            .handle();
+
+        let extent = self.swapchain
+            .as_ref()
+            .ok_or_else(|| AshError::VulkanError("Swapchain missing".to_string()))?
+            .extent;
+
+        let depth_format = self.depth_buffer
+            .as_ref()
+            .ok_or_else(|| AshError::VulkanError("Depth buffer missing".to_string()))?
+            .format();
+
+        let pipeline_info = PipelineConfig {
+            msaa: self.msaa_preset,
+            sample_shading: self.sample_shading,
+            ..Default::default()
+        };
+
+        // We need the set layouts. 
+        // 0: Frame, 1: Bindless, 2: Environment, 3: Forward+
+        let descriptors = self.descriptors.as_ref().ok_or_else(|| AshError::VulkanError("Descriptors missing".to_string()))?;
+        let bindless = self.bindless_manager.as_ref().ok_or_else(|| AshError::VulkanError("Bindless manager missing".to_string()))?;
+
+        let mut set_layouts = vec![
+            descriptors.frame_layout(),
+            bindless.descriptor_set_layout(),
+            descriptors.environment_layout(),
+        ];
+
+        if let Some(ref fp) = self.forward_plus {
+            set_layouts.push(fp.layout());
         }
 
-        skinned_builder = skinned_builder.add_shader_from_bytes(
-            include_bytes!(concat!(env!("OUT_DIR"), "/skinning.vert.spv")),
-            vk::ShaderStageFlags::VERTEX,
-            "main",
-        )?;
-        skinned_builder = skinned_builder.add_shader_from_bytes(
-            include_bytes!(concat!(env!("OUT_DIR"), "/frag.frag.spv")),
-            vk::ShaderStageFlags::FRAGMENT,
-            "main",
-        )?;
+        let (new_layout, _new_layout_id, new_pipeline, _new_pipeline_id) = unsafe {
+            Self::create_skybox_pipeline(
+                &self.device,
+                &self.resources,
+                render_pass,
+                extent,
+                self._pipeline_cache.handle(),
+                depth_format,
+                &pipeline_info,
+                &set_layouts,
+            )?
+        };
 
-        let mut new_skinned_pipeline = skinned_builder.build()?;
-        let skinned_pipeline_id = self
-            .resources
-            .register_pipeline(
-                new_skinned_pipeline.pipeline,
-                &[pipeline_layout_id, render_pass_id],
-            )
-            .map_err(|e| {
-                AshError::VulkanError(format!("Failed to register skinned pipeline: {e}"))
-            })?;
-
-        new_skinned_pipeline.mark_managed_by_registry();
-        self.skinned_pipeline = Some(new_skinned_pipeline);
-        self.skinned_pipeline_id = Some(skinned_pipeline_id);
-
-        log::info!("Pipelines recompiled successfully!");
+        self.skybox_pipeline = Some(new_pipeline);
+        self.skybox_pipeline_layout = Some(new_layout);
+        // Note: We're not updating IDs here as we're just replacing the instance.
+        // In a full system we might want to update the registry properly.
+        
         Ok(())
     }
 
@@ -3409,11 +3385,18 @@ impl Renderer {
                 sampler: self._vsm_default_array.sampler(),
             };
 
+            let skybox_info = vk::DescriptorImageInfo {
+                image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                image_view: self._default_skybox.view(),
+                sampler: self._default_skybox.sampler(),
+            };
+
             for index in 0..manager.environment_set_count() {
                 manager.bind_defaults(
                     index,
                     &vsm_uint_info,
                     &tex_2d_info,
+                    &skybox_info,
                 )?;
             }
 
@@ -3425,16 +3408,6 @@ impl Renderer {
         Ok(())
     }
 
-    fn recreate_joint_buffers(&mut self, count: usize) -> Result<()> {
-        self.joint_matrices_buffer.clear();
-        for _ in 0..count {
-            let buffer = unsafe {
-                resources::JointMatricesBuffer::new(Arc::clone(&self.alloc), self.max_bones)?
-            };
-            self.joint_matrices_buffer.push(buffer);
-        }
-        Ok(())
-    }
 
     /// Render frame with the specified camera view.
     ///
@@ -3444,6 +3417,79 @@ impl Renderer {
     /// - `camera_pos`: Camera world position (for lighting calculations)
 
 
+    /// Executes the GPU-driven culling pass (Compute).
+    /// Must be called OUTSIDE of a render pass.
+    pub fn cull_main_pass(
+        &mut self,
+        params: &MainPassParameters,
+    ) -> Result<()> {
+        let cmd_ctx = params.cmd_ctx;
+        let frame_index = params.frame_index;
+        let view = params.view;
+        let projection = params.projection;
+
+        // Modern Phase 4: Full GPU-Driven Indirect Draw (Opaque Path)
+        if let Some(indirect_pass) = self.indirect_draw_pass.as_mut() {
+            // No longer populating objects here; they were already populated in render_frame
+            // with high-fidelity clusters.
+
+            // 2. Upload and Execute Culling
+            log::debug!("Occlusion culling object count: {}", self.occlusion_culling.object_count());
+            if self.occlusion_culling.object_count() > 0 {
+                let _frame_address = self.uniform_buffers[frame_index].device_address();
+                
+                unsafe {
+                    indirect_pass.upload_objects(&self.alloc.vma, self.occlusion_culling.object_data(), 0)?;
+                    
+                    // Reset count buffer to 0 before compute pass
+                    self.device.device.cmd_fill_buffer(cmd_ctx.handle(), indirect_pass.count_buffer(), 0, 4, 0);
+
+                    // Compute barrier: ensure fill is done
+                    let fill_barrier = vk::MemoryBarrier::default()
+                        .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                        .dst_access_mask(vk::AccessFlags::SHADER_READ | vk::AccessFlags::SHADER_WRITE);
+                    
+                    cmd_ctx.pipeline_barrier(
+                        vk::PipelineStageFlags::TRANSFER,
+                        vk::PipelineStageFlags::COMPUTE_SHADER,
+                        vk::DependencyFlags::empty(),
+                        &[fill_barrier],
+                        &[],
+                        &[],
+                    );
+
+                    let extent = self.swapchain.as_ref().map_or(vk::Extent2D { width: 1, height: 1 }, |sw| sw.extent);
+
+                    indirect_pass.execute_culling(
+                        cmd_ctx.handle(),
+                        &self.occlusion_culling,
+                        projection * view,
+                        extent.width,
+                        extent.height,
+                        0,
+                        self.occlusion_culling.object_count() as u32,
+                        0,
+                    )?;
+
+                    // CRITICAL BARRIER: Compute-to-Graphics for Indirect Buffers
+                    let indirect_barrier = vk::MemoryBarrier::default()
+                        .src_access_mask(vk::AccessFlags::SHADER_WRITE)
+                        .dst_access_mask(vk::AccessFlags::INDIRECT_COMMAND_READ | vk::AccessFlags::SHADER_READ);
+                    
+                    cmd_ctx.pipeline_barrier(
+                        vk::PipelineStageFlags::COMPUTE_SHADER,
+                        vk::PipelineStageFlags::DRAW_INDIRECT | vk::PipelineStageFlags::VERTEX_SHADER,
+                        vk::DependencyFlags::empty(),
+                        &[indirect_barrier],
+                        &[],
+                        &[],
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub fn render_main_pass(
         &mut self,
         params: &MainPassParameters,
@@ -3452,15 +3498,10 @@ impl Renderer {
         let frame_index = params.frame_index;
         let scene_pipeline = params.scene_pipeline;
         let pipeline_layout_handle = params.pipeline_layout_handle;
-        let batch_offsets = params.batch_offsets;
-        let view = params.view;
-        let projection = params.projection;
-        let swapchain_extent = params.swapchain_extent;
-
-        // --- Main Pass Rendering Paths ---
-
-        // Calculate shadow boundary parameters once per frame
-
+        let _batch_offsets = params.batch_offsets;
+        let _view = params.view;
+        let _projection = params.projection;
+        let _swapchain_extent = params.swapchain_extent;
 
         // Resolve global debug state
         let (debug_enabled, debug_path_override) = match self.debug_mode {
@@ -3473,293 +3514,110 @@ impl Renderer {
             DebugMode::Lighting => (true, Some(7)),
         };
 
-        // 1. Render all visible opaque instanced batches (High-performance Path)
-        // GPU-Driven Path: Used for large numbers of static meshes with instancing.
-        let mut current_object_offset = 0;
-        for batch in self.instancing_manager.visible_batches() {
-            if let Some(mesh_data) = self.mesh_data.get(batch.key.mesh_id as usize) {
-                let mesh_key = &mesh_data.name;
+        // Modern Phase 4: Full GPU-Driven Indirect Draw (Opaque Path)
+        if let Some(indirect_pass) = self.indirect_draw_pass.as_mut() {
+            // Note: Culling and Upload (Compute) is done in cull_main_pass() BEFORE the render pass.
 
-                if let Some(uploaded) = self.model_renderer.get(mesh_key) {
-                    log::debug!("Batch for mesh {mesh_key} using main GPU-driven/instanced path");
+            // 3. Draw All Visible Objects in One Call
+            if self.occlusion_culling.object_count() > 0 {
+                let frame_address = self.uniform_buffers[frame_index].device_address();
+                let _ = frame_address; // Suppress unused warning as it is used in ctx below
 
-                    let material_push = MaterialPushConstants::new(batch.key.material_id)
-                        .with_receive_shadows(batch.receives_shadows())
-                        .with_debug_visualization(debug_enabled);
+                cmd_ctx.bind_pipeline(vk::PipelineBindPoint::GRAPHICS, scene_pipeline);
 
-                    // --- GPU-Driven Indirect Path ---
-                    if self.use_gpu_driven && self.indirect_draw_pass.is_some() {
-                        if let Some(indirect) = self.indirect_draw_pass.as_mut() {
-                            // 1. Upload instances for this batch to the object buffer
-                        unsafe {
-                            indirect.upload_objects(
-                                &self.alloc.vma,
-                                &batch.instances,
-                                current_object_offset,
-                            )?;
-                        }
+                // CRITICAL FIX: Bind Descriptor Sets
+                // Missing these was causing the "Invisible Mesh" issue (shaders had no resources)
+                let descriptors = self.descriptors.as_ref().ok_or(AshError::VulkanError("Descriptors not initialized".into()))?;
+                let bindless = self.bindless_manager.as_ref().ok_or(AshError::VulkanError("Bindless not initialized".into()))?;
+                
+                // Use public accessor methods instead of private fields
+                // frame_set returns Option<vk::DescriptorSet>
+                let frame_set = descriptors.frame_set(frame_index).ok_or(AshError::VulkanError("Frame set missing".into()))?;
+                let bindless_set = bindless.descriptor_set();
+                // environment_set returns Option<vk::DescriptorSet>
+                let environment_set = descriptors.environment_set(frame_index).ok_or(AshError::VulkanError("Environment set missing".into()))?;
 
-                        // 2. Upload draw template for this mesh
-                        let template = vk::DrawIndexedIndirectCommand {
-                            index_count: uploaded.index_count(),
-                            instance_count: 1,
-                            first_index: 0,
-                            vertex_offset: 0,
-                            first_instance: 0, // Set by compute shader
-                        };
-                        unsafe {
-                            indirect.upload_templates(&self.alloc.vma, &[template], 0)?;
-                        }
+                let sets = [frame_set, bindless_set, environment_set];
+                
+                unsafe {
+                    self.device.device.cmd_bind_descriptor_sets(
+                        cmd_ctx.handle(),
+                        vk::PipelineBindPoint::GRAPHICS,
+                        pipeline_layout_handle,
+                        0,
+                        &sets,
+                        &[],
+                    );
+                }
 
-                        // 3. Run Culling Compute Shader
-                        let bindless_manager =
-                            self.bindless_manager.as_ref().expect("Bindless manager");
-                        unsafe {
-                            indirect.execute_culling(
-                                cmd_ctx.handle(),
-                                &self.occlusion_culling,
-                                bindless_manager,
-                                projection * view,
-                                swapchain_extent.width,
-                                swapchain_extent.height,
-                                current_object_offset as u32,
-                                batch.count() as u32,
-                                0, // indirect_offset
-                            )?;
-                        }
+                // CRITICAL FIX: BDA Pointer Validation
+                // Prevent crash if buffers are not yet allocated
+                let vertex_ptr = self.model_renderer.geometry_buffer.vertex_heap_address();
+                let instance_ptr = indirect_pass.object_buffer_address();
+                let material_ptr = self.material_heap_address;
 
-                        // 4. Draw Indirect
-                        let final_path = debug_path_override.unwrap_or(1); // 1: GPU-Driven default
-                        let material_push = material_push.with_debug_path(final_path);
-                        let ctx = DrawContext {
-                            command_buffer: cmd_ctx.handle(),
-                            pipeline_layout: pipeline_layout_handle,
-                            uploaded,
-                            material: &material_push,
-                            frame_ptr: self.uniform_buffers[frame_index].device_address(),
-                            instance_ptr: indirect.object_buffer_address(),
-                            material_ptr: self.material_heap_address,
-                            joint_ptr: self.joint_buffer_addresses[frame_index],
-                        };
-                        unsafe {
-                            self.model_renderer.draw_mesh_indirect_count(
-                                &ctx,
-                                &crate::renderer::model_renderer::IndirectDrawCountParams {
-                                    indirect_buffer: indirect.indirect_buffer(),
-                                    indirect_offset: 0,
-                                    count_buffer: indirect.count_buffer(),
-                                    count_offset: 0,
-                                    max_draw_count: batch.count() as u32,
-                                    stride: std::mem::size_of::<vk::DrawIndexedIndirectCommand>()
-                                        as u32,
-                                },
-                            );
-                        }
+                if vertex_ptr == 0 || instance_ptr == 0 || material_ptr == 0 {
+                    log::error!(
+                        "CRITICAL: BDA Null Pointer - Skipping Draw. Vtx: {:#X}, Inst: {:#X}, Mat: {:#X}", 
+                        vertex_ptr, instance_ptr, material_ptr
+                    );
+                    return Ok(());
+                }
 
-                        current_object_offset += batch.count();
-                        }
-                    } else {
-                        // --- Direct Instanced Path Fallback ---
-                        let final_path = debug_path_override.unwrap_or(2); // 2: Legacy/Direct default
-                        let material_push = material_push
-                            .with_debug_path(final_path)
-                            .with_debug_visualization(debug_enabled);
-                        let ctx = DrawContext {
-                            command_buffer: cmd_ctx.handle(),
-                            pipeline_layout: pipeline_layout_handle,
-                            uploaded,
-                            material: &material_push,
-                            frame_ptr: self.uniform_buffers[frame_index].device_address(),
-                            instance_ptr: self.instance_buffer_addresses[frame_index],
-                            material_ptr: self.material_heap_address,
-                            joint_ptr: self.joint_buffer_addresses[frame_index],
+                let material_push = MaterialPushConstants::new(MaterialHandle::null())
+                    .with_receive_shadows(true)
+                    .with_debug_path(debug_path_override.unwrap_or(1))
+                    .with_debug_visualization(debug_enabled);
 
-                        };
+                let uploaded = match self.skybox_mesh.as_ref() {
+                    Some(mesh) => mesh,
+                    None => return Ok(()),
+                };
+                let _ = uploaded; 
 
-                        let offset = batch_offsets.get(&batch.key).copied().unwrap_or(0);
-                        unsafe {
-                            log::info!("DRAW: Direct instanced draw for mesh {} (count: {})", mesh_key, batch.count());
-                            self.model_renderer.draw_mesh_instanced(
-                                &ctx,
-                                batch.count() as u32,
-                                offset,
-                            );
-                        }
-                    }
+                let (width, height) = match self.swapchain.as_ref() {
+                    Some(sw) => (sw.extent.width, sw.extent.height),
+                    None => (1, 1),
+                };
+                let _ = (width, height); 
+
+                let draw_ctx = crate::renderer::model_renderer::DrawContext {
+                    command_buffer: cmd_ctx.handle(),
+                    pipeline_layout: pipeline_layout_handle,
+                    uploaded,
+                    material: &material_push,
+                    frame_ptr: self.uniform_buffers[frame_index].device_address(),
+                    vertex_ptr,
+                    instance_ptr,
+                    material_ptr,
+                };
+                
+                let count_params = crate::renderer::model_renderer::IndirectDrawCountParams {
+                    indirect_buffer: indirect_pass.indirect_buffer(),
+                    indirect_offset: 0,
+                    count_buffer: indirect_pass.count_buffer(),
+                    count_offset: 0,
+                    max_draw_count: self.occlusion_culling.object_count() as u32,
+                    stride: std::mem::size_of::<vk::DrawIndexedIndirectCommand>() as u32,
+                };
+
+                unsafe {
+                    self.model_renderer.draw_indirect_count(&draw_ctx, &count_params);
                 }
             }
         }
 
-        // 2. Draw remaining opaque meshes (Legacy / Direct Path)
-        // Legacy Path: Used for direct mesh rendering (skinned meshes, single instances, fallbacks).
-        {
-            let mut current_pipeline = scene_pipeline;
-            for item in &self.draw_items {
-                let mesh_index = item.mesh_id;
-                
-                // Skip if already handled by GPU-driven path
-                if self.use_gpu_driven && self.indirect_draw_pass.is_some() && self.culling_manager.gpu_driven_objects.contains(&mesh_index) {
-                    log::debug!("Mesh {} skipping main legacy path: handled by GPU-driven", item.key);
-                    continue;
-                }
+        // --- PHASE 4: STRICT MODERN - Legacy paths removed ---
+        // (Only skinned meshes would remain here if we hadn't moved them, 
+        // but for now we focus on opaque stability)
 
-                // Skip if transparent (separate pass)
-                if self.culling_manager.is_transparent(mesh_index) {
-                    continue;
-                }
-                
-                // Skip if hidden
-                if item.is_hidden {
-                    continue;
-                }
-
-                log::debug!("Mesh {} using main legacy path", item.key);
-
-                if let Some(uploaded) = self.model_renderer.get(&item.key) {
-                    // Switch pipeline if needed
-                    let target_pipeline = if item.is_skinned {
-                        self.skinned_pipeline
-                            .as_ref()
-                            .map(|p| p.pipeline)
-                            .unwrap_or(scene_pipeline)
-                    } else {
-                        scene_pipeline
-                    };
-
-                    if target_pipeline != current_pipeline {
-                        cmd_ctx.bind_pipeline(vk::PipelineBindPoint::GRAPHICS, target_pipeline);
-                        current_pipeline = target_pipeline;
-                    }
-                    
-                    let material_handle = item.material_handle;
-                    let final_path = debug_path_override.unwrap_or(2); // 2: Legacy
-                    let material_push = MaterialPushConstants::new(material_handle)
-                        .with_receive_shadows(item.receive_shadows)
-                        .with_debug_path(final_path)
-                        .with_debug_visualization(debug_enabled);
-
-                    let ctx = DrawContext {
-                        command_buffer: cmd_ctx.handle(),
-                        pipeline_layout: pipeline_layout_handle,
-                        uploaded,
-                        material: &material_push,
-                        frame_ptr: self.uniform_buffers[frame_index].device_address(),
-                        instance_ptr: self.instance_buffer_addresses[frame_index],
-                        material_ptr: self.material_heap_address,
-                        joint_ptr: self.joint_buffer_addresses[frame_index],
-                    };
-
-                    unsafe {
-                        self.model_renderer
-                            .draw_mesh(&ctx, item.transform, item.joint_offset);
-                    }
-                }
-            }
-        }
-
-        // 3. Draw all transparent meshes
-        {
-            let mut current_pipeline = scene_pipeline;
-            
-            // 3a. Draw transparent instanced batches
-            for batch in self.instancing_manager.transparent_batches() {
-                if let Some(mesh_data) = self.mesh_data.get(batch.key.mesh_id as usize) {
-                    let mesh_key = &mesh_data.name;
-                    if let Some(uploaded) = self.model_renderer.get(mesh_key) {
-                        log::debug!("Transparent batch for mesh {mesh_key} using main legacy path");
-
-                        let final_path = debug_path_override.unwrap_or(2); // 2: Legacy
-                        let material_push = MaterialPushConstants::new(batch.key.material_id)
-                            .with_receive_shadows(batch.receives_shadows())
-                            .with_debug_path(final_path)
-                            .with_debug_visualization(debug_enabled);
-                        
-                        let ctx = DrawContext {
-                            command_buffer: cmd_ctx.handle(),
-                            pipeline_layout: pipeline_layout_handle,
-                            uploaded,
-                            material: &material_push,
-                            frame_ptr: self.uniform_buffers[frame_index].device_address(),
-                            instance_ptr: self.instance_buffer_addresses[frame_index],
-                            material_ptr: self.material_heap_address,
-                            joint_ptr: self.joint_buffer_addresses[frame_index],
-
-                        };
-
-                        let offset = batch_offsets.get(&batch.key).copied().unwrap_or(0);
-                        unsafe {
-                            self.model_renderer.draw_mesh_instanced(
-                                &ctx,
-                                batch.count() as u32,
-                                offset,
-                            );
-                        }
-                    }
-                }
-            }
-
-            // 3b. Draw transparent traditional meshes
-            for item in &self.draw_items {
-                let mesh_index = item.mesh_id;
-                
-                // Skip if not transparent
-                if !self.culling_manager.is_transparent(mesh_index) {
-                    continue;
-                }
-
-                // Skip if handled by GPU-driven
-                if self.use_gpu_driven && self.culling_manager.gpu_driven_objects.contains(&mesh_index) {
-                    continue;
-                }
-                
-                if let Some(uploaded) = self.model_renderer.get(&item.key) {
-                    log::debug!("Transparent mesh {} using main legacy path", item.key);
-
-                    // Switch pipeline if needed
-                    let target_pipeline = if item.is_skinned {
-                        self.skinned_pipeline
-                            .as_ref()
-                            .map(|p| p.pipeline)
-                            .unwrap_or(scene_pipeline)
-                    } else {
-                        scene_pipeline
-                    };
-
-                    if target_pipeline != current_pipeline {
-                        cmd_ctx.bind_pipeline(vk::PipelineBindPoint::GRAPHICS, target_pipeline);
-                        current_pipeline = target_pipeline;
-                    }
-
-                    let material_handle = item.material_handle;
-                    let material_push = MaterialPushConstants::new(material_handle)
-                        .with_receive_shadows(item.receive_shadows)
-                        .with_debug_path(2) // 2: Legacy (Direct path)
-                        .with_debug_visualization(debug_enabled);
-
-                    let ctx = DrawContext {
-                        command_buffer: cmd_ctx.handle(),
-                        pipeline_layout: pipeline_layout_handle,
-                        uploaded,
-                        material: &material_push,
-                        frame_ptr: self.uniform_buffers[frame_index].device_address(),
-                        instance_ptr: self.instance_buffer_addresses[frame_index],
-                        material_ptr: self.material_heap_address,
-                        joint_ptr: self.joint_buffer_addresses[frame_index],
-                    };
-
-                    unsafe {
-                        self.model_renderer
-                            .draw_mesh(&ctx, item.transform, item.joint_offset);
-                    }
-                }
-            }
-        }
-
-        // 4. Render Skybox (Reverse-Z: Draw last, depth >= 0.0)
-        self.render_skybox(&cmd_ctx, frame_index, view, projection)?;
+        // 4. Render Skybox
+        // self.render_skybox(&cmd_ctx, frame_index, view, projection)?;
 
         Ok(())
     }
+
+
 
     pub fn render_skybox(
         &mut self,
@@ -3773,9 +3631,29 @@ impl Renderer {
                 cmd_ctx.bind_pipeline(vk::PipelineBindPoint::GRAPHICS, pipeline.pipeline);
 
                 if let Some(descriptor_manager) = self.descriptors.as_ref() {
-                    let layout = self.skybox_pipeline_layout.as_ref().unwrap().handle();
-                    let frame_set = descriptor_manager.frame_set(frame_index).unwrap();
-                    let env_set = descriptor_manager.environment_set(frame_index).unwrap();
+                    let layout = match self.skybox_pipeline_layout.as_ref() {
+                        Some(l) => l.handle(),
+                        None => {
+                            log::error!("Skybox pipeline layout missing during render!");
+                            return Ok(());
+                        }
+                    };
+                    
+                    let frame_set = match descriptor_manager.frame_set(frame_index) {
+                        Some(s) => s,
+                        None => {
+                            log::error!("Frame descriptor set missing for frame {}", frame_index);
+                            return Ok(());
+                        }
+                    };
+                    
+                    let env_set = match descriptor_manager.environment_set(frame_index) {
+                        Some(s) => s,
+                        None => {
+                            log::error!("Environment descriptor set missing for frame {}", frame_index);
+                            return Ok(());
+                        }
+                    };
                     
                     // Bind sets 0 (Frame/MVP) and 2 (Environment/Skybox)
                     // We also bind Set 1 (Bindless) as middle set to preserve layout compatibility if needed
@@ -3805,17 +3683,25 @@ impl Renderer {
                 }
                 
                 // Construct SkyboxPushConstants
-                // Must match skybox.vert layout: model(64) + uints(16) = 80 bytes padding, then ptr(8)
                 let push = SkyboxPushConstants {
-                    _padding: [0; 20],
+                    frame_ptr: self.uniform_buffers[frame_index].device_address(),
+                    _padding: [0; 18],
                     vertex_heap_ptr: vertex_ptr,
                 };
                 
                 let push_bytes = bytemuck::bytes_of(&push);
                 
+                let layout_handle = match self.skybox_pipeline_layout.as_ref() {
+                    Some(l) => l.handle(),
+                    None => {
+                        log::error!("Skybox pipeline layout missing during render!");
+                        return Ok(());
+                    }
+                };
+
                 self.device.device.cmd_push_constants(
                     cmd_ctx.handle(),
-                    self.skybox_pipeline_layout.as_ref().unwrap().handle(),
+                    layout_handle,
                     vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
                     0,
                     push_bytes,
@@ -4001,25 +3887,22 @@ impl Renderer {
             // SAFETY: frame_index is bounded by command_buffers.len() and frame_syncs.len()
             // which are established at initialization and swapchain recreation.
             let frame_index = self.current_frame;
-            assert!(
-                frame_index < self.joint_matrices_buffer.len(),
-                "Frame index {} out of bounds for joint buffers ({})",
-                frame_index,
-                self.joint_matrices_buffer.len()
-            );
+
+            if frame_index >= self.command_buffers.len() {
+                 log::error!("CRITICAL: frame_index {} >= command_buffers.len() {}", frame_index, self.command_buffers.len());
+                 return Ok(());
+            }
+
             let command_buffer = *self.command_buffers.get_unchecked(frame_index);
-            let frame_sync_ref = self.frame_syncs.get_unchecked(frame_index);
+            let sync = &self.frame_syncs[frame_index];
+            
+            sync.wait()?;
+            sync.reset()?;
+            
+            let image_available = sync.image_available;
+            let render_finished = sync.render_finished;
+            let in_flight_fence = sync.in_flight;
 
-            let (image_available, render_finished, in_flight_fence) = (
-                frame_sync_ref.image_available,
-                frame_sync_ref.render_finished,
-                frame_sync_ref.in_flight,
-            );
-
-            self.device
-                .device
-                .wait_for_fences(&[in_flight_fence], true, u64::MAX)?;
-            self.device.device.reset_fences(&[in_flight_fence])?;
 
             // DELETED: Transform overwrite bug (lines 4105-4108)
             // if let Some(item) = self.draw_items.get_mut(0) {
@@ -4040,43 +3923,24 @@ impl Renderer {
                         .get(item.mesh_id as usize)
                         .map(|m| m.bounds)
                         .unwrap_or_else(|| CullBoundingBox::new(Vec3::ZERO, Vec3::ONE * 100.0));
+                    let material_index = item.material_handle.index as u32;
+                    let vertex_offset = uploaded.vertex_offset.unwrap_or(0) as i32 / 64; // 64 bytes per vertex
+                    
                     self.occlusion_culling.push_clusters(
                         bounds,
                         item.transform,
                         i as u32,
+                        uploaded.index_offset.unwrap_or(0) as u32 / 4,
+                        uploaded.index_count(),
+                        material_index,
+                        vertex_offset,
                         uploaded.clusters(),
                     );
+                } else {
+                    log::warn!("Mesh key '{}' not found in model renderer cache!", item.key);
                 }
             }
 
-            // Phase 10: Execute Hi-Z construction
-            if let (Some(ref mut hiz), Some(depth_buffer)) =
-                (&mut self.hiz_pass, &self.depth_buffer)
-            {
-                // Update adaptive quality based on previous frame's metrics
-                if let Some(ref mut profiler) = self.gpu_profiler {
-                    let timings = profiler.last_extended_timings();
-                    if timings.valid {
-                        let hiz_time_ms = timings.hiz_generate_ms as f64;
-                        if let Some(new_quality) = self.adaptive_hiz_manager.update(hiz.quality(), hiz_time_ms) {
-                            hiz.set_quality(new_quality);
-                        }
-                    }
-                }
-
-                // Hiz pyramid is built from previous frame's depth
-                hiz.build_pyramid(command_buffer, depth_buffer.image())?;
-                
-                // Update indirect draw pass descriptors with Hi-Z pyramid
-                if let Some(ref indirect) = self.indirect_draw_pass {
-                    indirect.update_hiz_descriptor(hiz);
-                }
-                
-                // Write timestamp after Hi-Z generation
-                if let Some(ref profiler) = self.gpu_profiler {
-                    profiler.write_timestamp(command_buffer, crate::renderer::diagnostics::TimingScope::HiZGenerateEnd);
-                }
-            }
 
             // Apply sub-pixel jitter for VSR/VSR if enabled
             let mut jittered_projection = projection;
@@ -4207,7 +4071,6 @@ impl Renderer {
                     | vk::AccessFlags::VERTEX_ATTRIBUTE_READ
                 );
 
-            unsafe {
                 self.device.device.cmd_pipeline_barrier(
                     command_buffer,
                     vk::PipelineStageFlags::HOST,
@@ -4217,6 +4080,45 @@ impl Renderer {
                     &[],
                     &[],
                 );
+
+            // Phase 10: Execute Hi-Z construction (Moved here to be inside command buffer recording)
+            if let (Some(ref mut hiz), Some(depth_buffer)) =
+                (&mut self.hiz_pass, &self.depth_buffer)
+            {
+                // Update adaptive quality based on previous frame's metrics
+                if let Some(ref mut profiler) = self.gpu_profiler {
+                    let timings = profiler.last_extended_timings();
+                    if timings.valid {
+                        let hiz_time_ms = timings.hiz_generate_ms as f64;
+                        if let Some(new_quality) = self.adaptive_hiz_manager.update(hiz.quality(), hiz_time_ms) {
+                            hiz.set_quality(new_quality);
+                        }
+                    }
+                }
+
+                // Hiz pyramid is built from previous frame's depth
+                hiz.build_pyramid(command_buffer, depth_buffer.image())?;
+                
+                // MODERN FIX: The "Indestructible" Descriptor Guard
+                let hiz_view = if let Some(view) = hiz.hiz_view() {
+                    view
+                } else {
+                    self._black_texture.view()
+                };
+
+                let hiz_sampler = if hiz.is_initialized() { 
+                    hiz.hiz_sampler() 
+                } else { 
+                    self._black_texture.sampler() 
+                };
+
+                if let Some(ref mut indirect) = self.indirect_draw_pass {
+                    indirect.update_hiz_descriptor(hiz_view, hiz_sampler);
+                }
+                
+                if let Some(ref profiler) = self.gpu_profiler {
+                    profiler.write_timestamp(command_buffer, crate::renderer::diagnostics::TimingScope::HiZGenerateEnd);
+                }
             }
 
             // DELETED: update_post_descriptors call moved to end of main passes for efficiency
@@ -4230,169 +4132,150 @@ impl Renderer {
                     all_instances.extend_from_slice(&batch.instances);
                 }
             }
-
             if !all_instances.is_empty() {
                 self.instance_buffer[frame_index].update(&all_instances)?;
             }
 
-            // Shadow Pass
             if let Some(vsm) = &self.vsm_feature {
-                // Update VSM resources in environment descriptor set
-                if let Some(descriptors) = &self.descriptors {
-                     descriptors.bind_vsm_resources(
-                        frame_index,
-                        vsm.resources.page_table_view,
-                        vsm.resources.page_table_sampler,
-                        vsm.resources.physical_cache_view,
-                        vsm.resources.physical_cache_sampler,
-                    ).unwrap_or_else(|e| log::error!("Failed to bind VSM resources: {}", e));
-                }
-
-                // Extract references to avoid borrow checker conflicts
-                let instancing_manager = &self.instancing_manager;
-                let model_renderer = &self.model_renderer;
-                let mesh_data = &self.mesh_data;
-                let instance_buffer_addresses = &self.instance_buffer_addresses;
-                let joint_buffer_addresses = &self.joint_buffer_addresses;
-                let material_heap_address = self.material_heap_address;
-                let uniform_buffers = &self.uniform_buffers;
-
-                let frame_descriptor_set = self.descriptors.as_ref()
-                    .and_then(|d| d.frame_set(frame_index))
-                    .unwrap_or(vk::DescriptorSet::null());
-                let bindless_descriptor_set = self.bindless_manager.as_ref()
-                    .map(|bm| bm.descriptor_set())
-                    .unwrap_or(vk::DescriptorSet::null());
-                
-                // Get light direction and clipmap levels
-                let light_dir = glam::Vec3::from_slice(&self.scene_lighting.directional.direction[0..3]);
-                let device = &self.device; // Extract device for closure
-                
-                    // Pre-fetch levels to avoid borrow issues inside closure
-                    let levels: Vec<_> = if let Some(cm) = vsm.clipmap_manager() {
-                         cm.levels().cloned().collect()
-                    } else {
-                         Vec::new()
-                    };
-                    
-                    let page_table_res = vsm.clipmap_manager()
-                        .map(|cm| cm.page_table_resolution())
-                        .unwrap_or(128);
-
-                    // Pre-calculate culling for each level
-                    // Map: Layer Index -> (Light Space Matrix, Visible Batches)
-                    let mut level_culling = std::collections::HashMap::new();
-                    
-                    for level in &levels {
-                        let light_space_matrix = level.view_projection_matrix(light_dir, page_table_res);
-                        let frustum = Frustum::from_matrix(light_space_matrix);
-                        let visible_batches = instancing_manager.cull_shadow_casters(&frustum);
-                        level_culling.insert(level.layer, (light_space_matrix, visible_batches));
-                    }
-
-                    // Get primary light space matrix (use first clipmap level)
-                    let primary_light_matrix = if let Some(first_level) = levels.first() {
-                        let light_dir = glam::vec3(0.0, -1.0, -0.5).normalize();
-                        let light_pos = camera_pos - light_dir * first_level.extent;
-                        let light_view = glam::Mat4::look_at_rh(light_pos, camera_pos, glam::Vec3::Y);
-                        let light_proj = glam::Mat4::orthographic_rh(
-                            -first_level.extent,
-                            first_level.extent,
-                            -first_level.extent,
-                            first_level.extent,
-                            0.1,
-                            first_level.extent * 2.0,
-                        );
-                        light_proj * light_view
-                    } else {
-                        glam::Mat4::IDENTITY
-                    };
-
-                    vsm.render_shadows(command_buffer, &primary_light_matrix, frame_descriptor_set, bindless_descriptor_set, |cmd, page| {
-                        // Check dirty flag (Bit 0) - Skip rendering if clean
-                        if (page.flags & 1) == 0 {
-                            return;
+                    // ROBUST CHECK: Do not panic if pipeline failed to build.
+                    // Just skip shadows for this frame to prevent 0xc000041d.
+                    if let Some(pipeline_layout) = vsm.shadow_pipeline_layout() {
+                        // Update VSM resources in environment descriptor set
+                        if let Some(descriptors) = &self.descriptors {
+                             descriptors.bind_vsm_resources(
+                                frame_index,
+                                vsm.resources.page_table_view,
+                                vsm.resources.page_table_sampler,
+                                vsm.resources.physical_cache_view,
+                                vsm.resources.physical_cache_sampler,
+                            ).unwrap_or_else(|e| log::error!("Failed to bind VSM resources: {}", e));
                         }
 
-                        // Get pre-calculated data for this page's layer
-                        if let Some((light_space_matrix, visible_batches)) = level_culling.get(&page.layer) {
-                            // Iterate visible batches
-                            for (batch, _indices) in visible_batches {
-                                if let Some(data) = mesh_data.get(batch.key.mesh_id as usize) {
-                                    if let Some(uploaded) = model_renderer.get(&data.name) {
-                                        // Construct material push constants
-                                         let material_push = crate::renderer::model_renderer::MaterialPushConstants::new(batch.key.material_id)
-                                            .with_receive_shadows(false) // Shadows don't receive shadows
-                                            .with_debug_visualization(false);
-                                        
-                                        // Get pipeline layout from VSM feature
-                                        let pipeline_layout = vsm.shadow_pipeline_layout()
-                                            .expect("Shadow pipeline layout not initialized");
-                                        
-                                        // Construct draw context
-                                         let ctx = crate::renderer::model_renderer::DrawContext {
-                                            command_buffer: cmd,
-                                            pipeline_layout,
-                                            uploaded,
-                                            material: &material_push,
-                                            frame_ptr: uniform_buffers[frame_index].device_address(),
-                                            instance_ptr: instance_buffer_addresses[frame_index],
-                                            material_ptr: material_heap_address,
-                                            joint_ptr: joint_buffer_addresses[frame_index],
-                                        };
-                                        
-                                        // Push light-space matrix
-                                        // Note: This must match the push constant range in shadow shader
-                                        device.device.cmd_push_constants(
-                                            cmd,
-                                            pipeline_layout,
-                                            vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
-                                            160, // Offset for lightSpaceMatrix
-                                            bytemuck::bytes_of(light_space_matrix),
-                                        );
+                        // Extract references to avoid borrow checker conflicts
+                        let instancing_manager = &self.instancing_manager;
+                        let model_renderer = &self.model_renderer;
+                        let mesh_data = &self.mesh_data;
+                        let instance_buffer_addresses = &self.instance_buffer_addresses;
+                        let material_heap_address = self.material_heap_address;
+                        let uniform_buffers = &self.uniform_buffers;
 
-                                        // Get batch offset from the batch_offsets map
-                                        let offset = batch_offsets.get(&batch.key).copied().unwrap_or(0);
-                                        
-                                        // CRITICAL BDA SAFETY: Check for null vertex heap address
-                                        let vertex_ptr = uploaded.vertex_heap_address.unwrap_or(0);
-                                        if vertex_ptr == 0 {
-                                            log::error!(
-                                                "CRITICAL: Mesh '{}' has null BDA (vertex_heap_address=0). Skipping shadow draw to prevent DEVICE_LOST.",
-                                                data.name
+                        let frame_descriptor_set = self.descriptors.as_ref()
+                            .and_then(|d| d.frame_set(frame_index))
+                            .unwrap_or(vk::DescriptorSet::null());
+                        let bindless_descriptor_set = self.bindless_manager.as_ref()
+                            .map(|bm| bm.descriptor_set())
+                            .unwrap_or(vk::DescriptorSet::null());
+                        
+                        // Get light direction and clipmap levels
+                        let light_dir = glam::Vec3::from_slice(&self.scene_lighting.directional.direction[0..3]);
+                        let device = &self.device; // Extract device for closure
+                        
+                        // Pre-fetch levels to avoid borrow issues inside closure
+                        let levels: Vec<_> = if let Some(cm) = vsm.clipmap_manager() {
+                                cm.levels().cloned().collect()
+                        } else {
+                                Vec::new()
+                        };
+                        
+                        let page_table_res = vsm.clipmap_manager()
+                            .map(|cm| cm.page_table_resolution())
+                            .unwrap_or(128);
+
+                        // Pre-calculate culling for each level
+                        let mut level_culling = std::collections::HashMap::new();
+                        for level in &levels {
+                            let light_space_matrix = level.view_projection_matrix(light_dir, page_table_res);
+                            let frustum = Frustum::from_matrix(light_space_matrix);
+                            let visible_batches = instancing_manager.cull_shadow_casters(&frustum);
+                            level_culling.insert(level.layer, (light_space_matrix, visible_batches));
+                        }
+
+                        // Get primary light space matrix
+                        let primary_light_matrix = if let Some(first_level) = levels.first() {
+                            let light_dir = glam::vec3(0.0, -1.0, -0.5).normalize();
+                            let light_pos = camera_pos - light_dir * first_level.extent;
+                            let light_view = glam::Mat4::look_at_rh(light_pos, camera_pos, glam::Vec3::Y);
+                            let light_proj = glam::Mat4::orthographic_rh(
+                                -first_level.extent,
+                                first_level.extent,
+                                -first_level.extent,
+                                first_level.extent,
+                                0.1,
+                                first_level.extent * 2.0,
+                            );
+                            light_proj * light_view
+                        } else {
+                            glam::Mat4::IDENTITY
+                        };
+
+                        vsm.render_shadows(command_buffer, &primary_light_matrix, frame_descriptor_set, bindless_descriptor_set, |cmd, page| {
+                            if (page.flags & 1) == 0 { return; }
+                            if let Some((light_space_matrix, visible_batches)) = level_culling.get(&page.layer) {
+                                for (batch, _indices) in visible_batches {
+                                    if let Some(data) = mesh_data.get(batch.key.mesh_id as usize) {
+                                        if let Some(uploaded) = model_renderer.get(&data.name) {
+                                            let material_push = crate::renderer::model_renderer::MaterialPushConstants::new(batch.key.material_id)
+                                                .with_receive_shadows(false)
+                                                .with_debug_visualization(false);
+                                            
+                                            let ctx = crate::renderer::model_renderer::DrawContext {
+                                                command_buffer: cmd,
+                                                pipeline_layout,
+                                                uploaded,
+                                                material: &material_push,
+                                                frame_ptr: uniform_buffers[frame_index].device_address(),
+                                                vertex_ptr: model_renderer.geometry_buffer.vertex_heap_address(),
+                                                instance_ptr: instance_buffer_addresses[frame_index],
+                                                material_ptr: material_heap_address,
+                                            };
+                                            
+                                            device.device.cmd_push_constants(
+                                                cmd,
+                                                pipeline_layout,
+                                                vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                                                160,
+                                                bytemuck::bytes_of(light_space_matrix),
                                             );
-                                            continue;
-                                        }
-                                        
-                                        log::debug!("Shadow Draw: mesh={}, ptr=0x{:X}, count={}", data.name, vertex_ptr, batch.count());
 
-                                        // Draw instanced mesh (Draw ALL instances in batch for Coarse Culling)
-                                        model_renderer.draw_mesh_instanced(
-                                            &ctx,
-                                            batch.count() as u32,
-                                            offset,
-                                        );
+                                            let offset = batch_offsets.get(&batch.key).copied().unwrap_or(0);
+                                            
+                                            // CRITICAL BDA SAFETY: Check for null vertex heap address
+                                            let vertex_ptr = uploaded.vertex_heap_address.unwrap_or(0);
+                                            if vertex_ptr == 0 {
+                                                log::error!(
+                                                    "CRITICAL: Mesh '{}' has null BDA (vertex_heap_address=0). Skipping shadow draw to prevent DEVICE_LOST.",
+                                                    data.name
+                                                );
+                                                continue;
+                                            }
+                                            
+                                            log::debug!("Shadow Draw: mesh={}, ptr=0x{:X}, count={}", data.name, vertex_ptr, batch.count());
+
+                                            model_renderer.draw_mesh_instanced(&ctx, batch.count() as u32, offset);
+                                        }
                                     }
                                 }
                             }
-                        }
-                    });
+                        });
+                    } else {
+                        log::warn!("Shadow pipeline not ready, skipping shadow pass.");
+                    }
+                }
 
-                    // --- VSM TO MAIN PASS SYNCHRONIZATION ---
-                    // Barrier to ensure all shadow writes are visible to the main pass
-                    
-                    /*
-                    self.device.device.cmd_pipeline_barrier(
-                        command_buffer,
-                        vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
-                        vk::PipelineStageFlags::FRAGMENT_SHADER,
-                        vk::DependencyFlags::empty(),
-                        &[],
-                        &[],
-                        &[vsm_barrier],
-                    );
-                    */
-            }
+            // --- VSM TO MAIN PASS SYNCHRONIZATION ---
+            // Barrier to ensure all shadow writes are visible to the main pass
+            
+            /*
+            self.device.device.cmd_pipeline_barrier(
+                command_buffer,
+                vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                vk::PipelineStageFlags::FRAGMENT_SHADER,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[],
+                &[vsm_barrier],
+            );
+            */
 
             // --- Light Culling Compute Dispatch ---
             if let Some(ref mut fp_integration) = self.forward_plus {
@@ -4412,14 +4295,11 @@ impl Renderer {
                     )?;
 
                     // Dispatch the compute shader
-                    // DEBUG: Commented out
-                    /*
                     fp_integration.dispatch(
                         command_buffer,
                         &self.device.device,
                         frame_index as usize
                     );
-                    */
 
                     // Barrier: Ensure light buffers are ready for the fragment shader
                     let light_barrier = vk::BufferMemoryBarrier::default()
@@ -4467,7 +4347,7 @@ impl Renderer {
                     },
                     vk::ClearValue {
                         depth_stencil: vk::ClearDepthStencilValue {
-                            depth: 1.0, // 4: Depth
+                            depth: 0.0, // REVERSE-Z FIX: 0.0 is Far/Infinity
                             stencil: 0,
                         },
                     },
@@ -4481,7 +4361,7 @@ impl Renderer {
                     },
                     vk::ClearValue {
                         depth_stencil: vk::ClearDepthStencilValue {
-                            depth: 1.0, // 1: Depth
+                            depth: 0.0, // REVERSE-Z FIX: 0.0 is Far/Infinity
                             stencil: 0,
                         },
                     },
@@ -4500,6 +4380,26 @@ impl Renderer {
                 })?;
                 (framebuffer.handle(), framebuffer.attachments()[0])
             };
+
+            // PREPARE FOR CULLING & RENDERING (Moved out of Render Pass)
+            let pipeline_layout = self.pipeline_layout.as_ref().ok_or_else(|| {
+                AshError::VulkanError("Pipeline layout not available".to_string())
+            })?;
+            let pipeline_layout_handle = pipeline_layout.handle();
+
+            let main_pass_params = MainPassParameters {
+                cmd_ctx: &cmd_ctx,
+                frame_index,
+                scene_pipeline,
+                pipeline_layout_handle,
+                batch_offsets: &batch_offsets,
+                view,
+                projection: jittered_projection,
+                swapchain_extent,
+            };
+
+            // CRITICAL FIX: Execute Compute Culling BEFORE Render Pass
+            self.cull_main_pass(&main_pass_params)?;
 
             let render_pass_begin = vk::RenderPassBeginInfo::default()
                 .render_pass(main_render_pass)
@@ -4542,11 +4442,6 @@ impl Renderer {
 
             self.features.render(&render_ctx);
 
-            let pipeline_layout = self.pipeline_layout.as_ref().ok_or_else(|| {
-                AshError::VulkanError("Pipeline layout not available".to_string())
-            })?;
-            let pipeline_layout_handle = pipeline_layout.handle();
-
             let _ = (|| -> Result<vk::DescriptorSet> {
                 if let Some(manager) = self.descriptors.as_ref() {
                     let frame_set = manager.frame_set(frame_index).ok_or_else(|| {
@@ -4565,7 +4460,7 @@ impl Renderer {
                         cmd_ctx.bind_descriptor_sets(
                             vk::PipelineBindPoint::GRAPHICS,
                             pipeline_layout_handle,
-                            1, // Set 1: Bindless (Textures, Materials, Instances, Joints)
+                            1, // Set 1: Bindless (Textures, Materials, Instances)
                             &[bindless.descriptor_set()],
                             &[],
                         );
@@ -4602,17 +4497,7 @@ impl Renderer {
             })()?;
 
             // --- Phase 10: GPU Instancing & Culling Integration ---
-            let main_pass_params = MainPassParameters {
-                cmd_ctx: &cmd_ctx,
-                frame_index,
-                scene_pipeline,
-                pipeline_layout_handle,
-                batch_offsets: &batch_offsets,
-                view,
-                projection: jittered_projection,
-                swapchain_extent,
-            };
-            // self.render_main_pass(&main_pass_params)?;
+            self.render_main_pass(&main_pass_params)?;
 
             cmd_ctx.end_render_pass();
 
@@ -4675,7 +4560,7 @@ impl Renderer {
 
             // Resolve HDR target to swapchain (always needed even if tonemapping is disabled)
             log::debug!("DEBUG: About to call render_post_processing");
-            // self.render_post_processing(command_buffer, image_index as usize)?;
+            self.render_post_processing(command_buffer, image_index as usize)?;
             log::debug!("DEBUG: render_post_processing completed successfully");
 
             cmd_ctx.end()?;
@@ -4764,15 +4649,7 @@ impl Renderer {
     }
 
     /// Enables or disables tonemapping
-    pub fn set_tonemapping_enabled(&mut self, enabled: bool) {
-        self.tonemapping_enabled = enabled;
-    }
-
-    /// Enables or disables debug path visualization tints in the shader.
-    /// Deprecated: Use set_debug_mode instead.
-    pub fn set_debug_visualization(&mut self, enabled: bool) {
-        self.debug_mode = if enabled { DebugMode::Path } else { DebugMode::None };
-    }
+    // DELETED: Use set_debug_mode instead.
 
     /// Returns whether tonemapping is enabled
     pub fn tonemapping_enabled(&self) -> bool {
@@ -4905,7 +4782,7 @@ impl Renderer {
         // Create Hi-Z pass
         let mut hiz = HiZPass::new(Arc::clone(&self.device.device));
         unsafe {
-            hiz.init(&self.alloc.vma, &self.device, extent.width, extent.height);
+            hiz.init(&self.alloc.vma, &self.device, extent.width, extent.height)?;
         }
 
         // Create Indirect Draw pass
@@ -4925,8 +4802,20 @@ impl Renderer {
                 &self.device,
                 bindless_manager,
                 crate::renderer::indirect_draw::MAX_INDIRECT_OBJECTS,
-            );
-            indirect.update_hiz_descriptor(&hiz);
+            )?;
+            let hiz_view = if let Some(view) = hiz.hiz_view() {
+                view
+            } else {
+                // REVERSE-Z FIX: 0.0 is Far Plane (no occlusion)
+                self._black_texture.view()
+            };
+
+            let hiz_sampler = if hiz.is_initialized() { 
+                hiz.hiz_sampler() 
+            } else { 
+                self._black_texture.sampler() 
+            };
+            indirect.update_hiz_descriptor(hiz_view, hiz_sampler);
         }
 
         self.hiz_pass = Some(hiz);
@@ -5087,7 +4976,6 @@ impl Renderer {
         if self.post_descriptor_pool != vk::DescriptorPool::null() {
             unsafe {
                 self.device.device.destroy_descriptor_pool(self.post_descriptor_pool, None);
-                self.device.device.destroy_sampler(self._post_sampler, None);
             }
         }
         let pool_sizes = [vk::DescriptorPoolSize {

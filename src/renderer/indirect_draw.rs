@@ -6,7 +6,6 @@
 use ash::vk;
 use std::sync::Arc;
 
-use crate::renderer::hiz_pass::HiZPass;
 use crate::renderer::occlusion_culling::{CullObjectData, CullingPushConstants, OcclusionCulling};
 use crate::vulkan::descriptor_bindless::BindlessManager;
 use crate::vulkan::VulkanDevice;
@@ -26,9 +25,7 @@ pub struct IndirectDrawPass {
     object_buffer_size: u64,
     object_buffer_index: Option<u32>,
 
-    // Draw commands template buffer (input)
-    template_buffer: vk::Buffer,
-    template_allocation: Option<vk_mem::Allocation>,
+    // Draw commands template buffer (input) - DELETED (Using BDA Mesh Data Directly)
 
     // Indirect draw commands buffer (output)
     indirect_buffer: vk::Buffer,
@@ -63,8 +60,8 @@ impl IndirectDrawPass {
             object_allocation: None,
             object_buffer_size: 0,
             object_buffer_index: None,
-            template_buffer: vk::Buffer::null(),
-            template_allocation: None,
+            // template_buffer: vk::Buffer::null(),
+            // template_allocation: None,
             indirect_buffer: vk::Buffer::null(),
             indirect_allocation: None,
             visibility_buffer: vk::Buffer::null(),
@@ -90,26 +87,22 @@ impl IndirectDrawPass {
         _vulkan_device: &VulkanDevice,
         bindless_manager: &mut BindlessManager,
         max_objects: usize,
-    ) {
+    ) -> Result<()> {
         if self.initialized {
-            return;
+            return Ok(());
         }
 
-        self.create_buffers(allocator, max_objects)
-            .expect("Indirect buffers failed");
+        self.create_buffers(allocator, max_objects)?;
 
         // Register object buffer with BindlessManager
-        let index = bindless_manager
-            .add_storage_buffer(self.object_buffer, 0, vk::WHOLE_SIZE)
-            .expect("Failed to register indirect object buffer");
+        let index = bindless_manager.add_storage_buffer(self.object_buffer, 0, vk::WHOLE_SIZE)?;
         self.object_buffer_index = Some(index);
 
-        self.create_descriptors()
-            .expect("Indirect descriptors failed");
-        self.create_pipeline(bindless_manager.layout())
-            .expect("Indirect pipeline failed");
+        self.create_descriptors()?;
+        self.create_pipeline()?;
 
         self.initialized = true;
+        Ok(())
     }
 
     /// Create GPU buffers
@@ -142,22 +135,35 @@ impl IndirectDrawPass {
         let object_info = vk::BufferCreateInfo::default().size(object_size).usage(
             vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
         );
-        let (object_buffer, object_alloc) = allocator
+        let (object_buffer, mut object_alloc) = allocator
             .create_buffer(&object_info, &buffer_alloc_info)
             .map_err(|e| crate::AshError::VulkanError(format!("Object buffer: {e:?}")))?;
+
+        // SAFETY: BDA requires initialized memory. Zero it out to prevent wild pointers.
+        unsafe {
+            let ptr = allocator.map_memory(&mut object_alloc)?;
+            std::ptr::write_bytes(ptr, 0, object_size as usize);
+
+            // CRITICAL: Flush to ensure GPU sees the zeros!
+            allocator.flush_allocation(&object_alloc, 0, object_size)?;
+
+            allocator.unmap_memory(&mut object_alloc);
+        }
+
+        // Check address alignment
+        let info = vk::BufferDeviceAddressInfo::default().buffer(object_buffer);
+        let addr = self.device.get_buffer_device_address(&info);
+        log::info!(
+            "IndirectDrawPass: Object Buffer Address = {:#x} (Aligned: {})",
+            addr,
+            addr % 16 == 0
+        );
+
         self.object_buffer = object_buffer;
         self.object_allocation = Some(object_alloc);
         self.object_buffer_size = object_size;
 
-        // Template buffer (CPU writable)
-        let template_info = vk::BufferCreateInfo::default().size(command_size).usage(
-            vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
-        );
-        let (template_buffer, template_alloc) = allocator
-            .create_buffer(&template_info, &buffer_alloc_info)
-            .map_err(|e| crate::AshError::VulkanError(format!("Template buffer: {e:?}")))?;
-        self.template_buffer = template_buffer;
-        self.template_allocation = Some(template_alloc);
+        // Template buffer - DELETED
 
         // Indirect buffer (GPU only, indirect draw source)
         let indirect_info = vk::BufferCreateInfo::default().size(command_size).usage(
@@ -185,6 +191,7 @@ impl IndirectDrawPass {
         let count_info = vk::BufferCreateInfo::default().size(count_size).usage(
             vk::BufferUsageFlags::STORAGE_BUFFER
                 | vk::BufferUsageFlags::TRANSFER_DST
+                | vk::BufferUsageFlags::INDIRECT_BUFFER
                 | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
         );
         let (count_buffer, count_alloc) = allocator
@@ -209,7 +216,7 @@ impl IndirectDrawPass {
                 .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
                 .descriptor_count(1)
                 .stage_flags(vk::ShaderStageFlags::COMPUTE),
-            // 2: Draw commands template
+            // 2: Draw commands template - DELETED
             vk::DescriptorSetLayoutBinding::default()
                 .binding(2)
                 .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
@@ -268,7 +275,7 @@ impl IndirectDrawPass {
     }
 
     /// Create compute pipeline
-    unsafe fn create_pipeline(&mut self, bindless_layout: vk::DescriptorSetLayout) -> Result<()> {
+    unsafe fn create_pipeline(&mut self) -> Result<()> {
         let shader_code = include_bytes!(concat!(env!("OUT_DIR"), "/occlusion_cull.comp.spv"));
 
         let shader_module_info =
@@ -282,7 +289,8 @@ impl IndirectDrawPass {
             .offset(0)
             .size(std::mem::size_of::<CullingPushConstants>() as u32);
 
-        let layouts = [self.layout, bindless_layout];
+        // Define layouts: Only Set 0 (Indirect Resources) is needed now. Set 1 (Bindless) is gone.
+        let layouts = [self.layout];
         let layout_info = vk::PipelineLayoutCreateInfo::default()
             .set_layouts(&layouts)
             .push_constant_ranges(std::slice::from_ref(&push_constant_range));
@@ -315,11 +323,7 @@ impl IndirectDrawPass {
     /// # Safety
     /// The caller must ensure that the pipeline is not in use and that the
     /// provided SPIR-V code is valid.
-    pub unsafe fn reload_pipeline(
-        &mut self,
-        spirv_code: &[u32],
-        bindless_layout: vk::DescriptorSetLayout,
-    ) -> Result<()> {
+    pub unsafe fn reload_pipeline(&mut self, spirv_code: &[u32]) -> Result<()> {
         log::info!("IndirectDrawPass: Reloading pipeline...");
 
         // Destroy old pipeline
@@ -343,7 +347,7 @@ impl IndirectDrawPass {
             .offset(0)
             .size(std::mem::size_of::<CullingPushConstants>() as u32);
 
-        let layouts = [self.layout, bindless_layout];
+        let layouts = [self.layout];
         let layout_info = vk::PipelineLayoutCreateInfo::default()
             .set_layouts(&layouts)
             .push_constant_ranges(std::slice::from_ref(&push_constant_range));
@@ -375,21 +379,16 @@ impl IndirectDrawPass {
     ///
     /// # Safety
     /// Resources must be valid.
-    pub unsafe fn update_hiz_descriptor(&self, hiz_pass: &HiZPass) {
+    pub unsafe fn update_hiz_descriptor(&self, hiz_view: vk::ImageView, hiz_sampler: vk::Sampler) {
         if !self.initialized {
             return;
         }
 
-        let hiz_view = match hiz_pass.hiz_view() {
-            Some(v) => v,
-            None => return,
-        };
-
         // Update buffer descriptors
 
-        let template_info = vk::DescriptorBufferInfo::default()
-            .buffer(self.template_buffer)
-            .range(vk::WHOLE_SIZE);
+        // let template_info = vk::DescriptorBufferInfo::default()
+        //     .buffer(self.template_buffer)
+        //     .range(vk::WHOLE_SIZE);
 
         let visibility_info = vk::DescriptorBufferInfo::default()
             .buffer(self.visibility_buffer)
@@ -404,7 +403,7 @@ impl IndirectDrawPass {
             .range(vk::WHOLE_SIZE);
 
         let hiz_image_info = vk::DescriptorImageInfo::default()
-            .sampler(hiz_pass.hiz_sampler())
+            .sampler(hiz_sampler)
             .image_view(hiz_view)
             .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL);
 
@@ -414,11 +413,11 @@ impl IndirectDrawPass {
                 .dst_binding(1)
                 .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
                 .image_info(std::slice::from_ref(&hiz_image_info)),
-            vk::WriteDescriptorSet::default()
-                .dst_set(self.set)
-                .dst_binding(2)
-                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
-                .buffer_info(std::slice::from_ref(&template_info)),
+            // vk::WriteDescriptorSet::default()
+            //     .dst_set(self.set)
+            //     .dst_binding(2)
+            //     .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+            //     .buffer_info(std::slice::from_ref(&template_info)),
             vk::WriteDescriptorSet::default()
                 .dst_set(self.set)
                 .dst_binding(3)
@@ -442,7 +441,7 @@ impl IndirectDrawPass {
     /// Upload object data for culling
     ///
     /// # Safety
-    /// Allocator must be valid and offset must be within buffer capacity.
+    /// Allocator must be valid and offset (in elements of T) must be within buffer capacity.
     pub unsafe fn upload_objects(
         &self,
         allocator: &vk_mem::Allocator,
@@ -453,41 +452,36 @@ impl IndirectDrawPass {
             return Ok(());
         }
 
+        // log::debug!("IndirectDraw: Uploading {} objects", objects.len());
+
         if let Some(ref alloc) = self.object_allocation {
             let info = allocator.get_allocation_info(alloc);
             if !info.mapped_data.is_null() {
+                // CRITICAL SAFETY: Bounds check before write
+                let required_size = offset + objects.len() * std::mem::size_of::<CullObjectData>();
+                if required_size > info.size as usize {
+                    return Err(crate::AshError::VulkanError(format!(
+                        "IndirectDraw: Object buffer overrun. Size: {}, Allocation: {}",
+                        required_size, info.size
+                    )));
+                }
+
                 let dest = (info.mapped_data as *mut CullObjectData).add(offset);
                 std::ptr::copy_nonoverlapping(objects.as_ptr(), dest, objects.len());
+
+                // CRITICAL FIX: Flush memory to ensure GPU visibility on non-coherent heaps
+                allocator.flush_allocation(
+                    alloc,
+                    offset as u64,
+                    (objects.len() * std::mem::size_of::<CullObjectData>()) as u64,
+                )?;
             }
         }
 
         Ok(())
     }
 
-    /// Upload draw command templates
-    ///
-    /// # Safety
-    /// Allocator must be valid.
-    pub unsafe fn upload_templates(
-        &self,
-        allocator: &vk_mem::Allocator,
-        templates: &[vk::DrawIndexedIndirectCommand],
-        offset: usize,
-    ) -> Result<()> {
-        if !self.initialized || templates.is_empty() {
-            return Ok(());
-        }
-
-        if let Some(ref alloc) = self.template_allocation {
-            let info = allocator.get_allocation_info(alloc);
-            if !info.mapped_data.is_null() {
-                let dest = (info.mapped_data as *mut vk::DrawIndexedIndirectCommand).add(offset);
-                std::ptr::copy_nonoverlapping(templates.as_ptr(), dest, templates.len());
-            }
-        }
-
-        Ok(())
-    }
+    // upload_templates DELETED
 
     /// Execute culling pass
     ///
@@ -498,7 +492,6 @@ impl IndirectDrawPass {
         &self,
         cmd: vk::CommandBuffer,
         culling: &OcclusionCulling,
-        bindless_manager: &BindlessManager,
         view_proj: glam::Mat4,
         width: u32,
         height: u32,
@@ -507,6 +500,16 @@ impl IndirectDrawPass {
         indirect_offset: u32,
     ) -> Result<()> {
         if !self.initialized || !culling.is_enabled() || object_count == 0 {
+            return Ok(());
+        }
+
+        // SAFETY: BDA crash prevention
+        // If the object buffer address is 0 (uninitialized) or the buffer has not been uploaded,
+        // dispatching the shader will cause a TDR/Device Lost error.
+        let object_addr = self.object_buffer_address();
+        if object_addr == 0 {
+            // This is expected on the first frame if upload hasn't happened yet
+            // log::warn!("IndirectDrawPass: Object buffer address is 0, skipping culling dispatch");
             return Ok(());
         }
 
@@ -546,22 +549,16 @@ impl IndirectDrawPass {
             &[],
         );
 
-        // Bind bindless descriptors (Set 1)
-        self.device.cmd_bind_descriptor_sets(
-            cmd,
-            vk::PipelineBindPoint::COMPUTE,
-            self.cull_layout,
-            1,
-            &[bindless_manager.descriptor_set()],
-            &[],
-        );
+        // Bindless (Set 1) REMOVED - using BDA now
 
         // Push constants
         let mut push = culling.push_constants(view_proj, width, height);
         push.object_count = object_count;
         push.base_index = object_offset;
         push.indirect_start = indirect_offset;
-        push.object_buffer_index = self.object_buffer_index.unwrap_or(0);
+
+        // ADDRESS INJECTION: Pass the BDA pointer directly to the shader
+        push.object_buffer_addr = self.object_buffer_address();
 
         self.device.cmd_push_constants(
             cmd,
@@ -576,10 +573,19 @@ impl IndirectDrawPass {
         self.device.cmd_dispatch(cmd, group_count, 1, 1);
 
         // Barrier for indirect read
+        // Barriers for Indirect Draw & Count Read
         let indirect_barrier = vk::BufferMemoryBarrier {
             src_access_mask: vk::AccessFlags::SHADER_WRITE,
             dst_access_mask: vk::AccessFlags::INDIRECT_COMMAND_READ,
             buffer: self.indirect_buffer,
+            size: vk::WHOLE_SIZE,
+            ..Default::default()
+        };
+
+        let count_barrier = vk::BufferMemoryBarrier {
+            src_access_mask: vk::AccessFlags::SHADER_WRITE,
+            dst_access_mask: vk::AccessFlags::INDIRECT_COMMAND_READ,
+            buffer: self.count_buffer,
             size: vk::WHOLE_SIZE,
             ..Default::default()
         };
@@ -590,7 +596,7 @@ impl IndirectDrawPass {
             vk::PipelineStageFlags::DRAW_INDIRECT,
             vk::DependencyFlags::empty(),
             &[],
-            &[indirect_barrier],
+            &[indirect_barrier, count_barrier],
             &[],
         );
 
@@ -619,6 +625,10 @@ impl IndirectDrawPass {
 
     pub fn indirect_buffer(&self) -> vk::Buffer {
         self.indirect_buffer
+    }
+
+    pub fn is_initialized(&self) -> bool {
+        self.initialized
     }
 
     pub fn object_buffer_size(&self) -> vk::DeviceSize {
@@ -658,9 +668,9 @@ impl IndirectDrawPass {
         if let Some(mut alloc) = self.object_allocation.take() {
             allocator.destroy_buffer(self.object_buffer, &mut alloc);
         }
-        if let Some(mut alloc) = self.template_allocation.take() {
-            allocator.destroy_buffer(self.template_buffer, &mut alloc);
-        }
+        // if let Some(mut alloc) = self.template_allocation.take() {
+        //     allocator.destroy_buffer(self.template_buffer, &mut alloc);
+        // }
         if let Some(mut alloc) = self.indirect_allocation.take() {
             allocator.destroy_buffer(self.indirect_buffer, &mut alloc);
         }

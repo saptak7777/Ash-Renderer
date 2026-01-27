@@ -51,7 +51,7 @@ pub use error::{AshError, Result};
 #[doc(hidden)]
 pub use renderer::{
     Camera, DepthBuffer, Material, Mesh, PipelineCache, RenderStats, Renderer, ResourceId,
-    ResourceRegistry, SkinnedVertex, StatsCollector, Texture, TextureData, Transform, Vertex, MVP,
+    ResourceRegistry, StatsCollector, Texture, TextureData, Transform, Vertex, MVP,
 };
 
 pub use renderer::features::{
@@ -61,7 +61,7 @@ pub use renderer::features::{
 /// Prelude module for convenient imports
 pub mod prelude {
     pub use crate::{
-        AshError, Camera, DirectionalLight, Material, Mesh, PointLight, Renderer, Result,
-        SkinnedVertex, Texture, Transform, Vertex,
+        AshError, Camera, DirectionalLight, Material, Mesh, PointLight, Renderer, Result, Texture,
+        Transform, Vertex,
     };
 }

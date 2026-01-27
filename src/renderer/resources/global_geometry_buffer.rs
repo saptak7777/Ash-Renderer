@@ -86,7 +86,7 @@ impl DualHeapGeometryBuffer {
                 | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS
                 | vk::BufferUsageFlags::TRANSFER_DST,
             vk_mem::MemoryUsage::AutoPreferDevice,
-            vk_mem::AllocationCreateFlags::empty(),
+            vk_mem::AllocationCreateFlags::empty(), // GPU-only memory, no CPU access needed
             Some("Vertex Heap (BDA)".to_string()),
         )?;
 

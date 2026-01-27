@@ -358,19 +358,6 @@ impl Allocator {
             .build(self)
     }
 
-    /// Create joint matrix buffer (skinning data)
-    pub fn create_joint_buffer(
-        &self,
-        size: vk::DeviceSize,
-    ) -> crate::Result<(vk::Buffer, vk_mem::Allocation)> {
-        crate::vulkan::buffer_builder::BufferBuilder::new(size)
-            .storage_buffer()
-            .cpu_writable()
-            .persistent_mapping() // Frequently updated
-            .named("Joint Matrices")
-            .build(self)
-    }
-
     /// Create indirect draw buffer (GPU-written, GPU-consumed)
     pub fn create_indirect_buffer(
         &self,

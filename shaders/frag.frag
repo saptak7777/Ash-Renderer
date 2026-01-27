@@ -11,6 +11,7 @@ layout(location = 3) sample in vec3 fragWorldPos;
 layout(location = 4) in vec4 fragPosLightSpace;
 layout(location = 5) in vec4 fragTangent;
 layout(location = 6) in vec2 motionVector;
+layout(location = 7) flat in uint fragInstanceIndex;
 
 // Geometric Specular AA (Toksvig/Kaplanyan method)
 // Adjusts roughness based on normal map variance to prevent specular aliasing
@@ -279,7 +280,18 @@ vec3 calculateDirectionalLight(
 void main() {
     FrameData frame = FrameData(push.frame_ptr);
     // Extract actual index from handle (lower 16 bits)
-    uint actual_material_index = push.material_index & 0xFFFFu;
+    uint actual_material_index = push.material_index;
+    
+    // Modern BDA Material Pulling (Per-Instance)
+    if (push.use_instancing == 1 && push.instance_ptr != 0) {
+        InstanceBuffer instance_ctx = InstanceBuffer(push.instance_ptr);
+        // gl_InstanceIndex is not available in fragment shader, use passed in index
+        InstanceData instance = instance_ctx.instances[fragInstanceIndex];
+        actual_material_index = instance.material_index;
+    }
+    
+    actual_material_index &= 0xFFFFu;
+    
     MaterialBuffer material_ctx = MaterialBuffer(push.material_ptr);
     MaterialData mat = material_ctx.materials[actual_material_index];
 
@@ -289,6 +301,7 @@ void main() {
     int base_color_idx = mat.texture_indices.x;
     vec4 base_color_factor = mat.base_color_factor;
 
+    // Sample base color texture
     vec4 baseSample = base_color_idx >= 0
         ? texture(textures[nonuniformEXT(base_color_idx)], fragUV)
         : vec4(1.0);
@@ -317,6 +330,7 @@ void main() {
     int normal_idx = mat.texture_indices.y;
     float normal_scale = mat.parameters.w;
 
+    // Normal Mapping
     if (normal_idx >= 0) {
         vec3 mapSample = texture(textures[nonuniformEXT(normal_idx)], fragUV).xyz;
         if (length(mapSample) > 0.001) {
@@ -338,6 +352,7 @@ void main() {
     float roughness = mat.parameters.y;
     roughness = max(roughness, 0.04);
     
+    // Metallic/Roughness Map
     int mr_idx = mat.texture_indices.z;
     if (mr_idx >= 0) {
         vec4 mrSample = texture(textures[nonuniformEXT(mr_idx)], fragUV);
@@ -353,6 +368,7 @@ void main() {
     int occ_idx = mat.texture_indices.w;
     float occ_strength = mat.parameters.z;
 
+    // Occlusion Map
     if (occ_idx >= 0) {
         occlusion = mix(1.0, texture(textures[nonuniformEXT(occ_idx)], fragUV).r, occ_strength);
     }
@@ -488,33 +504,31 @@ void main() {
     // Combine: Ambient + Directional + Dynamic(Lo) + Emissive
     vec3 color = ambient + directional + Lo + emissive;
 
-    // Debug Path Visualization - Only compiled when debug_visualization feature is enabled
+    // Final Output
+    outColor = vec4(color, 1.0);
+    outNormal = vec4(normal * 0.5 + 0.5, 1.0);
+    outAlbedo = vec4(baseColor, 1.0);
+    outMotion = motionVector;
+
     // Debug Path Visualization - Only compiled when debug_visualization feature is enabled
     #ifdef DEBUG_VISUALIZATION
     if (push.debug_visualization_enabled == 1) {
         // debug_path values: 1=GPU, 2=Legacy, 3=Albedo, 4=Normal, 5=Metallic, 6=Roughness, 7=Lighting
         if (push.debug_path == 1) { // GPU-Driven Path
-            color = mix(color, vec3(0.0, 0.0, 1.0), 0.3); // Blue tint
+            outColor = mix(outColor, vec4(0.0, 0.0, 1.0, 1.0), 0.3); // Blue tint
         } else if (push.debug_path == 2) { // Legacy Path
-            color = mix(color, vec3(0.0, 1.0, 0.0), 0.3); // Green tint
+            outColor = mix(outColor, vec4(0.0, 1.0, 0.0, 1.0), 0.3); // Green tint
         } else if (push.debug_path == 3) { // Albedo
-            color = baseColor;
+            outColor = vec4(baseColor, 1.0);
         } else if (push.debug_path == 4) { // Normal
-            color = normal * 0.5 + 0.5;
+            outColor = vec4(normal * 0.5 + 0.5, 1.0);
         } else if (push.debug_path == 5) { // Metallic
-            color = vec3(metallic);
+            outColor = vec4(vec3(metallic), 1.0);
         } else if (push.debug_path == 6) { // Roughness
-            color = vec3(roughness);
+            outColor = vec4(vec3(roughness), 1.0);
         } else if (push.debug_path == 7) { // Lighting Only
-            // Show accumulated light without albedo modulation
-            // Recalculate basic lighting sum for visualization
-            color = ambient + directional + Lo;
+            outColor = vec4(ambient + directional + Lo, 1.0);
         }
     }
     #endif
-    
-    outColor = vec4(color, 1.0);
-    outNormal = vec4(normal, 1.0);
-    outAlbedo = vec4(baseColor, 1.0);
-    outMotion = motionVector;
 }

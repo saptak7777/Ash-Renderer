@@ -294,6 +294,35 @@ impl ForwardPlusIntegration {
         Ok(())
     }
 
+    /// Update the depth buffer descriptor for the compute pipeline.
+    /// This must be called when the depth buffer is recreated (e.g., on resize).
+    ///
+    /// # Safety
+    /// Device and depth_image_view must be valid.
+    pub unsafe fn update_depth_descriptor(
+        &mut self,
+        device: &ash::Device,
+        depth_image_view: vk::ImageView,
+        depth_sampler: vk::Sampler,
+    ) {
+        let depth_image_info = vk::DescriptorImageInfo {
+            sampler: depth_sampler,
+            image_view: depth_image_view,
+            image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+        };
+
+        for &descriptor_set in &self.compute_descriptor_sets {
+            let writes = [vk::WriteDescriptorSet::default()
+                .dst_set(descriptor_set)
+                .dst_binding(0)
+                .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                .image_info(std::slice::from_ref(&depth_image_info))];
+            device.update_descriptor_sets(&writes, &[]);
+        }
+
+        log::debug!("Forward+ depth descriptors updated");
+    }
+
     /// Initialize GPU resources for Forward+ lighting.
     ///
     /// # Safety

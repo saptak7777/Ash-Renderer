@@ -14,7 +14,8 @@ layout(buffer_reference, scalar) buffer VertexBuffer {
     vec2 uv;          // offset 24, 8 bytes
     vec3 color;       // offset 32, 12 bytes
     vec4 tangent;     // offset 44, 16 bytes
-    // Total: 60 bytes
+    uint _padding;    // offset 60, 4 bytes
+    // Total: 64 bytes
 };
 
 // Load vertex data from BDA pointer
@@ -25,8 +26,8 @@ VertexBuffer load_vertex(uint64_t base_address, uint vertex_index) {
         return VertexBuffer(uint64_t(0));
     }
     
-    // Calculate vertex address: base + (index * 60)
-    uint64_t vertex_address = base_address + uint64_t(vertex_index * 60);
+    // Calculate vertex address: base + (index * 64)
+    uint64_t vertex_address = base_address + uint64_t(vertex_index * 64);
     return VertexBuffer(vertex_address);
 }
 

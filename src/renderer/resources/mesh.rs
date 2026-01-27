@@ -27,6 +27,7 @@ pub struct Vertex {
     pub uv: [f32; 2],
     pub color: [f32; 3],
     pub tangent: [f32; 4],
+    pub _padding: u32, // Pad to 64 bytes for alignment (256 % 64 == 0)
 }
 
 /// Descriptor describing CPU-side mesh data ready for upload.
@@ -89,7 +90,6 @@ pub struct SubmeshDescriptor {
 pub struct Mesh {
     pub name: Arc<str>,
     pub vertices: Vec<Vertex>,
-    pub skinned_vertices: Vec<crate::renderer::SkinnedVertex>,
     pub indices: Option<Vec<u32>>,
     pub texture_data: Option<TextureData>,
     pub texture: Option<Arc<Texture>>,
@@ -155,6 +155,7 @@ impl Mesh {
                 uv: [0.0, 0.0],
                 color: [1.0, 1.0, 1.0],
                 tangent: [1.0, 0.0, 0.0, 1.0],
+                _padding: 0,
             },
             Vertex {
                 position: [1.0, -1.0, 1.0],
@@ -162,6 +163,7 @@ impl Mesh {
                 uv: [1.0, 0.0],
                 color: [1.0, 1.0, 1.0],
                 tangent: [1.0, 0.0, 0.0, 1.0],
+                _padding: 0,
             },
             Vertex {
                 position: [1.0, 1.0, 1.0],
@@ -169,6 +171,7 @@ impl Mesh {
                 uv: [1.0, 1.0],
                 color: [1.0, 1.0, 1.0],
                 tangent: [1.0, 0.0, 0.0, 1.0],
+                _padding: 0,
             },
             Vertex {
                 position: [-1.0, 1.0, 1.0],
@@ -176,6 +179,7 @@ impl Mesh {
                 uv: [0.0, 1.0],
                 color: [1.0, 1.0, 1.0],
                 tangent: [1.0, 0.0, 0.0, 1.0],
+                _padding: 0,
             },
             // Back face (green)
             Vertex {
@@ -184,6 +188,7 @@ impl Mesh {
                 uv: [0.0, 0.0],
                 color: [1.0, 1.0, 1.0],
                 tangent: [-1.0, 0.0, 0.0, 1.0],
+                _padding: 0,
             },
             Vertex {
                 position: [-1.0, -1.0, -1.0],
@@ -191,6 +196,7 @@ impl Mesh {
                 uv: [1.0, 0.0],
                 color: [1.0, 1.0, 1.0],
                 tangent: [-1.0, 0.0, 0.0, 1.0],
+                _padding: 0,
             },
             Vertex {
                 position: [-1.0, 1.0, -1.0],
@@ -198,6 +204,7 @@ impl Mesh {
                 uv: [1.0, 1.0],
                 color: [1.0, 1.0, 1.0],
                 tangent: [-1.0, 0.0, 0.0, 1.0],
+                _padding: 0,
             },
             Vertex {
                 position: [1.0, 1.0, -1.0],
@@ -205,6 +212,7 @@ impl Mesh {
                 uv: [0.0, 1.0],
                 color: [1.0, 1.0, 1.0],
                 tangent: [-1.0, 0.0, 0.0, 1.0],
+                _padding: 0,
             },
             // Top face (blue)
             Vertex {
@@ -213,6 +221,7 @@ impl Mesh {
                 uv: [0.0, 0.0],
                 color: [1.0, 1.0, 1.0],
                 tangent: [1.0, 0.0, 0.0, 1.0],
+                _padding: 0,
             },
             Vertex {
                 position: [1.0, 1.0, 1.0],
@@ -220,6 +229,7 @@ impl Mesh {
                 uv: [1.0, 0.0],
                 color: [1.0, 1.0, 1.0],
                 tangent: [1.0, 0.0, 0.0, 1.0],
+                _padding: 0,
             },
             Vertex {
                 position: [1.0, 1.0, -1.0],
@@ -227,6 +237,7 @@ impl Mesh {
                 uv: [1.0, 1.0],
                 color: [1.0, 1.0, 1.0],
                 tangent: [1.0, 0.0, 0.0, 1.0],
+                _padding: 0,
             },
             Vertex {
                 position: [-1.0, 1.0, -1.0],
@@ -234,6 +245,7 @@ impl Mesh {
                 uv: [0.0, 1.0],
                 color: [1.0, 1.0, 1.0],
                 tangent: [1.0, 0.0, 0.0, 1.0],
+                _padding: 0,
             },
             // Bottom face (yellow)
             Vertex {
@@ -242,6 +254,7 @@ impl Mesh {
                 uv: [0.0, 0.0],
                 color: [1.0, 1.0, 1.0],
                 tangent: [1.0, 0.0, 0.0, 1.0],
+                _padding: 0,
             },
             Vertex {
                 position: [1.0, -1.0, -1.0],
@@ -249,6 +262,7 @@ impl Mesh {
                 uv: [1.0, 0.0],
                 color: [1.0, 1.0, 1.0],
                 tangent: [1.0, 0.0, 0.0, 1.0],
+                _padding: 0,
             },
             Vertex {
                 position: [1.0, -1.0, 1.0],
@@ -256,6 +270,7 @@ impl Mesh {
                 uv: [1.0, 1.0],
                 color: [1.0, 1.0, 1.0],
                 tangent: [1.0, 0.0, 0.0, 1.0],
+                _padding: 0,
             },
             Vertex {
                 position: [-1.0, -1.0, 1.0],
@@ -263,6 +278,7 @@ impl Mesh {
                 uv: [0.0, 1.0],
                 color: [1.0, 1.0, 1.0],
                 tangent: [1.0, 0.0, 0.0, 1.0],
+                _padding: 0,
             },
             // Right face (cyan)
             Vertex {
@@ -271,6 +287,7 @@ impl Mesh {
                 uv: [0.0, 0.0],
                 color: [1.0, 1.0, 1.0],
                 tangent: [0.0, 0.0, -1.0, 1.0],
+                _padding: 0,
             },
             Vertex {
                 position: [1.0, -1.0, -1.0],
@@ -278,6 +295,7 @@ impl Mesh {
                 uv: [1.0, 0.0],
                 color: [1.0, 1.0, 1.0],
                 tangent: [0.0, 0.0, -1.0, 1.0],
+                _padding: 0,
             },
             Vertex {
                 position: [1.0, 1.0, -1.0],
@@ -285,6 +303,7 @@ impl Mesh {
                 uv: [1.0, 1.0],
                 color: [1.0, 1.0, 1.0],
                 tangent: [0.0, 0.0, -1.0, 1.0],
+                _padding: 0,
             },
             Vertex {
                 position: [1.0, 1.0, 1.0],
@@ -292,6 +311,7 @@ impl Mesh {
                 uv: [0.0, 1.0],
                 color: [1.0, 1.0, 1.0],
                 tangent: [0.0, 0.0, -1.0, 1.0],
+                _padding: 0,
             },
             // Left face (magenta)
             Vertex {
@@ -300,6 +320,7 @@ impl Mesh {
                 uv: [0.0, 0.0],
                 color: [1.0, 1.0, 1.0],
                 tangent: [0.0, 0.0, 1.0, 1.0],
+                _padding: 0,
             },
             Vertex {
                 position: [-1.0, -1.0, 1.0],
@@ -307,6 +328,7 @@ impl Mesh {
                 uv: [1.0, 0.0],
                 color: [1.0, 1.0, 1.0],
                 tangent: [0.0, 0.0, 1.0, 1.0],
+                _padding: 0,
             },
             Vertex {
                 position: [-1.0, 1.0, 1.0],
@@ -314,6 +336,7 @@ impl Mesh {
                 uv: [1.0, 1.0],
                 color: [1.0, 1.0, 1.0],
                 tangent: [0.0, 0.0, 1.0, 1.0],
+                _padding: 0,
             },
             Vertex {
                 position: [-1.0, 1.0, -1.0],
@@ -321,6 +344,7 @@ impl Mesh {
                 uv: [0.0, 1.0],
                 color: [1.0, 1.0, 1.0],
                 tangent: [0.0, 0.0, 1.0, 1.0],
+                _padding: 0,
             },
         ];
 
@@ -344,7 +368,6 @@ impl Mesh {
         Self {
             name: name.into(),
             vertices,
-            skinned_vertices: Vec::new(),
             indices: Some(indices),
             clusters,
             material_properties: Some(MaterialProperties::default()),
@@ -416,7 +439,6 @@ impl Mesh {
         Self {
             name: descriptor.key.clone(),
             vertices: descriptor.vertices.clone(),
-            skinned_vertices: Vec::new(),
             indices: descriptor.indices.clone(),
             texture_data: descriptor.texture.clone(),
             normal_texture_data: descriptor.normal_texture.clone(),

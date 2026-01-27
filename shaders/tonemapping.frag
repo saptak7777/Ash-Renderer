@@ -8,7 +8,6 @@ layout(location = 0) out vec4 outColor;
 
 layout(set = 0, binding = 0) uniform sampler2D hdrBuffer;
 layout(set = 0, binding = 1) uniform sampler2D bloomBuffer;
-layout(set = 0, binding = 2) uniform sampler2D ssgiBuffer;
 
 layout(push_constant) uniform PushConstants {
     float exposure;
@@ -34,12 +33,8 @@ void main() {
     // Sample Bloom buffer
     vec3 bloom = texture(bloomBuffer, fragTexCoord).rgb;
     
-    // Sample SSGI buffer
-    vec3 ssgiColor = texture(ssgiBuffer, fragTexCoord).rgb;
-    
-    // Add Bloom and SSGI with clamping to prevent overflow
+    // Add Bloom
     hdr += bloom * pc.bloomIntensity;
-    hdr += clamp(ssgiColor, 0.0, 10.0); 
     
     // Apply exposure
     hdr *= pc.exposure;

@@ -113,8 +113,8 @@ pub struct CullObjectData {
     pub error_metric: f32,
     /// Culling flags (e.g., enabled, shadow-caster)
     pub flags: u32,
-    /// Padding for 16-byte alignment
-    pub _padding: u32,
+    /// Material handle/index for BDA material pulling
+    pub material_index: u32,
 }
 
 impl CullObjectData {
@@ -136,7 +136,7 @@ impl CullObjectData {
             parent_index: u32::MAX,
             error_metric: 0.0,
             flags: 1,
-            _padding: 0,
+            material_index: 0,
         }
     }
 
@@ -150,6 +150,8 @@ impl CullObjectData {
         index_count: u32,
         parent_index: u32,
         error_metric: f32,
+        material_index: u32,
+        vertex_offset: i32,
     ) -> Self {
         let cols = model.to_cols_array_2d();
         // Pack sphere into CullBoundingBox for unified data structure
@@ -167,13 +169,13 @@ impl CullObjectData {
             draw_index,
             first_index,
             index_count,
-            vertex_offset: 0,
+            vertex_offset,
             color: [1.0, 1.0, 1.0, 1.0],
             custom: [0.0; 4],
             parent_index,
             error_metric,
             flags: 1,
-            _padding: 0,
+            material_index,
         }
     }
 
@@ -210,6 +212,30 @@ impl CullObjectData {
     /// Set hidden flag
     pub fn with_hidden(mut self, hidden: bool) -> Self {
         self.set_flag(CULL_FLAG_HIDDEN, hidden);
+        self
+    }
+
+    /// Set material index
+    pub fn with_material_index(mut self, material_index: u32) -> Self {
+        self.material_index = material_index;
+        self
+    }
+
+    /// Set index count
+    pub fn with_index_count(mut self, index_count: u32) -> Self {
+        self.index_count = index_count;
+        self
+    }
+
+    /// Set first index
+    pub fn with_first_index(mut self, first_index: u32) -> Self {
+        self.first_index = first_index;
+        self
+    }
+
+    /// Set vertex offset
+    pub fn with_vertex_offset(mut self, vertex_offset: i32) -> Self {
+        self.vertex_offset = vertex_offset;
         self
     }
 
@@ -304,7 +330,7 @@ pub struct CullingPushConstants {
     pub base_index: u32,
     /// Indirect command start index
     pub indirect_start: u32,
-    pub object_buffer_index: u32,
+    pub object_buffer_addr: u64,
 }
 
 impl Default for CullingPushConstants {
@@ -316,7 +342,7 @@ impl Default for CullingPushConstants {
             hiz_levels: HIZ_LEVELS as u32,
             base_index: 0,
             indirect_start: 0,
-            object_buffer_index: 0,
+            object_buffer_addr: 0,
         }
     }
 }
@@ -390,12 +416,20 @@ impl OcclusionCulling {
         bounds: CullBoundingBox,
         model: Mat4,
         draw_index: u32,
+        first_index: u32,
+        index_count: u32,
+        material_index: u32,
+        vertex_offset: i32,
         clusters: &[crate::renderer::resources::mesh::MeshCluster],
     ) {
         if clusters.is_empty() {
             // Assume caller handles capacity for hot path performance
-            self.objects
-                .push(CullObjectData::new(bounds, model, draw_index));
+            let mut data = CullObjectData::new(bounds, model, draw_index);
+            data.first_index = first_index;
+            data.index_count = index_count;
+            data.material_index = material_index;
+            data.vertex_offset = vertex_offset;
+            self.objects.push(data);
         } else {
             let cluster_start_offset = self.objects.len() as u32;
             for cluster in clusters {
@@ -414,18 +448,43 @@ impl OcclusionCulling {
                     cluster.index_count,
                     global_parent,
                     cluster.error_metric,
+                    material_index,
+                    vertex_offset,
                 ));
             }
         }
     }
 
-    pub fn add_object(&mut self, bounds: CullBoundingBox, model: Mat4, draw_index: u32) {
-        self.push_clusters(bounds, model, draw_index, &[]);
+    pub fn add_object(
+        &mut self,
+        bounds: CullBoundingBox,
+        model: Mat4,
+        draw_index: u32,
+        first_index: u32,
+        index_count: u32,
+        material_index: u32,
+        vertex_offset: i32,
+    ) {
+        self.push_clusters(
+            bounds,
+            model,
+            draw_index,
+            first_index,
+            index_count,
+            material_index,
+            vertex_offset,
+            &[],
+        );
     }
 
     /// Get object data for GPU upload
     pub fn object_data(&self) -> &[CullObjectData] {
         &self.objects
+    }
+
+    /// Get mutable object data
+    pub fn object_data_mut(&mut self) -> &mut Vec<CullObjectData> {
+        &mut self.objects
     }
 
     /// Get number of objects
@@ -447,7 +506,7 @@ impl OcclusionCulling {
             hiz_levels: HIZ_LEVELS as u32,
             base_index: 0,
             indirect_start: 0,
-            object_buffer_index: 0,
+            object_buffer_addr: 0,
         }
     }
 

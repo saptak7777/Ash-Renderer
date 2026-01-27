@@ -26,7 +26,6 @@ fn compile_shaders() {
         ),
         ("shaders/shadow.vert", "shadow.vert.spv", "vert", &[]),
         ("shaders/overlay.vert", "overlay.vert.spv", "vert", &[]),
-        ("shaders/skinning.vert", "skinning.vert.spv", "vert", &[]),
         ("shaders/motion.vert", "motion.vert.spv", "vert", &[]),
         // Fragment shaders
         (

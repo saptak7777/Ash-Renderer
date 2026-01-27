@@ -82,10 +82,10 @@ impl HiZQuality {
     /// Get mip count (compile-time constant)
     pub const fn mip_count(self) -> u32 {
         match self {
-            Self::Performance => 6,
-            Self::Balanced => 8,
-            Self::Quality => 10,
-            Self::Ultra => 12,
+            Self::Performance => 4,
+            Self::Balanced => 6,
+            Self::Quality => 8,
+            Self::Ultra => 10,
         }
     }
 
@@ -347,7 +347,7 @@ impl HiZPass {
         vulkan_device: &VulkanDevice,
         width: u32,
         height: u32,
-    ) {
+    ) -> Result<()> {
         // Adversarial Defense: Zero-Sized Resource
         // Minimizing a window on Windows often causes width/height to become 0.
         // Creating Vulkan images with 0 dimensions is invalid and will crash.
@@ -355,51 +355,46 @@ impl HiZPass {
             log::warn!(
                 "HiZPass: Skipping initialization with zero dimensions (window likely minimized)"
             );
-            return;
+            return Ok(());
         }
 
         if self.initialized {
-            return;
+            return Ok(());
         }
 
         self.width = width;
         self.height = height;
 
-        // Calculate max mips for this resolution (allocate for best quality)
-        let min_dimension = width.min(height);
-        let max_mips = (32 - min_dimension.leading_zeros()).min(12);
-        self.mip_count = max_mips;
+        // MODERN FIX: Dynamic Mip Calculation
+        // Never ask for more mips than the resolution supports.
+        // Formula: floor(log2(max(w, h))) + 1
+        let max_dimension = width.max(height);
+        let max_possible_mips = (32 - max_dimension.leading_zeros()).min(12);
+
+        // We want 12 levels for absolute quality, but we MUST clamp to what's physically possible.
+        self.mip_count = max_possible_mips;
 
         // Auto-detect initial quality from resolution
         self.quality = HiZQuality::from_resolution(width, height);
         self.active_mip_count = self.quality.mip_count().min(self.mip_count);
 
-        // Validate mip chain
-        if let Err(e) = self.quality.validate_mip_chain(width, height) {
-            log::error!("HiZPass: Validation failed: {e}");
-            return;
-        }
-
         log::info!(
-            "HiZPass: Initializing with {:?} quality ({}/{} mips) for {}x{}",
-            self.quality,
-            self.active_mip_count,
-            self.mip_count,
+            "HiZPass Initialized: {}x{} with {} mips (Quality: {:?})",
             width,
-            height
+            height,
+            self.mip_count,
+            self.quality
         );
 
         // Hi-Z image with mip chain
-        self.create_hiz_image(allocator)
-            .expect("Hi-Z image allocation failed");
+        self.create_hiz_image(allocator)?;
 
-        self.create_sampler().expect("Hi-Z sampler creation failed");
-        self.create_descriptors()
-            .expect("Hi-Z descriptor setup failed");
-        self.create_pipeline(vulkan_device)
-            .expect("Hi-Z pipeline creation failed");
+        self.create_sampler()?;
+        self.create_descriptors()?;
+        self.create_pipeline(vulkan_device)?;
 
         self.initialized = true;
+        Ok(())
     }
 
     /// Create Hi-Z image with mip chain
@@ -917,6 +912,10 @@ impl HiZPass {
         self.quality
     }
 
+    pub fn is_initialized(&self) -> bool {
+        self.initialized
+    }
+
     /// Get performance metrics
     pub fn metrics(&self) -> &HiZMetrics {
         &self.metrics
@@ -969,21 +968,22 @@ impl HiZPass {
         vulkan_device: &VulkanDevice,
         width: u32,
         height: u32,
-    ) {
+    ) -> Result<()> {
         // Adversarial Defense: Guard against zero dimensions on resize.
         if width == 0 || height == 0 {
-            return;
+            return Ok(());
         }
 
         if width == self.width && height == self.height {
-            return;
+            return Ok(());
         }
 
         self.destroy(allocator);
-        self.init(allocator, vulkan_device, width, height);
+        self.init(allocator, vulkan_device, width, height)?;
 
         // Final validation after resize (AAA standard)
         let _ = self.validate_mip_chain_runtime();
+        Ok(())
     }
 
     /// Destroy GPU resources

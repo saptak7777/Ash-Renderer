@@ -69,6 +69,7 @@ pub fn load_model(path: impl AsRef<Path>) -> Result<Vec<Mesh>> {
                     uv: uvs[i],
                     color: colors[i],
                     tangent: tangents[i],
+                    _padding: 0,
                 })
                 .collect();
 

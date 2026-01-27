@@ -18,10 +18,10 @@ struct InstanceData {
     int vertex_offset;
     vec4 color;
     vec4 custom;
-    uint cluster_offset;
-    uint cluster_count;
+    uint parent_index;
+    float error_metric;
     uint flags;
-    uint _padding;
+    uint material_index;
 };
 
 struct MaterialData {
@@ -43,6 +43,14 @@ struct HemisphereAmbient {
 struct DirectionalLight {
     vec4 direction;       // xyz = direction, w = shadow enabled
     vec4 color_intensity; // xyz = color, w = intensity
+};
+
+struct IndirectDrawCommand {
+    uint indexCount;
+    uint instanceCount;
+    uint firstIndex;
+    int vertexOffset;
+    uint firstInstance;
 };
 
 struct SceneLighting {
@@ -72,13 +80,15 @@ layout(buffer_reference, scalar) readonly buffer InstanceBuffer {
     InstanceData instances[];
 };
 
+layout(buffer_reference, scalar) readonly buffer ObjectBuffer {
+    InstanceData objects[];
+};
+
 layout(buffer_reference, scalar) readonly buffer MaterialBuffer {
     MaterialData materials[];
 };
 
-layout(buffer_reference, scalar) readonly buffer JointBuffer {
-    mat4 joints[];
-};
+// JointBuffer REMOVED
 
 // --- Push Constants ---
 
@@ -90,15 +100,13 @@ layout(push_constant) uniform PushConstants {
     uint64_t vertex_ptr;
     uint64_t instance_ptr;
     uint64_t material_ptr;
-    uint64_t joint_ptr;
-    uint64_t _ptr_padding;
+    uint64_t _ptr_padding[2]; // Replaces joint_ptr and its padding
 
     // Control stage (48-111)
     layout(offset = 48) mat4 model; 
-    layout(offset = 112) uint joint_offset;
+    layout(offset = 112) uint material_index; // Shifted up
     layout(offset = 116) uint use_instancing;
-    layout(offset = 120) uint is_skinned;
-    layout(offset = 124) uint material_index;
+    layout(offset = 120) uint _unused_flags[2]; // Padding to maintain alignment
 
     // Fragment/Debug stage (128-159)
     layout(offset = 128) uint flags;

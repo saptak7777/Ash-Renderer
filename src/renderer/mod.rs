@@ -33,7 +33,6 @@ pub mod renderer;
 pub mod resource_pool;
 pub mod resource_registry;
 pub mod resources;
-pub mod skinned_vertex;
 pub mod temporal_aa;
 pub mod util;
 pub mod vram_budget;
@@ -67,4 +66,3 @@ pub use resources::{
     ObjectMotionData, PipelineHandle, TemporalCamera, Texture, TextureData, Transform,
     UniformBuffer, Vertex, MVP,
 };
-pub use skinned_vertex::SkinnedVertex;

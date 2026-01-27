@@ -164,6 +164,18 @@ impl GBuffer {
     pub fn extent(&self) -> vk::Extent2D {
         self.extent
     }
+
+    pub fn normal_image(&self) -> vk::Image {
+        self.normal_image
+    }
+
+    pub fn albedo_image(&self) -> vk::Image {
+        self.albedo_image
+    }
+
+    pub fn motion_image(&self) -> vk::Image {
+        self.motion_image
+    }
 }
 
 impl Drop for GBuffer {

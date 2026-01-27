@@ -299,6 +299,11 @@ impl InstancingManager {
         self.batches.values().filter(|b| !b.is_transparent())
     }
 
+    /// Get opaque batches
+    pub fn opaque_batches(&self) -> impl Iterator<Item = &InstanceBatch> {
+        self.batches.values().filter(|b| !b.is_transparent())
+    }
+
     /// Get transparent batches
     pub fn transparent_batches(&self) -> impl Iterator<Item = &InstanceBatch> {
         self.batches.values().filter(|b| b.is_transparent())
