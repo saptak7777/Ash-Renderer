@@ -177,8 +177,19 @@ impl ApplicationHandler for App {
                     let up = Vec3::Y;
 
                     let view = Mat4::look_at_rh(camera_pos, target, up);
-                    let mut proj = Mat4::perspective_rh(45.0_f32.to_radians(), aspect, 0.1, 100.0);
-                    proj.y_axis.y *= -1.0; // Vulkan Y-flip
+                    // 1. MODERN PROJECTION: Infinite Reverse Z
+                    // Maps Z_Near (0.1) -> 1.0
+                    // Maps Infinity     -> 0.0
+                    // This matches our pipeline's GREATER_OR_EQUAL test perfectly.
+                    let mut proj = Mat4::perspective_infinite_reverse_rh(
+                        45.0_f32.to_radians(),
+                        aspect,
+                        0.1, // Near Plane
+                    );
+
+                    // 2. VULKAN FLIP
+                    // Glam assumes Y-Up (OpenGL standard). Vulkan uses Y-Down.
+                    proj.y_axis.y *= -1.0;
 
                     // Submit render commands
                     if let Err(e) = renderer.submit_render_commands(&self.render_commands) {
@@ -212,8 +223,7 @@ impl ApplicationHandler for App {
             } => {
                 // Cycle through debug modes
                 self.current_debug_mode = match self.current_debug_mode {
-                    DebugMode::None => DebugMode::Path,
-                    DebugMode::Path => DebugMode::Albedo,
+                    DebugMode::None => DebugMode::Albedo,
                     DebugMode::Albedo => DebugMode::Normal,
                     DebugMode::Normal => DebugMode::Metallic,
                     DebugMode::Metallic => DebugMode::Roughness,
@@ -233,11 +243,132 @@ impl ApplicationHandler for App {
 fn main() -> Result<()> {
     env_logger::init();
 
-    let event_loop = EventLoop::new().expect("Failed to create event loop");
-    event_loop.set_control_flow(ControlFlow::Poll);
+    let args: Vec<String> = std::env::args().collect();
+    let is_headless = args.iter().any(|arg| arg == "--headless");
+    let max_frames = args
+        .iter()
+        .position(|arg| arg == "--frames")
+        .and_then(|i| args.get(i + 1))
+        .and_then(|f| f.parse::<u32>().ok())
+        .unwrap_or(u32::MAX);
 
-    let mut app = App::default();
-    event_loop.run_app(&mut app).expect("Event loop error");
+    if is_headless {
+        run_headless(max_frames)
+    } else {
+        let event_loop = EventLoop::new().expect("Failed to create event loop");
+        event_loop.set_control_flow(ControlFlow::Poll);
+        let mut app = App::default();
+        event_loop.run_app(&mut app).expect("Event loop error");
+        Ok(())
+    }
+}
 
+fn run_headless(max_frames: u32) -> Result<()> {
+    log::info!("Running in HEADLESS mode for {max_frames} frames");
+    let width = 1280;
+    let height = 720;
+    let surface_provider = ash_renderer::vulkan::HeadlessSurfaceProvider::new(width, height);
+
+    let mut renderer = Renderer::new(&surface_provider)?;
+
+    // --- SETUP SOURCE (Copied from resumed) ---
+    let mut cube = Mesh::create_cube();
+    for v in &mut cube.vertices {
+        v.color = [1.0, 1.0, 1.0];
+    }
+    cube.name = Arc::from("RedPbrCubeHeadless");
+    let material = Material {
+        name: "ShinyRedHeadless".to_string(),
+        color: [1.0, 0.0, 0.0, 1.0],
+        metallic: 0.9,
+        roughness: 0.2,
+        ..Default::default()
+    };
+    let mesh_handle = renderer.upload_mesh(cube).unwrap();
+    let material_handle = renderer.register_and_upload_material(material).unwrap();
+
+    let render_commands = vec![ash_renderer::renderer::RenderCommand {
+        mesh_handle,
+        material_handle,
+        transform: Mat4::IDENTITY,
+        ..Default::default()
+    }];
+
+    let _tint_buffer = {
+        let tint_colors = [Vec4::new(1.0, 1.0, 1.0, 1.0)];
+        renderer
+            .register_bindless_storage_buffer(&tint_colors, "DefaultTintHeadless")
+            .ok()
+            .map(|(b, _)| b)
+    };
+
+    if let Err(e) = renderer.enable_post_processing() {
+        log::warn!("Post-processing failed: {e}");
+    }
+
+    let lighting = LightingBuilder::new()
+        .with_ambient_preset(AmbientPreset::IndoorLit)
+        .with_directional(
+            Vec3::new(1.0, -1.0, -1.0).normalize(),
+            Vec3::splat(2.0),
+            1.0,
+        )
+        .build();
+    renderer.set_lighting(&lighting);
+    // --- END SETUP ---
+
+    let start_time = Instant::now();
+    let aspect = width as f32 / height as f32;
+
+    for frame in 0..max_frames {
+        let elapsed = start_time.elapsed().as_secs_f32();
+
+        // Rotate the cube
+        let mut frame_commands = render_commands.clone();
+        frame_commands[0].transform = Mat4::from_rotation_translation(
+            Quat::from_euler(glam::EulerRot::XYZ, elapsed * 0.5, elapsed * 1.2, 0.0),
+            Vec3::ZERO,
+        );
+
+        // Orbiting point lights
+        let light_distance = 3.0;
+        let lights = vec![
+            PointLight {
+                position: Vec3::new(
+                    light_distance * (elapsed * 1.5).cos(),
+                    1.0,
+                    light_distance * (elapsed * 1.5).sin(),
+                ),
+                color: Vec3::new(1.0, 1.0, 1.0),
+                intensity: 5.0,
+                radius: 10.0,
+            },
+            PointLight {
+                position: Vec3::new(
+                    light_distance * (elapsed * 2.0 + std::f32::consts::PI).cos(),
+                    -1.0,
+                    light_distance * (elapsed * 2.0 + std::f32::consts::PI).sin(),
+                ),
+                color: Vec3::new(1.0, 0.5, 0.5),
+                intensity: 8.0,
+                radius: 10.0,
+            },
+        ];
+        renderer.update_lights(&lights, &[]);
+
+        let camera_pos = Vec3::new(0.0, 2.0, 5.0);
+        let view = Mat4::look_at_rh(camera_pos, Vec3::ZERO, Vec3::Y);
+        let mut proj = Mat4::perspective_infinite_reverse_rh(45.0_f32.to_radians(), aspect, 0.1);
+        proj.y_axis.y *= -1.0;
+
+        renderer.submit_render_commands(&frame_commands)?;
+        renderer.render_frame(view, proj, camera_pos, None)?;
+
+        if frame % 100 == 0 {
+            log::info!("Headless frame {frame}/{max_frames}");
+        }
+    }
+
+    log::info!("Headless run complete");
     Ok(())
 }

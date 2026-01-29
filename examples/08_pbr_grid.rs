@@ -82,7 +82,7 @@ impl ApplicationHandler for App {
                 // Enable post-processing for HDR/Tonemapping
                 if let Err(e) = renderer.enable_post_processing() {
                     log::warn!("Post-processing failed: {e}");
-                    renderer.set_tonemapping_enabled(true);
+                    renderer.tonemapping_enabled = true;
                 }
 
                 // Load pre-baked IBL environment map for realistic PBR lighting
@@ -105,6 +105,7 @@ impl ApplicationHandler for App {
                         _padding: asset.header._padding,
                     };
 
+                    /*
                     if let Err(e) = renderer.upload_ibl(
                         &header,
                         asset.cubemap_data(),
@@ -113,6 +114,7 @@ impl ApplicationHandler for App {
                     ) {
                         log::warn!("Failed to upload IBL: {e}");
                     }
+                    */
                 } else {
                     log::warn!("Failed to load IBL asset or file not found");
                     log::warn!("Continuing without IBL - cubes will have minimal ambient lighting");
@@ -284,7 +286,12 @@ impl ApplicationHandler for App {
                     let size = window.inner_size();
                     let aspect = size.width as f32 / size.height as f32;
                     let view = Mat4::look_at_rh(camera_pos, Vec3::ZERO, Vec3::Y);
-                    let mut proj = Mat4::perspective_rh(45.0_f32.to_radians(), aspect, 0.5, 100.0);
+                    // MODERN PROJECTION: Infinite Reverse Z
+                    let mut proj = Mat4::perspective_infinite_reverse_rh(
+                        45.0_f32.to_radians(),
+                        aspect,
+                        0.5, // Near Plane
+                    );
                     proj.y_axis.y *= -1.0; // Vulkan Y-flip
 
                     // Rotate the whole scene slowly

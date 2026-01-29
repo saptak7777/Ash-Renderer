@@ -92,7 +92,11 @@ impl ApplicationHandler for App {
 
                     let camera_pos = Vec3::new(3.0 * elapsed.sin(), 2.0, 3.0 * elapsed.cos());
                     let view = Mat4::look_at_rh(camera_pos, Vec3::ZERO, Vec3::Y);
-                    let mut proj = Mat4::perspective_rh(45.0_f32.to_radians(), aspect, 0.1, 100.0);
+                    let mut proj = Mat4::perspective_infinite_reverse_rh(
+                        45.0_f32.to_radians(),
+                        aspect,
+                        0.1, // Near Plane
+                    );
                     proj.y_axis.y *= -1.0;
 
                     let mut commands = Vec::new();

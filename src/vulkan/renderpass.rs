@@ -42,11 +42,9 @@ pub struct RenderPassBuilder {
     device: Arc<ash::Device>,
     color_attachments: Vec<vk::AttachmentDescription>,
     color_attachment_refs: Vec<vk::AttachmentReference>,
-    resolve_attachments: Vec<vk::AttachmentDescription>,
-    resolve_attachment_refs: Vec<vk::AttachmentReference>,
+
     depth_attachment: Option<vk::AttachmentDescription>,
     dependencies: Vec<vk::SubpassDependency>,
-    sample_count: vk::SampleCountFlags,
 }
 
 impl RenderPassBuilder {
@@ -55,11 +53,9 @@ impl RenderPassBuilder {
             device,
             color_attachments: Vec::new(),
             color_attachment_refs: Vec::new(),
-            resolve_attachments: Vec::new(),
-            resolve_attachment_refs: Vec::new(),
+
             depth_attachment: None,
             dependencies: Vec::new(),
-            sample_count: vk::SampleCountFlags::TYPE_1,
         }
     }
 
@@ -67,41 +63,17 @@ impl RenderPassBuilder {
     pub fn with_swapchain_color(mut self, format: vk::Format) -> Self {
         let attachment = vk::AttachmentDescription {
             format,
-            samples: self.sample_count,
+            samples: vk::SampleCountFlags::TYPE_1,
             load_op: vk::AttachmentLoadOp::CLEAR,
-            store_op: if self.sample_count == vk::SampleCountFlags::TYPE_1 {
-                vk::AttachmentStoreOp::STORE
-            } else {
-                vk::AttachmentStoreOp::DONT_CARE // MSAA is resolved, not stored
-            },
+            store_op: vk::AttachmentStoreOp::STORE,
             stencil_load_op: vk::AttachmentLoadOp::DONT_CARE,
             stencil_store_op: vk::AttachmentStoreOp::DONT_CARE,
             initial_layout: vk::ImageLayout::UNDEFINED,
-            final_layout: if self.sample_count == vk::SampleCountFlags::TYPE_1 {
-                vk::ImageLayout::PRESENT_SRC_KHR
-            } else {
-                vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL
-            },
+            final_layout: vk::ImageLayout::PRESENT_SRC_KHR,
             ..Default::default()
         };
 
         self.push_color_attachment(attachment, vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL);
-
-        // Add resolve attachment if MSAA is enabled
-        if self.sample_count != vk::SampleCountFlags::TYPE_1 {
-            let resolve = vk::AttachmentDescription {
-                format,
-                samples: vk::SampleCountFlags::TYPE_1,
-                load_op: vk::AttachmentLoadOp::DONT_CARE,
-                store_op: vk::AttachmentStoreOp::STORE,
-                stencil_load_op: vk::AttachmentLoadOp::DONT_CARE,
-                stencil_store_op: vk::AttachmentStoreOp::DONT_CARE,
-                initial_layout: vk::ImageLayout::UNDEFINED,
-                final_layout: vk::ImageLayout::PRESENT_SRC_KHR,
-                ..Default::default()
-            };
-            self.push_resolve_attachment(resolve, vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL);
-        }
 
         // Confirm external-to-color subpass dependency exists.
         if self.dependencies.is_empty() {
@@ -128,7 +100,7 @@ impl RenderPassBuilder {
     ) -> Self {
         let attachment = vk::AttachmentDescription {
             format,
-            samples: self.sample_count,
+            samples: vk::SampleCountFlags::TYPE_1,
             load_op: vk::AttachmentLoadOp::CLEAR,
             store_op: vk::AttachmentStoreOp::STORE,
             stencil_load_op: vk::AttachmentLoadOp::DONT_CARE,
@@ -142,9 +114,8 @@ impl RenderPassBuilder {
         self
     }
 
-    /// Sets the MSAA sample count for this render pass
-    pub fn with_sample_count(mut self, sample_count: vk::SampleCountFlags) -> Self {
-        self.sample_count = sample_count;
+    /// DEPRECATED: MSAA is removed. This function does nothing but return self.
+    pub fn with_sample_count(self, _sample_count: vk::SampleCountFlags) -> Self {
         self
     }
 
@@ -168,7 +139,7 @@ impl RenderPassBuilder {
 
         self.depth_attachment = Some(vk::AttachmentDescription {
             format,
-            samples: self.sample_count,
+            samples: vk::SampleCountFlags::TYPE_1,
             load_op: vk::AttachmentLoadOp::CLEAR,
             store_op: vk::AttachmentStoreOp::DONT_CARE,
             stencil_load_op,
@@ -195,19 +166,6 @@ impl RenderPassBuilder {
         });
     }
 
-    fn push_resolve_attachment(
-        &mut self,
-        attachment: vk::AttachmentDescription,
-        layout: vk::ImageLayout,
-    ) {
-        // Stores with a placeholder index (u32::MAX); actual indices are computed during the build phase.
-        self.resolve_attachments.push(attachment);
-        self.resolve_attachment_refs.push(vk::AttachmentReference {
-            attachment: u32::MAX,
-            layout,
-        });
-    }
-
     /// Builds the render pass.
     ///
     /// # Attachment Ordering (Internal Contract)
@@ -227,20 +185,6 @@ impl RenderPassBuilder {
         // Constructs attachment list in sequence: color, resolve, and depth.
         let mut attachments = self.color_attachments.clone();
 
-        // Fix resolve attachment indices (they reference positions after color attachments)
-        let resolve_base = attachments.len() as u32;
-        let resolve_refs: Vec<vk::AttachmentReference> = self
-            .resolve_attachment_refs
-            .iter()
-            .enumerate()
-            .map(|(i, r)| vk::AttachmentReference {
-                attachment: resolve_base + i as u32,
-                layout: r.layout,
-            })
-            .collect();
-
-        attachments.extend(self.resolve_attachments);
-
         let depth_ref = if let Some(depth_attachment) = self.depth_attachment.take() {
             let index = attachments.len() as u32;
             attachments.push(depth_attachment);
@@ -253,17 +197,12 @@ impl RenderPassBuilder {
         };
 
         let color_refs = self.color_attachment_refs;
-        let has_resolve = !resolve_refs.is_empty();
 
         // Configures subpass description, including optional resolve and depth attachments.
         let subpass = {
             let mut desc = vk::SubpassDescription::default()
                 .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
                 .color_attachments(&color_refs);
-
-            if has_resolve {
-                desc = desc.resolve_attachments(&resolve_refs);
-            }
 
             if let Some(ref depth_ref) = depth_ref {
                 desc = desc.depth_stencil_attachment(depth_ref);

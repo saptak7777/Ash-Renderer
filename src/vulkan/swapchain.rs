@@ -20,7 +20,9 @@ pub struct SwapchainWrapper {
 }
 
 impl SwapchainWrapper {
-    /// Creates a new swapchain (or headless targets).
+    pub fn is_headless(&self) -> bool {
+        self.headless
+    }
     ///
     /// # Safety
     ///

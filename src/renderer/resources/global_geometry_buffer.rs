@@ -45,9 +45,10 @@ pub struct DualHeapGeometryBuffer {
     vertex_capacity: u64,
     vertex_offset: AtomicU64,
 
-    // Index Heap (Traditional)
+    // Index Heap (BDA-enabled)
     index_buffer: vk::Buffer,
     index_allocation: Mutex<vk_mem::Allocation>,
+    index_device_address: vk::DeviceAddress,
     index_capacity: u64,
     index_offset: AtomicU64,
 }
@@ -96,14 +97,23 @@ impl DualHeapGeometryBuffer {
 
         log::info!("Vertex Heap BDA: 0x{:016X}", vertex_device_address);
 
-        // Create Index Heap (No BDA flag for Intel Arc compatibility)
+        // Create Index Heap with BDA support
         let (index_buffer, index_allocation) = allocator.create_buffer_with_flags_and_name(
             index_capacity * std::mem::size_of::<u32>() as u64,
-            vk::BufferUsageFlags::INDEX_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
+            vk::BufferUsageFlags::INDEX_BUFFER
+                | vk::BufferUsageFlags::STORAGE_BUFFER
+                | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS
+                | vk::BufferUsageFlags::TRANSFER_DST,
             vk_mem::MemoryUsage::AutoPreferDevice,
             vk_mem::AllocationCreateFlags::empty(),
-            Some("Index Heap".to_string()),
+            Some("Index Heap (BDA)".to_string()),
         )?;
+
+        // Get device address for index heap
+        let index_address_info = vk::BufferDeviceAddressInfo::default().buffer(index_buffer);
+        let index_device_address = device.get_buffer_device_address(&index_address_info);
+
+        log::info!("Index Heap BDA: 0x{:016X}", index_device_address);
 
         log::info!("✅ DualHeapGeometryBuffer created successfully");
 
@@ -117,6 +127,7 @@ impl DualHeapGeometryBuffer {
             vertex_offset: AtomicU64::new(0),
             index_buffer,
             index_allocation: Mutex::new(index_allocation),
+            index_device_address,
             index_capacity,
             index_offset: AtomicU64::new(0),
         })
@@ -258,6 +269,11 @@ impl DualHeapGeometryBuffer {
     /// Get the index buffer handle for traditional binding
     pub fn index_buffer_handle(&self) -> vk::Buffer {
         self.index_buffer
+    }
+
+    /// Get the base device address of the index heap
+    pub fn index_heap_address(&self) -> vk::DeviceAddress {
+        self.index_device_address
     }
 
     /// Get current usage statistics

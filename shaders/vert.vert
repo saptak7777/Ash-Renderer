@@ -34,8 +34,12 @@ void main() {
         vertex_offset = instance.vertex_offset;
     }
 
-    // BDA Vertex Pulling: Load vertex data from global vertex heap
-    VertexBuffer vertex = load_vertex(push.vertex_ptr, gl_VertexIndex + vertex_offset);
+    // BDA Index Pulling: Fetch logical index from index heap
+    // gl_VertexIndex is driven by firstVertex (offset into index heap)
+    uint actualIndex = load_index(push.index_ptr, gl_VertexIndex);
+
+    // BDA Vertex Pulling: Load vertex data using the pulled index
+    VertexBuffer vertex = load_vertex(push.vertex_ptr, actualIndex + vertex_offset);
     
     // Transform position to world space
     vec4 worldPosition = model * vec4(vertex.position, 1.0);
@@ -51,7 +55,11 @@ void main() {
     fragUV = vertex.uv;
     fragNormal = worldNormal;
     fragWorldPos = worldPosition.xyz;
-    fragTangent = vec4(mat3(push.model) * vertex.tangent.xyz, vertex.tangent.w);
-    motionVector = vec2(0.0);
+    fragTangent = vec4(mat3(model) * vertex.tangent.xyz, vertex.tangent.w);
+
+    // Calculate motion vectors
+    vec4 currentClip = gl_Position;
+    vec4 prevClip = frame.prev_view_proj * worldPosition;
+    motionVector = (currentClip.xy / currentClip.w - prevClip.xy / prevClip.w) * 0.5;
     fragInstanceIndex = gl_InstanceIndex;
 }

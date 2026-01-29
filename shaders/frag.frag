@@ -31,17 +31,23 @@ layout(location = 1) out vec4 outNormal;
 layout(location = 2) out vec4 outAlbedo;
 layout(location = 3) out vec2 outMotion;
 
-// Set 0: Bindless consolidated resources
-layout(set = 0, binding = 0) uniform sampler2D textures[];
+// Set 1: Bindless consolidated resources
+layout(set = 1, binding = 0) uniform sampler2D textures[];
+
+// Binding 1: Bindless Storage Buffers (for tints, per-material data, etc.)
+// std430 for consistent layout between Rust and GLSL
+layout(set = 1, binding = 1, std430) readonly buffer BindlessBuffer {
+    vec4 data[];
+} bindless_buffers[];
 
 
-// Set 1: Environment (Skybox + ShadowMap + VSM)
-layout(set = 1, binding = 3) uniform samplerCube skyboxMap;        // Optional: Skybox for reflections
+// Set 2: Environment (Skybox + ShadowMap + VSM)
+layout(set = 2, binding = 3) uniform samplerCube skyboxMap;        // Optional: Skybox for reflections
 
-layout(set = 1, binding = 5) uniform usampler2DArray vsmPageTable; // VSM Page Table Array (R32_UINT)
-layout(set = 1, binding = 6) uniform sampler2D vsmPhysicalCache;   // VSM Physical Cache (R32_FLOAT)
+layout(set = 2, binding = 5) uniform usampler2DArray vsmPageTable; // VSM Page Table Array (R32_UINT)
+layout(set = 2, binding = 6) uniform sampler2D vsmPhysicalCache;   // VSM Physical Cache (R32_FLOAT)
 
-// Set 2: Forward+ Lighting (Modern tile-based deferred lighting)
+// Set 3: Forward+ Lighting (Modern tile-based deferred lighting)
 #define MAX_LIGHTS_PER_TILE 256
 
 struct Light {
@@ -51,15 +57,15 @@ struct Light {
     vec4 params;     // x = innerConeAngle, y = outerConeAngle, z = falloff, w = enabled
 };
 
-layout(set = 2, binding = 0, std430) readonly buffer LightBuffer {
+layout(set = 3, binding = 0, std430) readonly buffer LightBuffer {
     Light lights[];
 };
 
-layout(set = 2, binding = 1, std430) readonly buffer TileLightIndices {
+layout(set = 3, binding = 1, std430) readonly buffer TileLightIndices {
     uint tileData[];
 };
 
-layout(set = 2, binding = 2) uniform ForwardPlusInfo {
+layout(set = 3, binding = 2) uniform ForwardPlusInfo {
     uvec2 num_tiles;
     uint tile_size;
     uint _padding;
@@ -308,6 +314,12 @@ void main() {
     // Apply sRGB-to-linear conversion only for texture samples (base_color_factor is already linear)
     vec3 baseSampleLinear = base_color_idx >= 0 ? srgb_to_linear(baseSample.rgb) : baseSample.rgb;
     vec3 baseColor = baseSampleLinear * base_color_factor.rgb * fragColor;
+
+    // Apply tint from bindless storage buffer if available (Example 06 pattern)
+    if (mat.tint_index >= 0) {
+        vec4 tint = bindless_buffers[nonuniformEXT(mat.tint_index)].data[0];
+        baseColor *= tint.rgb;
+    }
     
     // Alpha discard
     if (baseSample.a * base_color_factor.a < mat.alpha_cutoff) {

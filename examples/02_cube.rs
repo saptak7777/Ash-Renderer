@@ -108,7 +108,7 @@ impl ApplicationHandler for App {
                 // CRITICAL: Must call enable_post_processing() to initialize HDR/Tonemapping pipelines!
                 if let Err(e) = renderer.enable_post_processing() {
                     log::warn!("Post-processing failed: {e}");
-                    renderer.set_tonemapping_enabled(true);
+                    renderer.tonemapping_enabled = true;
                 }
 
                 self.renderer = Some(renderer);
@@ -142,13 +142,13 @@ impl ApplicationHandler for App {
                     let up = Vec3::Y;
 
                     let view = Mat4::look_at_rh(camera_pos, target, up);
-                    let mut proj = Mat4::perspective_rh(45.0_f32.to_radians(), aspect, 0.5, 100.0);
+                    // MODERN PROJECTION: Infinite Reverse Z
+                    let mut proj = Mat4::perspective_infinite_reverse_rh(
+                        45.0_f32.to_radians(),
+                        aspect,
+                        0.5, // Near Plane
+                    );
                     proj.y_axis.y *= -1.0; // Vulkan Y-flip
-                                           // Fix Z range: Vulkan [0, 1] vs OpenGL [-1, 1] derived from perspective_rh
-                    proj.x_axis.z = 0.5f32 * (proj.x_axis.z + proj.x_axis.w);
-                    proj.y_axis.z = 0.5f32 * (proj.y_axis.z + proj.y_axis.w);
-                    proj.z_axis.z = 0.5f32 * (proj.z_axis.z + proj.z_axis.w);
-                    proj.w_axis.z = 0.5f32 * (proj.w_axis.z + proj.w_axis.w);
 
                     // Submit commands
                     if let Err(e) = renderer.submit_render_commands(&self.render_commands) {

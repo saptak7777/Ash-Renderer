@@ -20,7 +20,6 @@ use crate::{
         },
         motion_pass::MotionVectorPass,
         occlusion_culling::{CullBoundingBox, OcclusionCulling},
-        pass_manager::{RenderPassManager, RenderingMode},
         resource_registry::{ResourceId, ResourceRegistry},
         resources,
         resources::uniform::{StorageBuffer, UniformBuffer},
@@ -57,8 +56,6 @@ pub struct CullingManager {
     pub shadow_casters: HashSet<u32>,
     pub shadow_receivers: HashSet<u32>,
     pub transparent_objects: HashSet<u32>,
-    pub gpu_driven_objects: HashSet<u32>,
-    pub traditional_objects: HashSet<u32>,
 }
 
 impl CullingManager {
@@ -69,27 +66,13 @@ impl CullingManager {
     pub fn build(
         &mut self,
         draw_items: &[DrawItem],
-        instancing_manager: &InstancingManager,
-        _mesh_data: &[MeshData],
     ) {
-        self.gpu_driven_objects.clear();
-        self.traditional_objects.clear();
         self.shadow_casters.clear();
         self.shadow_receivers.clear();
         self.transparent_objects.clear();
 
-        // Register GPU-driven objects (from instancing manager)
-        for batch in instancing_manager.batches() {
-            self.gpu_driven_objects.insert(batch.key.mesh_id);
-        }
-
-        // Register traditional objects (non-batched)
         for item in draw_items {
             let mesh_handle = item.mesh_id;
-
-            if !self.gpu_driven_objects.contains(&mesh_handle) {
-                self.traditional_objects.insert(mesh_handle);
-            }
 
             // Track shadow casters/receivers
             if item.cast_shadows {
@@ -119,7 +102,6 @@ impl CullingManager {
 pub enum DebugMode {
     #[default]
     None,            // Final render
-    Path,           // Visualize GPU vs Legacy path (Blue/Green)
     Albedo,         // Visualize Albedo channel
     Normal,         // Visualize Normal channel
     Metallic,       // Visualize Metallic channel
@@ -127,14 +109,7 @@ pub enum DebugMode {
     Lighting,       // Visualize Lighting only
 }
 
-#[derive(Clone, Copy, Debug, Default)]
-pub enum MsaaPreset {
-    #[default]
-    Off,
-    X2,
-    X4,
-    X8,
-}
+
 
 #[derive(Clone, Debug)]
 pub struct RenderCommand {
@@ -180,6 +155,7 @@ struct RendererResources {
     material_storage_buffer: StorageBuffer<resources::uniform::MaterialUniform>,
     instance_buffers: Vec<resources::InstanceBuffer>,
     post_sampler: vk::Sampler,
+    safety_texture: Texture,
 }
 
 fn compute_worker_index(worker_count: usize, frame_index: usize) -> usize {
@@ -246,16 +222,7 @@ mod tests {
     }
 }
 
-impl MsaaPreset {
-    fn sample_count(self) -> vk::SampleCountFlags {
-        match self {
-            MsaaPreset::Off => vk::SampleCountFlags::TYPE_1,
-            MsaaPreset::X2 => vk::SampleCountFlags::TYPE_2,
-            MsaaPreset::X4 => vk::SampleCountFlags::TYPE_4,
-            MsaaPreset::X8 => vk::SampleCountFlags::TYPE_8,
-        }
-    }
-}
+
 
 #[derive(Clone, Debug)]
 pub struct SpecializationOverride {
@@ -306,7 +273,7 @@ impl SampleShadingQuality {
 
 #[derive(Clone, Debug)]
 pub struct PipelineConfig {
-    pub msaa: MsaaPreset,
+
     pub sample_shading: SampleShadingQuality,
     pub watch_shaders: bool,
     pub specialization_constants: Vec<SpecializationOverride>,
@@ -315,7 +282,6 @@ pub struct PipelineConfig {
 impl Default for PipelineConfig {
     fn default() -> Self {
         Self {
-            msaa: MsaaPreset::Off,
             sample_shading: SampleShadingQuality::Disabled,
             watch_shaders: false,
             specialization_constants: Vec::new(),
@@ -326,7 +292,7 @@ impl Default for PipelineConfig {
 impl PipelineConfig {
     fn multisample_config(&self) -> vulkan::MultisampleConfig {
         vulkan::MultisampleConfig {
-            sample_count: self.msaa.sample_count(),
+            sample_count: vk::SampleCountFlags::TYPE_1,
             enable_sample_shading: self.sample_shading.enabled(),
             min_sample_shading: self.sample_shading.min_sample_shading(),
         }
@@ -431,7 +397,6 @@ pub struct Renderer {
     resize_pending: bool,
     pending_extent: Option<vk::Extent2D>,
     // Post-processing support
-    msaa_preset: MsaaPreset,
     sample_shading: SampleShadingQuality,
     hdr_framebuffer: Option<hdr_framebuffer::HdrFramebuffer>,
     fullscreen_pass: Option<fullscreen_pass::FullscreenPass>,
@@ -449,7 +414,7 @@ pub struct Renderer {
     // Virtual Shadow Maps
     vsm_feature: Option<VsmFeature>,
     // Bindless textures
-    bindless_manager: Option<vulkan::BindlessManager>,
+    bindless_manager: vulkan::BindlessManager,
     // Forward+ lighting
     forward_plus: Option<ForwardPlusIntegration>,
     // GPU-driven occlusion culling (Hi-Z + Indirect Draw)
@@ -466,7 +431,6 @@ pub struct Renderer {
     gbuffer: Option<GBuffer>,
     // Pipeline optimization
     culling_manager: CullingManager,
-    _use_gpu_driven: bool,
     // Lighting
     scene_lighting: crate::renderer::features::SceneLighting,
     point_lights: Vec<PointLight>,
@@ -484,8 +448,6 @@ pub struct Renderer {
     instancing_manager: InstancingManager,
     instance_buffer: Vec<resources::InstanceBuffer>, // One per frame
     transform_system: resources::TransformSystem,
-    // Pass management
-    pass_manager: RenderPassManager,
     // Image-Based Lighting
     allow_auto_material: bool,
     strict_mode: bool,
@@ -616,7 +578,7 @@ pub struct MainPassParameters<'a> {
 impl Renderer {
     fn sample_shading_config(&self) -> vulkan::MultisampleConfig {
         vulkan::MultisampleConfig {
-            sample_count: self.msaa_preset.sample_count(),
+            sample_count: vk::SampleCountFlags::TYPE_1,
             enable_sample_shading: self.sample_shading.enabled(),
             min_sample_shading: self.sample_shading.min_sample_shading(),
         }
@@ -717,9 +679,12 @@ impl Renderer {
             let aspect = swapchain.extent.width as f32 / swapchain.extent.height as f32;
 
             let mut bindless_manager = crate::vulkan::BindlessManager::new(
+                instance.instance(),
+                device.physical_device,
                 Arc::clone(&device.device),
                 descriptor_manager.allocator_mut(),
                 crate::vulkan::BindlessManager::DEFAULT_MAX_TEXTURES,
+                crate::vulkan::BindlessManager::DEFAULT_MAX_BUFFERS,
             )?;
 
             log::info!("Initializing Forward+ Integration");
@@ -751,6 +716,7 @@ impl Renderer {
                 material_storage_buffer,
                 instance_buffers,
                 post_sampler,
+                safety_texture,
             } = renderer_resources;
 
             // Bind IBL defaults to all environment sets
@@ -800,11 +766,18 @@ impl Renderer {
                 instance_buffer_addresses.push(buffer.device_address());
             }
 
-            // Register default texture as a fallback for all slots.
+            // Mandatory Slot 0: Register safety texture as the absolute fallback.
+            let safety_tex_index = bindless_manager
+                .add_sampled_image(safety_texture.view(), safety_texture.sampler())?;
+            log::info!("Registered safety texture (Magenta) at bindless index {safety_tex_index}");
+            if safety_tex_index != 0 {
+                return Err(AshError::VulkanError(format!("Safety texture MUST be at index 0, but got {safety_tex_index}")));
+            }
+
+            // Register default texture.
             let default_tex_index = bindless_manager
-                .add_sampled_image(default_texture.view(), default_texture.sampler())
-                .unwrap_or(0); // Fallback to index 0 if registration fails.
-            log::info!("Registered default texture at bindless index {default_tex_index}");
+                .add_sampled_image(default_texture.view(), default_texture.sampler())?;
+            log::info!("Registered default white texture at bindless index {default_tex_index}");
 
             log::info!("Configuring Pipeline Set Layouts");
             let set_layouts = [
@@ -1030,8 +1003,6 @@ impl Renderer {
                 )?
             };
             log::info!("Skybox initialized.");
-            
-            let pass_manager = RenderPassManager::new(RenderingMode::GPUDriven);
             let mesh_data: Vec<MeshData> = Vec::new();
             let material_manager = MaterialManager::new();
             let instancing_manager = InstancingManager::new();
@@ -1117,7 +1088,7 @@ impl Renderer {
                 swapchain_cleanup_pending: false,
                 resize_pending: false,
                 pending_extent: Some(swapchain_extent),
-                msaa_preset: pipeline_cfg.msaa,
+
                 sample_shading: pipeline_cfg.sample_shading,
                 hdr_framebuffer: None,
                 fullscreen_pass: None,
@@ -1132,7 +1103,7 @@ impl Renderer {
                 async_readback: None,
                 diagnostics_overlay: DiagnosticsOverlay::new(),
                 vsm_feature,
-                bindless_manager: Some(bindless_manager),
+                bindless_manager,
                 forward_plus: Some(forward_plus),
                 hiz_pass: Some(hiz_pass),
                 adaptive_hiz_manager: AdaptiveHiZManager::new(3.0), // Target 3ms for Hi-Z
@@ -1143,7 +1114,6 @@ impl Renderer {
                 motion_framebuffer: None,
                 gbuffer: Some(gbuffer),
                 culling_manager: CullingManager::new(),
-                _use_gpu_driven: true,
                 scene_lighting: crate::renderer::features::SceneLighting::default(),
                 point_lights: Vec::new(),
                 directional_lights: Vec::new(),
@@ -1160,7 +1130,6 @@ impl Renderer {
                 instancing_manager,
                 instance_buffer,
                 transform_system,
-                pass_manager,
                 allow_auto_material: config.allow_auto_material,
                 strict_mode: config.strict_mode,
                 readback_buffer,
@@ -1564,6 +1533,19 @@ impl Renderer {
             ).map_err(|e| AshError::VulkanError(format!("Failed to create post_sampler: {e}")))?
         };
 
+        let safety_texture_data = TextureData::solid_color([255, 0, 255, 255]); // Magenta
+        let safety_texture = unsafe {
+            Texture::from_data(
+                Arc::clone(alloc),
+                Arc::clone(&device.device),
+                command_pool,
+                device.graphics_queue,
+                &safety_texture_data,
+                vk::Format::R8G8B8A8_SRGB,
+                Some("safety_texture"),
+            )?
+        };
+
         Ok(RendererResources {
             uniform_buffers,
             default_texture,
@@ -1576,6 +1558,7 @@ impl Renderer {
             material_storage_buffer,
             instance_buffers,
             post_sampler,
+            safety_texture,
         })
     }
 
@@ -1995,27 +1978,13 @@ impl Renderer {
 
 
 
-    // DELETED: set_mesh() method. Use submit_render_commands instead.
-
-// DELETED Ok(())
-
-    /// Set the rendering mode (GPU-driven, Legacy, or Hybrid).
-    pub fn set_rendering_mode(&mut self, mode: RenderingMode) {
-        self.pass_manager.set_mode(mode);
-    }
-
-    /// Returns the current rendering mode.
-    pub fn rendering_mode(&self) -> RenderingMode {
-        self.pass_manager.mode()
-    }
-
     /// Access the underlying memory allocator.
     pub fn allocator(&self) -> &Allocator {
         &self.alloc
     }
 
-    /// Access the bindless manager (mutable) if enabled.
-    pub fn bindless_manager_mut(&mut self) -> &mut Option<BindlessManager> {
+    /// Access the bindless manager (mutable).
+    pub fn bindless_manager_mut(&mut self) -> &mut BindlessManager {
         &mut self.bindless_manager
     }
 
@@ -2096,9 +2065,7 @@ impl Renderer {
                 .ensure_mesh(&key, mesh, upload_pool, self.device.graphics_queue)?;
 
             // Register textures with bindless manager
-            if let Some(bindless_manager) = self.bindless_manager.as_mut() {
-                register_mesh_textures(mesh, bindless_manager)?;
-            }
+            register_mesh_textures(mesh, &mut self.bindless_manager)?;
 
             // Register material from mesh properties
             let mut material_handle = self.material_manager.default_material();
@@ -2232,22 +2199,27 @@ impl Renderer {
             mat_uniform.set_alpha_cutoff(material.alpha_cutoff);
             
             // Enable texture access by mapping indices from the material
-            let base_idx = material.texture_index.map(|i| i as i32).unwrap_or(-1);
-            let normal_idx = material.normal_texture_index.map(|i| i as i32).unwrap_or(-1);
-            let mr_idx = material.metallic_roughness_texture_index.map(|i| i as i32).unwrap_or(-1);
-            let occ_idx = material.occlusion_texture_index.map(|i| i as i32).unwrap_or(-1);
-            let emissive_idx = material.emissive_texture_index.map(|i| i as i32).unwrap_or(-1);
+            let base_idx = material.texture_index.unwrap_or(0) as i32;
+            let normal_idx = material.normal_texture_index.unwrap_or(0) as i32;
+            let mr_idx = material.metallic_roughness_texture_index.unwrap_or(0) as i32;
+            let occ_idx = material.occlusion_texture_index.unwrap_or(0) as i32;
+            let emissive_idx = material.emissive_texture_index.unwrap_or(0) as i32;
 
             // Validate texture indices before upload
-            if let Some(_bindless) = &self.bindless_manager {
-                let max_res = vulkan::BindlessManager::DEFAULT_MAX_TEXTURES;
-                resources::bindless_validator::BindlessValidator::validate_indices(
-                    &[base_idx, normal_idx, mr_idx, occ_idx, emissive_idx],
-                    max_res,
-                )?;
-            }
+            let max_res = vulkan::BindlessManager::DEFAULT_MAX_TEXTURES;
+            resources::bindless_validator::BindlessValidator::validate_indices(
+                &[base_idx, normal_idx, mr_idx, occ_idx, emissive_idx],
+                max_res,
+            )?;
 
-            mat_uniform.set_texture_indices(base_idx, normal_idx, mr_idx, occ_idx, emissive_idx, -1);
+            mat_uniform.set_texture_indices(
+                base_idx,
+                normal_idx,
+                mr_idx,
+                occ_idx,
+                emissive_idx,
+                material.tint_index,
+            );
 
             // AAA PATTERN: Direct streaming write instead of read-modify-write
             // This avoids:
@@ -2347,10 +2319,7 @@ impl Renderer {
         Arc<parking_lot::Mutex<resources::uniform::StorageBuffer<T>>>,
         u32,
     )> {
-        let bindless_manager = self
-            .bindless_manager
-            .as_mut()
-            .ok_or_else(|| AshError::VulkanError("Bindless manager not enabled".to_string()))?;
+        let bindless_manager = &mut self.bindless_manager;
 
         unsafe {
             let mut buffer = resources::uniform::StorageBuffer::new(
@@ -2944,7 +2913,6 @@ impl Renderer {
             .format();
 
         let pipeline_info = PipelineConfig {
-            msaa: self.msaa_preset,
             sample_shading: self.sample_shading,
             ..Default::default()
         };
@@ -2952,7 +2920,7 @@ impl Renderer {
         // We need the set layouts. 
         // 0: Frame, 1: Bindless, 2: Environment, 3: Forward+
         let descriptors = self.descriptors.as_ref().ok_or_else(|| AshError::VulkanError("Descriptors missing".to_string()))?;
-        let bindless = self.bindless_manager.as_ref().ok_or_else(|| AshError::VulkanError("Bindless manager missing".to_string()))?;
+        let bindless = &self.bindless_manager;
 
         let mut set_layouts = vec![
             descriptors.frame_layout(),
@@ -3504,14 +3472,9 @@ impl Renderer {
         let _swapchain_extent = params.swapchain_extent;
 
         // Resolve global debug state
-        let (debug_enabled, debug_path_override) = match self.debug_mode {
-            DebugMode::None => (false, None),
-            DebugMode::Path => (true, None),
-            DebugMode::Albedo => (true, Some(3)),
-            DebugMode::Normal => (true, Some(4)),
-            DebugMode::Metallic => (true, Some(5)),
-            DebugMode::Roughness => (true, Some(6)),
-            DebugMode::Lighting => (true, Some(7)),
+        let debug_enabled = match self.debug_mode {
+            DebugMode::None => false,
+            _ => true,
         };
 
         // Modern Phase 4: Full GPU-Driven Indirect Draw (Opaque Path)
@@ -3528,12 +3491,11 @@ impl Renderer {
                 // CRITICAL FIX: Bind Descriptor Sets
                 // Missing these was causing the "Invisible Mesh" issue (shaders had no resources)
                 let descriptors = self.descriptors.as_ref().ok_or(AshError::VulkanError("Descriptors not initialized".into()))?;
-                let bindless = self.bindless_manager.as_ref().ok_or(AshError::VulkanError("Bindless not initialized".into()))?;
                 
                 // Use public accessor methods instead of private fields
                 // frame_set returns Option<vk::DescriptorSet>
                 let frame_set = descriptors.frame_set(frame_index).ok_or(AshError::VulkanError("Frame set missing".into()))?;
-                let bindless_set = bindless.descriptor_set();
+                let bindless_set = self.bindless_manager.descriptor_set();
                 // environment_set returns Option<vk::DescriptorSet>
                 let environment_set = descriptors.environment_set(frame_index).ok_or(AshError::VulkanError("Environment set missing".into()))?;
 
@@ -3553,20 +3515,20 @@ impl Renderer {
                 // CRITICAL FIX: BDA Pointer Validation
                 // Prevent crash if buffers are not yet allocated
                 let vertex_ptr = self.model_renderer.geometry_buffer.vertex_heap_address();
+                let index_ptr = self.model_renderer.geometry_buffer.index_heap_address();
                 let instance_ptr = indirect_pass.object_buffer_address();
                 let material_ptr = self.material_heap_address;
 
-                if vertex_ptr == 0 || instance_ptr == 0 || material_ptr == 0 {
+                if vertex_ptr == 0 || index_ptr == 0 || instance_ptr == 0 || material_ptr == 0 {
                     log::error!(
-                        "CRITICAL: BDA Null Pointer - Skipping Draw. Vtx: {:#X}, Inst: {:#X}, Mat: {:#X}", 
-                        vertex_ptr, instance_ptr, material_ptr
+                        "CRITICAL: BDA Null Pointer - Skipping Draw. Vtx: {:#X}, Idx: {:#X}, Inst: {:#X}, Mat: {:#X}", 
+                        vertex_ptr, index_ptr, instance_ptr, material_ptr
                     );
                     return Ok(());
                 }
 
                 let material_push = MaterialPushConstants::new(MaterialHandle::null())
                     .with_receive_shadows(true)
-                    .with_debug_path(debug_path_override.unwrap_or(1))
                     .with_debug_visualization(debug_enabled);
 
                 let uploaded = match self.skybox_mesh.as_ref() {
@@ -3590,6 +3552,7 @@ impl Renderer {
                     vertex_ptr,
                     instance_ptr,
                     material_ptr,
+                    index_ptr,
                 };
                 
                 let count_params = crate::renderer::model_renderer::IndirectDrawCountParams {
@@ -3598,7 +3561,7 @@ impl Renderer {
                     count_buffer: indirect_pass.count_buffer(),
                     count_offset: 0,
                     max_draw_count: self.occlusion_culling.object_count() as u32,
-                    stride: std::mem::size_of::<vk::DrawIndexedIndirectCommand>() as u32,
+                    stride: std::mem::size_of::<vk::DrawIndirectCommand>() as u32,
                 };
 
                 unsafe {
@@ -3659,16 +3622,14 @@ impl Renderer {
                     // We also bind Set 1 (Bindless) as middle set to preserve layout compatibility if needed
                     // But typically we can sparse bind or bind all.
                     // Given create_skybox_pipeline uses [frame, bindless, environment], we must bind ALL 3.
-                    if let Some(bindless_manager) = self.bindless_manager.as_ref() {
-                         self.device.device.cmd_bind_descriptor_sets(
-                            cmd_ctx.handle(),
-                            vk::PipelineBindPoint::GRAPHICS,
-                            layout,
-                            0, 
-                            &[frame_set, bindless_manager.descriptor_set(), env_set],
-                            &[],
-                        );
-                    }
+                    self.device.device.cmd_bind_descriptor_sets(
+                        cmd_ctx.handle(),
+                        vk::PipelineBindPoint::GRAPHICS,
+                        layout,
+                        0, 
+                        &[frame_set, self.bindless_manager.descriptor_set(), env_set],
+                        &[],
+                    );
                 }
 
                 // Push Constants: Skybox View/Proj + Vertex Ptr
@@ -3910,7 +3871,7 @@ impl Renderer {
             // }
 
             // Build object registry once per frame
-            self.culling_manager.build(&self.draw_items, &self.instancing_manager, &self.mesh_data);
+            self.culling_manager.build(&self.draw_items);
 
             // Prepare culling data for this frame
             self.occlusion_culling.begin_frame();
@@ -4162,9 +4123,7 @@ impl Renderer {
                         let frame_descriptor_set = self.descriptors.as_ref()
                             .and_then(|d| d.frame_set(frame_index))
                             .unwrap_or(vk::DescriptorSet::null());
-                        let bindless_descriptor_set = self.bindless_manager.as_ref()
-                            .map(|bm| bm.descriptor_set())
-                            .unwrap_or(vk::DescriptorSet::null());
+                        let bindless_descriptor_set = self.bindless_manager.descriptor_set();
                         
                         // Get light direction and clipmap levels
                         let light_dir = glam::Vec3::from_slice(&self.scene_lighting.directional.direction[0..3]);
@@ -4227,6 +4186,7 @@ impl Renderer {
                                                 vertex_ptr: model_renderer.geometry_buffer.vertex_heap_address(),
                                                 instance_ptr: instance_buffer_addresses[frame_index],
                                                 material_ptr: material_heap_address,
+                                                index_ptr: model_renderer.geometry_buffer.index_heap_address(),
                                             };
                                             
                                             device.device.cmd_push_constants(
@@ -4251,7 +4211,7 @@ impl Renderer {
                                             
                                             log::debug!("Shadow Draw: mesh={}, ptr=0x{:X}, count={}", data.name, vertex_ptr, batch.count());
 
-                                            model_renderer.draw_mesh_instanced(&ctx, batch.count() as u32, offset);
+                                            model_renderer.draw_shadow_batch(&ctx, batch.count() as u32, offset);
                                         }
                                     }
                                 }
@@ -4456,15 +4416,13 @@ impl Renderer {
                     );
 
                     // Bind global bindless descriptor set (Set 1)
-                    if let Some(ref bindless) = self.bindless_manager {
-                        cmd_ctx.bind_descriptor_sets(
-                            vk::PipelineBindPoint::GRAPHICS,
-                            pipeline_layout_handle,
-                            1, // Set 1: Bindless (Textures, Materials, Instances)
-                            &[bindless.descriptor_set()],
-                            &[],
-                        );
-                    }
+                    cmd_ctx.bind_descriptor_sets(
+                        vk::PipelineBindPoint::GRAPHICS,
+                        pipeline_layout_handle,
+                        1, // Set 1: Bindless (Textures, Materials, Instances)
+                        &[self.bindless_manager.descriptor_set()],
+                        &[],
+                    );
 
                     // Bind Global Environment descriptor (Set 2: ShadowMap)
                     if let Some(env_set) = manager.environment_set(frame_index) {
@@ -4565,14 +4523,23 @@ impl Renderer {
 
             cmd_ctx.end()?;
 
-            let wait_semaphores = [image_available];
-            let wait_stages = [vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT];
+            let is_headless = self.swapchain.as_ref().map_or(false, |s| s.is_headless());
+
+            let wait_semaphores_all = [image_available];
+            let wait_stages_all = [vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT];
+
+            let (wait_semaphores, wait_stages) = if is_headless {
+                (&[] as &[vk::Semaphore], &[] as &[vk::PipelineStageFlags])
+            } else {
+                (&wait_semaphores_all as &[vk::Semaphore], &wait_stages_all as &[vk::PipelineStageFlags])
+            };
+
             let signal_semaphores = [render_finished];
             let command_buffers_submit = [command_buffer];
 
             let submit_info = vk::SubmitInfo::default()
-                .wait_semaphores(&wait_semaphores)
-                .wait_dst_stage_mask(&wait_stages)
+                .wait_semaphores(wait_semaphores)
+                .wait_dst_stage_mask(wait_stages)
                 .command_buffers(&command_buffers_submit)
                 .signal_semaphores(&signal_semaphores);
 
@@ -4636,17 +4603,7 @@ impl Renderer {
     // Post-Processing API
     // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-    /// Sets the MSAA preset.
-    pub fn set_msaa_preset(&mut self, preset: MsaaPreset) {
-        self.msaa_preset = preset;
-        log::info!("MSAA preset set to {preset:?}");
-        // MSAA targets require recreation upon preset modification.
-    }
 
-    /// Returns the current MSAA preset
-    pub fn msaa_preset(&self) -> MsaaPreset {
-        self.msaa_preset
-    }
 
     /// Enables or disables tonemapping
     // DELETED: Use set_debug_mode instead.
@@ -4792,9 +4749,7 @@ impl Renderer {
                 "DescriptorManager not initialized".to_string(),
             ));
         }
-        let bindless_manager = self.bindless_manager.as_mut().ok_or(AshError::VulkanError(
-            "BindlessManager not initialized".to_string(),
-        ))?;
+        let bindless_manager = &mut self.bindless_manager;
 
         unsafe {
             indirect.init(

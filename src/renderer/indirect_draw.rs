@@ -23,7 +23,7 @@ pub struct IndirectDrawPass {
     object_buffer: vk::Buffer,
     object_allocation: Option<vk_mem::Allocation>,
     object_buffer_size: u64,
-    object_buffer_index: Option<u32>,
+    object_buffer_index: u32,
 
     // Draw commands template buffer (input) - DELETED (Using BDA Mesh Data Directly)
 
@@ -59,7 +59,7 @@ impl IndirectDrawPass {
             object_buffer: vk::Buffer::null(),
             object_allocation: None,
             object_buffer_size: 0,
-            object_buffer_index: None,
+            object_buffer_index: 0,
             // template_buffer: vk::Buffer::null(),
             // template_allocation: None,
             indirect_buffer: vk::Buffer::null(),
@@ -96,7 +96,7 @@ impl IndirectDrawPass {
 
         // Register object buffer with BindlessManager
         let index = bindless_manager.add_storage_buffer(self.object_buffer, 0, vk::WHOLE_SIZE)?;
-        self.object_buffer_index = Some(index);
+        self.object_buffer_index = index;
 
         self.create_descriptors()?;
         self.create_pipeline()?;
@@ -608,7 +608,7 @@ impl IndirectDrawPass {
         self.object_buffer
     }
 
-    pub fn object_buffer_index(&self) -> Option<u32> {
+    pub fn object_buffer_index(&self) -> u32 {
         self.object_buffer_index
     }
 

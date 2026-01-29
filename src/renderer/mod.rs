@@ -23,9 +23,8 @@ pub mod light_culling_integration;
 // pub mod lod_system; // Deleted for Nanite transition
 pub mod model_renderer;
 pub mod motion_pass;
-pub mod msaa_targets;
+
 pub mod occlusion_culling;
-pub mod pass_manager;
 pub mod pipeline_cache;
 pub mod render_graph;
 pub mod render_stats;
@@ -50,9 +49,7 @@ pub use indirect_draw::IndirectDrawPass;
 pub use instancing::{InstanceData, InstancingManager};
 pub use model_renderer::{MaterialPushConstants, ModelRenderer};
 pub use motion_pass::MotionVectorPass;
-pub use msaa_targets::{MsaaColorTarget, MsaaDepthTarget};
 pub use occlusion_culling::{CullBoundingBox, CullObjectData, OcclusionCulling};
-pub use pass_manager::{RenderPassManager, RenderingMode};
 pub use pipeline_cache::PipelineCache;
 pub use render_stats::{RenderStats, StatsCollector};
 pub use renderer::{DebugMode, RenderCommand, Renderer};

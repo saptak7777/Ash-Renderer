@@ -46,10 +46,9 @@ struct DirectionalLight {
 };
 
 struct IndirectDrawCommand {
-    uint indexCount;
+    uint vertexCount;
     uint instanceCount;
-    uint firstIndex;
-    int vertexOffset;
+    uint firstVertex;
     uint firstInstance;
 };
 
@@ -88,7 +87,15 @@ layout(buffer_reference, scalar) readonly buffer MaterialBuffer {
     MaterialData materials[];
 };
 
-// JointBuffer REMOVED
+// --- Index Buffer for BDA-based Index Pulling ---
+layout(buffer_reference, scalar, buffer_reference_align = 4) readonly buffer IndexBuffer { 
+    uint indices[]; 
+};
+
+uint load_index(uint64_t ptr, uint logical_index) {
+    IndexBuffer ib = IndexBuffer(ptr);
+    return ib.indices[logical_index];
+}
 
 // --- Push Constants ---
 
@@ -100,7 +107,8 @@ layout(push_constant) uniform PushConstants {
     uint64_t vertex_ptr;
     uint64_t instance_ptr;
     uint64_t material_ptr;
-    uint64_t _ptr_padding[2]; // Replaces joint_ptr and its padding
+    uint64_t index_ptr;
+    uint64_t _ptr_padding; // Padding to 48 bytes
 
     // Control stage (48-111)
     layout(offset = 48) mat4 model; 

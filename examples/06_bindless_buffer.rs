@@ -96,9 +96,10 @@ impl ApplicationHandler for App {
                     });
 
                 // 5. Phase 2 Settings: Proper HDR + Tonemapping
+                // 5. Phase 2 Settings: Proper HDR + Tonemapping
                 if let Err(e) = renderer.enable_post_processing() {
                     log::warn!("Post-processing failed: {e}");
-                    renderer.set_tonemapping_enabled(true);
+                    renderer.tonemapping_enabled = true;
                 }
 
                 // 6. Setup PHASE 2 Lighting: Balanced HDR (RAGE approach)
@@ -139,8 +140,11 @@ impl ApplicationHandler for App {
                         let camera_pos = Vec3::new(camera_x, 2.0, camera_z);
 
                         let view = Mat4::look_at_rh(camera_pos, Vec3::ZERO, Vec3::Y);
-                        let mut proj =
-                            Mat4::perspective_rh(45.0_f32.to_radians(), aspect, 0.1, 100.0);
+                        let mut proj = Mat4::perspective_infinite_reverse_rh(
+                            45.0_f32.to_radians(),
+                            aspect,
+                            0.1, // Near Plane
+                        );
                         proj.y_axis.y *= -1.0; // Vulkan Y-flip
                                                // Dynamic Lighting
                         let light_angle = time * 0.5;
@@ -176,9 +180,114 @@ impl ApplicationHandler for App {
 
 fn main() -> Result<()> {
     env_logger::init();
-    let event_loop = EventLoop::new().expect("Failed to create event loop");
-    event_loop.set_control_flow(ControlFlow::Poll);
-    let mut app = App::default();
-    event_loop.run_app(&mut app).expect("Event loop error");
+
+    let args: Vec<String> = std::env::args().collect();
+    let is_headless = args.iter().any(|arg| arg == "--headless");
+    let max_frames = args
+        .iter()
+        .position(|arg| arg == "--frames")
+        .and_then(|i| args.get(i + 1))
+        .and_then(|f| f.parse::<u32>().ok())
+        .unwrap_or(u32::MAX);
+
+    if is_headless {
+        run_headless(max_frames)
+    } else {
+        let event_loop = EventLoop::new().expect("Failed to create event loop");
+        event_loop.set_control_flow(ControlFlow::Poll);
+        let mut app = App::default();
+        event_loop.run_app(&mut app).expect("Event loop error");
+        Ok(())
+    }
+}
+
+fn run_headless(max_frames: u32) -> Result<()> {
+    log::info!("Running in HEADLESS mode for {max_frames} frames");
+    let width = 1280;
+    let height = 720;
+    let surface_provider = ash_renderer::vulkan::HeadlessSurfaceProvider::new(width, height);
+
+    let mut renderer = Renderer::new(&surface_provider)?;
+
+    // --- SETUP SOURCE (Copied from resumed) ---
+    // 1. Register bindless storage buffer FIRST to get the index
+    let tint_colors = [Vec4::new(1.0, 1.0, 1.0, 1.0)];
+    let (_tint_buffer_gpu, tint_index) = renderer
+        .register_bindless_storage_buffer(&tint_colors, "CubeTintBuffer")
+        .expect("Failed to register bindless storage buffer");
+
+    log::info!("✓ Registered bindless tint buffer at index {tint_index}");
+
+    // 2. Set up material with MATTE ORANGE color
+    let material = Material {
+        color: [1.0, 0.5, 0.0, 1.0], // SOLID ORANGE
+        metallic: 0.0,
+        roughness: 0.7,
+        tint_index: tint_index as i32,
+        ..Default::default()
+    };
+
+    let material_handle = renderer.register_and_upload_material(material).unwrap();
+    let mut cube = Mesh::create_cube();
+    for v in &mut cube.vertices {
+        v.color = [1.0, 1.0, 1.0];
+    }
+    cube.name = Arc::from("OrangeCubeHeadless");
+    let mesh_handle = renderer.upload_mesh(cube).unwrap_or(0);
+
+    let render_commands = vec![ash_renderer::renderer::RenderCommand {
+        mesh_handle,
+        material_handle,
+        transform: Mat4::IDENTITY,
+        ..Default::default()
+    }];
+
+    if let Err(e) = renderer.enable_post_processing() {
+        log::warn!("Post-processing failed: {e}");
+        renderer.tonemapping_enabled = true;
+    }
+
+    let lighting = LightingBuilder::new()
+        .with_ambient_preset(AmbientPreset::IndoorLit)
+        .with_directional(
+            Vec3::new(-1.0, -1.0, -1.0).normalize(),
+            Vec3::splat(2.5),
+            1.0,
+        )
+        .build();
+    renderer.set_lighting(&lighting);
+    // --- END SETUP ---
+
+    let start_time = Instant::now();
+    let aspect = width as f32 / height as f32;
+
+    for frame in 0..max_frames {
+        let time = start_time.elapsed().as_secs_f32();
+
+        // Orbiting camera
+        let radius = 5.0;
+        let camera_pos = Vec3::new(radius * time.sin(), 2.0, radius * time.cos());
+        let view = Mat4::look_at_rh(camera_pos, Vec3::ZERO, Vec3::Y);
+        let mut proj = Mat4::perspective_infinite_reverse_rh(45.0_f32.to_radians(), aspect, 0.1);
+        proj.y_axis.y *= -1.0;
+
+        // Dynamic Lighting
+        let light_angle = time * 0.5;
+        let light_dir = Vec3::new(-light_angle.cos(), -1.0, -light_angle.sin()).normalize();
+        let lighting = LightingBuilder::new()
+            .with_ambient_preset(AmbientPreset::IndoorLit)
+            .with_directional(light_dir, Vec3::splat(2.5), 1.0)
+            .build();
+        renderer.set_lighting(&lighting);
+
+        renderer.submit_render_commands(&render_commands)?;
+        renderer.render_frame(view, proj, camera_pos, None)?;
+
+        if frame % 100 == 0 {
+            log::info!("Headless frame {frame}/{max_frames}");
+        }
+    }
+
+    log::info!("Headless run complete");
     Ok(())
 }

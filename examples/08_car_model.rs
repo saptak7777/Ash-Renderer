@@ -192,8 +192,11 @@ impl ApplicationHandler for App {
                         let camera_pos = Vec3::new(camera_x, 3.0, camera_z);
                         let target = Vec3::new(0.0, 0.5, 0.0);
                         let view = Mat4::look_at_rh(camera_pos, target, Vec3::Y);
-                        let mut proj =
-                            Mat4::perspective_rh(45.0_f32.to_radians(), aspect, 0.1, 100.0);
+                        let mut proj = Mat4::perspective_infinite_reverse_rh(
+                            45.0_f32.to_radians(),
+                            aspect,
+                            0.1, // Near Plane
+                        );
                         proj.y_axis.y *= -1.0;
 
                         let _ = renderer.submit_render_commands(&self.render_commands);

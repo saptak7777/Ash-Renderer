@@ -283,10 +283,9 @@ void main() {
     
     // Build indirect command directly from InstanceData
     IndirectDrawCommand cmd;
-    cmd.indexCount = obj.index_count;
+    cmd.vertexCount = obj.index_count;
     cmd.instanceCount = 1;
-    cmd.firstIndex = obj.first_index;
-    cmd.vertexOffset = 0; // Fixed: Command offset must be 0 if shader adds it manually
+    cmd.firstVertex = obj.first_index; // Critical: gl_VertexIndex starts at our index heap offset
     cmd.firstInstance = pc.baseIndex + objectIdx;
     
     // Write to indirect buffer
