@@ -36,10 +36,12 @@ pub struct BindlessManager {
     max_images: u32,
     max_page_tables: u32,
     max_cubemaps: u32,
+    max_storage_images: u32,
     max_buffers: u32,
     next_image_index: u32,
     next_page_table_index: u32,
     next_cubemap_index: u32,
+    next_storage_image_index: u32,
     next_buffer_index: u32,
     // Resource tracking for recreation
     resources: Vec<RegisteredResource>,
@@ -49,6 +51,7 @@ impl BindlessManager {
     pub const DEFAULT_MAX_TEXTURES: u32 = 16384;
     pub const DEFAULT_MAX_PAGE_TABLES: u32 = 1024;
     pub const DEFAULT_MAX_CUBEMAPS: u32 = 1024;
+    pub const DEFAULT_MAX_STORAGE_IMAGES: u32 = 1024;
     pub const DEFAULT_MAX_BUFFERS: u32 = 1024;
 
     pub fn new(
@@ -59,6 +62,7 @@ impl BindlessManager {
         max_images: u32,
         max_page_tables: u32,
         max_cubemaps: u32,
+        max_storage_images: u32,
         mut max_buffers: u32,
     ) -> Result<Self> {
         // Hardware Validation: Clamp buffers to hardware limits to prevent DEVICE_LOST
@@ -98,7 +102,13 @@ impl BindlessManager {
                 max_cubemaps,
             )
             .add_bindless_binding(
-                3, // global_buffers
+                3, // global_storage_images
+                vk::DescriptorType::STORAGE_IMAGE,
+                vk::ShaderStageFlags::ALL_GRAPHICS | vk::ShaderStageFlags::COMPUTE,
+                max_storage_images,
+            )
+            .add_bindless_binding(
+                4, // global_buffers
                 vk::DescriptorType::STORAGE_BUFFER,
                 vk::ShaderStageFlags::ALL_GRAPHICS | vk::ShaderStageFlags::COMPUTE,
                 max_buffers,
@@ -117,10 +127,12 @@ impl BindlessManager {
             max_images,
             max_page_tables,
             max_cubemaps,
+            max_storage_images,
             max_buffers,
             next_image_index: 0,
             next_page_table_index: 0,
             next_cubemap_index: 0,
+            next_storage_image_index: 0,
             next_buffer_index: 0,
             resources: Vec::new(),
         })
@@ -149,16 +161,25 @@ impl BindlessManager {
         for res in &self.resources {
             match res.info {
                 ResourceInfo::Image { view, sampler } => {
+                    let (descriptor_type, image_layout) = if res.binding == 3 {
+                        (vk::DescriptorType::STORAGE_IMAGE, vk::ImageLayout::GENERAL)
+                    } else {
+                        (
+                            vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+                            vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                        )
+                    };
+
                     let info = vk::DescriptorImageInfo {
                         sampler,
                         image_view: view,
-                        image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                        image_layout,
                     };
                     self.descriptor_set.update_image_at(
                         res.binding,
                         res.index,
                         info,
-                        vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+                        descriptor_type,
                     )?;
                 }
                 ResourceInfo::Buffer {
@@ -274,15 +295,37 @@ impl BindlessManager {
         Ok(index)
     }
 
+    pub fn add_storage_image(&mut self, image_view: vk::ImageView) -> Result<u32> {
+        let index = self.allocate_index(3)?;
+        let info = vk::DescriptorImageInfo {
+            sampler: vk::Sampler::null(),
+            image_view,
+            image_layout: vk::ImageLayout::GENERAL,
+        };
+        self.descriptor_set
+            .update_image_at(3, index, info, vk::DescriptorType::STORAGE_IMAGE)?;
+
+        self.resources.push(RegisteredResource {
+            index,
+            binding: 3,
+            info: ResourceInfo::Image {
+                view: image_view,
+                sampler: vk::Sampler::null(),
+            },
+        });
+
+        Ok(index)
+    }
+
     pub fn add_storage_buffer(
         &mut self,
         buffer: vk::Buffer,
         offset: vk::DeviceSize,
         range: vk::DeviceSize,
     ) -> Result<u32> {
-        let index = self.allocate_index(3)?;
+        let index = self.allocate_index(4)?;
         self.descriptor_set.update_buffer_at(
-            3,
+            4,
             index,
             buffer,
             offset,
@@ -292,7 +335,7 @@ impl BindlessManager {
 
         self.resources.push(RegisteredResource {
             index,
-            binding: 3,
+            binding: 4,
             info: ResourceInfo::Buffer {
                 buffer,
                 offset,
@@ -340,6 +383,14 @@ impl BindlessManager {
                 Ok(idx)
             }
             3 => {
+                if self.next_storage_image_index >= self.max_storage_images {
+                    return Err(AshError::VulkanError("Exceeded max storage images".into()));
+                }
+                let idx = self.next_storage_image_index;
+                self.next_storage_image_index += 1;
+                Ok(idx)
+            }
+            4 => {
                 if self.next_buffer_index >= self.max_buffers {
                     return Err(AshError::VulkanError("Exceeded max buffers".into()));
                 }

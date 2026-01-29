@@ -231,6 +231,13 @@ pub struct SpecializationOverride {
     data: Vec<u8>,
 }
 
+#[derive(Default, Clone, Copy, Debug)]
+pub struct GBufferIndices {
+    pub color_index: u32,
+    pub depth_index: u32,
+    pub motion_index: u32,
+}
+
 impl SpecializationOverride {
     pub fn from_value<T: Pod>(stage: vk::ShaderStageFlags, constant_id: u32, value: &T) -> Self {
         Self {
@@ -435,7 +442,7 @@ pub struct Renderer {
     // Lighting
     scene_lighting: crate::renderer::features::SceneLighting,
     point_lights: Vec<PointLight>,
-     directional_lights: Vec<DirectionalLight>,
+    directional_lights: Vec<DirectionalLight>,
     spot_lights: Vec<SpotLight>,
     pub debug_mode: DebugMode,
 
@@ -443,6 +450,9 @@ pub struct Renderer {
     vsm_page_index: u32,
     vsm_cache_index: u32,
     skybox_index: u32,
+    
+    // Phase 4: G-Buffer & HDR Indices
+    gbuffer_indices: GBufferIndices,
 
     // Post-processing descriptors
     post_descriptor_pool: vk::DescriptorPool,
@@ -695,6 +705,7 @@ impl Renderer {
                 crate::vulkan::BindlessManager::DEFAULT_MAX_TEXTURES,
                 crate::vulkan::BindlessManager::DEFAULT_MAX_PAGE_TABLES,
                 crate::vulkan::BindlessManager::DEFAULT_MAX_CUBEMAPS,
+                crate::vulkan::BindlessManager::DEFAULT_MAX_STORAGE_IMAGES,
                 crate::vulkan::BindlessManager::DEFAULT_MAX_BUFFERS,
             )?;
 
@@ -730,17 +741,9 @@ impl Renderer {
                 safety_texture,
             } = renderer_resources;
 
-            // CRITICAL: Bindless defaults (Set 1) were already registered at Index 0.
-            // Set 2 management has been removed in Phase 3.
-
-            let buffer_size =
-                std::mem::size_of::<crate::renderer::resources::uniform::MvpMatrices>()
-                    as vk::DeviceSize;
-            for set_index in 0..descriptor_manager.frame_set_count() {
-                if let Some(ubo) = uniform_buffers.get(set_index) {
-                    descriptor_manager.bind_frame_uniform(set_index, ubo.buffer, buffer_size)?;
-                }
-            }
+            // CRITICAL: All frame data is now accessed via BDA (push.frame_ptr).
+            // Descriptor Set 0 (Frame Data) has been removed.
+            // Bindless set (formerly Set 1) is now Set 0.
 
             // BDA Migration: No longer need to manually register buffers with bindless manager
             let material_heap_address = material_storage_buffer.device_address();
@@ -766,13 +769,12 @@ impl Renderer {
 
             log::info!("Configuring Pipeline Set Layouts");
             let set_layouts = [
-                descriptor_manager.frame_layout(),        // Set 0: Frame Data
-                bindless_manager.descriptor_set_layout(), // Set 1: Bindless Textures
+                bindless_manager.descriptor_set_layout(), // Set 0: Unified Bindless
             ];
             
             // DIAGNOSTIC: Log layout handles for verification
-            log::debug!("Main Pipeline Set Layouts: Frame={:?}, Bindless={:?}", 
-                set_layouts[0], set_layouts[1]);
+            log::debug!("Main Pipeline Set Layouts: Unified={:?}", 
+                set_layouts[0]);
 
             log::info!("Creating Main Graphics Pipeline");
             let (pipeline_layout, pipeline_layout_id, pipeline, pipeline_id) =
@@ -808,10 +810,9 @@ impl Renderer {
             if let Some(ref mut vsm) = vsm_feature {
                 log::info!("Creating VSM shadow pipeline...");
                 
-                // Use the same descriptor set layouts as the main pipeline
+                // Use the unified Bindless layout
                 let descriptor_layouts = vec![
-                    descriptor_manager.frame_layout(),        // Set 0
-                    bindless_manager.descriptor_set_layout(), // Set 1
+                    bindless_manager.descriptor_set_layout(), // Set 0
                 ];
 
                 // Create the shadow rendering pipeline
@@ -944,6 +945,27 @@ impl Renderer {
                 black_texture.sampler(),
                 depth_buffer.view()
             )?;
+            
+            // Phase 4: G-Buffer Registration
+            // Register created G-Buffer images with BindlessManager
+            let mut gbuffer_indices = GBufferIndices::default();
+            
+            gbuffer_indices.motion_index = bindless_manager.add_sampled_image(
+                gbuffer.motion_view(),
+                default_texture.sampler(),
+            )?;
+            
+            // Note: Depth buffer was created earlier (line 663)
+            gbuffer_indices.depth_index = bindless_manager.add_sampled_image(
+                depth_buffer.view(),
+                default_texture.sampler(),
+            )?;
+            
+            log::info!("Registered GBuffer indices: Motion={}, Depth={}", 
+                gbuffer_indices.motion_index, gbuffer_indices.depth_index);
+            
+            // HDR Framebuffer is not yet created (happens in initialize_hdr called by enable_post_processing)
+            // But we should initialize indices to 0 or safe defaults.
 
             log::info!("Renderer initialization complete. Constructing struct.");
 
@@ -1143,6 +1165,8 @@ impl Renderer {
                 vsm_page_index: active_vsm_page_index,
                 vsm_cache_index,
                 skybox_index,
+                
+                gbuffer_indices,
 
                 debug_mode: DebugMode::None,
                 post_descriptor_pool: vk::DescriptorPool::null(),
@@ -2950,11 +2974,10 @@ impl Renderer {
 
         // We need the set layouts. 
         // 0: Frame, 1: Bindless
-        let descriptors = self.descriptors.as_ref().ok_or_else(|| AshError::VulkanError("Descriptors missing".to_string()))?;
+        let _descriptors = self.descriptors.as_ref().ok_or_else(|| AshError::VulkanError("Descriptors missing".to_string()))?;
         let bindless = &self.bindless_manager;
 
         let set_layouts = vec![
-            descriptors.frame_layout(),
             bindless.descriptor_set_layout(),
         ];
 
@@ -3025,19 +3048,40 @@ impl Renderer {
 
         self.depth_buffer = Some(depth_buffer);
         self.depth_buffer_id = Some(depth_buffer_id);
+        
+        // Register Depth Buffer
+        // We need a sampler for depth. Shadow sampler (comparison) or standard?
+        // VSR likely needs standard sampling (raw depth).
+        // Let's use standard default sampler.
+        let depth_index = self.bindless_manager.add_sampled_image(
+            self.depth_buffer.as_ref().unwrap().view(),
+            self._default_texture.sampler(),
+        )?;
+        self.gbuffer_indices.depth_index = depth_index;
 
         Ok(())
     }
 
     fn recreate_gbuffer(&mut self, extent: vk::Extent2D) -> Result<()> {
-        self.gbuffer = Some(unsafe {
+        let gbuffer = unsafe {
             GBuffer::new(
                 Arc::clone(&self.device.device),
                 Arc::clone(&self.alloc),
                 extent.width,
                 extent.height,
             )?
-        });
+        };
+        
+        // Register Motion Vector for VSR
+        // Note: We register with standard sampler, though VSR often fetches.
+        // Assuming default sampler is fine for now.
+        let motion_index = self.bindless_manager.add_sampled_image(
+            gbuffer.motion_view(),
+            self._default_texture.sampler(), // Use default sampler
+        )?;
+        self.gbuffer_indices.motion_index = motion_index;
+        
+        self.gbuffer = Some(gbuffer);
         Ok(())
     }
 
@@ -3049,6 +3093,7 @@ impl Renderer {
                 vsr.init(
                     &self.alloc.vma,
                     &self.device,
+                    &mut self.bindless_manager,
                     display_extent.width,
                     display_extent.height,
                     self.vsr_config.quality,
@@ -3340,19 +3385,9 @@ impl Renderer {
             })?;
         }
 
-        if let Some(manager) = self.descriptors.as_mut() {
-            let count = self.frame_syncs.len() as u32;
-            manager.recreate_frame_sets(count)?;
-            // Joint matrices are now in bindless Set 1 Binding 3, no need to recreate separate sets
-
-            let buffer_size =
-                std::mem::size_of::<crate::renderer::resources::uniform::MvpMatrices>()
-                    as vk::DeviceSize;
-            for index in 0..manager.frame_set_count() {
-                if let Some(ubo) = self.uniform_buffers.get(index) {
-                    manager.bind_frame_uniform(index, ubo.buffer, buffer_size)?;
-                }
-            }
+        if let Some(_manager) = self.descriptors.as_mut() {
+            let _count = self.frame_syncs.len() as u32;
+            // Removed recreate_frame_sets lines
 
             // CRITICAL FIX: Re-bind Environment defaults removed in Phase 3
             // Set 2 is gone.
@@ -3479,14 +3514,13 @@ impl Renderer {
 
                 // CRITICAL FIX: Bind Descriptor Sets
                 // Missing these was causing the "Invisible Mesh" issue (shaders had no resources)
-                let descriptors = self.descriptors.as_ref().ok_or(AshError::VulkanError("Descriptors not initialized".into()))?;
+                let _descriptors = self.descriptors.as_ref().ok_or(AshError::VulkanError("Descriptors not initialized".into()))?;
                 
                 // Use public accessor methods instead of private fields
                 // frame_set returns Option<vk::DescriptorSet>
-                let frame_set = descriptors.frame_set(frame_index).ok_or(AshError::VulkanError("Frame set missing".into()))?;
                 let bindless_set = self.bindless_manager.descriptor_set();
 
-                let sets = [frame_set, bindless_set];
+                let sets = [bindless_set];
                 
                 unsafe {
                     self.device.device.cmd_bind_descriptor_sets(
@@ -3585,7 +3619,7 @@ impl Renderer {
             unsafe {
                 cmd_ctx.bind_pipeline(vk::PipelineBindPoint::GRAPHICS, pipeline.pipeline);
 
-                if let Some(descriptor_manager) = self.descriptors.as_ref() {
+                if let Some(_descriptor_manager) = self.descriptors.as_ref() {
                     let layout = match self.skybox_pipeline_layout.as_ref() {
                         Some(l) => l.handle(),
                         None => {
@@ -3594,13 +3628,9 @@ impl Renderer {
                         }
                     };
                     
-                    let frame_set = match descriptor_manager.frame_set(frame_index) {
-                        Some(s) => s,
-                        None => {
-                            log::error!("Frame descriptor set missing for frame {}", frame_index);
-                            return Ok(());
-                        }
-                    };
+                    let sets = [
+                        self.bindless_manager.descriptor_set(),
+                    ];
                     
                     // Bind sets 0 (Frame/MVP) and 1 (Bindless)
                     // Set 2 (Environment) removed in Phase 3
@@ -3609,7 +3639,7 @@ impl Renderer {
                         vk::PipelineBindPoint::GRAPHICS,
                         layout,
                         0, 
-                        &[frame_set, self.bindless_manager.descriptor_set()],
+                        &sets,
                         &[],
                     );
                 }
@@ -4095,9 +4125,7 @@ impl Renderer {
                         let material_heap_address = self.material_heap_address;
                         let uniform_buffers = &self.uniform_buffers;
 
-                        let frame_descriptor_set = self.descriptors.as_ref()
-                            .and_then(|d| d.frame_set(frame_index))
-                            .unwrap_or(vk::DescriptorSet::null());
+                        let frame_descriptor_set = vk::DescriptorSet::null();
                         let bindless_descriptor_set = self.bindless_manager.descriptor_set();
                         
                         // Get light direction and clipmap levels
@@ -4308,7 +4336,7 @@ impl Renderer {
                 ]
             };
 
-            let (framebuffer_handle, hdr_attachment) = {
+            let (framebuffer_handle, _hdr_attachment) = {
                 let framebuffer = self.framebuffers.get(image_index as usize).ok_or_else(|| {
                     log::error!(
                         "Frame {}: Framebuffer index {} out of range (max: {})",
@@ -4385,33 +4413,19 @@ impl Renderer {
             self.features.render(&render_ctx);
 
             let _ = (|| -> Result<vk::DescriptorSet> {
-                if let Some(manager) = self.descriptors.as_ref() {
-                    let frame_set = manager.frame_set(frame_index).ok_or_else(|| {
-                        AshError::VulkanError("Frame descriptor set not available".to_string())
-                    })?;
+                // Bind Unified Bindless descriptor set (Set 0)
+                // We check descriptors existence to ensure renderer is initialized,
+                // but we bind strictly from bindless_manager.
+                if self.descriptors.is_some() {
                     cmd_ctx.bind_descriptor_sets(
                         vk::PipelineBindPoint::GRAPHICS,
                         pipeline_layout_handle,
-                        0, // Set 0: Frame Data
-                        &[frame_set],
-                        &[],
-                    );
-
-                    // Bind Global Bindless descriptor set (Set 1)
-                    cmd_ctx.bind_descriptor_sets(
-                        vk::PipelineBindPoint::GRAPHICS,
-                        pipeline_layout_handle,
-                        1, // Set 1: Bindless (Textures, Materials, Instances, Shadows)
+                        0, // Set 0: Unified Bindless (Textures, Materials, Instances, Shadows, Storage)
                         &[self.bindless_manager.descriptor_set()],
                         &[],
                     );
-
-                    // Set 2 (Environment) removed in Phase 3. VSM shadows now sampled via Set 1.
-
-                    Ok(vk::DescriptorSet::null())
-                } else {
-                    Ok(vk::DescriptorSet::null())
                 }
+                Ok(vk::DescriptorSet::null())
             })()?;
 
             // --- Phase 10: GPU Instancing & Culling Integration ---
@@ -4421,13 +4435,13 @@ impl Renderer {
 
 
             // --- VSR (Upscaling) Pass ---
-            if let (Some(ref mut vsr), Some(ref mut gbuffer)) =
+            if let (Some(ref mut vsr), Some(ref mut _gbuffer)) =
                 (&mut self.vsr_pass, &mut self.gbuffer)
             {
                 // Read back metrics from previous frame (non-blocking)
                 let _ = vsr.readback_metrics(command_buffer, &self.alloc.vma);
 
-                let depth_buffer = self
+                let _depth_buffer = self
                     .depth_buffer
                     .as_ref()
                     .ok_or_else(|| AshError::VulkanError("Depth buffer missing".to_string()))?;
@@ -4452,9 +4466,9 @@ impl Renderer {
                 };
 
                 let vsr_inputs = VsrInputs {
-                    color: hdr_attachment,
-                    depth: depth_buffer.view(),
-                    motion: gbuffer.motion_view(),
+                    color_index: self.gbuffer_indices.color_index, // HDR input
+                    depth_index: self.gbuffer_indices.depth_index,
+                    motion_index: self.gbuffer_indices.motion_index,
                     jitter: jitter_uv,
                 };
 
@@ -4776,6 +4790,7 @@ impl Renderer {
             vsr.init(
                 &self.alloc.vma,
                 &self.device,
+                &mut self.bindless_manager,
                 extent.width,
                 extent.height,
                 quality,

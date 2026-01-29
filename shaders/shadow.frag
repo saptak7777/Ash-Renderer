@@ -35,8 +35,8 @@ layout(push_constant) uniform ShadowPushConstants {
     layout(offset = 160) mat4 lightSpaceMatrix;
 } pc;
 
-// Binding 0: Textures (Set 1)
-layout(set = 1, binding = 0) uniform sampler2D textures[];
+// Binding 0: Textures (Set 0)
+layout(set = 0, binding = 0) uniform sampler2D textures[];
 
 void main() {
     // Alpha testing for transparent materials

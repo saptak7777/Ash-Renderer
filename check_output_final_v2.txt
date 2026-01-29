@@ -1,0 +1,2 @@
+   Compiling ash_renderer v0.5.25 (C:\Users\tilok\Downloads\Ash Renderer)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 2.09s

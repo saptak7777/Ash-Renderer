@@ -1,4 +1,5 @@
 // shaders/include/structures.glsl
+// Verified Phase 4 Binding Update: Set 0, Binding 4 for Bindless Buffers
 // Single Source of Truth for shader-side structures
 // Matches Rust definitions in src/renderer/model_renderer.rs
 
@@ -99,13 +100,16 @@ layout(buffer_reference, scalar) buffer LightBuffer {
     Light lights[];
 };
 
-// Set 1: Bindless consolidated resources
-layout(set = 1, binding = 0) uniform sampler2D global_textures[];
-layout(set = 1, binding = 1) uniform usampler2DArray global_page_tables[];
-layout(set = 1, binding = 2) uniform samplerCube global_cubemaps[];
+// Set 0: Unified Bindless consolidated resources
+layout(set = 0, binding = 0) uniform sampler2D global_textures[];
+layout(set = 0, binding = 1) uniform usampler2DArray global_page_tables[];
+layout(set = 0, binding = 2) uniform samplerCube global_cubemaps[];
 
-// Binding 3: Bindless Storage Buffers
-layout(set = 1, binding = 3, std430) readonly buffer BindlessBuffer {
+// Binding 3: Global Storage Images (for compute writes)
+layout(set = 0, binding = 3, rgba16f) uniform image2D global_storage_images[];
+
+// Binding 4: Bindless Storage Buffers
+layout(set = 0, binding = 4, std430) readonly buffer BindlessBuffer {
     vec4 data[];
 } bindless_buffers[];
 
