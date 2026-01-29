@@ -47,29 +47,8 @@ layout(set = 2, binding = 3) uniform samplerCube skyboxMap;        // Optional: 
 layout(set = 2, binding = 5) uniform usampler2DArray vsmPageTable; // VSM Page Table Array (R32_UINT)
 layout(set = 2, binding = 6) uniform sampler2D vsmPhysicalCache;   // VSM Physical Cache (R32_FLOAT)
 
-// Set 3: Forward+ Lighting (Modern tile-based deferred lighting)
+// Set 3: No longer used (Forward+ migrated to BDA)
 #define MAX_LIGHTS_PER_TILE 256
-
-struct Light {
-    vec4 position;   // xyz = position, w = radius
-    vec4 color;      // rgb = color, a = intensity
-    vec4 direction;  // xyz = direction (for spot), w = type (0=point, 1=spot, 2=directional)
-    vec4 params;     // x = innerConeAngle, y = outerConeAngle, z = falloff, w = enabled
-};
-
-layout(set = 3, binding = 0, std430) readonly buffer LightBuffer {
-    Light lights[];
-};
-
-layout(set = 3, binding = 1, std430) readonly buffer TileLightIndices {
-    uint tileData[];
-};
-
-layout(set = 3, binding = 2) uniform ForwardPlusInfo {
-    uvec2 num_tiles;
-    uint tile_size;
-    uint _padding;
-} fpInfo;
 
 const float PI = 3.14159265359;
 
@@ -112,17 +91,6 @@ float VsmShadowCalculation(vec4 fragPosLightSpace, vec3 normal, vec3 lightDir) {
     projCoords.xy = projCoords.xy * 0.5 + 0.5;
     
     // 2. EARLY REJECTION
-    // Note: uv_min/uv_max are not in standard push constants, assuming they were added or need to be accessed differently.
-    // However, they appeared in the original code as push.uv_min. If they are missing from struct DrawPushConstants, that's a separate issue.
-    // For now, I will keep using push. assuming it works or will be fixed if broken.
-    // Wait, DrawPushConstants in model_renderer.rs DOES NOT have uv_min/uv_max.
-    // This implies VSM Shadow Calculation might fail to compile if I don't fix this.
-    // ERROR: uv_min/uv_max are NOT in DrawPushConstants.
-    // I will comment out the early rejection that uses them for now to fix the compile error, 
-    // unless they are in FrameData? No.
-    // Actually, looking at structures.glsl, PushConstants struct does NOT have them. 
-    // This was likely a leftover or legacy. Removing specific UV bounds check.
-    
     if (projCoords.z > 1.0) {
         return 0.0; // Outside shadow map = fully lit
     }
@@ -390,24 +358,26 @@ void main() {
     float NdotV = max(dot(normal, viewDir), 0.001);
 
     // ============================================================================
-    // MODERN FORWARD+ LIGHTING (Tile-Based Deferred)
+    // MODERN FORWARD+ LIGHTING (Tile-Based Deferred BDA)
     // ============================================================================
-    
+    LightBuffer lb = LightBuffer(push.light_ptr);
+    TileIndexBuffer tib = TileIndexBuffer(push.tile_ptr);
+
     // Calculate tile index for this fragment
-    uvec2 tileID = uvec2(gl_FragCoord.xy) / fpInfo.tile_size;
-    uint tileIndex = tileID.y * fpInfo.num_tiles.x + tileID.x;
+    uvec2 tileID = uvec2(gl_FragCoord.xy) / frame.scene_lighting.tile_size;
+    uint tileIndex = tileID.y * frame.scene_lighting.num_tiles_x + tileID.x;
     uint tileOffset = tileIndex * (MAX_LIGHTS_PER_TILE + 1);
     
     // Get light count for this tile (first element)
-    uint lightCount = min(tileData[tileOffset], MAX_LIGHTS_PER_TILE);
+    uint lightCount = min(tib.tileData[tileOffset], MAX_LIGHTS_PER_TILE);
     
     // Accumulated lighting
     vec3 Lo = vec3(0.0);
     
     // Iterate over all lights affecting this tile
     for (uint i = 0; i < lightCount; i++) {
-        uint lightIdx = tileData[tileOffset + 1 + i];
-        Light light = lights[lightIdx];
+        uint lightIdx = tib.tileData[tileOffset + 1 + i];
+        Light light = lb.lights[lightIdx];
         
         // Skip disabled lights
         if (light.params.w < 0.5) continue;

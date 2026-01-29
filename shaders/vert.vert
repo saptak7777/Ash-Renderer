@@ -60,6 +60,9 @@ void main() {
     // Calculate motion vectors
     vec4 currentClip = gl_Position;
     vec4 prevClip = frame.prev_view_proj * worldPosition;
-    motionVector = (currentClip.xy / currentClip.w - prevClip.xy / prevClip.w) * 0.5;
+    
+    float w_current = max(abs(currentClip.w), 1e-6);
+    float w_prev = max(abs(prevClip.w), 1e-6);
+    motionVector = (currentClip.xy / w_current - prevClip.xy / w_prev) * 0.5;
     fragInstanceIndex = gl_InstanceIndex;
 }

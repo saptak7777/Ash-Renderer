@@ -1,4 +1,11 @@
 #version 450
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_buffer_reference2 : require
+#extension GL_EXT_scalar_block_layout : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+
+#define SKIP_PUSH_CONSTANTS
+#include "include/structures.glsl"
 
 // GPU Light Culling Compute Shader
 // Implements tile-based deferred lighting (Forward+)
@@ -14,36 +21,17 @@ layout(local_size_x_id = 0, local_size_y_id = 1, local_size_z = 1) in;
 // Maximum lights per tile (synchronized with Rust light_culling.rs)
 #define MAX_LIGHTS_PER_TILE 256
 
-// Light structure
-struct Light {
-    vec4 position;   // xyz = position, w = radius
-    vec4 color;      // rgb = color, a = intensity
-    vec4 direction;  // xyz = direction (for spot), w = type (0=point, 1=spot, 2=directional)
-    vec4 params;     // x = innerConeAngle, y = outerConeAngle, z = falloff, w = enabled
-};
-
 // Push constants for screen info
 layout(push_constant) uniform PushConstants {
     uvec2 screenSize;
     uint lightCount;
     uint _padding;
+    uint64_t light_ptr;
+    uint64_t tile_ptr;
 } pc;
-
-// Input: All scene lights (from Set 3 to match fragment shader)
-layout(set = 3, binding = 0, std430) readonly buffer LightBuffer {
-    Light lights[];
-};
 
 // Input: Depth buffer for frustum culling
 layout(set = 0, binding = 0) uniform sampler2D depthBuffer;
-
-// Output: Light indices per tile
-// Format: [tileCount][MAX_LIGHTS_PER_TILE + 1]
-// First element of each tile = light count for that tile
-// NOTE: Writing to Set 3, binding 1 to match fragment shader's read location
-layout(set = 3, binding = 1, std430) writeonly buffer TileLightIndices {
-    uint tileData[];
-};
 
 // View-projection matrix for frustum construction
 layout(set = 0, binding = 1) uniform CameraData {
@@ -161,6 +149,10 @@ void main() {
     uint tileIndex = tileId.y * numTiles.x + tileId.x;
     uint tileOffset = tileIndex * (MAX_LIGHTS_PER_TILE + 1);
     
+    // Modern BDA Buffer References
+    LightBuffer lb = LightBuffer(pc.light_ptr);
+    TileIndexBuffer tib = TileIndexBuffer(pc.tile_ptr);
+    
     // Initialize shared memory
     if (localIndex == 0) {
         sharedLightCount = 0;
@@ -191,7 +183,7 @@ void main() {
     
     if (pc.lightCount == 0) {
         if (localIndex == 0) {
-            tileData[tileOffset] = 0;
+            tib.tileData[tileOffset] = 0;
         }
         return;
     }
@@ -201,9 +193,9 @@ void main() {
     uint lightsPerThread = (pc.lightCount + workgroupSize - 1) / workgroupSize;
     uint lightStart = localIndex * lightsPerThread;
     uint lightEnd = min(lightStart + lightsPerThread, pc.lightCount);
-    
+
     for (uint i = lightStart; i < lightEnd; i++) {
-        Light light = lights[i];
+        Light light = lb.lights[i];
         
         // Skip disabled lights
         if (light.params.w < 0.5) continue;
@@ -244,10 +236,10 @@ void main() {
     // Write results to global buffer (only thread 0)
     if (localIndex == 0) {
         uint count = min(sharedLightCount, MAX_LIGHTS_PER_TILE);
-        tileData[tileOffset] = count;
+        tib.tileData[tileOffset] = count;
         
         for (uint i = 0; i < count; i++) {
-            tileData[tileOffset + 1 + i] = sharedLightIndices[i];
+            tib.tileData[tileOffset + 1 + i] = sharedLightIndices[i];
         }
     }
 }

@@ -9,7 +9,7 @@ pub mod cluster_builder;
 pub mod command_list;
 pub mod diagnostics;
 pub mod features;
-pub mod forward_plus_descriptor;
+// pub mod forward_plus_descriptor; // DELETED: Using BDA
 pub mod forward_plus_integration;
 pub mod frame_graph;
 pub mod frustum_culling;
@@ -41,7 +41,7 @@ pub mod vsr_pass;
 pub use async_readback::AsyncReadbackManager;
 pub use cleanup_traits::{BufferCleanup, VulkanResourceCleanup};
 pub use features::{AutoRotateFeature, FeatureManager, RenderFeature};
-pub use forward_plus_descriptor::ForwardPlusDescriptor;
+// pub use forward_plus_descriptor::ForwardPlusDescriptor; // DELETED
 pub use forward_plus_integration::ForwardPlusIntegration;
 pub use gbuffer::GBuffer;
 pub use hiz_pass::HiZPass;

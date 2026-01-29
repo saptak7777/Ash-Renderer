@@ -9,12 +9,14 @@ use vk_mem::Alloc;
 
 use super::light_culling::{GpuLight, LightCullingConfig, LightCullingPass, MAX_LIGHTS};
 use super::lighting::{DirectionalLight, PointLight, SpotLight};
+use crate::vulkan::Allocator;
 
 /// GPU buffer info for lights
 pub struct LightBuffer {
     pub buffer: vk::Buffer,
     pub allocation: vk_mem::Allocation,
     pub size: u64,
+    pub device_address: u64,
 }
 
 /// GPU buffer info for tile indices (output of light culling compute)
@@ -22,6 +24,7 @@ pub struct TileBuffer {
     pub buffer: vk::Buffer,
     pub allocation: vk_mem::Allocation,
     pub size: u64,
+    pub device_address: u64,
 }
 
 /// Forward+ info UBO (matches shader ForwardPlusInfo)
@@ -157,8 +160,14 @@ impl LightManager {
         &self,
         width: u32,
         height: u32,
+        frame_index: usize,
     ) -> super::light_culling::LightCullingPushConstants {
-        self.culling_pass.get_push_constants(width, height)
+        self.culling_pass.get_push_constants(
+            width,
+            height,
+            self.light_ptr(frame_index),
+            self.tile_ptr(frame_index),
+        )
     }
 
     /// Get Forward+ info for fragment shader
@@ -205,13 +214,17 @@ impl LightManager {
     /// # Safety
     /// Caller must ensure no GPU commands are pending that reference the old buffers
     /// if this is called as a recreation (e.g., during resize).
-    pub unsafe fn create_buffers(&mut self, allocator: &vk_mem::Allocator) -> crate::Result<()> {
+    pub unsafe fn create_buffers(&mut self, allocator: &Allocator) -> crate::Result<()> {
         // Light buffer: MAX_LIGHTS * sizeof(GpuLight)
         let light_buffer_size = (MAX_LIGHTS * std::mem::size_of::<GpuLight>()) as u64;
 
         let light_buffer_info = vk::BufferCreateInfo::default()
             .size(light_buffer_size)
-            .usage(vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_DST)
+            .usage(
+                vk::BufferUsageFlags::STORAGE_BUFFER
+                    | vk::BufferUsageFlags::TRANSFER_DST
+                    | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
+            )
             .sharing_mode(vk::SharingMode::EXCLUSIVE);
 
         let light_alloc_info = vk_mem::AllocationCreateInfo {
@@ -224,13 +237,20 @@ impl LightManager {
         // Allocate light buffers for all frames
         for frame_idx in 0..self.frame_count {
             let (light_buffer, light_allocation) = allocator
+                .vma
                 .create_buffer(&light_buffer_info, &light_alloc_info)
                 .expect("LightManager: Light buffer allocation failed during initialization");
+
+            let device_address = unsafe {
+                let address_info = vk::BufferDeviceAddressInfo::default().buffer(light_buffer);
+                allocator.device.get_buffer_device_address(&address_info)
+            };
 
             self.light_buffers[frame_idx] = Some(LightBuffer {
                 buffer: light_buffer,
                 allocation: light_allocation,
                 size: light_buffer_size,
+                device_address,
             });
         }
 
@@ -241,7 +261,9 @@ impl LightManager {
         // Create tile buffer with host-accessible memory for zero-initialization
         let tile_buffer_info = vk::BufferCreateInfo::default()
             .size(tile_buffer_size)
-            .usage(vk::BufferUsageFlags::STORAGE_BUFFER)
+            .usage(
+                vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
+            )
             .sharing_mode(vk::SharingMode::EXCLUSIVE);
 
         let tile_alloc_info = vk_mem::AllocationCreateInfo {
@@ -254,19 +276,29 @@ impl LightManager {
         // Allocate tile buffers for all frames
         for frame_idx in 0..self.frame_count {
             let (tile_buffer, tile_allocation) = allocator
+                .vma
                 .create_buffer(&tile_buffer_info, &tile_alloc_info)
                 .expect("LightManager: Tile buffer allocation failed");
 
             // Zero out the tile buffer to prevent garbage data
-            let tile_mapped = allocator.get_allocation_info(&tile_allocation).mapped_data;
+            let tile_mapped = allocator
+                .vma
+                .get_allocation_info(&tile_allocation)
+                .mapped_data;
             if !tile_mapped.is_null() {
                 std::ptr::write_bytes(tile_mapped as *mut u8, 0, tile_buffer_size as usize);
             }
+
+            let device_address = unsafe {
+                let address_info = vk::BufferDeviceAddressInfo::default().buffer(tile_buffer);
+                allocator.device.get_buffer_device_address(&address_info)
+            };
 
             self.tile_buffers[frame_idx] = Some(TileBuffer {
                 buffer: tile_buffer,
                 allocation: tile_allocation,
                 size: tile_buffer_size,
+                device_address,
             });
         }
 
@@ -282,7 +314,7 @@ impl LightManager {
 
     pub unsafe fn recreate_tile_buffer_if_needed(
         &mut self,
-        allocator: &vk_mem::Allocator,
+        allocator: &Allocator,
     ) -> crate::Result<bool> {
         if !self.dirty {
             return Ok(false);
@@ -317,14 +349,18 @@ impl LightManager {
         // Destroy old buffers if they exist
         for frame_idx in 0..self.frame_count {
             if let Some(mut old_tile_buffer) = self.tile_buffers[frame_idx].take() {
-                allocator.destroy_buffer(old_tile_buffer.buffer, &mut old_tile_buffer.allocation);
+                allocator
+                    .vma
+                    .destroy_buffer(old_tile_buffer.buffer, &mut old_tile_buffer.allocation);
             }
         }
 
         // Create new tile buffers with host-accessible memory for zero-initialization
         let tile_buffer_info = vk::BufferCreateInfo::default()
             .size(new_tile_buffer_size)
-            .usage(vk::BufferUsageFlags::STORAGE_BUFFER)
+            .usage(
+                vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
+            )
             .sharing_mode(vk::SharingMode::EXCLUSIVE);
 
         let tile_alloc_info = vk_mem::AllocationCreateInfo {
@@ -336,6 +372,7 @@ impl LightManager {
 
         for frame_idx in 0..self.frame_count {
             let (tile_buffer, tile_allocation) = allocator
+                .vma
                 .create_buffer(&tile_buffer_info, &tile_alloc_info)
                 .map_err(|e| {
                     crate::AshError::VulkanError(format!(
@@ -344,15 +381,24 @@ impl LightManager {
                 })?;
 
             // Zero out the tile buffer to prevent garbage data
-            let tile_mapped = allocator.get_allocation_info(&tile_allocation).mapped_data;
+            let tile_mapped = allocator
+                .vma
+                .get_allocation_info(&tile_allocation)
+                .mapped_data;
             if !tile_mapped.is_null() {
                 std::ptr::write_bytes(tile_mapped as *mut u8, 0, new_tile_buffer_size as usize);
             }
+
+            let device_address = unsafe {
+                let address_info = vk::BufferDeviceAddressInfo::default().buffer(tile_buffer);
+                allocator.device.get_buffer_device_address(&address_info)
+            };
 
             self.tile_buffers[frame_idx] = Some(TileBuffer {
                 buffer: tile_buffer,
                 allocation: tile_allocation,
                 size: new_tile_buffer_size,
+                device_address,
             });
         }
 
@@ -372,7 +418,7 @@ impl LightManager {
     /// Buffer must have been created and be valid.
     pub unsafe fn upload_lights(
         &mut self,
-        allocator: &vk_mem::Allocator,
+        allocator: &Allocator,
         frame_index: usize,
     ) -> crate::Result<()> {
         let Some(ref light_buffer) = self.light_buffers.get(frame_index).and_then(|b| b.as_ref())
@@ -386,7 +432,7 @@ impl LightManager {
         }
 
         let data_size = std::mem::size_of_val(lights);
-        let allocation_info = allocator.get_allocation_info(&light_buffer.allocation);
+        let allocation_info = allocator.vma.get_allocation_info(&light_buffer.allocation);
 
         let mapped_ptr = allocation_info.mapped_data;
         if !mapped_ptr.is_null() {
@@ -418,17 +464,35 @@ impl LightManager {
             .map(|b| b.buffer)
     }
 
+    /// Get light buffer device address
+    pub fn light_ptr(&self, frame_index: usize) -> u64 {
+        self.light_buffers
+            .get(frame_index)
+            .and_then(|b| b.as_ref())
+            .map(|b| b.device_address)
+            .unwrap_or(0)
+    }
+
+    /// Get tile buffer device address
+    pub fn tile_ptr(&self, frame_index: usize) -> u64 {
+        self.tile_buffers
+            .get(frame_index)
+            .and_then(|b| b.as_ref())
+            .map(|b| b.device_address)
+            .unwrap_or(0)
+    }
+
     /// Destroy GPU buffers
     ///
     /// # Safety
     /// Buffers must not be in use by GPU.
-    pub unsafe fn destroy_buffers(&mut self, allocator: &vk_mem::Allocator) {
+    pub unsafe fn destroy_buffers(&mut self, allocator: &Allocator) {
         for frame_idx in 0..self.frame_count {
             if let Some(mut light_buffer) = self.light_buffers[frame_idx].take() {
-                allocator.destroy_buffer(light_buffer.buffer, &mut light_buffer.allocation);
+                allocator.vma.destroy_buffer(light_buffer.buffer, &mut light_buffer.allocation);
             }
             if let Some(mut tile_buffer) = self.tile_buffers[frame_idx].take() {
-                allocator.destroy_buffer(tile_buffer.buffer, &mut tile_buffer.allocation);
+                allocator.vma.destroy_buffer(tile_buffer.buffer, &mut tile_buffer.allocation);
             }
         }
         log::info!(

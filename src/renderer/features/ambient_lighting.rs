@@ -134,7 +134,9 @@ pub struct SceneLighting {
     pub ambient: HemisphereAmbient,
     pub directional: DirectionalLight,
     pub point_light_count: u32,
-    pub _padding: [u32; 3],
+    pub num_tiles_x: u32,
+    pub num_tiles_y: u32,
+    pub tile_size: u32,
 }
 
 const _: () = assert!(std::mem::size_of::<SceneLighting>() == 80);
@@ -225,7 +227,9 @@ impl LightingBuilder<DirectionalSet> {
             ambient: self.ambient,
             directional: self.directional,
             point_light_count: 0,
-            _padding: [0; 3],
+            num_tiles_x: 0,
+            num_tiles_y: 0,
+            tile_size: 16,
         }
     }
 }
@@ -238,28 +242,36 @@ impl LightingPresets {
         ambient: HemisphereAmbient::from_preset(AmbientPreset::IndoorDark),
         directional: DirectionalLight::sun(),
         point_light_count: 0,
-        _padding: [0; 3],
+        num_tiles_x: 0,
+        num_tiles_y: 0,
+        tile_size: 16,
     };
 
     pub const INDOOR_LIT: SceneLighting = SceneLighting {
         ambient: HemisphereAmbient::from_preset(AmbientPreset::IndoorLit),
         directional: DirectionalLight::sun(),
         point_light_count: 0,
-        _padding: [0; 3],
+        num_tiles_x: 0,
+        num_tiles_y: 0,
+        tile_size: 16,
     };
 
     pub const OUTDOOR_DAY: SceneLighting = SceneLighting {
         ambient: HemisphereAmbient::from_preset(AmbientPreset::OutdoorDay),
         directional: DirectionalLight::sun(),
         point_light_count: 0,
-        _padding: [0; 3],
+        num_tiles_x: 0,
+        num_tiles_y: 0,
+        tile_size: 16,
     };
 
     pub const OUTDOOR_NIGHT: SceneLighting = SceneLighting {
         ambient: HemisphereAmbient::from_preset(AmbientPreset::OutdoorNight),
         directional: DirectionalLight::moon(),
         point_light_count: 0,
-        _padding: [0; 3],
+        num_tiles_x: 0,
+        num_tiles_y: 0,
+        tile_size: 16,
     };
 }
 

@@ -573,6 +573,8 @@ pub struct MainPassParameters<'a> {
     pub view: Mat4,
     pub projection: Mat4,
     pub swapchain_extent: vk::Extent2D,
+    pub light_ptr: u64,
+    pub tile_ptr: u64,
 }
 
 impl Renderer {
@@ -690,10 +692,10 @@ impl Renderer {
             log::info!("Initializing Forward+ Integration");
             let mut forward_plus = ForwardPlusIntegration::new(
                 Arc::clone(&device.device),
-                &alloc.vma,
+                &*alloc,
                 frame_syncs.len() as u32,
             )?;
-            forward_plus.init(&alloc.vma);
+            forward_plus.init(&alloc);
             forward_plus.on_resize(swapchain.extent.width, swapchain.extent.height);
             
             log::info!("Initializing Renderer Resources (Uniforms, Textures, Materials)");
@@ -784,12 +786,12 @@ impl Renderer {
                 descriptor_manager.frame_layout(),        // Set 0: Frame Data
                 bindless_manager.descriptor_set_layout(), // Set 1: Bindless Textures
                 descriptor_manager.environment_layout(), // Set 2: Global Environment (Shadow)
-                forward_plus.layout(),                    // Set 3: Forward+ lights
+                // Set 3: Forward+ lights (Migrated to BDA via Push Constants)
             ];
             
             // DIAGNOSTIC: Log layout handles for verification
-            log::debug!("Main Pipeline Set Layouts: Bindless={:?}, Env={:?}, F+={:?}", 
-                set_layouts[0], set_layouts[1], set_layouts[2]);
+            log::debug!("Main Pipeline Set Layouts: Bindless={:?}, Env={:?}", 
+                set_layouts[1], set_layouts[2]);
 
             log::info!("Creating Main Graphics Pipeline");
             let (pipeline_layout, pipeline_layout_id, pipeline, pipeline_id) =
@@ -2706,6 +2708,12 @@ impl Renderer {
         if let Some(ref mut forward_plus) = self.forward_plus {
             forward_plus.on_resize(swapchain_extent.width, swapchain_extent.height);
             log::info!("Forward+ resized for {}x{}", swapchain_extent.width, swapchain_extent.height);
+            
+            // Sync tiling metadata to SceneLighting for shader access via BDA
+            let fp_info = forward_plus.get_lights().get_forward_plus_info();
+            self.scene_lighting.num_tiles_x = fp_info.num_tiles[0];
+            self.scene_lighting.num_tiles_y = fp_info.num_tiles[1];
+            self.scene_lighting.tile_size = fp_info.tile_size;
         }
         
         self.recreate_descriptor_sets()?;
@@ -2922,15 +2930,14 @@ impl Renderer {
         let descriptors = self.descriptors.as_ref().ok_or_else(|| AshError::VulkanError("Descriptors missing".to_string()))?;
         let bindless = &self.bindless_manager;
 
-        let mut set_layouts = vec![
+        let set_layouts = vec![
             descriptors.frame_layout(),
             bindless.descriptor_set_layout(),
             descriptors.environment_layout(),
         ];
 
-        if let Some(ref fp) = self.forward_plus {
-            set_layouts.push(fp.layout());
-        }
+        // Set layouts: 0: Frame, 1: Bindless, 2: Environment
+        // (Set 3: Forward+ migrated to BDA)
 
         let (new_layout, _new_layout_id, new_pipeline, _new_pipeline_id) = unsafe {
             Self::create_skybox_pipeline(
@@ -3553,6 +3560,8 @@ impl Renderer {
                     instance_ptr,
                     material_ptr,
                     index_ptr,
+                    light_ptr: params.light_ptr,
+                    tile_ptr: params.tile_ptr,
                 };
                 
                 let count_params = crate::renderer::model_renderer::IndirectDrawCountParams {
@@ -4187,6 +4196,8 @@ impl Renderer {
                                                 instance_ptr: instance_buffer_addresses[frame_index],
                                                 material_ptr: material_heap_address,
                                                 index_ptr: model_renderer.geometry_buffer.index_heap_address(),
+                                                light_ptr: 0, // Shadows don't need lighting data
+                                                tile_ptr: 0,
                                             };
                                             
                                             device.device.cmd_push_constants(
@@ -4242,12 +4253,12 @@ impl Renderer {
                 // Ensure pipeline is initialized before dispatching
                 if fp_integration.is_enabled() {
                     // Update GPU buffers and descriptors for the current frame
-                    fp_integration.upload_to_gpu(&self.alloc.vma, &self.device.device, frame_index as usize)?;
+                    fp_integration.upload_to_gpu(&self.alloc, &self.device.device, frame_index as usize)?;
 
                     // Update camera buffer with current view/projection matrices
                     // We use the NON-JITTERED projection for culling to match frustum
                     fp_integration.update_camera(
-                        &self.alloc.vma,
+                        &self.alloc,
                         frame_index as usize,
                         &view.to_cols_array_2d(),
                         &projection.to_cols_array_2d(),
@@ -4356,6 +4367,8 @@ impl Renderer {
                 view,
                 projection: jittered_projection,
                 swapchain_extent,
+                light_ptr: self.forward_plus.as_ref().map(|fp| fp.get_lights().light_ptr(frame_index)).unwrap_or(0),
+                tile_ptr: self.forward_plus.as_ref().map(|fp| fp.get_lights().tile_ptr(frame_index)).unwrap_or(0),
             };
 
             // CRITICAL FIX: Execute Compute Culling BEFORE Render Pass
@@ -4434,17 +4447,6 @@ impl Renderer {
                             2, // Set 2: Environment
                             &[env_set],
                             &[],
-                        );
-                    }
-
-                    // Bind Forward+ descriptor set (Set 3)
-                    if let Some(ref forward_plus) = self.forward_plus {
-                        log::debug!("DEBUG: Binding Forward+ descriptor set (Set 3)");
-                        forward_plus.bind(
-                            &self.device.device,
-                            command_buffer,
-                            pipeline_layout_handle,
-                            frame_index as usize,
                         );
                     }
 
@@ -5264,7 +5266,7 @@ impl Drop for Renderer {
 
             // Cleanup Forward+ integration (Phase 5)
             if let Some(mut fp) = self.forward_plus.take() {
-                fp.destroy(&self.alloc.vma, &self.device.device);
+                fp.destroy(&self.alloc, &self.device.device);
             }
 
             // Cleanup UE5 feature modules (Phase 5)

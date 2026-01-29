@@ -19,6 +19,7 @@
 //! forward_plus.bind(device, cmd, pipeline_layout);
 //! ```
 
+use crate::vulkan::Allocator;
 use ash::vk;
 use bytemuck;
 use std::sync::Arc;
@@ -28,7 +29,6 @@ use crate::renderer::features::light_culling::{CullingCameraData, LightCullingPu
 use crate::renderer::features::{
     DirectionalLight, ForwardPlusInfo, LightManager, PointLight, SpotLight,
 };
-use crate::renderer::forward_plus_descriptor::ForwardPlusDescriptor;
 use crate::vulkan::{ComputePipeline, ShaderModule};
 use crate::{AshError, Result};
 
@@ -42,11 +42,6 @@ use crate::{AshError, Result};
 pub struct ForwardPlusIntegration {
     /// Light manager (owns light and tile buffers)
     lights: LightManager,
-    /// Descriptor set for Set 3 (Fragment)
-    descriptor: ForwardPlusDescriptor,
-    /// ForwardPlusInfo UBO buffers (per-frame)
-    info_bufs: Vec<vk::Buffer>,
-    info_allocs: Vec<vk_mem::Allocation>,
 
     /// Camera Data UBO for Compute Shader (per-frame)
     camera_bufs: Vec<vk::Buffer>,
@@ -70,46 +65,21 @@ pub struct ForwardPlusIntegration {
 }
 
 impl ForwardPlusIntegration {
+    /// Access the internal light manager
+    pub fn get_lights(&self) -> &LightManager {
+        &self.lights
+    }
+
     /// Create a new Forward+ integration
     ///
     /// # Safety
     /// Device and allocator must be valid.
     pub unsafe fn new(
-        device: Arc<ash::Device>,
-        allocator: &vk_mem::Allocator,
+        _device: Arc<ash::Device>,
+        allocator: &Allocator,
         frame_count: u32,
     ) -> Result<Self> {
         let lights = LightManager::new(frame_count as usize);
-        let descriptor = ForwardPlusDescriptor::new(device, frame_count)?;
-
-        // Create per-frame ForwardPlusInfo UBOs
-        let info_size = std::mem::size_of::<ForwardPlusInfo>() as u64;
-        let info_buffer_info = vk::BufferCreateInfo::default()
-            .size(info_size)
-            .usage(vk::BufferUsageFlags::UNIFORM_BUFFER)
-            .sharing_mode(vk::SharingMode::EXCLUSIVE);
-
-        let info_alloc_info = vk_mem::AllocationCreateInfo {
-            usage: vk_mem::MemoryUsage::Auto,
-            flags: vk_mem::AllocationCreateFlags::HOST_ACCESS_SEQUENTIAL_WRITE
-                | vk_mem::AllocationCreateFlags::MAPPED,
-            ..Default::default()
-        };
-
-        let mut info_bufs = Vec::with_capacity(frame_count as usize);
-        let mut info_allocs = Vec::with_capacity(frame_count as usize);
-
-        for _ in 0..frame_count {
-            let (buf, alloc) = allocator
-                .create_buffer(&info_buffer_info, &info_alloc_info)
-                .map_err(|e| {
-                    crate::AshError::VulkanError(format!(
-                        "ForwardPlusInfo buffer creation failed: {e:?}"
-                    ))
-                })?;
-            info_bufs.push(buf);
-            info_allocs.push(alloc);
-        }
 
         // Create per-frame Camera Data UBOs for Compute Shader
         let camera_size = std::mem::size_of::<CullingCameraData>() as u64;
@@ -121,9 +91,17 @@ impl ForwardPlusIntegration {
         let mut camera_bufs = Vec::with_capacity(frame_count as usize);
         let mut camera_allocs = Vec::with_capacity(frame_count as usize);
 
+        let camera_alloc_info = vk_mem::AllocationCreateInfo {
+            usage: vk_mem::MemoryUsage::Auto,
+            flags: vk_mem::AllocationCreateFlags::HOST_ACCESS_SEQUENTIAL_WRITE
+                | vk_mem::AllocationCreateFlags::MAPPED,
+            ..Default::default()
+        };
+
         for _ in 0..frame_count {
             let (buf, alloc) = allocator
-                .create_buffer(&camera_buffer_info, &info_alloc_info)
+                .vma
+                .create_buffer(&camera_buffer_info, &camera_alloc_info)
                 .map_err(|e| {
                     crate::AshError::VulkanError(format!(
                         "Camera data buffer creation failed: {e:?}"
@@ -135,9 +113,6 @@ impl ForwardPlusIntegration {
 
         Ok(Self {
             lights,
-            descriptor,
-            info_bufs,
-            info_allocs,
             camera_bufs,
             camera_allocs,
             compute_pipeline: None,
@@ -147,7 +122,6 @@ impl ForwardPlusIntegration {
             frame_count: frame_count as usize,
             initialized: false,
             cached_info: ForwardPlusInfo::default(),
-            // first_frame: true,
         })
     }
 
@@ -244,16 +218,12 @@ impl ForwardPlusIntegration {
         };
 
         // We use the helper ComputePipeline from crate::vulkan which simplifies creation
-        // NOTE: Set 0 contains DepthBuffer and CameraData
-        // Set 3 contains Forward+ descriptor (LightBuffer, TileLightIndices, ForwardPlusInfo)
-        // We need placeholder sets at 1 and 2 so Set 3 is at the correct index
+        // BDA Migration: Compute shader now only needs Set 0 (Depth/Camera)
+        // Set 3 is gone, BDA handles everything.
         self.compute_pipeline = Some(
             ComputePipeline::builder(Arc::clone(&device))
                 .with_shader(shader_module.module)
                 .add_set_layout(self.compute_descriptor_layout) // Set 0: Depth buffer, camera
-                .add_set_layout(vk::DescriptorSetLayout::null()) // Set 1: Placeholder
-                .add_set_layout(vk::DescriptorSetLayout::null()) // Set 2: Placeholder
-                .add_set_layout(self.descriptor.layout()) // Set 3: Forward+ (LightBuffer, TileLightIndices, ForwardPlusInfo)
                 .add_push_constant(push_constant_range)
                 .build()?,
         );
@@ -328,7 +298,7 @@ impl ForwardPlusIntegration {
     /// # Safety
     /// The caller must ensure that the provided allocator remains valid for the duration
     /// of the renderer's lifetime or until `destroy` is called.
-    pub unsafe fn init(&mut self, allocator: &vk_mem::Allocator) {
+    pub unsafe fn init(&mut self, allocator: &Allocator) {
         if self.initialized {
             return;
         }
@@ -363,7 +333,7 @@ impl ForwardPlusIntegration {
     /// allocated during `new()`.
     pub unsafe fn update_camera(
         &mut self,
-        allocator: &vk_mem::Allocator,
+        allocator: &Allocator,
         frame_index: usize,
         view: &[[f32; 4]; 4],
         projection: &[[f32; 4]; 4],
@@ -379,7 +349,9 @@ impl ForwardPlusIntegration {
             camera_pos: *camera_pos,
         };
 
-        let info = allocator.get_allocation_info(&self.camera_allocs[frame_index]);
+        let info = allocator
+            .vma
+            .get_allocation_info(&self.camera_allocs[frame_index]);
         let ptr = info.mapped_data;
         if !ptr.is_null() {
             std::ptr::copy_nonoverlapping(&data, ptr as *mut CullingCameraData, 1);
@@ -394,7 +366,7 @@ impl ForwardPlusIntegration {
     /// access to the light buffers occurs during this operation.
     pub unsafe fn upload_to_gpu(
         &mut self,
-        allocator: &vk_mem::Allocator,
+        allocator: &Allocator,
         _device: &ash::Device,
         frame_index: usize,
     ) -> Result<()> {
@@ -405,59 +377,13 @@ impl ForwardPlusIntegration {
         // CRITICAL: Recreate tile buffer if screen size changed
         // Must happen before upload_lights and descriptor update
         // This also handles min size 1024 logic internally now
-        let buffers_recreated = self.lights.recreate_tile_buffer_if_needed(allocator)?;
+        let _buffers_recreated = self.lights.recreate_tile_buffer_if_needed(allocator)?;
 
         // Upload lights
         self.lights.upload_lights(allocator, frame_index)?;
 
-        // Upload ForwardPlusInfo to the current frame's UBO
+        // Update cached info
         self.cached_info = self.lights.get_forward_plus_info();
-        let info_data = allocator.get_allocation_info(&self.info_allocs[frame_index]);
-        let mapped_ptr = info_data.mapped_data;
-        if !mapped_ptr.is_null() {
-            std::ptr::copy_nonoverlapping(
-                &self.cached_info as *const ForwardPlusInfo as *const u8,
-                mapped_ptr as *mut u8,
-                std::mem::size_of::<ForwardPlusInfo>(),
-            );
-        }
-
-        let info_size = std::mem::size_of::<ForwardPlusInfo>() as u64;
-        let light_buffer_size = (crate::renderer::features::MAX_LIGHTS
-            * std::mem::size_of::<crate::renderer::features::GpuLight>())
-            as u64;
-
-        // If buffers were recreated, update all descriptor sets to point to new buffers
-        // Recreate happens on resize (idle) so it is safe to update all sets.
-        // Otherwise, update only the current frame's set to avoid touching in-flight sets.
-        let update_range = if buffers_recreated {
-            0..self.lights.frame_count()
-        } else {
-            frame_index..frame_index + 1
-        };
-
-        for idx in update_range {
-            // Update descriptor bindings - we only do this if buffers exist
-            if let (Some(l_buf), Some(t_buf)) = (
-                self.lights.get_light_buffer(idx),
-                self.lights.get_tile_buffer(idx),
-            ) {
-                // Update Fragment Shader Descriptor (Set 3) with frame-specific info buffer
-                self.descriptor.update(
-                    idx,
-                    l_buf,
-                    light_buffer_size,
-                    t_buf,
-                    self.lights.get_tile_buffer_size() as u64,
-                    self.info_bufs[idx],
-                    info_size,
-                );
-            }
-        }
-
-        // Update Compute Shader Descriptor (Set 0) - only for current frame
-        // NOTE: Camera buffer is already bound in init_pipeline, but we may need to update it
-        // if the camera data changes. For now, we rely on update_camera_data() being called separately.
 
         Ok(())
     }
@@ -495,28 +421,15 @@ impl ForwardPlusIntegration {
                 &[],
             );
 
-            // Bind Set 3: Forward+ descriptor (LightBuffer, TileLightIndices, ForwardPlusInfo)
-            device.cmd_bind_descriptor_sets(
-                command_buffer,
-                vk::PipelineBindPoint::COMPUTE,
-                pipeline.layout(),
-                3,
-                &[self.descriptor.descriptor_set(frame_index)],
-                &[],
-            );
-
             let (tx, ty, tz) = self.lights.get_dispatch_dimensions();
 
             // Reconstruct screen size for PC
-            // We use the cached ForwardPlusInfo to determine total size
             let width = self.cached_info.num_tiles[0] * self.cached_info.tile_size;
             let height = self.cached_info.num_tiles[1] * self.cached_info.tile_size;
 
-            let push_constants = LightCullingPushConstants {
-                screen_size: [width, height],
-                light_count: self.lights.light_count() as u32,
-                _padding: 0,
-            };
+            let push_constants = self
+                .lights
+                .get_culling_push_constants(width, height, frame_index);
 
             device.cmd_push_constants(
                 command_buffer,
@@ -551,30 +464,6 @@ impl ForwardPlusIntegration {
         }
     }
 
-    /// Bind Set 4 for rendering
-    ///
-    /// Call this before issuing draw commands that use Forward+ lighting.
-    ///
-    /// # Safety
-    /// Command buffer must be in recording state.
-    pub unsafe fn bind(
-        &self,
-        device: &ash::Device,
-        command_buffer: vk::CommandBuffer,
-        pipeline_layout: vk::PipelineLayout,
-        frame_index: usize,
-    ) {
-        if self.initialized {
-            self.descriptor
-                .bind(device, command_buffer, pipeline_layout, frame_index);
-        }
-    }
-
-    /// Get the descriptor set layout for pipeline creation
-    pub fn layout(&self) -> vk::DescriptorSetLayout {
-        self.descriptor.layout()
-    }
-
     /// Check if Forward+ is enabled (has lights)
     pub fn is_enabled(&self) -> bool {
         self.lights.is_enabled()
@@ -604,7 +493,7 @@ impl ForwardPlusIntegration {
     /// # Safety
     /// The caller must ensure that no GPU commands using these resources are
     /// currently executing on the device.
-    pub unsafe fn destroy(&mut self, allocator: &vk_mem::Allocator, device: &ash::Device) {
+    pub unsafe fn destroy(&mut self, allocator: &Allocator, device: &ash::Device) {
         if !self.initialized {
             return;
         }
@@ -619,14 +508,9 @@ impl ForwardPlusIntegration {
 
         self.lights.destroy_buffers(allocator);
 
-        // Destroy all per-frame info buffers
-        for (buf, alloc) in self.info_bufs.iter().zip(self.info_allocs.iter_mut()) {
-            allocator.destroy_buffer(*buf, alloc);
-        }
-
         // Destroy all per-frame camera buffers
         for (buf, alloc) in self.camera_bufs.iter().zip(self.camera_allocs.iter_mut()) {
-            allocator.destroy_buffer(*buf, alloc);
+            allocator.vma.destroy_buffer(*buf, alloc);
         }
 
         self.initialized = false;

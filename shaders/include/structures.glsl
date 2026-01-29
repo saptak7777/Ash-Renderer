@@ -45,6 +45,14 @@ struct DirectionalLight {
     vec4 color_intensity; // xyz = color, w = intensity
 };
 
+// GPU Forward+ Light structure
+struct Light {
+    vec4 position;   // xyz = position, w = radius
+    vec4 color;      // rgb = color, a = intensity
+    vec4 direction;  // xyz = direction, w = type (0=point, 1=directional, 2=spot)
+    vec4 params;     // x = inner, y = outer, z = falloff, w = enabled
+};
+
 struct IndirectDrawCommand {
     uint vertexCount;
     uint instanceCount;
@@ -56,9 +64,9 @@ struct SceneLighting {
     HemisphereAmbient ambient;
     DirectionalLight directional;
     uint point_light_count;
-    uint _pad1;
-    uint _pad2;
-    uint _pad3;
+    uint num_tiles_x;
+    uint num_tiles_y;
+    uint tile_size;
 };
 
 // --- BDA Buffer References (Require structs above) ---
@@ -87,12 +95,21 @@ layout(buffer_reference, scalar) readonly buffer MaterialBuffer {
     MaterialData materials[];
 };
 
+layout(buffer_reference, scalar) buffer LightBuffer {
+    Light lights[];
+};
+
+layout(buffer_reference, scalar) buffer TileIndexBuffer {
+    uint tileData[];
+};
+
 // --- Index Buffer for BDA-based Index Pulling ---
 layout(buffer_reference, scalar, buffer_reference_align = 4) readonly buffer IndexBuffer { 
     uint indices[]; 
 };
 
 uint load_index(uint64_t ptr, uint logical_index) {
+    if (ptr == 0) return 0;
     IndexBuffer ib = IndexBuffer(ptr);
     return ib.indices[logical_index];
 }
@@ -102,23 +119,21 @@ uint load_index(uint64_t ptr, uint logical_index) {
 #ifndef SKIP_PUSH_CONSTANTS
 // Modern Push Constants - Full Bindless/BDA
 layout(push_constant) uniform PushConstants {
-    // Pointer stage (0-47)
+    // Pointer stage (0-55)
     uint64_t frame_ptr;
     uint64_t vertex_ptr;
     uint64_t instance_ptr;
     uint64_t material_ptr;
     uint64_t index_ptr;
-    uint64_t _ptr_padding; // Padding to 48 bytes
+    uint64_t light_ptr;
+    uint64_t tile_ptr;
 
-    // Control stage (48-111)
-    layout(offset = 48) mat4 model; 
-    layout(offset = 112) uint material_index; // Shifted up
-    layout(offset = 116) uint use_instancing;
-    layout(offset = 120) uint _unused_flags[2]; // Padding to maintain alignment
-
-    // Fragment/Debug stage (128-159)
-    layout(offset = 128) uint flags;
-    layout(offset = 132) uint debug_path;
-    layout(offset = 136) uint debug_visualization_enabled;
+    // Control stage (64-127)
+    layout(offset = 64) mat4 model; 
+    layout(offset = 128) uint material_index;
+    layout(offset = 132) uint use_instancing;
+    layout(offset = 136) uint flags;
+    layout(offset = 140) uint debug_path;
+    layout(offset = 144) uint debug_visualization_enabled;
 } push;
 #endif

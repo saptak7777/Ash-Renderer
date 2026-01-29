@@ -97,8 +97,11 @@ pub struct LightCullingPushConstants {
     pub screen_size: [u32; 2],
     /// Number of lights
     pub light_count: u32,
-    /// Padding
     pub _padding: u32,
+    /// Address of global LightBuffer
+    pub light_ptr: u64,
+    /// Address of TileLightIndices buffer
+    pub tile_ptr: u64,
 }
 
 /// Camera data UBO for culling shader
@@ -282,11 +285,15 @@ impl LightCullingPass {
         &self,
         screen_width: u32,
         screen_height: u32,
+        light_ptr: u64,
+        tile_ptr: u64,
     ) -> LightCullingPushConstants {
         LightCullingPushConstants {
             screen_size: [screen_width, screen_height],
             light_count: self.lights.len() as u32,
             _padding: 0,
+            light_ptr,
+            tile_ptr,
         }
     }
 
