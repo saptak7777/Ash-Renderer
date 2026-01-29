@@ -334,7 +334,8 @@ impl Default for RendererConfig {
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct SkyboxPushConstants {
     frame_ptr: u64,
-    _padding: [u32; 18],
+    skybox_index: u32,
+    _padding: [u32; 17],
     vertex_heap_ptr: u64,
 }
 
@@ -434,9 +435,15 @@ pub struct Renderer {
     // Lighting
     scene_lighting: crate::renderer::features::SceneLighting,
     point_lights: Vec<PointLight>,
-    directional_lights: Vec<DirectionalLight>,
+     directional_lights: Vec<DirectionalLight>,
     spot_lights: Vec<SpotLight>,
     pub debug_mode: DebugMode,
+
+    // Bindless Indices for Phase 3
+    vsm_page_index: u32,
+    vsm_cache_index: u32,
+    skybox_index: u32,
+
     // Post-processing descriptors
     post_descriptor_pool: vk::DescriptorPool,
     post_descriptor_sets: Vec<vk::DescriptorSet>,
@@ -686,6 +693,8 @@ impl Renderer {
                 Arc::clone(&device.device),
                 descriptor_manager.allocator_mut(),
                 crate::vulkan::BindlessManager::DEFAULT_MAX_TEXTURES,
+                crate::vulkan::BindlessManager::DEFAULT_MAX_PAGE_TABLES,
+                crate::vulkan::BindlessManager::DEFAULT_MAX_CUBEMAPS,
                 crate::vulkan::BindlessManager::DEFAULT_MAX_BUFFERS,
             )?;
 
@@ -721,34 +730,8 @@ impl Renderer {
                 safety_texture,
             } = renderer_resources;
 
-            // Bind IBL defaults to all environment sets
-            {
-                let tex_2d_info = vk::DescriptorImageInfo {
-                    image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-                    image_view: black_texture.view(),
-                    sampler: black_texture.sampler(),
-                };
-                let vsm_uint_info = vk::DescriptorImageInfo {
-                    image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-                    image_view: vsm_default_array.view(), // Use array for clipmap support
-                    sampler: vsm_default_array.sampler(), // NEAREST
-                };
-
-                let skybox_info = vk::DescriptorImageInfo {
-                    image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-                    image_view: default_skybox.view(),
-                    sampler: default_skybox.sampler(),
-                };
-
-                for i in 0..descriptor_manager.environment_set_count() {
-                    descriptor_manager.bind_defaults(
-                        i,
-                        &vsm_uint_info,
-                        &tex_2d_info,
-                        &skybox_info,
-                    )?;
-                }
-            }
+            // CRITICAL: Bindless defaults (Set 1) were already registered at Index 0.
+            // Set 2 management has been removed in Phase 3.
 
             let buffer_size =
                 std::mem::size_of::<crate::renderer::resources::uniform::MvpMatrices>()
@@ -785,13 +768,11 @@ impl Renderer {
             let set_layouts = [
                 descriptor_manager.frame_layout(),        // Set 0: Frame Data
                 bindless_manager.descriptor_set_layout(), // Set 1: Bindless Textures
-                descriptor_manager.environment_layout(), // Set 2: Global Environment (Shadow)
-                // Set 3: Forward+ lights (Migrated to BDA via Push Constants)
             ];
             
             // DIAGNOSTIC: Log layout handles for verification
-            log::debug!("Main Pipeline Set Layouts: Bindless={:?}, Env={:?}", 
-                set_layouts[1], set_layouts[2]);
+            log::debug!("Main Pipeline Set Layouts: Frame={:?}, Bindless={:?}", 
+                set_layouts[0], set_layouts[1]);
 
             log::info!("Creating Main Graphics Pipeline");
             let (pipeline_layout, pipeline_layout_id, pipeline, pipeline_id) =
@@ -995,6 +976,44 @@ impl Renderer {
                     &set_layouts,
                 )?;
             
+            // Phase 3: Register Bindless Defaults (Index 0 safety)
+            // 1. Textures (Binding 0)
+            bindless_manager.add_sampled_image(
+                black_texture.view(),
+                black_texture.sampler(),
+            )?;
+
+            // 2. Page Tables (Binding 1)
+            let vsm_page_index = bindless_manager.add_page_table(
+                vsm_default_array.view(),
+                vsm_default_array.sampler(),
+            )?;
+
+            // 3. Cubemaps (Binding 2)
+            let skybox_index = bindless_manager.add_cubemap(
+                default_skybox.view(),
+                default_skybox.sampler(),
+            )?;
+
+            log::info!("Bindless Defaults registered (Page: {vsm_page_index}, Skybox: {skybox_index})");
+
+            // 4. Actual VSM registration (if active)
+            let mut vsm_cache_index = 0;
+            let mut active_vsm_page_index = vsm_page_index;
+            if let Some(ref vsm) = vsm_feature {
+                active_vsm_page_index = bindless_manager.add_page_table(
+                    vsm.resources.page_table_view,
+                    vsm.resources.page_table_sampler,
+                )?;
+                vsm_cache_index = bindless_manager.add_sampled_image(
+                    vsm.resources.physical_cache_view,
+                    vsm.resources.physical_cache_sampler,
+                )?;
+                log::info!("VSM registered in bindless array (Page: {active_vsm_page_index}, Cache: {vsm_cache_index})");
+            }
+
+            // Create Skybox Mesh (Unit Cube)
+
             // Create Skybox Mesh (Unit Cube)
             let skybox_mesh = {
                 let mesh = crate::renderer::Mesh::create_cube(); 
@@ -1120,6 +1139,10 @@ impl Renderer {
                 point_lights: Vec::new(),
                 directional_lights: Vec::new(),
                 spot_lights: Vec::new(),
+
+                vsm_page_index: active_vsm_page_index,
+                vsm_cache_index,
+                skybox_index,
 
                 debug_mode: DebugMode::None,
                 post_descriptor_pool: vk::DescriptorPool::null(),
@@ -2926,18 +2949,16 @@ impl Renderer {
         };
 
         // We need the set layouts. 
-        // 0: Frame, 1: Bindless, 2: Environment, 3: Forward+
+        // 0: Frame, 1: Bindless
         let descriptors = self.descriptors.as_ref().ok_or_else(|| AshError::VulkanError("Descriptors missing".to_string()))?;
         let bindless = &self.bindless_manager;
 
         let set_layouts = vec![
             descriptors.frame_layout(),
             bindless.descriptor_set_layout(),
-            descriptors.environment_layout(),
         ];
 
-        // Set layouts: 0: Frame, 1: Bindless, 2: Environment
-        // (Set 3: Forward+ migrated to BDA)
+        // Set layouts: 0: Frame, 1: Bindless
 
         let (new_layout, _new_layout_id, new_pipeline, _new_pipeline_id) = unsafe {
             Self::create_skybox_pipeline(
@@ -3322,7 +3343,6 @@ impl Renderer {
         if let Some(manager) = self.descriptors.as_mut() {
             let count = self.frame_syncs.len() as u32;
             manager.recreate_frame_sets(count)?;
-            manager.recreate_environment_sets(count)?;
             // Joint matrices are now in bindless Set 1 Binding 3, no need to recreate separate sets
 
             let buffer_size =
@@ -3334,46 +3354,8 @@ impl Renderer {
                 }
             }
 
-            // CRITICAL FIX: Recreate bindless manager descriptor set
-            // This was the root cause of black screens during resize
-            // NON-CRITICAL: Bindless manager size is fixed, no need to recreate on resize.
-            // Disabling to prevent potential driver crashes from heavy updates.
-            /*
-            if let Some(bindless) = self.bindless_manager.as_mut() {
-                log::info!("Recreating bindless descriptor set after swapchain resize...");
-                bindless.recreate(manager.allocator_mut())?;
-            }
-            */
-
-            // CRITICAL FIX: Re-bind Environment (Set 2) resources after recreation
-            // Without this, shadow mapping and IBL break after resize
-            // 1. Bind Defaults (Shadow Map, VSM Page Table, etc.)
-            let tex_2d_info = vk::DescriptorImageInfo {
-                image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-                image_view: self._black_texture.view(),
-                sampler: self._black_texture.sampler(),
-            };
-
-            let vsm_uint_info = vk::DescriptorImageInfo {
-                image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-                image_view: self._vsm_default_array.view(), // Use array for clipmap support
-                sampler: self._vsm_default_array.sampler(),
-            };
-
-            let skybox_info = vk::DescriptorImageInfo {
-                image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-                image_view: self._default_skybox.view(),
-                sampler: self._default_skybox.sampler(),
-            };
-
-            for index in 0..manager.environment_set_count() {
-                manager.bind_defaults(
-                    index,
-                    &vsm_uint_info,
-                    &tex_2d_info,
-                    &skybox_info,
-                )?;
-            }
+            // CRITICAL FIX: Re-bind Environment defaults removed in Phase 3
+            // Set 2 is gone.
 
 
             // CRITICAL FIX: Update Forward+ Descriptors (Set 3)
@@ -3503,10 +3485,8 @@ impl Renderer {
                 // frame_set returns Option<vk::DescriptorSet>
                 let frame_set = descriptors.frame_set(frame_index).ok_or(AshError::VulkanError("Frame set missing".into()))?;
                 let bindless_set = self.bindless_manager.descriptor_set();
-                // environment_set returns Option<vk::DescriptorSet>
-                let environment_set = descriptors.environment_set(frame_index).ok_or(AshError::VulkanError("Environment set missing".into()))?;
 
-                let sets = [frame_set, bindless_set, environment_set];
+                let sets = [frame_set, bindless_set];
                 
                 unsafe {
                     self.device.device.cmd_bind_descriptor_sets(
@@ -3562,6 +3542,9 @@ impl Renderer {
                     index_ptr,
                     light_ptr: params.light_ptr,
                     tile_ptr: params.tile_ptr,
+                    vsm_page_index: self.vsm_page_index,
+                    vsm_cache_index: self.vsm_cache_index,
+                    skybox_index: self.skybox_index,
                 };
                 
                 let count_params = crate::renderer::model_renderer::IndirectDrawCountParams {
@@ -3619,24 +3602,14 @@ impl Renderer {
                         }
                     };
                     
-                    let env_set = match descriptor_manager.environment_set(frame_index) {
-                        Some(s) => s,
-                        None => {
-                            log::error!("Environment descriptor set missing for frame {}", frame_index);
-                            return Ok(());
-                        }
-                    };
-                    
-                    // Bind sets 0 (Frame/MVP) and 2 (Environment/Skybox)
-                    // We also bind Set 1 (Bindless) as middle set to preserve layout compatibility if needed
-                    // But typically we can sparse bind or bind all.
-                    // Given create_skybox_pipeline uses [frame, bindless, environment], we must bind ALL 3.
+                    // Bind sets 0 (Frame/MVP) and 1 (Bindless)
+                    // Set 2 (Environment) removed in Phase 3
                     self.device.device.cmd_bind_descriptor_sets(
                         cmd_ctx.handle(),
                         vk::PipelineBindPoint::GRAPHICS,
                         layout,
                         0, 
-                        &[frame_set, self.bindless_manager.descriptor_set(), env_set],
+                        &[frame_set, self.bindless_manager.descriptor_set()],
                         &[],
                     );
                 }
@@ -3655,7 +3628,8 @@ impl Renderer {
                 // Construct SkyboxPushConstants
                 let push = SkyboxPushConstants {
                     frame_ptr: self.uniform_buffers[frame_index].device_address(),
-                    _padding: [0; 18],
+                    skybox_index: self.skybox_index,
+                    _padding: [0; 17],
                     vertex_heap_ptr: vertex_ptr,
                 };
                 
@@ -4108,18 +4082,10 @@ impl Renderer {
 
             if let Some(vsm) = &self.vsm_feature {
                     // ROBUST CHECK: Do not panic if pipeline failed to build.
-                    // Just skip shadows for this frame to prevent 0xc000041d.
+                    // Just skip shadows for this frame
                     if let Some(pipeline_layout) = vsm.shadow_pipeline_layout() {
-                        // Update VSM resources in environment descriptor set
-                        if let Some(descriptors) = &self.descriptors {
-                             descriptors.bind_vsm_resources(
-                                frame_index,
-                                vsm.resources.page_table_view,
-                                vsm.resources.page_table_sampler,
-                                vsm.resources.physical_cache_view,
-                                vsm.resources.physical_cache_sampler,
-                            ).unwrap_or_else(|e| log::error!("Failed to bind VSM resources: {}", e));
-                        }
+                        // Set 2 is gone. VSM resources are now in Set 1 (Bindless)
+                        // and indices are passed via push constants in draw_context.
 
                         // Extract references to avoid borrow checker conflicts
                         let instancing_manager = &self.instancing_manager;
@@ -4198,6 +4164,9 @@ impl Renderer {
                                                 index_ptr: model_renderer.geometry_buffer.index_heap_address(),
                                                 light_ptr: 0, // Shadows don't need lighting data
                                                 tile_ptr: 0,
+                                                vsm_page_index: self.vsm_page_index,
+                                                vsm_cache_index: self.vsm_cache_index,
+                                                skybox_index: self.skybox_index,
                                             };
                                             
                                             device.device.cmd_push_constants(
@@ -4428,27 +4397,16 @@ impl Renderer {
                         &[],
                     );
 
-                    // Bind global bindless descriptor set (Set 1)
+                    // Bind Global Bindless descriptor set (Set 1)
                     cmd_ctx.bind_descriptor_sets(
                         vk::PipelineBindPoint::GRAPHICS,
                         pipeline_layout_handle,
-                        1, // Set 1: Bindless (Textures, Materials, Instances)
+                        1, // Set 1: Bindless (Textures, Materials, Instances, Shadows)
                         &[self.bindless_manager.descriptor_set()],
                         &[],
                     );
 
-                    // Bind Global Environment descriptor (Set 2: ShadowMap)
-                    if let Some(env_set) = manager.environment_set(frame_index) {
-
-                        
-                        cmd_ctx.bind_descriptor_sets(
-                            vk::PipelineBindPoint::GRAPHICS,
-                            pipeline_layout_handle,
-                            2, // Set 2: Environment
-                            &[env_set],
-                            &[],
-                        );
-                    }
+                    // Set 2 (Environment) removed in Phase 3. VSM shadows now sampled via Set 1.
 
                     Ok(vk::DescriptorSet::null())
                 } else {

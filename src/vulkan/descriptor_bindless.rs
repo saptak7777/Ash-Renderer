@@ -8,38 +8,48 @@ use super::descriptor_layout::{DescriptorSetLayout, DescriptorSetLayoutBuilder};
 use super::descriptor_set::DescriptorSet;
 
 #[derive(Clone)]
-struct RegisteredImage {
+struct RegisteredResource {
     index: u32,
-    view: vk::ImageView,
-    sampler: vk::Sampler,
+    binding: u32,
+    info: ResourceInfo,
 }
 
 #[derive(Clone)]
-struct RegisteredBuffer {
-    index: u32,
-    buffer: vk::Buffer,
-    offset: vk::DeviceSize,
-    range: vk::DeviceSize,
+enum ResourceInfo {
+    Image {
+        view: vk::ImageView,
+        sampler: vk::Sampler,
+    },
+    Buffer {
+        buffer: vk::Buffer,
+        offset: vk::DeviceSize,
+        range: vk::DeviceSize,
+    },
 }
 
-/// Manages bindless descriptor resources (images) with variable descriptor counts.
+/// Manages bindless descriptor resources (textures, page tables, cubemaps, buffers).
 pub struct BindlessManager {
     #[allow(dead_code)]
     device: Arc<ash::Device>,
     layout: DescriptorSetLayout,
     descriptor_set: DescriptorSet,
     max_images: u32,
+    max_page_tables: u32,
+    max_cubemaps: u32,
     max_buffers: u32,
     next_image_index: u32,
+    next_page_table_index: u32,
+    next_cubemap_index: u32,
     next_buffer_index: u32,
     // Resource tracking for recreation
-    registered_images: Vec<RegisteredImage>,
-    registered_buffers: Vec<RegisteredBuffer>,
+    resources: Vec<RegisteredResource>,
 }
 
 impl BindlessManager {
     pub const DEFAULT_MAX_TEXTURES: u32 = 16384;
-    pub const DEFAULT_MAX_BUFFERS: u32 = 1024; // Reduced to prevent DEVICE_LOST on some hardware
+    pub const DEFAULT_MAX_PAGE_TABLES: u32 = 1024;
+    pub const DEFAULT_MAX_CUBEMAPS: u32 = 1024;
+    pub const DEFAULT_MAX_BUFFERS: u32 = 1024;
 
     pub fn new(
         instance: &ash::Instance,
@@ -47,6 +57,8 @@ impl BindlessManager {
         device: Arc<ash::Device>,
         allocator: &mut DescriptorAllocator,
         max_images: u32,
+        max_page_tables: u32,
+        max_cubemaps: u32,
         mut max_buffers: u32,
     ) -> Result<Self> {
         // Hardware Validation: Clamp buffers to hardware limits to prevent DEVICE_LOST
@@ -65,15 +77,28 @@ impl BindlessManager {
                 max_buffers = hw_max_buffers;
             }
         }
+
         let layout = DescriptorSetLayoutBuilder::new()
             .add_bindless_binding(
-                0,
+                0, // global_textures
                 vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
                 vk::ShaderStageFlags::ALL_GRAPHICS | vk::ShaderStageFlags::COMPUTE,
                 max_images,
             )
             .add_bindless_binding(
-                1,
+                1, // global_page_tables
+                vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+                vk::ShaderStageFlags::ALL_GRAPHICS | vk::ShaderStageFlags::COMPUTE,
+                max_page_tables,
+            )
+            .add_bindless_binding(
+                2, // global_cubemaps
+                vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+                vk::ShaderStageFlags::ALL_GRAPHICS | vk::ShaderStageFlags::COMPUTE,
+                max_cubemaps,
+            )
+            .add_bindless_binding(
+                3, // global_buffers
                 vk::DescriptorType::STORAGE_BUFFER,
                 vk::ShaderStageFlags::ALL_GRAPHICS | vk::ShaderStageFlags::COMPUTE,
                 max_buffers,
@@ -90,11 +115,14 @@ impl BindlessManager {
             layout,
             descriptor_set,
             max_images,
+            max_page_tables,
+            max_cubemaps,
             max_buffers,
             next_image_index: 0,
+            next_page_table_index: 0,
+            next_cubemap_index: 0,
             next_buffer_index: 0,
-            registered_images: Vec::new(),
-            registered_buffers: Vec::new(),
+            resources: Vec::new(),
         })
     }
 
@@ -102,65 +130,57 @@ impl BindlessManager {
     pub fn recreate(&mut self, allocator: &mut DescriptorAllocator) -> Result<()> {
         log::info!("Recreating bindless descriptor set...");
 
-        // Allocate new descriptor set with same layout
         let new_descriptor_set = allocator.allocate_bindless_set(
             self.layout.handle(),
             self.layout.bindings(),
-            self.max_buffers, // VARIABLE_DESCRIPTOR_COUNT applies to the last binding (buffers)
+            self.max_buffers,
         )?;
 
-        // Free the old descriptor set to prevent memory leaks
+        // Free the old descriptor set
         allocator.free_bindless_set(self.descriptor_set.handle())?;
-
-        // Replace old descriptor set
         self.descriptor_set = new_descriptor_set;
 
-        // Re-register all previously registered resources
+        // Re-register all resources
         self.re_register_all()?;
-
-        log::info!("Bindless descriptor set recreated successfully");
         Ok(())
     }
 
-    /// Re-register all previously registered resources
     fn re_register_all(&mut self) -> Result<()> {
-        // Re-register images
-        for img in &self.registered_images {
-            let info = vk::DescriptorImageInfo {
-                sampler: img.sampler,
-                image_view: img.view,
-                image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-            };
-            self.descriptor_set.update_image_at(
-                0,
-                img.index,
-                info,
-                vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-            )?;
+        for res in &self.resources {
+            match res.info {
+                ResourceInfo::Image { view, sampler } => {
+                    let info = vk::DescriptorImageInfo {
+                        sampler,
+                        image_view: view,
+                        image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                    };
+                    self.descriptor_set.update_image_at(
+                        res.binding,
+                        res.index,
+                        info,
+                        vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+                    )?;
+                }
+                ResourceInfo::Buffer {
+                    buffer,
+                    offset,
+                    range,
+                } => {
+                    self.descriptor_set.update_buffer_at(
+                        res.binding,
+                        res.index,
+                        buffer,
+                        offset,
+                        range,
+                        vk::DescriptorType::STORAGE_BUFFER,
+                    )?;
+                }
+            }
         }
-
-        // Re-register buffers
-        for buf in &self.registered_buffers {
-            self.descriptor_set.update_buffer_at(
-                1,
-                buf.index,
-                buf.buffer,
-                buf.offset,
-                buf.range,
-                vk::DescriptorType::STORAGE_BUFFER,
-            )?;
-        }
-
-        log::debug!(
-            "Re-registered {} images and {} buffers",
-            self.registered_images.len(),
-            self.registered_buffers.len()
-        );
-
         Ok(())
     }
 
-    pub fn layout(&self) -> vk::DescriptorSetLayout {
+    pub fn descriptor_set_layout(&self) -> vk::DescriptorSetLayout {
         self.layout.handle()
     }
 
@@ -173,7 +193,7 @@ impl BindlessManager {
         image_view: vk::ImageView,
         sampler: vk::Sampler,
     ) -> Result<u32> {
-        let index = self.allocate_image_index()?;
+        let index = self.allocate_index(0)?;
         let info = vk::DescriptorImageInfo {
             sampler,
             image_view,
@@ -186,11 +206,69 @@ impl BindlessManager {
             vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
         )?;
 
-        // Track for recreation
-        self.registered_images.push(RegisteredImage {
+        self.resources.push(RegisteredResource {
             index,
-            view: image_view,
+            binding: 0,
+            info: ResourceInfo::Image {
+                view: image_view,
+                sampler,
+            },
+        });
+
+        Ok(index)
+    }
+
+    pub fn add_page_table(
+        &mut self,
+        image_view: vk::ImageView,
+        sampler: vk::Sampler,
+    ) -> Result<u32> {
+        let index = self.allocate_index(1)?;
+        let info = vk::DescriptorImageInfo {
             sampler,
+            image_view,
+            image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+        };
+        self.descriptor_set.update_image_at(
+            1,
+            index,
+            info,
+            vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+        )?;
+
+        self.resources.push(RegisteredResource {
+            index,
+            binding: 1,
+            info: ResourceInfo::Image {
+                view: image_view,
+                sampler,
+            },
+        });
+
+        Ok(index)
+    }
+
+    pub fn add_cubemap(&mut self, image_view: vk::ImageView, sampler: vk::Sampler) -> Result<u32> {
+        let index = self.allocate_index(2)?;
+        let info = vk::DescriptorImageInfo {
+            sampler,
+            image_view,
+            image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+        };
+        self.descriptor_set.update_image_at(
+            2,
+            index,
+            info,
+            vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+        )?;
+
+        self.resources.push(RegisteredResource {
+            index,
+            binding: 2,
+            info: ResourceInfo::Image {
+                view: image_view,
+                sampler,
+            },
         });
 
         Ok(index)
@@ -202,9 +280,9 @@ impl BindlessManager {
         offset: vk::DeviceSize,
         range: vk::DeviceSize,
     ) -> Result<u32> {
-        let index = self.allocate_buffer_index()?;
+        let index = self.allocate_index(3)?;
         self.descriptor_set.update_buffer_at(
-            1,
+            3,
             index,
             buffer,
             offset,
@@ -212,20 +290,17 @@ impl BindlessManager {
             vk::DescriptorType::STORAGE_BUFFER,
         )?;
 
-        // Track for recreation
-        self.registered_buffers.push(RegisteredBuffer {
+        self.resources.push(RegisteredResource {
             index,
-            buffer,
-            offset,
-            range,
+            binding: 3,
+            info: ResourceInfo::Buffer {
+                buffer,
+                offset,
+                range,
+            },
         });
 
         Ok(index)
-    }
-
-    /// Get the descriptor set layout
-    pub fn descriptor_set_layout(&self) -> vk::DescriptorSetLayout {
-        self.layout.handle()
     }
 
     pub fn validate_index(&self, index: u32) -> Result<()> {
@@ -238,27 +313,41 @@ impl BindlessManager {
         Ok(())
     }
 
-    fn allocate_image_index(&mut self) -> Result<u32> {
-        if self.next_image_index >= self.max_images {
-            return Err(AshError::VulkanError(format!(
-                "Exceeded maximum number of bindless images: {}/{}",
-                self.next_image_index, self.max_images
-            )));
+    fn allocate_index(&mut self, binding: u32) -> Result<u32> {
+        match binding {
+            0 => {
+                if self.next_image_index >= self.max_images {
+                    return Err(AshError::VulkanError("Exceeded max images".into()));
+                }
+                let idx = self.next_image_index;
+                self.next_image_index += 1;
+                Ok(idx)
+            }
+            1 => {
+                if self.next_page_table_index >= self.max_page_tables {
+                    return Err(AshError::VulkanError("Exceeded max page tables".into()));
+                }
+                let idx = self.next_page_table_index;
+                self.next_page_table_index += 1;
+                Ok(idx)
+            }
+            2 => {
+                if self.next_cubemap_index >= self.max_cubemaps {
+                    return Err(AshError::VulkanError("Exceeded max cubemaps".into()));
+                }
+                let idx = self.next_cubemap_index;
+                self.next_cubemap_index += 1;
+                Ok(idx)
+            }
+            3 => {
+                if self.next_buffer_index >= self.max_buffers {
+                    return Err(AshError::VulkanError("Exceeded max buffers".into()));
+                }
+                let idx = self.next_buffer_index;
+                self.next_buffer_index += 1;
+                Ok(idx)
+            }
+            _ => Err(AshError::VulkanError("Invalid bindless binding".into())),
         }
-        let index = self.next_image_index;
-        self.next_image_index += 1;
-        Ok(index)
-    }
-
-    fn allocate_buffer_index(&mut self) -> Result<u32> {
-        if self.next_buffer_index >= self.max_buffers {
-            return Err(AshError::VulkanError(format!(
-                "Exceeded maximum number of bindless buffers: {}/{}",
-                self.next_buffer_index, self.max_buffers
-            )));
-        }
-        let index = self.next_buffer_index;
-        self.next_buffer_index += 1;
-        Ok(index)
     }
 }

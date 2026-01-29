@@ -9,8 +9,9 @@
 #include "include/vertex_pulling.glsl"
 
 layout(push_constant) uniform SkyboxPush {
-    uint64_t frame_ptr;  // Offset 0
-    layout(offset = 80) uint64_t vertex_ptr;
+    uint64_t frame_ptr;      // Offset 0
+    uint skybox_index;       // Offset 8
+    layout(offset = 80) uint64_t vertex_ptr; // Offset 80
 } push;
 
 layout(location = 0) out vec3 outUVW;

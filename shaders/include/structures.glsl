@@ -99,6 +99,16 @@ layout(buffer_reference, scalar) buffer LightBuffer {
     Light lights[];
 };
 
+// Set 1: Bindless consolidated resources
+layout(set = 1, binding = 0) uniform sampler2D global_textures[];
+layout(set = 1, binding = 1) uniform usampler2DArray global_page_tables[];
+layout(set = 1, binding = 2) uniform samplerCube global_cubemaps[];
+
+// Binding 3: Bindless Storage Buffers
+layout(set = 1, binding = 3, std430) readonly buffer BindlessBuffer {
+    vec4 data[];
+} bindless_buffers[];
+
 layout(buffer_reference, scalar) buffer TileIndexBuffer {
     uint tileData[];
 };
@@ -128,6 +138,10 @@ layout(push_constant) uniform PushConstants {
     uint64_t light_ptr;
     uint64_t tile_ptr;
 
+    // Texture indices (56-63)
+    uint vsm_page_index;
+    uint vsm_cache_index;
+
     // Control stage (64-127)
     layout(offset = 64) mat4 model; 
     layout(offset = 128) uint material_index;
@@ -135,5 +149,6 @@ layout(push_constant) uniform PushConstants {
     layout(offset = 136) uint flags;
     layout(offset = 140) uint debug_path;
     layout(offset = 144) uint debug_visualization_enabled;
+    layout(offset = 148) uint skybox_index;
 } push;
 #endif

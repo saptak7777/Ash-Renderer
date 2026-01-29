@@ -108,7 +108,10 @@ struct DrawPushConstants {
     index_ptr: u64,    // 32
     light_ptr: u64,    // 40
     tile_ptr: u64,     // 48
-    _ptr_padding: u64, // 56
+
+    // Texture indices (56-63)
+    vsm_page_index: u32,  // 56
+    vsm_cache_index: u32, // 60
 
     // Control stage (64-127)
     model: Mat4Push,                  // 64
@@ -117,7 +120,8 @@ struct DrawPushConstants {
     flags: u32,                       // 136
     debug_path: u32,                  // 140
     debug_visualization_enabled: u32, // 144
-    _padding: [u32; 3],               // 148 (Total 160)
+    skybox_index: u32,                // 148
+    _padding: [u32; 2],               // 152 (Total 160)
 }
 
 /// Context for draw calls with BDA support
@@ -135,6 +139,11 @@ pub struct DrawContext<'a> {
     pub index_ptr: u64,
     pub light_ptr: u64,
     pub tile_ptr: u64,
+
+    // Bindless Indices
+    pub vsm_page_index: u32,
+    pub vsm_cache_index: u32,
+    pub skybox_index: u32,
 }
 
 /// Parameters for indirect draw with count buffer
@@ -272,14 +281,16 @@ impl ModelRenderer {
             index_ptr: ctx.index_ptr,
             light_ptr: ctx.light_ptr,
             tile_ptr: ctx.tile_ptr,
-            _ptr_padding: 0,
+            vsm_page_index: ctx.vsm_page_index,
+            vsm_cache_index: ctx.vsm_cache_index,
             model: glam::Mat4::IDENTITY.into(),
             material_index: material_handle.index as u32,
             use_instancing: 1,
             flags: ctx.material.flags,
             debug_path: 0,
             debug_visualization_enabled: ctx.material.debug_visualization_enabled,
-            _padding: [0; 3],
+            skybox_index: ctx.skybox_index,
+            _padding: [0; 2],
         };
 
         let push_bytes = bytemuck::bytes_of(&push);
@@ -336,14 +347,16 @@ impl ModelRenderer {
             index_ptr: ctx.index_ptr,
             light_ptr: ctx.light_ptr,
             tile_ptr: ctx.tile_ptr,
-            _ptr_padding: 0,
+            vsm_page_index: ctx.vsm_page_index,
+            vsm_cache_index: ctx.vsm_cache_index,
             model: glam::Mat4::IDENTITY.into(),
             material_index: 0,
             use_instancing: 1,
             flags: ctx.material.flags,
             debug_path: 0,
             debug_visualization_enabled: ctx.material.debug_visualization_enabled,
-            _padding: [0; 3],
+            skybox_index: ctx.skybox_index,
+            _padding: [0; 2],
         };
 
         let push_bytes = bytemuck::bytes_of(&push);
@@ -386,14 +399,16 @@ impl ModelRenderer {
             index_ptr: ctx.index_ptr,
             light_ptr: ctx.light_ptr,
             tile_ptr: ctx.tile_ptr,
-            _ptr_padding: 0,
+            vsm_page_index: ctx.vsm_page_index,
+            vsm_cache_index: ctx.vsm_cache_index,
             model: glam::Mat4::IDENTITY.into(),
             material_index: material_handle.index as u32,
             use_instancing: 1,
             flags: ctx.material.flags,
             debug_path: 0,
             debug_visualization_enabled: ctx.material.debug_visualization_enabled,
-            _padding: [0; 3],
+            skybox_index: ctx.skybox_index,
+            _padding: [0; 2],
         };
 
         let push_bytes = bytemuck::bytes_of(&push);

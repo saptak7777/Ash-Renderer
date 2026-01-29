@@ -31,21 +31,13 @@ layout(location = 1) out vec4 outNormal;
 layout(location = 2) out vec4 outAlbedo;
 layout(location = 3) out vec2 outMotion;
 
-// Set 1: Bindless consolidated resources
-layout(set = 1, binding = 0) uniform sampler2D textures[];
+// Set 1: Bindless consolidated resources are inherited from structures.glsl
+// global_textures[]      -> Binding 0
+// global_page_tables[]   -> Binding 1
+// global_cubemaps[]      -> Binding 2
+// bindless_buffers[]    -> Binding 3
 
-// Binding 1: Bindless Storage Buffers (for tints, per-material data, etc.)
-// std430 for consistent layout between Rust and GLSL
-layout(set = 1, binding = 1, std430) readonly buffer BindlessBuffer {
-    vec4 data[];
-} bindless_buffers[];
-
-
-// Set 2: Environment (Skybox + ShadowMap + VSM)
-layout(set = 2, binding = 3) uniform samplerCube skyboxMap;        // Optional: Skybox for reflections
-
-layout(set = 2, binding = 5) uniform usampler2DArray vsmPageTable; // VSM Page Table Array (R32_UINT)
-layout(set = 2, binding = 6) uniform sampler2D vsmPhysicalCache;   // VSM Physical Cache (R32_FLOAT)
+// Set 2: No longer used (migrated to Set 1 Bindless)
 
 // Set 3: No longer used (Forward+ migrated to BDA)
 #define MAX_LIGHTS_PER_TILE 256
@@ -107,7 +99,7 @@ float VsmShadowCalculation(vec4 fragPosLightSpace, vec3 normal, vec3 lightDir) {
     
     // 4. SAMPLE PAGE TABLE TO GET PHYSICAL PAGE (with layer)
     vec3 pageTableCoord = vec3((vec2(virtualPage) + 0.5) / pageTableResolution, float(clipmapLayer));
-    uint packedPhysical = texture(vsmPageTable, pageTableCoord).r;
+    uint packedPhysical = texture(global_page_tables[nonuniformEXT(push.vsm_page_index)], pageTableCoord).r;
     
     // Check if page is allocated (0xFFFFFFFF = invalid)
     const uint INVALID_PAGE = 0xFFFFFFFFu;
@@ -135,7 +127,8 @@ float VsmShadowCalculation(vec4 fragPosLightSpace, vec3 normal, vec3 lightDir) {
     
     // 8. VARIANCE SHADOW MAPPING (Chebyshev's Inequality)
     // Sample variance moments (depth, depth^2) from physical cache
-    vec2 moments = texture(vsmPhysicalCache, physicalUV).rg;
+    // Physical cache is a standard sampler2D in global_textures
+    vec2 moments = texture(global_textures[nonuniformEXT(push.vsm_cache_index)], physicalUV).rg;
     
     float currentDepth = projCoords.z;
     
@@ -277,7 +270,7 @@ void main() {
 
     // Sample base color texture
     vec4 baseSample = base_color_idx >= 0
-        ? texture(textures[nonuniformEXT(base_color_idx)], fragUV)
+        ? texture(global_textures[nonuniformEXT(base_color_idx)], fragUV)
         : vec4(1.0);
     // Apply sRGB-to-linear conversion only for texture samples (base_color_factor is already linear)
     vec3 baseSampleLinear = base_color_idx >= 0 ? srgb_to_linear(baseSample.rgb) : baseSample.rgb;
@@ -312,7 +305,7 @@ void main() {
 
     // Normal Mapping
     if (normal_idx >= 0) {
-        vec3 mapSample = texture(textures[nonuniformEXT(normal_idx)], fragUV).xyz;
+        vec3 mapSample = texture(global_textures[nonuniformEXT(normal_idx)], fragUV).xyz;
         if (length(mapSample) > 0.001) {
             vec3 mapNormal = mapSample * 2.0 - 1.0;
             mapNormal.xy *= normal_scale;
@@ -335,7 +328,7 @@ void main() {
     // Metallic/Roughness Map
     int mr_idx = mat.texture_indices.z;
     if (mr_idx >= 0) {
-        vec4 mrSample = texture(textures[nonuniformEXT(mr_idx)], fragUV);
+        vec4 mrSample = texture(global_textures[nonuniformEXT(mr_idx)], fragUV);
         metallic = metallic * mrSample.b;
         roughness = max(roughness * mrSample.g, 0.04);
     }
@@ -350,7 +343,7 @@ void main() {
 
     // Occlusion Map
     if (occ_idx >= 0) {
-        occlusion = mix(1.0, texture(textures[nonuniformEXT(occ_idx)], fragUV).r, occ_strength);
+        occlusion = mix(1.0, texture(global_textures[nonuniformEXT(occ_idx)], fragUV).r, occ_strength);
     }
 
     // PBR base reflectance
@@ -480,7 +473,7 @@ void main() {
     int emissive_idx = mat.emissive_texture_index;
     vec3 emissive = mat.emissive_factor.rgb;
     if (emissive_idx >= 0) {
-        emissive *= texture(textures[nonuniformEXT(emissive_idx)], fragUV).rgb;
+        emissive *= texture(global_textures[nonuniformEXT(emissive_idx)], fragUV).rgb;
     }
 
     // Combine: Ambient + Directional + Dynamic(Lo) + Emissive

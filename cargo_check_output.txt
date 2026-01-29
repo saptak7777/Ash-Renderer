@@ -1,0 +1,74 @@
+﻿cargo :     Checking ash_renderer v0.5.25 
+(C:\Users\tilok\Downloads\Ash Renderer)
+At line:1 char:1
++ cargo check 2>&1 | Out-File -FilePath 
+"cargo_check_output.txt" -Encod ...
++ ~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (    Checki 
+   ng as...s\Ash Renderer):String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+error[E0425]: cannot find value `pipeline_layout` in 
+this scope
+    --> src\renderer\renderer.rs:4157:49
+     |
+4086 |                     if let 
+Some(_pipeline_layout) = vsm.shadow_pipeline_layout() {
+     |                                 ---------------- 
+`_pipeline_layout` defined here
+...
+4157 |                                                 
+pipeline_layout,
+     |                                                 
+^^^^^^^^^^^^^^^
+     |
+help: you might have meant to use the available field
+     |
+4157 |                                                 
+pipeline_layout: self.pipeline_layout,
+     |                                                 
+++++++++++++++++++++++
+help: the leading underscore in `_pipeline_layout` 
+marks it as unused, consider renaming it to 
+`pipeline_layout`
+     |
+4086 -                     if let 
+Some(_pipeline_layout) = vsm.shadow_pipeline_layout() {
+4086 +                     if let Some(pipeline_layout) 
+= vsm.shadow_pipeline_layout() {
+     |
+
+error[E0425]: cannot find value `pipeline_layout` in 
+this scope
+    --> src\renderer\renderer.rs:4174:49
+     |
+4086 |                     if let 
+Some(_pipeline_layout) = vsm.shadow_pipeline_layout() {
+     |                                 ---------------- 
+`_pipeline_layout` defined here
+...
+4174 |                                                 
+pipeline_layout,
+     |                                                 
+^^^^^^^^^^^^^^^
+     |
+help: you might have meant to use the available field
+     |
+4174 |                                                 
+self.pipeline_layout,
+     |                                                 
++++++
+help: the leading underscore in `_pipeline_layout` 
+marks it as unused, consider renaming it to 
+`pipeline_layout`
+     |
+4086 -                     if let 
+Some(_pipeline_layout) = vsm.shadow_pipeline_layout() {
+4086 +                     if let Some(pipeline_layout) 
+= vsm.shadow_pipeline_layout() {
+     |
+
+For more information about this error, try `rustc 
+--explain E0425`.
+error: could not compile `ash_renderer` (lib) due to 2 
+previous errors
