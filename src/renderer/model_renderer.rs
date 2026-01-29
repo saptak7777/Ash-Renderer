@@ -350,7 +350,7 @@ impl ModelRenderer {
             vsm_page_index: ctx.vsm_page_index,
             vsm_cache_index: ctx.vsm_cache_index,
             model: glam::Mat4::IDENTITY.into(),
-            material_index: 0,
+            material_index: ctx.material.material_handle.index as u32,
             use_instancing: 1,
             flags: ctx.material.flags,
             debug_path: 0,

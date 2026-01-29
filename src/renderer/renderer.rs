@@ -4232,18 +4232,31 @@ impl Renderer {
 
             // --- VSM TO MAIN PASS SYNCHRONIZATION ---
             // Barrier to ensure all shadow writes are visible to the main pass
-            
-            /*
-            self.device.device.cmd_pipeline_barrier(
-                command_buffer,
-                vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
-                vk::PipelineStageFlags::FRAGMENT_SHADER,
-                vk::DependencyFlags::empty(),
-                &[],
-                &[],
-                &[vsm_barrier],
-            );
-            */
+            if let Some(vsm) = &self.vsm_feature {
+                let vsm_barrier = vk::ImageMemoryBarrier::default()
+                    .image(vsm.resources.physical_cache)
+                    .old_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+                    .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+                    .src_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE)
+                    .dst_access_mask(vk::AccessFlags::SHADER_READ)
+                    .subresource_range(vk::ImageSubresourceRange {
+                        aspect_mask: vk::ImageAspectFlags::COLOR,
+                        base_mip_level: 0,
+                        level_count: 1,
+                        base_array_layer: 0,
+                        layer_count: 1,
+                    });
+
+                self.device.device.cmd_pipeline_barrier(
+                    command_buffer,
+                    vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                    vk::PipelineStageFlags::FRAGMENT_SHADER,
+                    vk::DependencyFlags::empty(),
+                    &[],
+                    &[],
+                    &[vsm_barrier],
+                );
+            }
 
             // --- Light Culling Compute Dispatch ---
             if let Some(ref mut fp_integration) = self.forward_plus {

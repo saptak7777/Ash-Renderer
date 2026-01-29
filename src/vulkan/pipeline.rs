@@ -154,7 +154,7 @@ impl PipelineBuilder {
                 .depth_clamp_enable(false)
                 .rasterizer_discard_enable(false)
                 .polygon_mode(vk::PolygonMode::FILL)
-                .cull_mode(vk::CullModeFlags::NONE)
+                .cull_mode(vk::CullModeFlags::BACK)
                 .front_face(vk::FrontFace::COUNTER_CLOCKWISE)
                 .line_width(1.0)
                 .depth_bias_enable(false),
