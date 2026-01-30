@@ -24,21 +24,26 @@ Oh, and did I mention it's **FULL BDA** (Buffer Device Address) and **FULL BINDL
 
 - ✅ **Forward+ Lighting**: Tile-based culling for hundreds of point and spot lights.
 - ✅ **RAGE Hemisphere Ambient**: AAA-standard ambient model for physically plausible fill lighting.
-- ✅ **Bindless Resources**: Up to 16,384 texture slots because who has time to bind things manually?
+- ✅ **Bindless or Bust**: We don't bind descriptors per object. We bind the whole world once and index it like a boss. (Up to 16,384 slots).
 - ✅ **FULL BDA (Buffer Device Address)**: Direct GPU memory access. No more descriptor binding gymnastics.
 - ✅ **GPU-Driven Culling**: Hi-Z occlusion and frustum culling so your GPU doesn't melt.
 - ✅ **PBR Workflow**: Metallic/Roughness standard, with automatic GLB material ingestion.
-- ✅ **Async Readbacks**: Get data back from the GPU without stalling the whole pipeline (usually).
+- ✅ **Targeted Readbacks**: We read back what matters (VSR metrics, headless screenshots) without stalling. The rest stays on the GPU.
 - ✅ **VSM (Virtual Shadow Maps)**: Full implementation with 16k+ resolution shadows, virtual memory paging, clipmap cascades, and smart cache invalidation. No artifacts, just crispy shadows.
 - ✅ **Nanite V2 (Virtual Geometry)**: Professional mesh clustering using `meshopt` for leaf generation and simplification. Spatial sorting (Morton Codes) ensures extremely high cache locality. Continuous, invisible LOD transitions.
 - ✅ **Post-Processing**: Bloom, Tonemapping, and a VSR (Temporal) implementation that's surprisingly okay.
 - ✅ **Stability First**: Fixed the infamous crashes. Descriptor leaks patched. Resize is rock solid.
 - ✅ **Debug Visualization**: See exactly what's being culled with colored wireframes (Red=Gone, Green=Seen).
-- ✅ **Shader Hot-Reload**: Iterate on compute shaders instantly (F5) without restarting.
+- ✅ **Shader Hot-Reload**: Iterate on compute shaders instantly (F5). (Disabled by default, enable via `config.watch_shaders = true`).
 - ✅ **Safe RHI**: No more raw pointers bro, I swear. We use `GpuBuffer<T>` now, very safe, very typed.
 - ✅ **Render Graph**: Handles barriers automatically so I don't cry at night. Barriers merged also, performance stonks.
 - ✅ **Parallel Everything**: Command recording on all cores? Yes. Culling on all cores? Yes. CPU fan go brrr? Also yes.
-- ✅ **Async Transfers**: Data loading happens in background, no lag spike guarantee (mostly).
+- ✅ **Async Transfers**: Dedicated transfer queue. Data loading happens in background, no lag spike guarantee (mostly).
+- ✅ **Frame Profiler**: Built-in GPU timing queries. Know exactly which pass is killing your framerate.
+- ✅ **Pipeline Cache**: Shader compilation caching. The first load is slow; the second is instant.
+- ✅ **Motion Vectors**: Full Motion Vector generation for TAA/VSR.
+- ✅ **VRAM Budget**: We track usage so you don't OOM yourself.
+- ✅ **Headless Mode**: Run without a window. Great for CI/CD or feeling like a hacker.
 
 ### What It Doesn't Do (Yet)
 
