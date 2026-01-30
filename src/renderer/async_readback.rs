@@ -294,7 +294,13 @@ impl AsyncReadbackManager {
             match self.device.get_fence_status(request.fence) {
                 Ok(true) => {
                     // Fence signaled, query complete
-                    let request = self.pending.pop_front().unwrap();
+                    let request = match self.pending.pop_front() {
+                        Some(r) => r,
+                        None => {
+                            log::error!("Async readback queue desynchronized: front() returned Some but pop_front() returned None");
+                            break;
+                        }
+                    };
 
                     // Retrieve query result
                     let result = self.get_query_result(&request)?;
@@ -327,8 +333,11 @@ impl AsyncReadbackManager {
                 Err(e) => {
                     log::error!("Fence status check failed: {e:?}");
                     // Remove failed request
-                    let request = self.pending.pop_front().unwrap();
-                    self.device.destroy_fence(request.fence, None);
+                    if let Some(request) = self.pending.pop_front() {
+                        self.device.destroy_fence(request.fence, None);
+                    } else {
+                        log::error!("Async readback queue desynchronized during error handling");
+                    }
                 }
             }
         }

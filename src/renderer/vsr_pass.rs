@@ -1064,7 +1064,10 @@ impl VsrPass {
 
         // We assume the caller handles the fence/wait before actually reading the data
         // or we use host mapping if it's already finished.
-        let alloc_info = alloc.get_allocation_info(self.metrics_readback_alloc.as_ref().unwrap());
+        let allocation = self.metrics_readback_alloc.as_ref().ok_or_else(|| {
+            VsrError::MetricsReadbackFailed("Metrics readback allocation not initialized".into())
+        })?;
+        let alloc_info = alloc.get_allocation_info(allocation);
         let ptr = alloc_info.mapped_data;
         if !ptr.is_null() {
             let data = std::slice::from_raw_parts(ptr as *const u32, 4);

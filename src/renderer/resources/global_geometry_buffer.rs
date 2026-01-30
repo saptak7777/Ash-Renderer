@@ -300,8 +300,20 @@ impl DualHeapGeometryBuffer {
             return;
         }
 
-        let mut vertex_alloc = self.vertex_allocation.lock().unwrap();
-        let mut index_alloc = self.index_allocation.lock().unwrap();
+        let mut vertex_alloc = match self.vertex_allocation.lock() {
+            Ok(alloc) => alloc,
+            Err(poisoned) => {
+                log::error!("Vertex allocation mutex poisoned during destroy, attempting recovery");
+                poisoned.into_inner()
+            }
+        };
+        let mut index_alloc = match self.index_allocation.lock() {
+            Ok(alloc) => alloc,
+            Err(poisoned) => {
+                log::error!("Index allocation mutex poisoned during destroy, attempting recovery");
+                poisoned.into_inner()
+            }
+        };
 
         self.allocator
             .destroy_buffer(self.vertex_heap, &mut vertex_alloc);

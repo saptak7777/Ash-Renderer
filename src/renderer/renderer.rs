@@ -3054,7 +3054,10 @@ impl Renderer {
         // VSR likely needs standard sampling (raw depth).
         // Let's use standard default sampler.
         let depth_index = self.bindless_manager.add_sampled_image(
-            self.depth_buffer.as_ref().unwrap().view(),
+            self.depth_buffer
+                .as_ref()
+                .ok_or_else(|| AshError::VulkanError("Depth buffer not initialized".into()))?
+                .view(),
             self._default_texture.sampler(),
         )?;
         self.gbuffer_indices.depth_index = depth_index;
