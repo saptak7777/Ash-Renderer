@@ -36,12 +36,8 @@ impl ShaderReflection {
     ///
     /// Requires the `shader_reflection` feature to be enabled.
     #[cfg(feature = "shader_reflection")]
-    pub fn reflect(code: &[u8], stage: vk::ShaderStageFlags) -> Result<Self> {
-        let code_u32 = ash::util::read_spv(&mut Cursor::new(code)).map_err(|e| {
-            AshError::VulkanError(format!("Failed to parse SPIR-V for reflection: {e}"))
-        })?;
-
-        let reflection_module = Reflection::new_from_spirv(&code_u32)
+    pub fn reflect(code: &[u32], stage: vk::ShaderStageFlags) -> Result<Self> {
+        let reflection_module = Reflection::new_from_spirv(code)
             .map_err(|e| AshError::VulkanError(format!("SPIR-V reflection failed: {e}")))?;
 
         let mut reflection = ShaderReflection {
@@ -140,7 +136,7 @@ impl ShaderReflection {
     /// Stub implementation when shader_reflection feature is disabled.
     /// Returns default empty reflection.
     #[cfg(not(feature = "shader_reflection"))]
-    pub fn reflect(_code: &[u8], stage: vk::ShaderStageFlags) -> Result<Self> {
+    pub fn reflect(_code: &[u32], stage: vk::ShaderStageFlags) -> Result<Self> {
         log::warn!("ShaderReflection::reflect called without shader_reflection feature enabled - returning empty reflection");
         Ok(Self {
             stage,
@@ -169,12 +165,7 @@ impl ShaderReflection {
             lines.push(format!("  Descriptor set {set_idx}"));
         }
 
-        for attr in &self.input_attributes {
-            lines.push(format!(
-                "  Input: location={}, format={:?}",
-                attr.location, attr.format
-            ));
-        }
+        // Input attributes loop removed (rspirv-reflect migration skipped input extraction)
 
         lines.join("\n")
     }
@@ -273,10 +264,10 @@ impl ShaderModule {
             )));
         }
 
-        let reflection = ShaderReflection::reflect(code, stage)?;
-
         let code_u32 = ash::util::read_spv(&mut Cursor::new(code))
             .map_err(|e| AshError::VulkanError(format!("Failed to parse SPIR-V: {e}")))?;
+
+        let reflection = ShaderReflection::reflect(&code_u32, stage)?;
 
         let module = unsafe {
             let create_info = vk::ShaderModuleCreateInfo::default().code(&code_u32);
