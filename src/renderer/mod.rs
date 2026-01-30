@@ -18,7 +18,7 @@ pub mod hiz_pass;
 pub mod indirect_draw;
 pub mod instancing;
 pub mod light_culling_integration;
-// pub mod lod_system; // Deleted for Nanite transition
+// pub mod lod_system; // Deleted for VCGS transition
 pub mod model_renderer;
 pub mod motion_pass;
 pub mod passes;

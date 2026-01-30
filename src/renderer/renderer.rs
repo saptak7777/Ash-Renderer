@@ -2037,7 +2037,7 @@ impl Renderer {
     }
 
     pub fn register_mesh_handle(&mut self, handle: u32, mesh: &mut Mesh) -> Result<()> {
-        // Nanite Phase 2: Build Cluster DAG
+        // VCGS Phase 2: Build Cluster DAG
         // This generates the hierarchical cluster structure needed for GPU selection.
         crate::renderer::cluster_builder::build_mesh_dag(mesh);
 

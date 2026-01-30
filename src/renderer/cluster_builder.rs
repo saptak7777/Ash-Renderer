@@ -1,9 +1,13 @@
+//! # VCGS (Virtual Clustered Geometry System)
+//! A directed acyclic graph (DAG) based geometry virtualization system
+//! designed for continuous LOD and occlusion culling.
+
 use crate::renderer::resources::mesh::Mesh;
 use crate::renderer::resources::mesh::MeshCluster;
 use bytemuck;
 use rayon::prelude::*;
 
-/// Builds a cluster DAG for a mesh using meshopt (Nanite V2).
+/// Builds a cluster DAG for a mesh using meshopt (VCGS V2).
 pub fn build_mesh_dag(mesh: &mut Mesh) {
     if mesh.indices.is_none() {
         return;
@@ -13,7 +17,7 @@ pub fn build_mesh_dag(mesh: &mut Mesh) {
     let vertices = &mesh.vertices;
 
     log::info!(
-        "Building Nanite V2 DAG for '{}' ({} tris)...",
+        "Building VCGS V2 DAG for '{}' ({} tris)...",
         mesh.name,
         indices.len() / 3
     );

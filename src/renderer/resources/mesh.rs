@@ -6,7 +6,7 @@ use super::texture::{Texture, TextureData};
 use super::texture_compressor::{CompressionFormat, TextureCompressor};
 use crate::renderer::Material;
 
-/// Mesh Cluster for fine-grained culling (Nanite Phase 3)
+/// Mesh Cluster for fine-grained culling (VCGS Phase 3)
 #[derive(Debug, Clone, Copy, Default, bytemuck::Pod, bytemuck::Zeroable)]
 #[repr(C)]
 pub struct MeshCluster {

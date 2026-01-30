@@ -107,9 +107,9 @@ pub struct CullObjectData {
     pub color: [f32; 4],
     /// Custom data (user-defined)
     pub custom: [f32; 4],
-    /// Nanite: Parent cluster index (u32::MAX if root)
+    /// VCGS: Parent cluster index (u32::MAX if root)
     pub parent_index: u32,
-    /// Nanite: Error metric for LOD selection
+    /// VCGS: Error metric for LOD selection
     pub error_metric: f32,
     /// Culling flags (e.g., enabled, shadow-caster)
     pub flags: u32,
