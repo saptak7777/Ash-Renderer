@@ -30,7 +30,7 @@ Oh, and did I mention it's **FULL BDA** (Buffer Device Address) and **FULL BINDL
 - ✅ **PBR Workflow**: Metallic/Roughness standard, with automatic GLB material ingestion.
 - ✅ **Targeted Readbacks**: We read back what matters (VSR metrics, headless screenshots) without stalling. The rest stays on the GPU.
 - ✅ **VSM (Virtual Shadow Maps)**: Full implementation with 16k+ resolution shadows, virtual memory paging, clipmap cascades, and smart cache invalidation. No artifacts, just crispy shadows.
-- ✅ **Nanite V2 (Virtual Geometry)**: Professional mesh clustering using `meshopt` for leaf generation and simplification. Spatial sorting (Morton Codes) ensures extremely high cache locality. Continuous, invisible LOD transitions.
+- ✅ **VCGS (Virtual Clustered Geometry System)**: Professional mesh clustering using `meshopt` for leaf generation and simplification. Spatial sorting (Morton Codes) ensures extremely high cache locality. Continuous, invisible LOD transitions.
 - ✅ **Post-Processing**: Bloom, Tonemapping, and a VSR (Temporal) implementation that's surprisingly okay.
 - ✅ **Stability First**: Fixed the infamous crashes. Descriptor leaks patched. Resize is rock solid.
 - ✅ **Debug Visualization**: See exactly what's being culled with colored wireframes (Red=Gone, Green=Seen).
