@@ -12,7 +12,6 @@ pub mod features;
 // pub mod forward_plus_descriptor; // DELETED: Using BDA
 pub mod forward_plus_integration;
 pub mod frame_graph;
-pub mod frustum_culling;
 pub mod fullscreen_pass;
 pub mod gbuffer;
 pub mod hdr_framebuffer;

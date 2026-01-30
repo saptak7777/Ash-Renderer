@@ -6,14 +6,11 @@
 //! # Features
 //! - Automatic instance batching
 //! - Per-instance data (transform, color, custom)
-//! - Frustum culling of instances
 //! - Statistics tracking
 
-use crate::renderer::frustum_culling::Frustum;
 use crate::renderer::occlusion_culling::CullObjectData;
 use crate::renderer::resources::material::MaterialHandle;
 use ahash::AHasher;
-use glam::Vec3;
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 
@@ -49,10 +46,6 @@ pub struct InstanceBatch {
     pub instances: Vec<InstanceData>,
     /// Hashes of instances in this batch (for duplicate detection)
     pub instance_hashes: HashSet<u64>,
-    /// Bounding sphere center (for frustum culling)
-    pub bounds_center: Vec3,
-    /// Bounding sphere radius
-    pub bounds_radius: f32,
 }
 
 impl InstanceBatch {
@@ -61,8 +54,6 @@ impl InstanceBatch {
             key,
             instances: Vec::new(),
             instance_hashes: HashSet::new(),
-            bounds_center: Vec3::ZERO,
-            bounds_radius: 0.0,
         }
     }
 
@@ -127,26 +118,6 @@ impl InstanceBatch {
         self.instances.clear();
         self.instance_hashes.clear();
     }
-
-    /// Calculate bounding sphere from instances
-    pub fn calculate_bounds(&mut self) {
-        if self.instances.is_empty() {
-            return;
-        }
-
-        // Calculate center as average of positions
-        let sum: Vec3 = self.instances.iter().map(|i| i.position()).sum();
-        self.bounds_center = sum / self.instances.len() as f32;
-
-        // Find maximum distance from center (including instance radius)
-        let max_dist = self
-            .instances
-            .iter()
-            .map(|i| (i.position() - self.bounds_center).length() + i.world_radius())
-            .fold(0.0f32, f32::max);
-
-        self.bounds_radius = max_dist;
-    }
 }
 
 /// Instancing statistics
@@ -193,8 +164,6 @@ pub struct InstancingManager {
     batches: HashMap<BatchKey, InstanceBatch>,
     /// Statistics
     stats: InstancingStats,
-    /// Enable frustum culling of instances
-    frustum_cull: bool,
     /// Enable duplicate prevention
     duplicate_prevention: bool,
 }
@@ -205,7 +174,6 @@ impl InstancingManager {
         Self {
             batches: HashMap::new(),
             stats: InstancingStats::default(),
-            frustum_cull: true,
             duplicate_prevention: true,
         }
     }
@@ -271,11 +239,6 @@ impl InstancingManager {
         // Remove empty batches
         self.batches.retain(|_, batch| !batch.is_empty());
 
-        // Update bounds for culling
-        for batch in self.batches.values_mut() {
-            batch.calculate_bounds();
-        }
-
         // Calculate stats
         self.stats.batch_count = self.batches.len() as u32;
         if self.stats.batch_count > 0 {
@@ -287,11 +250,6 @@ impl InstancingManager {
     /// Get all batches for rendering
     pub fn batches(&self) -> impl Iterator<Item = &InstanceBatch> {
         self.batches.values()
-    }
-
-    /// Get batches that cast shadows
-    pub fn shadow_batches(&self) -> impl Iterator<Item = &InstanceBatch> {
-        self.batches.values().filter(|b| b.casts_shadows())
     }
 
     /// Get visible opaque batches
@@ -319,11 +277,6 @@ impl InstancingManager {
         &self.stats
     }
 
-    /// Enable/disable frustum culling
-    pub fn set_frustum_cull(&mut self, enabled: bool) {
-        self.frustum_cull = enabled;
-    }
-
     /// Enable/disable duplicate prevention
     pub fn set_duplicate_prevention(&mut self, enabled: bool) {
         self.duplicate_prevention = enabled;
@@ -332,24 +285,6 @@ impl InstancingManager {
     /// Is duplicate prevention enabled?
     pub fn is_duplicate_prevention_enabled(&self) -> bool {
         self.duplicate_prevention
-    }
-
-    /// Cull shadow casting batches against a frustum
-    /// Returns a vector of tuples (batch, visible_instance_indices)
-    pub fn cull_shadow_casters(&self, frustum: &Frustum) -> Vec<(&InstanceBatch, Vec<u32>)> {
-        let mut visible_batches = Vec::new();
-
-        for batch in self.shadow_batches() {
-            // Test batch bounding sphere against frustum
-            if frustum.test_sphere(batch.bounds_center, batch.bounds_radius) {
-                // For Coarse Culling phase, assume all instances are visible if batch is visible.
-                // TODO: Implement per-instance culling if needed.
-                let indices = (0..batch.count() as u32).collect();
-                visible_batches.push((batch, indices));
-            }
-        }
-
-        visible_batches
     }
 }
 
