@@ -4,7 +4,7 @@ use ash::vk;
 use std::sync::Arc;
 
 use crate::vulkan::Allocator;
-use crate::{AshError, Result};
+use crate::Result;
 
 use super::clipmap_manager::ClipmapManager;
 use super::compute_pipelines::VsmComputePipelines;
@@ -32,13 +32,6 @@ pub struct VsmFeature {
 
     /// Shadow culling pass
     pub shadow_cull_pass: ShadowCullPass,
-
-    /// Descriptor pool for VSM
-    descriptor_pool: vk::DescriptorPool,
-
-    /// Descriptor sets (per frame)
-    _analysis_descriptor_sets: Vec<vk::DescriptorSet>,
-    _allocator_descriptor_sets: Vec<vk::DescriptorSet>,
 
     /// Current frame index
     current_frame: u32,
@@ -89,70 +82,6 @@ impl VsmFeature {
         let shadow_pass =
             VsmShadowPass::new(Arc::clone(&device), Arc::clone(&allocator), &resources)?;
 
-        // Create descriptor pool
-        let pool_sizes = [
-            vk::DescriptorPoolSize {
-                ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-                descriptor_count: frame_count * 2, // Depth buffer + page table
-            },
-            vk::DescriptorPoolSize {
-                ty: vk::DescriptorType::UNIFORM_BUFFER,
-                descriptor_count: frame_count * 6, // Metadata, camera, light x2, clipmap data
-            },
-            vk::DescriptorPoolSize {
-                ty: vk::DescriptorType::STORAGE_BUFFER,
-                descriptor_count: frame_count * 8, // Request, allocation, free pool x2 + safety margin
-            },
-            vk::DescriptorPoolSize {
-                ty: vk::DescriptorType::STORAGE_IMAGE,
-                descriptor_count: frame_count * 2, // Page table x2
-            },
-        ];
-
-        let pool_info = vk::DescriptorPoolCreateInfo::default()
-            .pool_sizes(&pool_sizes)
-            .max_sets(frame_count * 2); // Analysis + Allocator per frame
-
-        let descriptor_pool = device
-            .create_descriptor_pool(&pool_info, None)
-            .map_err(|e| {
-                AshError::VulkanError(format!("Failed to create VSM descriptor pool: {e:?}"))
-            })?;
-
-        // Allocate descriptor sets (will be populated later)
-        let mut analysis_descriptor_sets = Vec::new();
-        let mut allocator_descriptor_sets = Vec::new();
-
-        for _ in 0..frame_count {
-            let analysis_layouts = [compute_pipelines.analysis_descriptor_set_layout];
-            let analysis_alloc_info = vk::DescriptorSetAllocateInfo::default()
-                .descriptor_pool(descriptor_pool)
-                .set_layouts(&analysis_layouts);
-
-            let analysis_sets = device
-                .allocate_descriptor_sets(&analysis_alloc_info)
-                .map_err(|e| {
-                    AshError::VulkanError(format!(
-                        "Failed to allocate analysis descriptor set: {e:?}"
-                    ))
-                })?;
-            analysis_descriptor_sets.push(analysis_sets[0]);
-
-            let allocator_layouts = [compute_pipelines.allocator_descriptor_set_layout];
-            let allocator_alloc_info = vk::DescriptorSetAllocateInfo::default()
-                .descriptor_pool(descriptor_pool)
-                .set_layouts(&allocator_layouts);
-
-            let allocator_sets = device
-                .allocate_descriptor_sets(&allocator_alloc_info)
-                .map_err(|e| {
-                    AshError::VulkanError(format!(
-                        "Failed to allocate allocator descriptor set: {e:?}"
-                    ))
-                })?;
-            allocator_descriptor_sets.push(allocator_sets[0]);
-        }
-
         // Create shadow cull pass
         let shadow_cull_pass = ShadowCullPass::new(
             Arc::clone(&device),
@@ -178,9 +107,6 @@ impl VsmFeature {
             compute_pipelines,
             shadow_pass,
             shadow_cull_pass,
-            descriptor_pool,
-            _analysis_descriptor_sets: analysis_descriptor_sets,
-            _allocator_descriptor_sets: allocator_descriptor_sets,
             current_frame: 0,
             device,
             allocator,
@@ -439,12 +365,6 @@ impl VsmFeature {
         self.shadow_pass.destroy(&self.allocator);
         self.shadow_cull_pass.destroy(&self.allocator);
         self.compute_pipelines.destroy();
-
-        if self.descriptor_pool != vk::DescriptorPool::null() {
-            self.device
-                .destroy_descriptor_pool(self.descriptor_pool, None);
-            self.descriptor_pool = vk::DescriptorPool::null();
-        }
 
         self.resources.destroy();
 
