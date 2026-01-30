@@ -47,6 +47,9 @@ pub struct ForwardPlusIntegration {
     camera_bufs: Vec<vk::Buffer>,
     camera_allocs: Vec<vk_mem::Allocation>,
 
+    /// Whether the integration has been destroyed
+    destroyed: bool,
+
     /// Compute Pipeline Resources
     compute_pipeline: Option<ComputePipeline>,
     compute_descriptor_pool: vk::DescriptorPool,
@@ -115,6 +118,7 @@ impl ForwardPlusIntegration {
             lights,
             camera_bufs,
             camera_allocs,
+            destroyed: false,
             compute_pipeline: None,
             compute_descriptor_pool: vk::DescriptorPool::null(),
             compute_descriptor_sets: Vec::new(),
@@ -494,9 +498,12 @@ impl ForwardPlusIntegration {
     /// The caller must ensure that no GPU commands using these resources are
     /// currently executing on the device.
     pub unsafe fn destroy(&mut self, allocator: &Allocator, device: &ash::Device) {
-        if !self.initialized {
+        if self.destroyed {
             return;
         }
+        self.destroyed = true;
+
+        log::debug!("Destroying Forward+ Integration");
 
         if self.compute_descriptor_pool != vk::DescriptorPool::null() {
             device.destroy_descriptor_pool(self.compute_descriptor_pool, None);

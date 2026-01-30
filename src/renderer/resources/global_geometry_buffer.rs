@@ -51,6 +51,8 @@ pub struct DualHeapGeometryBuffer {
     index_device_address: vk::DeviceAddress,
     index_capacity: u64,
     index_offset: AtomicU64,
+
+    destroyed: bool,
 }
 
 impl DualHeapGeometryBuffer {
@@ -130,6 +132,7 @@ impl DualHeapGeometryBuffer {
             index_device_address,
             index_capacity,
             index_offset: AtomicU64::new(0),
+            destroyed: false,
         })
     }
 
@@ -293,6 +296,10 @@ impl DualHeapGeometryBuffer {
     /// # Safety
     /// Resources must not be in use by the GPU
     pub unsafe fn destroy(&mut self) {
+        if self.destroyed {
+            return;
+        }
+
         let mut vertex_alloc = self.vertex_allocation.lock().unwrap();
         let mut index_alloc = self.index_allocation.lock().unwrap();
 
@@ -300,6 +307,10 @@ impl DualHeapGeometryBuffer {
             .destroy_buffer(self.vertex_heap, &mut vertex_alloc);
         self.allocator
             .destroy_buffer(self.index_buffer, &mut index_alloc);
+
+        self.vertex_heap = vk::Buffer::null();
+        self.index_buffer = vk::Buffer::null();
+        self.destroyed = true;
 
         log::info!("DualHeapGeometryBuffer destroyed");
     }

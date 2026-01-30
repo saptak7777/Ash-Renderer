@@ -6,10 +6,15 @@
 
 ## What This Is (Probably)
 
-Ash Renderer is a low-level Vulkan rendering library for Rust projects that want more control than a high-level engine but don't want to write 1,000 lines of boilerplate just to see a triangle. It uses a Forward+ approach, meaning it can technically handle more lights than your average basement, and relies on a "Dumb Pipe" philosophy—it mostly just renders what you give it.
+Ash Renderer is a low-level Vulkan rendering library for Rust projects that want more control than a high-level engine but don't want to write 1,000 lines of boilerplate just to see a triangle. It uses a Forward+ approach, meaning it can technically handle more lights than your average basement, and relies on a "Dumb Pipe" philosophy—it mostly just renders what you give it. 
+
+Oh, and did I mention it's **FULL BDA** (Buffer Device Address) and **FULL BINDLESS**? Yeah, we went there. Your CPU will thank us for not constantly bothering it with buffer bindings and descriptor updates. It's basically on vacation while your GPU does all the heavy lifting.
 
 > [!IMPORTANT]
 > **Fair Warning**: This is a rendering component, not a game engine. You still have to handle your own physics, ECS, and logic. It's like buying a high-performance engine for a car you haven't built yet; it runs great on a test stand, but you can't drive it to the grocery store.
+
+> [!NOTE]
+> **Quick Apology**: The skinning system is temporarily disabled because it was using legacy LOD architecture. I'll implement modern skinning in the next update. Yes, I know this is annoying if you wanted animated characters. Sorry about that.
 
 ---
 
@@ -20,13 +25,14 @@ Ash Renderer is a low-level Vulkan rendering library for Rust projects that want
 - ✅ **Forward+ Lighting**: Tile-based culling for hundreds of point and spot lights.
 - ✅ **RAGE Hemisphere Ambient**: AAA-standard ambient model for physically plausible fill lighting.
 - ✅ **Bindless Resources**: Up to 16,384 texture slots because who has time to bind things manually?
+- ✅ **FULL BDA (Buffer Device Address)**: Direct GPU memory access. No more descriptor binding gymnastics.
 - ✅ **GPU-Driven Culling**: Hi-Z occlusion and frustum culling so your GPU doesn't melt.
 - ✅ **PBR Workflow**: Metallic/Roughness standard, with automatic GLB material ingestion.
 - ✅ **Async Readbacks**: Get data back from the GPU without stalling the whole pipeline (usually).
-- ✅ **VSM (Virtual Shadow Maps)**: Finalized implementation. 16k+ resolution shadows with virtual memory paging, clipmap cascades, and smart cache invalidation. No artifacts, just crispy shadows.
-- ✅ **Nanite V2 (Virtual Geometry)**: "The Polish" update. Professional mesh clustering using `meshopt` for leaf generation and simplification. Spatial sorting (Morton Codes) ensures extremely high cache locality. Continuous, invisible LOD transitions.
+- ✅ **VSM (Virtual Shadow Maps)**: Full implementation with 16k+ resolution shadows, virtual memory paging, clipmap cascades, and smart cache invalidation. No artifacts, just crispy shadows.
+- ✅ **Nanite V2 (Virtual Geometry)**: Professional mesh clustering using `meshopt` for leaf generation and simplification. Spatial sorting (Morton Codes) ensures extremely high cache locality. Continuous, invisible LOD transitions.
 - ✅ **Post-Processing**: Bloom, Tonemapping, and a VSR (Temporal) implementation that's surprisingly okay.
-- ✅ **Stability First**: Fixed the infamous `0xc000041d` sporadic crash. Descriptor leaks patched. Resize is rock solid.
+- ✅ **Stability First**: Fixed the infamous crashes. Descriptor leaks patched. Resize is rock solid.
 - ✅ **Debug Visualization**: See exactly what's being culled with colored wireframes (Red=Gone, Green=Seen).
 - ✅ **Shader Hot-Reload**: Iterate on compute shaders instantly (F5) without restarting.
 - ✅ **Safe RHI**: No more raw pointers bro, I swear. We use `GpuBuffer<T>` now, very safe, very typed.
@@ -40,6 +46,7 @@ Ash Renderer is a low-level Vulkan rendering library for Rust projects that want
 - ❌ **Scene Graph**: We strictly draw what's submitted each frame.
 - ❌ **Asset Management**: We provide loaders, but you decide where they live.
 - ❌ **Audio**: Total silence.
+- ❌ **Skinning/Animation**: Currently disabled due to legacy LOD architecture issues (see apology above).
 
 ---
 
@@ -49,8 +56,8 @@ Add this to your `Cargo.toml` and pray to the Vulkan gods:
 
 ```toml
 [dependencies]
-ash_renderer = "0.4.86"
-glam = "0.29" # Or whatever version we're using this week
+ash_renderer = "0.5.25"
+glam = "0.31" # Or whatever version we're using this week
 ```
 
 ---
@@ -71,6 +78,7 @@ use winit::event::WindowEvent;
 struct App {
     window: Option<Window>,
     renderer: Option<Renderer>,
+    render_commands: Vec<ash_renderer::renderer::RenderCommand>,
 }
 
 impl ApplicationHandler for App {
@@ -83,6 +91,27 @@ impl ApplicationHandler for App {
         // Init renderer (Warning: May take a second to cook shaders)
         self.renderer = Some(Renderer::new(&surface_provider).expect("Vulkan forgot how to GPU"));
         self.window = Some(window);
+        
+        // Setup basic mesh and material
+        if let Some(ref mut renderer) = self.renderer {
+            let mut cube = Mesh::create_cube();
+            let mesh_handle = renderer.upload_mesh(cube).unwrap();
+            
+            let material = Material {
+                color: [0.8, 0.8, 0.8, 1.0],
+                metallic: 0.0,
+                roughness: 0.5,
+                ..Default::default()
+            };
+            let material_handle = renderer.register_and_upload_material(material).unwrap();
+            
+            self.render_commands.push(ash_renderer::renderer::RenderCommand {
+                mesh_handle,
+                material_handle,
+                transform: glam::Mat4::IDENTITY,
+                ..Default::default()
+            });
+        }
     }
 
     fn window_event(&mut self, _el: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
@@ -90,10 +119,13 @@ impl ApplicationHandler for App {
             if let (Some(r), Some(w)) = (&mut self.renderer, &self.window) {
                 let camera_pos = glam::Vec3::new(0.0, 2.0, 5.0);
                 let view = glam::Mat4::look_at_rh(camera_pos, glam::Vec3::ZERO, glam::Vec3::Y);
-                let proj = glam::Mat4::perspective_rh(45.0_f32.to_radians(), 1.6, 0.1, 100.0);
+                let aspect = w.inner_size().width as f32 / w.inner_size().height as f32;
+                let mut proj = glam::Mat4::perspective_rh(45.0_f32.to_radians(), aspect, 0.1, 100.0);
+                proj.y_axis.y *= -1.0;
                 
-                // Draw all the things
-                r.render_frame(view, proj, camera_pos, None).unwrap();
+                // Submit commands then render
+                let _ = r.submit_render_commands(&self.render_commands);
+                let _ = r.render_frame(view, proj, camera_pos, None);
             }
         }
     }
@@ -110,31 +142,42 @@ use ash_renderer::renderer::features::ambient_lighting::{AmbientPreset, Lighting
 // Build a preset or custom lighting setup (Compile-time verified!)
 let lighting = LightingBuilder::new()
     .with_ambient_preset(AmbientPreset::OutdoorDay)
-    .with_sun() // Adds a default global directional light
+    .with_directional(
+        Vec3::new(-0.5, -1.0, -0.5).normalize(),
+        Vec3::splat(3.0),
+        1.0,
+    )
     .build();
 
 renderer.set_lighting(&lighting);
 ```
 
-### 3. Spotlights & Dynamic Gear
+### 3. GLB Model Loading (The Easy Way)
 
-We also haven't ignored spotlights. You can update them like this:
+Loading GLB models is now ridiculously simple:
 
 ```rust
-let spot = SpotLight::new(
-    Vec3::new(0.0, 10.0, 0.0), // Position
-    Vec3::new(0.0, -1.0, 0.0), // Direction
-    [1.0, 0.8, 0.6, 10.0],    // Color + Intensity
-    25.0,                      // Range
-    0.5,                       // Inner Angle (rads)
-    0.8,                       // Outer Angle (rads)
-);
+use ash_renderer::renderer::resources::gltf_loader;
 
-// This tells the Forward+ culler about your new flashlight
-renderer.update_spot_lights(&[spot]);
+// Load model from file
+let meshes = gltf_loader::load_model("assets/models/car.glb")?;
+
+// Upload first mesh
+let mesh = meshes.into_iter().next().unwrap();
+let mesh_handle = renderer.upload_mesh(mesh)?;
+
+// Create render command
+let command = ash_renderer::renderer::RenderCommand {
+    mesh_handle,
+    material_handle: ash_renderer::renderer::MaterialHandle::null(),
+    transform: glam::Mat4::IDENTITY,
+    ..Default::default()
+};
+
+renderer.submit_render_commands(&[command])?;
 ```
 
-### 3. Buffer Building (The Fluent Way)
+### 4. Buffer Building (The Fluent Way)
 
 Creating buffers doesn't have to be a nightmare:
 
@@ -146,7 +189,7 @@ let (buffer, allocation) = BufferBuilder::new(1024)
     .build(renderer.allocator())?;
 ```
 
-### 4. Parallel Command Recording (The "Fastness" Way)
+### 5. Parallel Command Recording (The "Fastness" Way)
 
 If you have many CPU cores (rich guy), use them all to record commands.
 
@@ -166,16 +209,40 @@ recorder.record_parallel(cmd, pass_count, |idx, cmd| {
 ### Renderer
 The heavy lifter. You probably only need one.
 - `Renderer::new(provider)`: The constructor. Expects a `SurfaceProvider`.
-- `render_frame(...)`: Call this every frame or nothing happens.
-- `upload_mesh(mesh)`: Sends geometry to the GPU using new `GpuBuffer`, very type safe.
-- `allocate_transient(...)`: Get temporary image for one frame. Automatic delete, no leak guarantee.
-- `update_point_lights(...)`: For the spheres of light.
-- `update_spot_lights(...)`: For the cones of light.
+- `render_frame(view, proj, camera_pos, target)`: Call this every frame or nothing happens.
+- `upload_mesh(mesh)`: Sends geometry to the GPU, returns handle.
+- `register_and_upload_material(material)`: Registers and uploads PBR material.
+- `submit_render_commands(commands)`: Submit render commands for the frame.
+- `set_lighting(lighting)`: Set up RAGE hemisphere ambient + directional lights.
+- `request_swapchain_resize(extent)`: Handle window resizing properly.
+
+### RenderCommand
+What you actually submit each frame:
+- `mesh_handle`: Handle to uploaded mesh
+- `material_handle`: Handle to uploaded material  
+- `transform`: World transformation matrix
+- `..Default::default()`: Other fields have sensible defaults
+
+### Lighting
+AAA-standard lighting setup:
+- `LightingBuilder`: Fluent API for building lighting configurations
+- `AmbientPreset`: Pre-configured hemisphere ambient setups (OutdoorDay, IndoorLit, etc.)
+- `DirectionalLight`: Sun/moon style lighting
+- `PointLight`: Spherical light sources
+- `SpotLight`: Conical light sources
+
+### VSM (Virtual Shadow Maps)
+The shadow system that doesn't suck:
+- `VsmFeature`: Complete VSM system with clipmaps and paging
+- `default_vsm_config()`: Good starting configuration
+- `high_quality_vsm_config()`: For when you really need crispy shadows
+- `performance_vsm_config()`: For potatos
 
 ### Forward+ Pipeline
 The magic that makes lights fast.
 - Tile size is 16x16 by default.
-- Depth pre-pass is technically integrated but we sometimes skip it if we're feeling lazy.
+- Automatic light culling and clustering.
+- Supports hundreds of dynamic lights without melting your GPU.
 
 ---
 
@@ -184,24 +251,76 @@ The magic that makes lights fast.
 - **Only .glb files**: We really like GLTF. If you have OBJs, you'll need to convert them.
 - **Vulkan 1.2+**: If your GPU is from the Victorian era, it might not support descriptor indexing.
 - **Sparse Assets**: We don't handle streaming yet; everything you submit should be on the GPU.
+- **No Skinning**: Currently disabled due to legacy LOD architecture issues (see apology above).
+- **No Animation**: Same story as skinning - will be back with modern implementation.
 
 ---
 
 ## Troubleshooting
 
 ### "The screen is black!"
-1. Did you submit any render commands?
-2. Is your camera pointing at the floor?
-3. Check the Vulkan validation layers. If they're screaming, listen to them.
+1. Did you submit any render commands using `submit_render_commands()`?
+2. Did you upload a mesh and material?
+3. Is your camera pointing at the floor?
+4. Check the Vulkan validation layers. If they're screaming, listen to them.
 
 ### "It crashed during init!"
 Usually means the driver doesn't support a required extension (like `descriptor_indexing`). We try to check, but sometimes we just crash. Oops.
 
+### "My GLB model doesn't load!"
+1. Make sure the file path is correct
+2. Check that the GLB contains actual meshes (not just animations)
+3. Verify texture paths are embedded or accessible
+
+### "VSM shadows are flickering!"
+1. Try `high_quality_vsm_config()` instead of default
+2. Check if your directional light is moving too fast
+3. Consider increasing cache size in VSM config
+
 ---
+
+## Examples (Actually Working)
+
+- `01_triangle`: The classic "hello world" of graphics
+- `02_cube`: Simple colored cube with basic PBR
+- `03_model_loading`: Load and display a GLB model
+- `08_car_model`: Full PBR car model with materials
+- `09_basic_mesh`: Minimal example, great starting point
+
+Run them with:
+```bash
+cargo run --example 01_triangle
+cargo run --example 08_car_model --features "gltf_loading"
+```
 
 ## Contributing
 
 PRs are welcome! If you find a bug, open an issue. I might fix it, or I might just document it here as a "feature."
+
+**Priority areas for contributions:**
+- Modern skinning system (to fix the current limitation)
+- More format support (OBJ, FBX, etc.)
+- Asset streaming system
+- Better documentation and examples
+
+---
+
+## The Real Reason This Exists
+
+**WARNING**: This engine is built on pure recklessness and a willingness to break everything in the name of progress. I don't care about backward compatibility. I don't care about your carefully crafted code. I care about making this the most badass renderer on the block.
+
+Every update might:
+- Rename all your favorite functions
+- Change the entire API structure 
+- Delete features you loved
+- Add new features you didn't know you needed
+- Make your existing code explode in spectacular ways
+
+But here's the thing: it's constantly evolving. While other libraries are busy maintaining decade-old APIs for the sake of "stability," we're here pushing the limits of what's possible. Breaking changes aren't bugs—they're features.
+
+Think of this as the opposite of enterprise software. We move fast and break things. If you want stability and predictability, go use something else. If you want cutting-edge rendering tech that evolves faster than your GPU drivers, welcome aboard.
+
+Just remember to check the changelog before updating. Your code's life depends on it.
 
 ---
 

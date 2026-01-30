@@ -11,6 +11,7 @@ use super::compute_pipelines::VsmComputePipelines;
 use super::page_manager::{PageManager, PageManagerStats};
 use super::resources::{VsmConfig, VsmResources};
 use super::shadow_pass::VsmShadowPass;
+use crate::renderer::passes::ShadowCullPass;
 
 /// VSM Feature - Complete virtual shadow map system
 pub struct VsmFeature {
@@ -28,6 +29,9 @@ pub struct VsmFeature {
 
     /// Shadow rendering pass
     pub shadow_pass: VsmShadowPass,
+
+    /// Shadow culling pass
+    pub shadow_cull_pass: ShadowCullPass,
 
     /// Descriptor pool for VSM
     descriptor_pool: vk::DescriptorPool,
@@ -47,6 +51,9 @@ pub struct VsmFeature {
 
     /// Enabled state
     enabled: bool,
+
+    /// Whether the feature has been destroyed
+    destroyed: bool,
 }
 
 impl VsmFeature {
@@ -146,7 +153,14 @@ impl VsmFeature {
             allocator_descriptor_sets.push(allocator_sets[0]);
         }
 
-        log::info!("VSM feature created successfully");
+        // Create shadow cull pass
+        let shadow_cull_pass = ShadowCullPass::new(
+            Arc::clone(&device),
+            &allocator,
+            frame_count,
+            2048, // max_objects
+            config.clipmap_levels,
+        )?;
 
         // Create clipmap manager if clipmaps are enabled
         let clipmap_manager = if config.clipmap_levels > 0 {
@@ -155,12 +169,15 @@ impl VsmFeature {
             None
         };
 
+        log::info!("VSM feature created successfully");
+
         Ok(Self {
             resources,
             page_manager,
             clipmap_manager,
             compute_pipelines,
             shadow_pass,
+            shadow_cull_pass,
             descriptor_pool,
             _analysis_descriptor_sets: analysis_descriptor_sets,
             _allocator_descriptor_sets: allocator_descriptor_sets,
@@ -168,6 +185,7 @@ impl VsmFeature {
             device,
             allocator,
             enabled: true,
+            destroyed: false,
         })
     }
 
@@ -252,31 +270,147 @@ impl VsmFeature {
         self.clipmap_manager.is_some()
     }
 
-    /// Render shadows for all allocated pages
+    /// Render shadows using GPU-driven culling and indirect drawing
     ///
     /// # Safety
-    /// Command buffer must be in recording state. Draw function will be called for each page.
-    pub unsafe fn render_shadows<F>(
+    /// Command buffer must be in recording state.
+    pub unsafe fn render_shadows(
         &self,
         cmd: vk::CommandBuffer,
-        light_space_matrix: &glam::Mat4,
+        light_dir: glam::Vec3,
+        object_count: u32,
+        frame_index: usize,
         frame_set: vk::DescriptorSet,
         bindless_set: vk::DescriptorSet,
-        draw_fn: F,
-    ) where
-        F: FnMut(vk::CommandBuffer, &super::resources::PageAllocation),
-    {
+        frame_ptr: u64,
+        vertex_ptr: u64,
+        instance_ptr: u64,
+        material_ptr: u64,
+        index_ptr: u64,
+        light_ptr: u64,
+        tile_ptr: u64,
+    ) {
         let allocations = self.page_manager.get_allocated_pages();
-        let page_size = self.resources.config().page_size;
+        if allocations.is_empty() {
+            return;
+        }
 
-        self.shadow_pass.render_shadows(
+        let page_size = self.resources.config().page_size;
+        let page_table_res = self.resources.config().page_table_resolution();
+
+        // 1. Clear count buffers for this frame
+        let count_buffer = self.shadow_cull_pass.count_buffers[frame_index];
+        self.device
+            .cmd_fill_buffer(cmd, count_buffer, 0, vk::WHOLE_SIZE, 0);
+
+        // 2. Memory barrier to ensure clear is finished
+        let clear_barrier = vk::BufferMemoryBarrier::default()
+            .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+            .dst_access_mask(vk::AccessFlags::SHADER_READ | vk::AccessFlags::SHADER_WRITE)
+            .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .buffer(count_buffer)
+            .offset(0)
+            .size(vk::WHOLE_SIZE);
+
+        self.device.cmd_pipeline_barrier(
+            cmd,
+            vk::PipelineStageFlags::TRANSFER,
+            vk::PipelineStageFlags::COMPUTE_SHADER,
+            vk::DependencyFlags::empty(),
+            &[],
+            &[clear_barrier],
+            &[],
+        );
+
+        // 3. Dispatch culling for each clipmap level and collect matrices
+        let mut level_matrices = Vec::new();
+        if let Some(ref clipmap_manager) = self.clipmap_manager {
+            for level_idx in 0..clipmap_manager.level_count() {
+                if let Some(level) = clipmap_manager.level(level_idx) {
+                    let view_proj = level.view_projection_matrix(light_dir, page_table_res);
+                    level_matrices.push(view_proj);
+
+                    self.shadow_cull_pass.cull_shadows(
+                        cmd,
+                        frame_index,
+                        view_proj,
+                        object_count,
+                        0, // base_index
+                        level_idx as u32,
+                        instance_ptr,
+                    );
+
+                    // Memory barrier between levels for atomic counter visibility (Suggested)
+                    self.device.cmd_pipeline_barrier(
+                        cmd,
+                        vk::PipelineStageFlags::COMPUTE_SHADER,
+                        vk::PipelineStageFlags::COMPUTE_SHADER,
+                        vk::DependencyFlags::empty(),
+                        &[],
+                        &[vk::BufferMemoryBarrier::default()
+                            .src_access_mask(vk::AccessFlags::SHADER_WRITE)
+                            .dst_access_mask(
+                                vk::AccessFlags::SHADER_READ | vk::AccessFlags::SHADER_WRITE,
+                            )
+                            .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                            .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                            .buffer(count_buffer)
+                            .offset((level_idx as vk::DeviceSize) * 4)
+                            .size(4)],
+                        &[],
+                    );
+                }
+            }
+        }
+
+        // 4. Pipeline barrier: Compute -> Indirect/Draw
+        let cull_barrier = vk::BufferMemoryBarrier::default()
+            .src_access_mask(vk::AccessFlags::SHADER_WRITE)
+            .dst_access_mask(vk::AccessFlags::INDIRECT_COMMAND_READ)
+            .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .buffer(self.shadow_cull_pass.indirect_buffers[frame_index])
+            .offset(0)
+            .size(vk::WHOLE_SIZE);
+
+        let count_barrier = vk::BufferMemoryBarrier::default()
+            .src_access_mask(vk::AccessFlags::SHADER_WRITE)
+            .dst_access_mask(vk::AccessFlags::INDIRECT_COMMAND_READ)
+            .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .buffer(count_buffer)
+            .offset(0)
+            .size(vk::WHOLE_SIZE);
+
+        self.device.cmd_pipeline_barrier(
+            cmd,
+            vk::PipelineStageFlags::COMPUTE_SHADER,
+            vk::PipelineStageFlags::DRAW_INDIRECT,
+            vk::DependencyFlags::empty(),
+            &[],
+            &[cull_barrier, count_barrier],
+            &[],
+        );
+
+        // 5. Render using indirect commands
+        self.shadow_pass.render_shadows_indirect(
             cmd,
             &allocations,
             page_size,
-            light_space_matrix,
             frame_set,
             bindless_set,
-            draw_fn,
+            self.shadow_cull_pass.indirect_buffers[frame_index],
+            count_buffer,
+            2048, // max_commands_per_level
+            &level_matrices,
+            material_ptr,
+            index_ptr,
+            light_ptr,
+            tile_ptr,
+            frame_ptr,
+            vertex_ptr,
+            instance_ptr,
         );
     }
 
@@ -295,9 +429,15 @@ impl VsmFeature {
     /// # Safety
     /// Must be called before device is destroyed. Resources must not be in use.
     pub unsafe fn destroy(&mut self) {
+        if self.destroyed {
+            return;
+        }
+        self.destroyed = true;
+
         log::debug!("Destroying VSM feature");
 
         self.shadow_pass.destroy(&self.allocator);
+        self.shadow_cull_pass.destroy(&self.allocator);
         self.compute_pipelines.destroy();
 
         if self.descriptor_pool != vk::DescriptorPool::null() {

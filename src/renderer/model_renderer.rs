@@ -21,10 +21,20 @@ pub struct UploadedMesh {
 }
 
 impl MaterialPushConstants {
-    pub fn new(material_handle: MaterialHandle) -> Self {
+    pub fn new(handle: MaterialHandle) -> Self {
         Self {
-            material_handle,
-            ..Default::default()
+            light_ptr_low: 0,
+            light_ptr_high: 0,
+            tile_ptr_low: 0,
+            tile_ptr_high: 0,
+            material_handle: handle,
+            flags: 0,
+            material_buffer_index: 0,
+            debug_visualization_enabled: 0,
+            skybox_index: 0,
+            _padding_1: 0,
+            _padding_2: 0,
+            _padding_3: 0,
         }
     }
 
@@ -86,11 +96,18 @@ impl From<glam::Mat4> for Mat4Push {
 #[repr(C, align(16))]
 #[derive(Clone, Copy, Default, Pod, Zeroable)]
 pub struct MaterialPushConstants {
-    pub material_handle: MaterialHandle,
+    pub light_ptr_low: u32,
+    pub light_ptr_high: u32,
+    pub tile_ptr_low: u32,
+    pub tile_ptr_high: u32,
+    pub material_handle: MaterialHandle, // 4 bytes (u16+u16)
     pub flags: u32,
     pub material_buffer_index: u32,
-    pub debug_visualization_enabled: u32, // 0: Disabled, 1: Enabled
-    pub _padding: [u32; 4],
+    pub debug_visualization_enabled: u32,
+    pub skybox_index: u32,
+    pub _padding_1: u32,
+    pub _padding_2: u32,
+    pub _padding_3: u32,
 }
 
 pub const DRAW_PUSH_VERTEX_BYTES: u32 = 128;
@@ -101,13 +118,20 @@ pub const DRAW_PUSH_FRAGMENT_BYTES: u32 = 32;
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct DrawPushConstants {
     // Pointer stage (0-55)
-    frame_ptr: u64,    // 0
-    vertex_ptr: u64,   // 8
-    instance_ptr: u64, // 16
-    material_ptr: u64, // 24
-    index_ptr: u64,    // 32
-    light_ptr: u64,    // 40
-    tile_ptr: u64,     // 48
+    frame_ptr_low: u32,     // 0
+    frame_ptr_high: u32,    // 4
+    vertex_ptr_low: u32,    // 8
+    vertex_ptr_high: u32,   // 12
+    instance_ptr_low: u32,  // 16
+    instance_ptr_high: u32, // 20
+    material_ptr_low: u32,  // 24
+    material_ptr_high: u32, // 28
+    index_ptr_low: u32,     // 32
+    index_ptr_high: u32,    // 36
+    light_ptr_low: u32,     // 40
+    light_ptr_high: u32,    // 44
+    tile_ptr_low: u32,      // 48
+    tile_ptr_high: u32,     // 52
 
     // Texture indices (56-63)
     vsm_page_index: u32,  // 56
@@ -144,6 +168,8 @@ pub struct DrawContext<'a> {
     pub vsm_page_index: u32,
     pub vsm_cache_index: u32,
     pub skybox_index: u32,
+
+    pub model: glam::Mat4, // Carrying the transform from RenderCommand
 }
 
 /// Parameters for indirect draw with count buffer
@@ -274,22 +300,29 @@ impl ModelRenderer {
         }
 
         let push = DrawPushConstants {
-            frame_ptr: ctx.frame_ptr,
-            vertex_ptr: ctx.vertex_ptr, // Already baked or absolute
-            instance_ptr: ctx.instance_ptr,
-            material_ptr: ctx.material_ptr,
-            index_ptr: ctx.index_ptr,
-            light_ptr: ctx.light_ptr,
-            tile_ptr: ctx.tile_ptr,
+            frame_ptr_low: ctx.frame_ptr as u32,
+            frame_ptr_high: (ctx.frame_ptr >> 32) as u32,
+            vertex_ptr_low: vertex_ptr as u32,
+            vertex_ptr_high: (vertex_ptr >> 32) as u32,
+            instance_ptr_low: ctx.instance_ptr as u32,
+            instance_ptr_high: (ctx.instance_ptr >> 32) as u32,
+            material_ptr_low: ctx.material_ptr as u32,
+            material_ptr_high: (ctx.material_ptr >> 32) as u32,
+            index_ptr_low: ctx.index_ptr as u32,
+            index_ptr_high: (ctx.index_ptr >> 32) as u32,
+            light_ptr_low: ctx.light_ptr as u32,
+            light_ptr_high: (ctx.light_ptr >> 32) as u32,
+            tile_ptr_low: ctx.tile_ptr as u32,
+            tile_ptr_high: (ctx.tile_ptr >> 32) as u32,
             vsm_page_index: ctx.vsm_page_index,
             vsm_cache_index: ctx.vsm_cache_index,
-            model: glam::Mat4::IDENTITY.into(),
+            model: ctx.model.into(),
             material_index: material_handle.index as u32,
-            use_instancing: 1,
+            use_instancing: 0,
             flags: ctx.material.flags,
             debug_path: 0,
             debug_visualization_enabled: ctx.material.debug_visualization_enabled,
-            skybox_index: ctx.skybox_index,
+            skybox_index: ctx.material.skybox_index,
             _padding: [0; 2],
         };
 
@@ -333,29 +366,37 @@ impl ModelRenderer {
     /// # Safety
     /// Command buffer must be in recording state and all buffers must be valid.
     pub unsafe fn draw_indirect_count(&self, ctx: &DrawContext, params: &IndirectDrawCountParams) {
-        if ctx.vertex_ptr == 0 {
+        let vertex_ptr = ctx.uploaded.vertex_heap_address.unwrap_or(0);
+        if vertex_ptr == 0 {
             log::error!("CRITICAL: vertex_heap_ptr is NULL in draw_indirect_count! Skipping draw.");
             return;
         }
 
         // We use a dummy push constant block because the shader pulls EVERYTHING from BDA
         let push = DrawPushConstants {
-            frame_ptr: ctx.frame_ptr,
-            vertex_ptr: ctx.vertex_ptr,
-            instance_ptr: ctx.instance_ptr,
-            material_ptr: ctx.material_ptr,
-            index_ptr: ctx.index_ptr,
-            light_ptr: ctx.light_ptr,
-            tile_ptr: ctx.tile_ptr,
+            frame_ptr_low: ctx.frame_ptr as u32,
+            frame_ptr_high: (ctx.frame_ptr >> 32) as u32,
+            vertex_ptr_low: vertex_ptr as u32,
+            vertex_ptr_high: (vertex_ptr >> 32) as u32,
+            instance_ptr_low: ctx.instance_ptr as u32,
+            instance_ptr_high: (ctx.instance_ptr >> 32) as u32,
+            material_ptr_low: ctx.material_ptr as u32,
+            material_ptr_high: (ctx.material_ptr >> 32) as u32,
+            index_ptr_low: ctx.index_ptr as u32,
+            index_ptr_high: (ctx.index_ptr >> 32) as u32,
+            light_ptr_low: ctx.light_ptr as u32,
+            light_ptr_high: (ctx.light_ptr >> 32) as u32,
+            tile_ptr_low: ctx.tile_ptr as u32,
+            tile_ptr_high: (ctx.tile_ptr >> 32) as u32,
             vsm_page_index: ctx.vsm_page_index,
             vsm_cache_index: ctx.vsm_cache_index,
-            model: glam::Mat4::IDENTITY.into(),
+            model: ctx.model.into(),
             material_index: ctx.material.material_handle.index as u32,
             use_instancing: 1,
             flags: ctx.material.flags,
             debug_path: 0,
             debug_visualization_enabled: ctx.material.debug_visualization_enabled,
-            skybox_index: ctx.skybox_index,
+            skybox_index: ctx.material.skybox_index,
             _padding: [0; 2],
         };
 
@@ -392,16 +433,23 @@ impl ModelRenderer {
     ) {
         let material_handle = ctx.material.material_handle;
         let push = DrawPushConstants {
-            frame_ptr: ctx.frame_ptr,
-            vertex_ptr: ctx.vertex_ptr, // Bake or absolute
-            instance_ptr: ctx.instance_ptr,
-            material_ptr: ctx.material_ptr,
-            index_ptr: ctx.index_ptr,
-            light_ptr: ctx.light_ptr,
-            tile_ptr: ctx.tile_ptr,
+            frame_ptr_low: ctx.frame_ptr as u32,
+            frame_ptr_high: (ctx.frame_ptr >> 32) as u32,
+            vertex_ptr_low: ctx.vertex_ptr as u32,
+            vertex_ptr_high: (ctx.vertex_ptr >> 32) as u32,
+            instance_ptr_low: ctx.instance_ptr as u32,
+            instance_ptr_high: (ctx.instance_ptr >> 32) as u32,
+            material_ptr_low: ctx.material_ptr as u32,
+            material_ptr_high: (ctx.material_ptr >> 32) as u32,
+            index_ptr_low: ctx.index_ptr as u32,
+            index_ptr_high: (ctx.index_ptr >> 32) as u32,
+            light_ptr_low: ctx.light_ptr as u32,
+            light_ptr_high: (ctx.light_ptr >> 32) as u32,
+            tile_ptr_low: ctx.tile_ptr as u32,
+            tile_ptr_high: (ctx.tile_ptr >> 32) as u32,
             vsm_page_index: ctx.vsm_page_index,
             vsm_cache_index: ctx.vsm_cache_index,
-            model: glam::Mat4::IDENTITY.into(),
+            model: ctx.model.into(),
             material_index: material_handle.index as u32,
             use_instancing: 1,
             flags: ctx.material.flags,

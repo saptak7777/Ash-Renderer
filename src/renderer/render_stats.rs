@@ -60,8 +60,6 @@ pub struct CullingStats {
     pub after_occlusion: u32,
     /// Lights culled
     pub lights_culled: u32,
-    /// Triangles culled by LOD
-    pub lod_triangles_saved: u64,
 }
 
 /// Complete render statistics
@@ -226,11 +224,6 @@ impl StatsCollector {
     /// Record thread pool stats
     pub fn record_thread_pool(&mut self, _stats: &PoolStats) {
         // Could add thread pool stats if needed
-    }
-
-    /// Record LOD savings
-    pub fn record_lod_savings(&mut self, triangles_saved: u64) {
-        self.stats.culling.lod_triangles_saved = triangles_saved;
     }
 
     /// Get final statistics

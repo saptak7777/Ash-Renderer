@@ -15,21 +15,29 @@ layout(location = 0) in vec2 inUV;
 layout(location = 0) out vec2 outMoments;
 
 layout(push_constant) uniform ShadowPushConstants {
-    // Standard DrawPushConstants (0-159)
-    uint64_t frame_ptr;
-    uint64_t vertex_ptr;
-    uint64_t instance_ptr;
-    uint64_t material_ptr;
-    uint64_t _ptr_padding[2];
+    // Pointer stage (0-55)
+    uint64_t frame_ptr;    // 0
+    uint64_t vertex_ptr;   // 8
+    uint64_t instance_ptr; // 16
+    uint64_t material_ptr; // 24
+    uint64_t index_ptr;    // 32
+    uint64_t light_ptr;    // 40
+    uint64_t tile_ptr;     // 48
 
-    layout(offset = 48) mat4 model; 
-    layout(offset = 112) uint material_index;
-    layout(offset = 116) uint use_instancing;
-    layout(offset = 120) uint _unused_flags[2];
+    // Texture indices (56-63)
+    uint vsm_page_index;   // 56
+    uint vsm_cache_index;  // 60
 
-    layout(offset = 128) uint flags;
-    layout(offset = 132) uint debug_path;
-    layout(offset = 136) uint debug_visualization_enabled;
+    // Control bits (64-127)
+    layout(offset = 64) mat4 model; 
+    
+    // Material & Flags (128-159)
+    layout(offset = 128) uint material_index;
+    layout(offset = 132) uint use_instancing;
+    layout(offset = 136) uint flags;
+    layout(offset = 140) uint debug_path;
+    layout(offset = 144) uint debug_visualization_enabled;
+    layout(offset = 148) uint skybox_index;
     
     // VSM-specific (160-223)
     layout(offset = 160) mat4 lightSpaceMatrix;

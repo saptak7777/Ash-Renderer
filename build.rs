@@ -111,6 +111,12 @@ fn compile_shaders() {
             "comp",
             &[],
         ),
+        (
+            "shaders/shadow_cull.comp",
+            "shadow_cull.comp.spv",
+            "comp",
+            &[],
+        ),
         ("shaders/skybox.vert", "skybox.vert.spv", "vert", &[]),
         ("shaders/skybox.frag", "skybox.frag.spv", "frag", &[]),
     ];

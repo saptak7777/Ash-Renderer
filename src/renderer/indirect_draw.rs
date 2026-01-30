@@ -49,6 +49,7 @@ pub struct IndirectDrawPass {
     set: vk::DescriptorSet,
 
     initialized: bool,
+    destroyed: bool,
 }
 
 impl IndirectDrawPass {
@@ -74,6 +75,7 @@ impl IndirectDrawPass {
             layout: vk::DescriptorSetLayout::null(),
             set: vk::DescriptorSet::null(),
             initialized: false,
+            destroyed: false,
         }
     }
 
@@ -660,6 +662,11 @@ impl IndirectDrawPass {
     /// # Safety
     /// Resources must not be in use.
     pub unsafe fn destroy(&mut self, allocator: &vk_mem::Allocator) {
+        if self.destroyed {
+            return;
+        }
+        self.destroyed = true;
+
         if !self.initialized {
             return;
         }

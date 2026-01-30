@@ -8,6 +8,38 @@ use crate::{AshError, Result};
 
 use super::resources::{PageAllocation, VsmResources};
 
+#[repr(C, align(16))]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct ShadowPushConstants {
+    pub frame_ptr_low: u32,
+    pub frame_ptr_high: u32,
+    pub vertex_ptr_low: u32,
+    pub vertex_ptr_high: u32,
+    pub instance_ptr_low: u32,
+    pub instance_ptr_high: u32,
+    pub material_ptr_low: u32,
+    pub material_ptr_high: u32,
+    pub index_ptr_low: u32,
+    pub index_ptr_high: u32,
+    pub light_ptr_low: u32,
+    pub light_ptr_high: u32,
+    pub tile_ptr_low: u32,
+    pub tile_ptr_high: u32,
+
+    pub vsm_page_index: u32,
+    pub vsm_cache_index: u32,
+
+    pub model: [[f32; 4]; 4], // Mat4
+    pub material_index: u32,
+    pub use_instancing: u32,
+    pub flags: u32,
+    pub debug_path: u32,
+    pub debug_visualization_enabled: u32,
+    pub skybox_index: u32,
+    pub _padding: [u32; 2],
+    pub light_space_matrix: [[f32; 4]; 4], // Mat4
+}
+
 /// VSM shadow rendering pass
 pub struct VsmShadowPass {
     device: Arc<ash::Device>,
@@ -27,8 +59,10 @@ pub struct VsmShadowPass {
     depth_view: vk::ImageView,
 
     /// Pipeline for shadow rendering
-    shadow_pipeline: Option<vk::Pipeline>,
     shadow_pipeline_layout: Option<vk::PipelineLayout>,
+    shadow_pipeline: Option<vk::Pipeline>,
+
+    destroyed: bool,
 }
 
 impl VsmShadowPass {
@@ -192,8 +226,9 @@ impl VsmShadowPass {
             depth_image,
             depth_image_alloc: Some(depth_image_alloc),
             depth_view,
-            shadow_pipeline: None,
             shadow_pipeline_layout: None,
+            shadow_pipeline: None,
+            destroyed: false,
         })
     }
 
@@ -356,6 +391,176 @@ impl VsmShadowPass {
         self.shadow_pipeline_layout
     }
 
+    /// Render shadows using GPU-generated indirect commands
+    ///
+    /// # Safety
+    /// Command buffer must be in recording state.
+    pub unsafe fn render_shadows_indirect(
+        &self,
+        cmd: vk::CommandBuffer,
+        allocations: &[PageAllocation],
+        page_size: u32,
+        frame_set: vk::DescriptorSet,
+        bindless_set: vk::DescriptorSet,
+        indirect_buffer: vk::Buffer,
+        count_buffer: vk::Buffer,
+        max_commands_per_level: u32,
+        level_matrices: &[glam::Mat4],
+        frame_ptr: u64,
+        vertex_ptr: u64,
+        instance_ptr: u64,
+        material_ptr: u64,
+        index_ptr: u64,
+        light_ptr: u64,
+        tile_ptr: u64,
+    ) {
+        if allocations.is_empty() {
+            return;
+        }
+
+        log::debug!("Rendering {} shadow pages (indirect)", allocations.len());
+
+        let clear_values = [
+            vk::ClearValue {
+                color: vk::ClearColorValue {
+                    float32: [1.0, 1.0, 0.0, 0.0],
+                },
+            },
+            vk::ClearValue {
+                depth_stencil: vk::ClearDepthStencilValue {
+                    depth: 0.0, // Reverse-Z
+                    stencil: 0,
+                },
+            },
+        ];
+
+        let render_pass_begin = vk::RenderPassBeginInfo::default()
+            .render_pass(self.render_pass)
+            .framebuffer(self.framebuffer)
+            .render_area(vk::Rect2D {
+                offset: vk::Offset2D { x: 0, y: 0 },
+                extent: vk::Extent2D {
+                    width: self.physical_resolution,
+                    height: self.physical_resolution,
+                },
+            })
+            .clear_values(&clear_values);
+
+        self.device
+            .cmd_begin_render_pass(cmd, &render_pass_begin, vk::SubpassContents::INLINE);
+
+        // Bind Pipeline
+        if let Some(pipeline) = self.shadow_pipeline {
+            self.device
+                .cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, pipeline);
+        }
+
+        // Bind Descriptor Sets
+        if let Some(layout) = self.shadow_pipeline_layout {
+            self.device.cmd_bind_descriptor_sets(
+                cmd,
+                vk::PipelineBindPoint::GRAPHICS,
+                layout,
+                0,
+                &[frame_set, bindless_set],
+                &[],
+            );
+        }
+
+        // For each allocated page, set viewport and execute indirect draw
+        for allocation in allocations {
+            let x = (allocation.physical_x * page_size) as f32;
+            let y = (allocation.physical_y * page_size) as f32;
+
+            let viewport = vk::Viewport {
+                x,
+                y,
+                width: page_size as f32,
+                height: page_size as f32,
+                min_depth: 0.0,
+                max_depth: 1.0,
+            };
+
+            let scissor = vk::Rect2D {
+                offset: vk::Offset2D {
+                    x: x as i32,
+                    y: y as i32,
+                },
+                extent: vk::Extent2D {
+                    width: page_size,
+                    height: page_size,
+                },
+            };
+
+            self.device.cmd_set_viewport(cmd, 0, &[viewport]);
+            self.device.cmd_set_scissor(cmd, 0, &[scissor]);
+
+            // Push constants for this level
+            let level_matrix = level_matrices
+                .get(allocation.layer as usize)
+                .cloned()
+                .unwrap_or(glam::Mat4::IDENTITY);
+
+            let push_constants = ShadowPushConstants {
+                frame_ptr_low: frame_ptr as u32,
+                frame_ptr_high: (frame_ptr >> 32) as u32,
+                vertex_ptr_low: vertex_ptr as u32,
+                vertex_ptr_high: (vertex_ptr >> 32) as u32,
+                instance_ptr_low: instance_ptr as u32,
+                instance_ptr_high: (instance_ptr >> 32) as u32,
+                material_ptr_low: material_ptr as u32,
+                material_ptr_high: (material_ptr >> 32) as u32,
+                index_ptr_low: index_ptr as u32,
+                index_ptr_high: (index_ptr >> 32) as u32,
+                light_ptr_low: light_ptr as u32,
+                light_ptr_high: (light_ptr >> 32) as u32,
+                tile_ptr_low: tile_ptr as u32,
+                tile_ptr_high: (tile_ptr >> 32) as u32,
+
+                vsm_page_index: 0,
+                vsm_cache_index: 0,
+                model: glam::Mat4::IDENTITY.to_cols_array_2d(),
+                material_index: 0,
+                use_instancing: 1, // DrawIndirect uses gl_InstanceIndex
+                flags: 0,
+                debug_path: 0,
+                debug_visualization_enabled: 0,
+                skybox_index: 0,
+                _padding: [0, 0],
+                light_space_matrix: level_matrix.to_cols_array_2d(),
+            };
+
+            if let Some(layout) = self.shadow_pipeline_layout {
+                self.device.cmd_push_constants(
+                    cmd,
+                    layout,
+                    vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                    0,
+                    bytemuck::bytes_of(&push_constants),
+                );
+            }
+
+            // Execute indirect draw for this page's clipmap level
+            let level_offset = (allocation.layer * max_commands_per_level) as vk::DeviceSize
+                * std::mem::size_of::<crate::renderer::occlusion_culling::IndirectDrawCommand>()
+                    as vk::DeviceSize;
+            let count_offset = (allocation.layer * 4) as vk::DeviceSize;
+
+            self.device.cmd_draw_indirect_count(
+                cmd,
+                indirect_buffer,
+                level_offset,
+                count_buffer,
+                count_offset,
+                max_commands_per_level,
+                std::mem::size_of::<crate::renderer::occlusion_culling::IndirectDrawCommand>()
+                    as u32,
+            );
+        }
+
+        self.device.cmd_end_render_pass(cmd);
+    }
+
     /// Render shadows for allocated pages
     ///
     /// # Safety
@@ -481,7 +686,12 @@ impl VsmShadowPass {
     ///
     /// # Safety
     /// Must be called before device is destroyed. Resources must not be in use.
-    pub unsafe fn destroy(&mut self, allocator: &Allocator) {
+    pub unsafe fn destroy(&mut self, allocator: &Arc<Allocator>) {
+        if self.destroyed {
+            return;
+        }
+        self.destroyed = true;
+
         log::debug!("Destroying VSM shadow pass");
 
         if let Some(pipeline) = self.shadow_pipeline.take() {

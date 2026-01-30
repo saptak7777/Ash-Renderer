@@ -300,6 +300,7 @@ pub struct HiZPass {
 
     // Performance metrics (AAA standard)
     metrics: HiZMetrics,
+    destroyed: bool,
 
     // Validation state (debug builds only)
     #[cfg(debug_assertions)]
@@ -328,6 +329,7 @@ impl HiZPass {
             active_mip_count: 0,
             quality: HiZQuality::default(),
             metrics: HiZMetrics::default(),
+            destroyed: false,
             #[cfg(debug_assertions)]
             _validation: HiZValidation {
                 _verify_mip_chain: true,
@@ -991,6 +993,11 @@ impl HiZPass {
     /// # Safety
     /// Resources must not be in use.
     pub unsafe fn destroy(&mut self, allocator: &vk_mem::Allocator) {
+        if self.destroyed {
+            return;
+        }
+        self.destroyed = true;
+
         if !self.initialized {
             return;
         }

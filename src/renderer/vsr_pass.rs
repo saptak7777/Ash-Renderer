@@ -534,7 +534,8 @@ pub struct VsrPass {
     metrics_ptr: u64,
 
     // Global Bindless Set
-    bindless_set: vk::DescriptorSet,
+    analysis_descriptor_sets: Vec<vk::DescriptorSet>,
+    destroyed: bool,
 
     sampler: vk::Sampler,
 
@@ -582,8 +583,7 @@ impl VsrPass {
             motion_index: 0,
             history_indices: [0, 0],
             metrics_ptr: 0,
-            bindless_set: vk::DescriptorSet::null(),
-            // Removed descriptor pool/sets
+            analysis_descriptor_sets: Vec::new(),
             sampler: vk::Sampler::null(),
             render_w: 0,
             render_h: 0,
@@ -608,6 +608,7 @@ impl VsrPass {
 
             last_output: VsrOutput::Raw,
             initialized: false,
+            destroyed: false,
         }
     }
 
@@ -629,7 +630,8 @@ impl VsrPass {
         }
 
         // cache the bindless set
-        self.bindless_set = bindless_manager.descriptor_set();
+        self.analysis_descriptor_sets
+            .push(bindless_manager.descriptor_set());
 
         // Adversarial Defense: Zero-Sized Resource
         // Minimizing a window on Windows often causes width/height to become 0.
@@ -916,7 +918,8 @@ impl VsrPass {
         // Let's add them to VsrPass struct in a separate step or assume strict ordering?
         // Better to be explicit.
         // For now, I'll hack it: history_indices stores Sampled indices.
-        // I will temporarily add storage indices to the struct or just rely on the fact that I can't easily add fields with this tool without checking alignment.
+        // I will temporarily add storage indices to the struct or just put 0 as placeholder to compile,
+        // then I will add the field in next step.
         // Actually, I can just register them and print them for now, but I need to pass them to shader.
         // I'll add `history_storage_indices: [u32; 2]` to VsrPass.
 
@@ -949,9 +952,9 @@ impl VsrPass {
             .offset(0)
             .size(std::mem::size_of::<VsrPushConstants>() as u32);
 
-        let binding = bindless_manager.descriptor_set_layout();
+        let bindless_layout = bindless_manager.descriptor_set_layout();
         let layout_info = vk::PipelineLayoutCreateInfo::default()
-            .set_layouts(std::slice::from_ref(&binding))
+            .set_layouts(std::slice::from_ref(&bindless_layout))
             .push_constant_ranges(std::slice::from_ref(&push_constant_range));
 
         self.upscale_layout = self.device.create_pipeline_layout(&layout_info, None)?;
@@ -991,9 +994,9 @@ impl VsrPass {
             .offset(0)
             .size(std::mem::size_of::<SharpenPushConstants>() as u32);
 
-        let binding = bindless_manager.descriptor_set_layout();
+        let bindless_layout = bindless_manager.descriptor_set_layout();
         let layout_info = vk::PipelineLayoutCreateInfo::default()
-            .set_layouts(std::slice::from_ref(&binding))
+            .set_layouts(std::slice::from_ref(&bindless_layout))
             .push_constant_ranges(std::slice::from_ref(&push_constant_range));
 
         self.sharpen_layout = self.device.create_pipeline_layout(&layout_info, None)?;
@@ -1182,7 +1185,7 @@ impl VsrPass {
                 vk::PipelineBindPoint::COMPUTE,
                 self.upscale_layout,
                 0,
-                &[self.bindless_set],
+                &self.analysis_descriptor_sets,
                 &[],
             );
 
@@ -1210,13 +1213,6 @@ impl VsrPass {
                 // Actually, motion is internal to VsrPass in my current struct: `motion_img`.
                 // So I should use `self.motion_index`.
                 // Renderer GBuffer motion is separate?
-                // No, VSR needs GBuffer motion.
-                // `self.motion_img` in VsrPass might be a temp buffer?
-                // Let's check init: `create_motion_image`. Yes, VsrPass creates its own motion image?
-                // Why? VSR inputs usually take GBuffer motion.
-                // Lines 4457 in Renderer: `motion: gbuffer.motion_view()`.
-                // So `VsrPass` logic is:
-                // `motion_img` might be internal motion history?
                 // No, standard TAA uses current frame motion.
                 // Let's assume `inputs.motion_index` is correct from GBuffer.
                 // `self.motion_index` might be unused or for something else?
@@ -1360,7 +1356,7 @@ impl VsrPass {
             vk::PipelineBindPoint::COMPUTE,
             self.sharpen_layout,
             0,
-            &[self.bindless_set],
+            &self.analysis_descriptor_sets,
             &[],
         );
 
@@ -1439,9 +1435,10 @@ impl VsrPass {
     /// # Safety
     /// No GPU commands using these resources must be in flight.
     pub unsafe fn destroy(&mut self, allocator: &vk_mem::Allocator) {
-        if !self.initialized {
+        if self.destroyed {
             return;
         }
+        self.destroyed = true;
 
         self.device.destroy_image_view(self.motion_v, None);
         if let Some(mut a) = self.motion_alloc.take() {

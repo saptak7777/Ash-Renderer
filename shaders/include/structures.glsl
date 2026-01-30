@@ -113,6 +113,14 @@ layout(set = 0, binding = 4, std430) readonly buffer BindlessBuffer {
     vec4 data[];
 } bindless_buffers[];
 
+layout(buffer_reference, scalar) writeonly buffer IndirectBuffer {
+    IndirectDrawCommand commands[];
+};
+
+layout(buffer_reference, scalar) buffer CountBuffer {
+    uint count;
+};
+
 layout(buffer_reference, scalar) buffer TileIndexBuffer {
     uint tileData[];
 };

@@ -35,7 +35,7 @@ use crate::{
     vulkan::{self, Allocator, BindlessManager, CommandBufferContext},
     AshError, Result,
 };
-use crate::renderer::frustum_culling::Frustum;
+// use crate::renderer::frustum_culling::Frustum; // Unused after GPU shadow culling
 
 use ash::vk;
 use bytemuck::Pod;
@@ -3579,6 +3579,7 @@ impl Renderer {
                     vsm_page_index: self.vsm_page_index,
                     vsm_cache_index: self.vsm_cache_index,
                     skybox_index: self.skybox_index,
+                    model: glam::Mat4::IDENTITY,
                 };
                 
                 let count_params = crate::renderer::model_renderer::IndirectDrawCountParams {
@@ -4113,118 +4114,40 @@ impl Renderer {
             if let Some(vsm) = &self.vsm_feature {
                     // ROBUST CHECK: Do not panic if pipeline failed to build.
                     // Just skip shadows for this frame
-                    if let Some(pipeline_layout) = vsm.shadow_pipeline_layout() {
+                    if vsm.shadow_pipeline_layout().is_some() {
                         // Set 2 is gone. VSM resources are now in Set 1 (Bindless)
                         // and indices are passed via push constants in draw_context.
 
-                        // Extract references to avoid borrow checker conflicts
-                        let instancing_manager = &self.instancing_manager;
-                        let model_renderer = &self.model_renderer;
-                        let mesh_data = &self.mesh_data;
-                        let instance_buffer_addresses = &self.instance_buffer_addresses;
-                        let material_heap_address = self.material_heap_address;
-                        let uniform_buffers = &self.uniform_buffers;
-
+                        // VSM GPU-Driven Shadow Pass
+                        let light_dir = glam::Vec3::from_slice(&self.scene_lighting.directional.direction[0..3]);
                         let frame_descriptor_set = vk::DescriptorSet::null();
                         let bindless_descriptor_set = self.bindless_manager.descriptor_set();
-                        
-                        // Get light direction and clipmap levels
-                        let light_dir = glam::Vec3::from_slice(&self.scene_lighting.directional.direction[0..3]);
-                        let device = &self.device; // Extract device for closure
-                        
-                        // Pre-fetch levels to avoid borrow issues inside closure
-                        let levels: Vec<_> = if let Some(cm) = vsm.clipmap_manager() {
-                                cm.levels().cloned().collect()
+
+                        let light_ptr = self.forward_plus.as_ref().map(|fp| fp.get_lights().light_ptr(frame_index)).unwrap_or(0);
+                        let tile_ptr = self.forward_plus.as_ref().map(|fp| fp.get_lights().tile_ptr(frame_index)).unwrap_or(0);
+
+                        let vertex_ptr = self.model_renderer.geometry_buffer.vertex_heap_address();
+                        let index_ptr = self.model_renderer.geometry_buffer.index_heap_address();
+
+                        if vertex_ptr == 0 || index_ptr == 0 {
+                            log::warn!("Shadow pass: Invalid BDA pointers (V: {}, I: {}). Skipping.", vertex_ptr, index_ptr);
                         } else {
-                                Vec::new()
-                        };
-                        
-                        let page_table_res = vsm.clipmap_manager()
-                            .map(|cm| cm.page_table_resolution())
-                            .unwrap_or(128);
-
-                        // Pre-calculate culling for each level
-                        let mut level_culling = std::collections::HashMap::new();
-                        for level in &levels {
-                            let light_space_matrix = level.view_projection_matrix(light_dir, page_table_res);
-                            let frustum = Frustum::from_matrix(light_space_matrix);
-                            let visible_batches = instancing_manager.cull_shadow_casters(&frustum);
-                            level_culling.insert(level.layer, (light_space_matrix, visible_batches));
-                        }
-
-                        // Get primary light space matrix
-                        let primary_light_matrix = if let Some(first_level) = levels.first() {
-                            let light_dir = glam::vec3(0.0, -1.0, -0.5).normalize();
-                            let light_pos = camera_pos - light_dir * first_level.extent;
-                            let light_view = glam::Mat4::look_at_rh(light_pos, camera_pos, glam::Vec3::Y);
-                            let light_proj = glam::Mat4::orthographic_rh(
-                                -first_level.extent,
-                                first_level.extent,
-                                -first_level.extent,
-                                first_level.extent,
-                                0.1,
-                                first_level.extent * 2.0,
+                            vsm.render_shadows(
+                                command_buffer,
+                                light_dir,
+                                all_instances.len() as u32,
+                                frame_index,
+                                frame_descriptor_set,
+                                bindless_descriptor_set,
+                                self.uniform_buffers[frame_index].device_address(),
+                                vertex_ptr,
+                                self.instance_buffer_addresses[frame_index],
+                                self.material_heap_address,
+                                index_ptr,
+                                light_ptr,
+                                tile_ptr,
                             );
-                            light_proj * light_view
-                        } else {
-                            glam::Mat4::IDENTITY
-                        };
-
-                        vsm.render_shadows(command_buffer, &primary_light_matrix, frame_descriptor_set, bindless_descriptor_set, |cmd, page| {
-                            if (page.flags & 1) == 0 { return; }
-                            if let Some((light_space_matrix, visible_batches)) = level_culling.get(&page.layer) {
-                                for (batch, _indices) in visible_batches {
-                                    if let Some(data) = mesh_data.get(batch.key.mesh_id as usize) {
-                                        if let Some(uploaded) = model_renderer.get(&data.name) {
-                                            let material_push = crate::renderer::model_renderer::MaterialPushConstants::new(batch.key.material_id)
-                                                .with_receive_shadows(false)
-                                                .with_debug_visualization(false);
-                                            
-                                            let ctx = crate::renderer::model_renderer::DrawContext {
-                                                command_buffer: cmd,
-                                                pipeline_layout,
-                                                uploaded,
-                                                material: &material_push,
-                                                frame_ptr: uniform_buffers[frame_index].device_address(),
-                                                vertex_ptr: model_renderer.geometry_buffer.vertex_heap_address(),
-                                                instance_ptr: instance_buffer_addresses[frame_index],
-                                                material_ptr: material_heap_address,
-                                                index_ptr: model_renderer.geometry_buffer.index_heap_address(),
-                                                light_ptr: 0, // Shadows don't need lighting data
-                                                tile_ptr: 0,
-                                                vsm_page_index: self.vsm_page_index,
-                                                vsm_cache_index: self.vsm_cache_index,
-                                                skybox_index: self.skybox_index,
-                                            };
-                                            
-                                            device.device.cmd_push_constants(
-                                                cmd,
-                                                pipeline_layout,
-                                                vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
-                                                160,
-                                                bytemuck::bytes_of(light_space_matrix),
-                                            );
-
-                                            let offset = batch_offsets.get(&batch.key).copied().unwrap_or(0);
-                                            
-                                            // CRITICAL BDA SAFETY: Check for null vertex heap address
-                                            let vertex_ptr = uploaded.vertex_heap_address.unwrap_or(0);
-                                            if vertex_ptr == 0 {
-                                                log::error!(
-                                                    "CRITICAL: Mesh '{}' has null BDA (vertex_heap_address=0). Skipping shadow draw to prevent DEVICE_LOST.",
-                                                    data.name
-                                                );
-                                                continue;
-                                            }
-                                            
-                                            log::debug!("Shadow Draw: mesh={}, ptr=0x{:X}, count={}", data.name, vertex_ptr, batch.count());
-
-                                            model_renderer.draw_shadow_batch(&ctx, batch.count() as u32, offset);
-                                        }
-                                    }
-                                }
-                            }
-                        });
+                        }
                     } else {
                         log::warn!("Shadow pipeline not ready, skipping shadow pass.");
                     }
@@ -4363,6 +4286,9 @@ impl Renderer {
             };
 
             // PREPARE FOR CULLING & RENDERING (Moved out of Render Pass)
+            let light_ptr = self.forward_plus.as_ref().map(|fp| fp.get_lights().light_ptr(frame_index)).unwrap_or(0);
+            let tile_ptr = self.forward_plus.as_ref().map(|fp| fp.get_lights().tile_ptr(frame_index)).unwrap_or(0);
+
             let pipeline_layout = self.pipeline_layout.as_ref().ok_or_else(|| {
                 AshError::VulkanError("Pipeline layout not available".to_string())
             })?;
@@ -4377,8 +4303,8 @@ impl Renderer {
                 view,
                 projection: jittered_projection,
                 swapchain_extent,
-                light_ptr: self.forward_plus.as_ref().map(|fp| fp.get_lights().light_ptr(frame_index)).unwrap_or(0),
-                tile_ptr: self.forward_plus.as_ref().map(|fp| fp.get_lights().tile_ptr(frame_index)).unwrap_or(0),
+                light_ptr,
+                tile_ptr,
             };
 
             // CRITICAL FIX: Execute Compute Culling BEFORE Render Pass
