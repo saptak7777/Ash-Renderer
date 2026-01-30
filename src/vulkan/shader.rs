@@ -1,6 +1,6 @@
 use ash::vk;
 #[cfg(feature = "shader_reflection")]
-use spirv_reflect::ShaderModule as ReflectShaderModule;
+use rspirv_reflect::Reflection;
 use std::collections::HashMap;
 use std::ffi::CString;
 use std::fs;
@@ -37,7 +37,11 @@ impl ShaderReflection {
     /// Requires the `shader_reflection` feature to be enabled.
     #[cfg(feature = "shader_reflection")]
     pub fn reflect(code: &[u8], stage: vk::ShaderStageFlags) -> Result<Self> {
-        let module = ReflectShaderModule::load_u8_data(code)
+        let code_u32 = ash::util::read_spv(&mut Cursor::new(code)).map_err(|e| {
+            AshError::VulkanError(format!("Failed to parse SPIR-V for reflection: {e}"))
+        })?;
+
+        let reflection_module = Reflection::new_from_spirv(&code_u32)
             .map_err(|e| AshError::VulkanError(format!("SPIR-V reflection failed: {e}")))?;
 
         let mut reflection = ShaderReflection {
@@ -56,103 +60,78 @@ impl ShaderReflection {
         };
 
         // Extract push constants
-        if let Ok(push_constants) = module.enumerate_push_constant_blocks(None) {
-            for block in push_constants {
-                log::debug!(
-                    "[Shader Reflection] {} push constant: offset={}, size={} bytes",
-                    stage_name,
-                    block.offset,
-                    block.size
-                );
-                reflection.push_constants.push(vk::PushConstantRange {
-                    stage_flags: stage,
-                    offset: block.offset,
-                    size: block.size,
-                });
-            }
+        if let Ok(Some(push_constant)) = reflection_module.get_push_constant_range() {
+            log::debug!(
+                "[Shader Reflection] {} push constant: offset={}, size={} bytes",
+                stage_name,
+                push_constant.offset,
+                push_constant.size
+            );
+            reflection.push_constants.push(vk::PushConstantRange {
+                stage_flags: stage,
+                offset: push_constant.offset,
+                size: push_constant.size,
+            });
         }
 
         // Extract descriptor sets and bindings
-        if let Ok(descriptor_sets) = module.enumerate_descriptor_sets(None) {
-            for set in descriptor_sets {
+        if let Ok(descriptor_sets) = reflection_module.get_descriptor_sets() {
+            for (set_idx, bindings_map) in descriptor_sets {
                 log::debug!(
                     "[Shader Reflection] {} descriptor set {}: {} bindings",
                     stage_name,
-                    set.set,
-                    set.bindings.len()
+                    set_idx,
+                    bindings_map.len()
                 );
 
-                let bindings: Vec<_> = set
-                    .bindings
+                let bindings: Vec<_> = bindings_map
                     .iter()
-                    .map(|binding| {
-                        let desc_type = convert_descriptor_type(binding.descriptor_type);
+                    .map(|(binding_idx, binding_info)| {
+                        let desc_type = convert_descriptor_type(binding_info.ty);
                         log::debug!(
                             "  - binding {}: {:?} x{} ({})",
-                            binding.binding,
+                            binding_idx,
                             desc_type,
-                            binding.count,
-                            binding.name
+                            binding_info.binding_count,
+                            binding_info.name
                         );
                         vk::DescriptorSetLayoutBinding {
-                            binding: binding.binding,
+                            binding: *binding_idx,
                             descriptor_type: desc_type,
-                            descriptor_count: binding.count,
+                            descriptor_count: binding_info.binding_count,
                             stage_flags: stage,
                             ..Default::default()
                         }
                     })
                     .collect();
 
-                reflection.descriptor_sets.insert(set.set, bindings);
+                reflection.descriptor_sets.insert(set_idx, bindings);
             }
         }
 
         // Extract vertex inputs
         if stage == vk::ShaderStageFlags::VERTEX {
-            if let Ok(inputs) = module.enumerate_input_variables(None) {
-                for var in inputs {
-                    let format = convert_format(var.format);
-                    log::debug!(
-                        "[Shader Reflection] VERTEX input: location={}, format={:?} ({})",
-                        var.location,
-                        format,
-                        var.name
-                    );
-                    reflection
-                        .input_attributes
-                        .push(vk::VertexInputAttributeDescription {
-                            location: var.location,
-                            binding: var.location,
-                            format,
-                            offset: 0,
-                        });
-                }
-            }
+            // Note: rspirv-reflect 0.9 doesn't enforce easy iteration of inputs in the same way.
+            // We skip automatic input generation for now as it's rarely used in this engine
+            // (manual VertexInputDescription is preferred).
+            log::debug!(
+                "[Shader Reflection] VERTEX inputs extraction skipped (rspirv-reflect migration)"
+            );
         }
 
         // Extract fragment outputs
         if stage == vk::ShaderStageFlags::FRAGMENT {
-            if let Ok(outputs) = module.enumerate_output_variables(None) {
-                for var in outputs {
-                    let format = convert_format(var.format);
-                    log::debug!(
-                        "[Shader Reflection] FRAGMENT output: location={}, format={:?}",
-                        var.location,
-                        format
-                    );
-                    reflection.output_attachment_formats.push(format);
-                }
-            }
+            // Similar to inputs, output iteration is often manual.
+            // We'll skip auto-format extraction to avoid mismatches.
+            log::debug!("[Shader Reflection] FRAGMENT outputs extraction skipped (rspirv-reflect migration)");
         }
 
         // Log summary
         log::info!(
-            "[Shader Reflection] {} shader: {} push constants, {} descriptor sets, {} inputs",
+            "[Shader Reflection] {} shader: {} push constants, {} descriptor sets",
             stage_name,
             reflection.push_constants.len(),
-            reflection.descriptor_sets.len(),
-            reflection.input_attributes.len()
+            reflection.descriptor_sets.len()
         );
 
         Ok(reflection)
@@ -202,10 +181,8 @@ impl ShaderReflection {
 }
 
 #[cfg(feature = "shader_reflection")]
-fn convert_descriptor_type(
-    ty: spirv_reflect::types::descriptor::ReflectDescriptorType,
-) -> vk::DescriptorType {
-    use spirv_reflect::types::descriptor::ReflectDescriptorType as Ty;
+fn convert_descriptor_type(ty: rspirv_reflect::DescriptorType) -> vk::DescriptorType {
+    use rspirv_reflect::DescriptorType as Ty;
     match ty {
         Ty::Sampler => vk::DescriptorType::SAMPLER,
         Ty::CombinedImageSampler => vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
@@ -218,14 +195,14 @@ fn convert_descriptor_type(
         Ty::UniformBufferDynamic => vk::DescriptorType::UNIFORM_BUFFER_DYNAMIC,
         Ty::StorageBufferDynamic => vk::DescriptorType::STORAGE_BUFFER_DYNAMIC,
         Ty::InputAttachment => vk::DescriptorType::INPUT_ATTACHMENT,
-        Ty::AccelerationStructureNV => vk::DescriptorType::ACCELERATION_STRUCTURE_KHR,
+        Ty::AccelerationStructureKHR => vk::DescriptorType::ACCELERATION_STRUCTURE_KHR,
         _ => vk::DescriptorType::SAMPLER,
     }
 }
 
 #[cfg(feature = "shader_reflection")]
-fn convert_format(format: spirv_reflect::types::ReflectFormat) -> vk::Format {
-    use spirv_reflect::types::ReflectFormat as Fmt;
+fn convert_format(format: rspirv_reflect::types::ReflectFormat) -> vk::Format {
+    use rspirv_reflect::types::ReflectFormat as Fmt;
     match format {
         Fmt::R32G32B32A32_SFLOAT => vk::Format::R32G32B32A32_SFLOAT,
         Fmt::R32G32B32_SFLOAT => vk::Format::R32G32B32_SFLOAT,

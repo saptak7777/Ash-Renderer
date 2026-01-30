@@ -21,7 +21,8 @@ vk-mem = "0.5"
 
 # Shader compilation
 shaderc = { version = "0.10.1", optional = true }
-spirv-reflect = { version = "0.2", optional = true }
+# spirv-reflect = { version = "0.2", optional = true } // Replaced by rspirv-reflect
+rspirv-reflect = { version = "0.9", optional = true }
 
 # Math
 glam = { version = "0.31.0", features = ["bytemuck"] }
@@ -72,7 +73,7 @@ default = ["validation", "gltf_loading"]
 validation = [] # Enable Vulkan validation layers
 gltf_loading = ["gltf"] # GLTF model loading support
 shader_compilation = ["shaderc"] # Runtime shader compilation
-shader_reflection = ["spirv-reflect"] # SPIRV reflection support
+shader_reflection = ["rspirv-reflect"] # SPIRV reflection support
 profiling = [] # Enable GPU profiling
 parallel = [] # Enable parallel command buffer recording
 simd = [] # Enable explicit SIMD optimizations for CPU culling
