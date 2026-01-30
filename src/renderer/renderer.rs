@@ -1,6 +1,5 @@
 use crate::{
     renderer::{
-        async_readback::AsyncReadbackManager,
         diagnostics::{
             DiagnosticsMode, DiagnosticsOverlay, DiagnosticsState, FrameProfiler, GpuProfiler,
         },
@@ -165,34 +164,11 @@ fn compute_worker_index(worker_count: usize, frame_index: usize) -> usize {
     }
 }
 
-#[allow(dead_code)]
-fn validate_worker_resources(
-    worker_count: usize,
-    descriptor_count: usize,
-    buffer_count: usize,
-) -> Result<()> {
-    if worker_count == 0 {
-        return Ok(());
-    }
 
-    if descriptor_count != worker_count {
-        return Err(AshError::VulkanError(format!(
-            "material descriptor count ({descriptor_count}) must match worker count ({worker_count})"
-        )));
-    }
-
-    if buffer_count != worker_count {
-        return Err(AshError::VulkanError(format!(
-            "material buffer count ({buffer_count}) must match worker count ({worker_count})"
-        )));
-    }
-
-    Ok(())
-}
 
 #[cfg(test)]
 mod tests {
-    use super::{compute_worker_index, validate_worker_resources};
+    use super::compute_worker_index;
 
     #[test]
     fn worker_index_zero_workers() {
@@ -206,18 +182,6 @@ mod tests {
         assert_eq!(compute_worker_index(4, 3), 3);
         assert_eq!(compute_worker_index(4, 4), 0);
         assert_eq!(compute_worker_index(4, 7), 3);
-    }
-
-    #[test]
-    fn validate_worker_resources_ok() {
-        assert!(validate_worker_resources(0, 0, 0).is_ok());
-        assert!(validate_worker_resources(2, 2, 2).is_ok());
-    }
-
-    #[test]
-    fn validate_worker_resources_errors_on_mismatch() {
-        assert!(validate_worker_resources(2, 1, 2).is_err());
-        assert!(validate_worker_resources(2, 2, 1).is_err());
     }
 }
 
@@ -416,7 +380,6 @@ pub struct Renderer {
     diagnostics: DiagnosticsState,
     frame_profiler: FrameProfiler,
     gpu_profiler: Option<GpuProfiler>,
-    async_readback: Option<AsyncReadbackManager>,
     diagnostics_overlay: DiagnosticsOverlay,
     // Virtual Shadow Maps
     vsm_feature: Option<VsmFeature>,
@@ -1142,7 +1105,6 @@ impl Renderer {
                 diagnostics: DiagnosticsState::default(),
                 frame_profiler: FrameProfiler::new(),
                 gpu_profiler: None,
-                async_readback: None,
                 diagnostics_overlay: DiagnosticsOverlay::new(),
                 vsm_feature,
                 bindless_manager,
@@ -1193,7 +1155,7 @@ impl Renderer {
             renderer.init_motion_pass()?;
             
             // Initialize async readback manager
-            renderer.init_async_readback()?;
+            // renderer.init_async_readback()?;
 
             log::info!("Renderer initialization COMPLETE");
             Ok(renderer)
@@ -1366,24 +1328,6 @@ impl Renderer {
         
         log::info!("Motion vector pass initialized");
 
-        Ok(())
-    }
-
-    /// Initialize async readback manager
-    ///
-    /// # Safety
-    /// Device must be valid
-    pub unsafe fn init_async_readback(&mut self) -> Result<()> {
-        if self.async_readback.is_some() {
-            return Ok(());
-        }
-
-        let mut manager = AsyncReadbackManager::new(Arc::clone(&self.device.device));
-        manager.init(&self.device)?;
-
-        self.async_readback = Some(manager);
-        
-        log::info!("Async readback system initialized and integrated");
         Ok(())
     }
 
@@ -3785,13 +3729,7 @@ impl Renderer {
             dm.next_frame();
         }
 
-        // Poll for async GPU readbacks
-        if let Some(readback) = self.async_readback.as_mut() {
-            unsafe {
-                let _ = readback.poll_completed();
-                readback.next_frame();
-            }
-        }
+
 
         // Hot-reload shaders if changed (throttled to every ~1 second)
         const SHADER_CHECK_INTERVAL: usize = 60;
@@ -5195,9 +5133,7 @@ impl Drop for Renderer {
             }
 
             // Cleanup async readback manager
-            if let Some(mut readback) = self.async_readback.take() {
-                readback.destroy();
-            }
+
 
             for ub in &mut self.uniform_buffers {
                 let _ = ub.cleanup();

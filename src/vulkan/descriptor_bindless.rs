@@ -29,8 +29,6 @@ enum ResourceInfo {
 
 /// Manages bindless descriptor resources (textures, page tables, cubemaps, buffers).
 pub struct BindlessManager {
-    #[allow(dead_code)]
-    device: Arc<ash::Device>,
     layout: DescriptorSetLayout,
     descriptor_set: DescriptorSet,
     max_images: u32,
@@ -121,7 +119,6 @@ impl BindlessManager {
             allocator.allocate_bindless_set(layout.handle(), layout.bindings(), max_buffers)?;
 
         Ok(Self {
-            device,
             layout,
             descriptor_set,
             max_images,

@@ -79,6 +79,8 @@ parallel = [] # Enable parallel command buffer recording
 simd = [] # Enable explicit SIMD optimizations for CPU culling
 debug_visualization = [
 ] # Enable debug visualization modes (normals, albedo, roughness, metallic)
+future_optimization = [
+] # Enable currently unused but preserved optimization features
 full = [
     "validation",
     "gltf_loading",

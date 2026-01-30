@@ -190,130 +190,9 @@ impl Default for BloomPass {
 ///
 /// Manages bloom image with mip chain and associated views.
 /// Implements RAII cleanup pattern.
-#[allow(dead_code)] // Fields used in Parts 2 & 3
-struct BloomResources {
-    image: vk::Image,
-    allocation: vk_mem::Allocation,
-    view: vk::ImageView,
-    mip_views: Vec<vk::ImageView>,
-    allocator: std::sync::Arc<crate::vulkan::Allocator>,
-    device: std::sync::Arc<ash::Device>,
-    width: u32,
-    height: u32,
-}
-
-impl BloomResources {
-    /// Create bloom resources for given resolution
-    ///
-    /// # Safety
-    /// Device and allocator must be valid.
-    #[allow(dead_code)] // Used when renderer integration is complete
-    unsafe fn new(
-        device: std::sync::Arc<ash::Device>,
-        allocator: std::sync::Arc<crate::vulkan::Allocator>,
-        width: u32,
-        height: u32,
-        mip_count: u32,
-    ) -> crate::Result<Self> {
-        use ash::vk;
-
-        // Create bloom image with mip levels
-        let image_info = vk::ImageCreateInfo::default()
-            .image_type(vk::ImageType::TYPE_2D)
-            .format(vk::Format::R16G16B16A16_SFLOAT)
-            .extent(vk::Extent3D {
-                width,
-                height,
-                depth: 1,
-            })
-            .mip_levels(mip_count)
-            .array_layers(1)
-            .samples(vk::SampleCountFlags::TYPE_1)
-            .tiling(vk::ImageTiling::OPTIMAL)
-            .usage(
-                vk::ImageUsageFlags::SAMPLED
-                    | vk::ImageUsageFlags::COLOR_ATTACHMENT
-                    | vk::ImageUsageFlags::TRANSFER_SRC
-                    | vk::ImageUsageFlags::TRANSFER_DST,
-            )
-            .sharing_mode(vk::SharingMode::EXCLUSIVE)
-            .initial_layout(vk::ImageLayout::UNDEFINED);
-
-        let (image, allocation) =
-            allocator.create_image(&image_info, vk_mem::MemoryUsage::AutoPreferDevice)?;
-
-        // Create full image view
-        let view_info = vk::ImageViewCreateInfo::default()
-            .image(image)
-            .view_type(vk::ImageViewType::TYPE_2D)
-            .format(vk::Format::R16G16B16A16_SFLOAT)
-            .subresource_range(vk::ImageSubresourceRange {
-                aspect_mask: vk::ImageAspectFlags::COLOR,
-                base_mip_level: 0,
-                level_count: mip_count,
-                base_array_layer: 0,
-                layer_count: 1,
-            });
-
-        let view = device.create_image_view(&view_info, None)?;
-
-        // Create per-mip views
-        let mut mip_views = Vec::with_capacity(mip_count as usize);
-        for mip_level in 0..mip_count {
-            let mip_view_info = vk::ImageViewCreateInfo::default()
-                .image(image)
-                .view_type(vk::ImageViewType::TYPE_2D)
-                .format(vk::Format::R16G16B16A16_SFLOAT)
-                .subresource_range(vk::ImageSubresourceRange {
-                    aspect_mask: vk::ImageAspectFlags::COLOR,
-                    base_mip_level: mip_level,
-                    level_count: 1,
-                    base_array_layer: 0,
-                    layer_count: 1,
-                });
-
-            let mip_view = device.create_image_view(&mip_view_info, None)?;
-            mip_views.push(mip_view);
-        }
-
-        log::debug!("Created bloom resources ({width}x{height}, {mip_count} mips)");
-
-        Ok(Self {
-            image,
-            allocation,
-            view,
-            mip_views,
-            allocator,
-            device,
-            width,
-            height,
-        })
-    }
-}
-
-impl Drop for BloomResources {
-    fn drop(&mut self) {
-        unsafe {
-            // Cleanup in reverse order
-            for view in self.mip_views.drain(..) {
-                self.device.destroy_image_view(view, None);
-            }
-            self.device.destroy_image_view(self.view, None);
-            self.allocator
-                .vma
-                .destroy_image(self.image, &mut self.allocation);
-        }
-    }
-}
-
-/// Bloom render feature
-///
-/// Integrates BloomPass with the rendering pipeline.
-/// Manages GPU resources (images, framebuffers, pipelines).
 pub struct BloomFeature {
     pass: BloomPass,
     device: Option<ash::Device>,
-    resources: Option<BloomResources>,
     prefilter_pipeline: Option<vk::Pipeline>,
     downsample_pipeline: Option<vk::Pipeline>,
     upsample_pipeline: Option<vk::Pipeline>,
@@ -328,7 +207,6 @@ impl BloomFeature {
         Self {
             pass: BloomPass::new(),
             device: None,
-            resources: None,
             prefilter_pipeline: None,
             downsample_pipeline: None,
             upsample_pipeline: None,
@@ -343,7 +221,6 @@ impl BloomFeature {
         Self {
             pass: BloomPass::with_config(config),
             device: None,
-            resources: None,
             prefilter_pipeline: None,
             downsample_pipeline: None,
             upsample_pipeline: None,
@@ -682,10 +559,7 @@ impl RenderFeature for BloomFeature {
             return;
         }
 
-        // Early return if resources or pipelines not ready
-        let Some(ref resources) = self.resources else {
-            return;
-        };
+        // Early return if pipelines not ready
         let Some(prefilter_pipeline) = self.prefilter_pipeline else {
             return;
         };
@@ -778,7 +652,6 @@ impl RenderFeature for BloomFeature {
         let _ = (
             device,
             cmd,
-            resources,
             prefilter_pipeline,
             downsample_pipeline,
             upsample_pipeline,
@@ -811,8 +684,6 @@ impl RenderFeature for BloomFeature {
             }
         }
 
-        // Drop resources (RAII handles cleanup)
-        self.resources = None;
         log::info!("Bloom feature removed");
     }
 }
