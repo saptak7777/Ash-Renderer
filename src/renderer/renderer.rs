@@ -1155,7 +1155,7 @@ impl Renderer {
             renderer.init_motion_pass()?;
             
             // Initialize async readback manager
-            // renderer.init_async_readback()?;
+
 
             log::info!("Renderer initialization COMPLETE");
             Ok(renderer)

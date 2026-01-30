@@ -297,7 +297,7 @@ impl Default for InstancingManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use glam::Mat4;
+    use glam::{Mat4, Vec3};
 
     #[test]
     fn test_instance_data() {

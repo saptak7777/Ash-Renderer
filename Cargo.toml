@@ -32,7 +32,7 @@ bytemuck = { version = "1.14", features = ["derive"] }
 
 # Concurrency
 parking_lot = "0.12"
-rayon = "1.10"
+rayon = "1.11"
 crossbeam-channel = "0.5"
 
 # Window
