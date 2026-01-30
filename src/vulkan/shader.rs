@@ -14,7 +14,6 @@ use crate::{AshError, Result};
 pub struct ShaderReflection {
     pub push_constants: Vec<vk::PushConstantRange>,
     pub descriptor_sets: HashMap<u32, Vec<vk::DescriptorSetLayoutBinding<'static>>>,
-    pub input_attributes: Vec<vk::VertexInputAttributeDescription>,
     pub output_attachment_formats: Vec<vk::Format>,
     pub stage: vk::ShaderStageFlags,
 }
@@ -24,7 +23,6 @@ impl Default for ShaderReflection {
         Self {
             push_constants: Vec::new(),
             descriptor_sets: HashMap::new(),
-            input_attributes: Vec::new(),
             output_attachment_formats: Vec::new(),
             stage: vk::ShaderStageFlags::empty(),
         }
@@ -105,23 +103,6 @@ impl ShaderReflection {
             }
         }
 
-        // Extract vertex inputs
-        if stage == vk::ShaderStageFlags::VERTEX {
-            // Note: rspirv-reflect 0.9 doesn't enforce easy iteration of inputs in the same way.
-            // We skip automatic input generation for now as it's rarely used in this engine
-            // (manual VertexInputDescription is preferred).
-            log::debug!(
-                "[Shader Reflection] VERTEX inputs extraction skipped (rspirv-reflect migration)"
-            );
-        }
-
-        // Extract fragment outputs
-        if stage == vk::ShaderStageFlags::FRAGMENT {
-            // Similar to inputs, output iteration is often manual.
-            // We'll skip auto-format extraction to avoid mismatches.
-            log::debug!("[Shader Reflection] FRAGMENT outputs extraction skipped (rspirv-reflect migration)");
-        }
-
         // Log summary
         log::info!(
             "[Shader Reflection] {} shader: {} push constants, {} descriptor sets",
@@ -188,26 +169,6 @@ fn convert_descriptor_type(ty: rspirv_reflect::DescriptorType) -> vk::Descriptor
         Ty::InputAttachment => vk::DescriptorType::INPUT_ATTACHMENT,
         Ty::AccelerationStructureKHR => vk::DescriptorType::ACCELERATION_STRUCTURE_KHR,
         _ => vk::DescriptorType::SAMPLER,
-    }
-}
-
-#[cfg(feature = "shader_reflection")]
-fn convert_format(format: rspirv_reflect::types::ReflectFormat) -> vk::Format {
-    use rspirv_reflect::types::ReflectFormat as Fmt;
-    match format {
-        Fmt::R32G32B32A32_SFLOAT => vk::Format::R32G32B32A32_SFLOAT,
-        Fmt::R32G32B32_SFLOAT => vk::Format::R32G32B32_SFLOAT,
-        Fmt::R32G32_SFLOAT => vk::Format::R32G32_SFLOAT,
-        Fmt::R32_SFLOAT => vk::Format::R32_SFLOAT,
-        Fmt::R32G32B32A32_UINT => vk::Format::R32G32B32A32_UINT,
-        Fmt::R32G32B32_UINT => vk::Format::R32G32B32_UINT,
-        Fmt::R32G32_UINT => vk::Format::R32G32_UINT,
-        Fmt::R32_UINT => vk::Format::R32_UINT,
-        Fmt::R32G32B32A32_SINT => vk::Format::R32G32B32A32_SINT,
-        Fmt::R32G32B32_SINT => vk::Format::R32G32B32_SINT,
-        Fmt::R32G32_SINT => vk::Format::R32G32_SINT,
-        Fmt::R32_SINT => vk::Format::R32_SINT,
-        _ => vk::Format::R32G32B32A32_SFLOAT,
     }
 }
 
