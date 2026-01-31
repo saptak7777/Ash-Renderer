@@ -1584,10 +1584,9 @@ impl Renderer {
         let mut render_pass_builder = vulkan::RenderPass::builder(Arc::clone(&device.device));
 
         if device.headless {
-            render_pass_builder = render_pass_builder
-                .with_color_attachment(swapchain.format, vk::ImageLayout::TRANSFER_SRC_OPTIMAL);
+            render_pass_builder = render_pass_builder.with_swapchain_color(swapchain.format, vk::ImageLayout::TRANSFER_SRC_OPTIMAL);
         } else {
-            render_pass_builder = render_pass_builder.with_swapchain_color(swapchain.format);
+            render_pass_builder = render_pass_builder.with_swapchain_color(swapchain.format, vk::ImageLayout::PRESENT_SRC_KHR);
         }
 
         let mut render_pass = render_pass_builder
@@ -2948,6 +2947,12 @@ impl Renderer {
     }
 
     fn update_image_views(&mut self, image_views: &[vk::ImageView]) -> Result<()> {
+        if self.device.headless && !self.swapchain_image_view_ids.is_empty() {
+             // In headless mode, we reuse the same image views. 
+             // Cleaning them up would destroy the underlying Vulkan handles.
+             return Ok(());
+        }
+
         for id in self.swapchain_image_view_ids.drain(..) {
             if let Err(e) = self.resources.cleanup_resource(id) {
                 log::warn!("Failed to cleanup old swapchain image view {id}: {e}");
@@ -3073,7 +3078,12 @@ impl Renderer {
             builder = builder
                 .with_color_attachment(hdr.format(), vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL);
         } else {
-            builder = builder.with_swapchain_color(color_format);
+            let final_layout = if self.device.headless {
+                vk::ImageLayout::TRANSFER_SRC_OPTIMAL
+            } else {
+                vk::ImageLayout::PRESENT_SRC_KHR
+            };
+            builder = builder.with_swapchain_color(color_format, final_layout);
         }
 
         if self.gbuffer.is_some() {
@@ -3118,7 +3128,12 @@ impl Renderer {
             // For now, if render_pass is missing, we create a default one too.
             if self.render_pass.is_none() {
                  let sw_builder = vulkan::RenderPass::builder(Arc::clone(&self.device.device));
-                 let sw_pass = sw_builder.with_swapchain_color(color_format)
+                 let final_layout = if self.device.headless {
+                     vk::ImageLayout::TRANSFER_SRC_OPTIMAL
+                 } else {
+                     vk::ImageLayout::PRESENT_SRC_KHR
+                 };
+                 let sw_pass = sw_builder.with_swapchain_color(color_format, final_layout)
                      .with_depth_attachment(depth_buffer.format(), vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
                      .build()?;
                  let sw_id = self.resources.register_render_pass(sw_pass.handle())?;
@@ -4739,11 +4754,17 @@ impl Renderer {
             .ok_or(AshError::VulkanError("Swapchain not available".to_string()))?
             .format;
 
+        let final_layout = if self.device.headless {
+            vk::ImageLayout::TRANSFER_SRC_OPTIMAL
+        } else {
+            vk::ImageLayout::PRESENT_SRC_KHR
+        };
+
         unsafe {
             let pass =
-                fullscreen_pass::FullscreenPass::new(Arc::clone(&self.device.device), format)?;
+                fullscreen_pass::FullscreenPass::new(Arc::clone(&self.device.device), format, final_layout)?;
             self.fullscreen_pass = Some(pass);
-            log::info!("Fullscreen pass initialized");
+            log::info!("Fullscreen pass initialized (final_layout: {:?})", final_layout);
         }
 
         Ok(())

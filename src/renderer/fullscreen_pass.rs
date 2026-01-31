@@ -23,7 +23,11 @@ impl FullscreenPass {
     ///
     /// # Safety
     /// Device must remain valid for the lifetime of this pass.
-    pub unsafe fn new(device: Arc<ash::Device>, output_format: vk::Format) -> Result<Self> {
+    pub unsafe fn new(
+        device: Arc<ash::Device>,
+        output_format: vk::Format,
+        final_layout: vk::ImageLayout,
+    ) -> Result<Self> {
         log::info!("Creating fullscreen pass");
 
         // Create render pass for fullscreen output
@@ -35,7 +39,7 @@ impl FullscreenPass {
             stencil_load_op: vk::AttachmentLoadOp::DONT_CARE,
             stencil_store_op: vk::AttachmentStoreOp::DONT_CARE,
             initial_layout: vk::ImageLayout::UNDEFINED,
-            final_layout: vk::ImageLayout::PRESENT_SRC_KHR,
+            final_layout,
             ..Default::default()
         };
 
@@ -51,10 +55,12 @@ impl FullscreenPass {
         let dependency = vk::SubpassDependency {
             src_subpass: vk::SUBPASS_EXTERNAL,
             dst_subpass: 0,
-            src_stage_mask: vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+            src_stage_mask: vk::PipelineStageFlags::BOTTOM_OF_PIPE,
+            src_access_mask: vk::AccessFlags::MEMORY_READ,
             dst_stage_mask: vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
-            dst_access_mask: vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
-            ..Default::default()
+            dst_access_mask: vk::AccessFlags::COLOR_ATTACHMENT_READ
+                | vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
+            dependency_flags: vk::DependencyFlags::BY_REGION,
         };
 
         let render_pass_info = vk::RenderPassCreateInfo::default()

@@ -60,7 +60,11 @@ impl RenderPassBuilder {
     }
 
     /// Adds a color attachment matching swapchain usage with clear/load defaults.
-    pub fn with_swapchain_color(mut self, format: vk::Format) -> Self {
+    pub fn with_swapchain_color(
+        mut self,
+        format: vk::Format,
+        final_layout: vk::ImageLayout,
+    ) -> Self {
         let attachment = vk::AttachmentDescription {
             format,
             samples: vk::SampleCountFlags::TYPE_1,
@@ -69,7 +73,7 @@ impl RenderPassBuilder {
             stencil_load_op: vk::AttachmentLoadOp::DONT_CARE,
             stencil_store_op: vk::AttachmentStoreOp::DONT_CARE,
             initial_layout: vk::ImageLayout::UNDEFINED,
-            final_layout: vk::ImageLayout::PRESENT_SRC_KHR,
+            final_layout,
             ..Default::default()
         };
 
