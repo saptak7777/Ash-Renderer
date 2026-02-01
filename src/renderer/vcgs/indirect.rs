@@ -6,7 +6,7 @@
 use ash::vk;
 use std::sync::Arc;
 
-use crate::renderer::occlusion_culling::{CullObjectData, CullingPushConstants, OcclusionCulling};
+use super::culling::{CullObjectData, CullingPushConstants, OcclusionCulling};
 use crate::vulkan::descriptor_bindless::BindlessManager;
 use crate::vulkan::VulkanDevice;
 use crate::Result;
@@ -210,18 +210,12 @@ impl IndirectDrawPass {
 
     /// Create descriptor layout and pool
     unsafe fn create_descriptors(&mut self) -> Result<()> {
-        // Bindings match occlusion_cull.comp
+        // Bindings match cull_instances.comp
         let bindings = [
             // 1: Hi-Z pyramid
             vk::DescriptorSetLayoutBinding::default()
                 .binding(1)
                 .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-                .descriptor_count(1)
-                .stage_flags(vk::ShaderStageFlags::COMPUTE),
-            // 2: Draw commands template - DELETED
-            vk::DescriptorSetLayoutBinding::default()
-                .binding(2)
-                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
                 .descriptor_count(1)
                 .stage_flags(vk::ShaderStageFlags::COMPUTE),
             // 3: Visibility flags
@@ -278,7 +272,7 @@ impl IndirectDrawPass {
 
     /// Create compute pipeline
     unsafe fn create_pipeline(&mut self) -> Result<()> {
-        let shader_code = include_bytes!(concat!(env!("OUT_DIR"), "/occlusion_cull.comp.spv"));
+        let shader_code = include_bytes!(concat!(env!("OUT_DIR"), "/cull_instances.comp.spv"));
 
         let shader_module_info =
             vk::ShaderModuleCreateInfo::default().code(bytemuck::cast_slice(shader_code));
@@ -388,10 +382,6 @@ impl IndirectDrawPass {
 
         // Update buffer descriptors
 
-        // let template_info = vk::DescriptorBufferInfo::default()
-        //     .buffer(self.template_buffer)
-        //     .range(vk::WHOLE_SIZE);
-
         let visibility_info = vk::DescriptorBufferInfo::default()
             .buffer(self.visibility_buffer)
             .range(vk::WHOLE_SIZE);
@@ -415,11 +405,6 @@ impl IndirectDrawPass {
                 .dst_binding(1)
                 .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
                 .image_info(std::slice::from_ref(&hiz_image_info)),
-            // vk::WriteDescriptorSet::default()
-            //     .dst_set(self.set)
-            //     .dst_binding(2)
-            //     .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
-            //     .buffer_info(std::slice::from_ref(&template_info)),
             vk::WriteDescriptorSet::default()
                 .dst_set(self.set)
                 .dst_binding(3)
@@ -500,6 +485,7 @@ impl IndirectDrawPass {
         object_offset: u32,
         object_count: u32,
         indirect_offset: u32,
+        cluster_buffer_addr: u64,
     ) -> Result<()> {
         if !self.initialized || !culling.is_enabled() || object_count == 0 {
             return Ok(());
@@ -561,6 +547,7 @@ impl IndirectDrawPass {
 
         // ADDRESS INJECTION: Pass the BDA pointer directly to the shader
         push.object_buffer_addr = self.object_buffer_address();
+        push.cluster_buffer_addr = cluster_buffer_addr;
 
         self.device.cmd_push_constants(
             cmd,

@@ -94,8 +94,8 @@ fn compile_shaders() {
         ),
         ("shaders/sharpen.comp", "sharpen.comp.spv", "comp", &[]),
         (
-            "shaders/occlusion_cull.comp",
-            "occlusion_cull.comp.spv",
+            "shaders/vcgs/cull_instances.comp",
+            "cull_instances.comp.spv",
             "comp",
             &[],
         ),
@@ -106,8 +106,8 @@ fn compile_shaders() {
             &[],
         ),
         (
-            "shaders/cluster_cull.comp",
-            "cluster_cull.comp.spv",
+            "shaders/vcgs/cull_clusters.comp",
+            "cull_clusters.comp.spv",
             "comp",
             &[],
         ),

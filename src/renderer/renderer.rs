@@ -8,17 +8,16 @@ use crate::{
             FeatureRenderContext, PointLight, SpotLight,
             VsmFeature, default_vsm_config,
         },
-        forward_plus_integration::ForwardPlusIntegration,
+        ForwardPlusIntegration,
         fullscreen_pass, hdr_framebuffer,
         hiz_pass::HiZPass,
-        indirect_draw::IndirectDrawPass,
+        vcgs::{CullBoundingBox, IndirectDrawPass, OcclusionCulling},
         instancing::{BatchKey, InstanceData, InstancingManager},
         model_renderer::{
             MaterialPushConstants, ModelRenderer, UploadedMesh, DRAW_PUSH_FRAGMENT_BYTES,
             DRAW_PUSH_VERTEX_BYTES,
         },
         motion_pass::MotionVectorPass,
-        occlusion_culling::{CullBoundingBox, OcclusionCulling},
         resource_registry::{ResourceId, ResourceRegistry},
         resources,
         resources::uniform::{StorageBuffer, UniformBuffer},
@@ -48,6 +47,8 @@ use std::time::Instant;
 
 use crate::renderer::resources::buffer::BufferHandle;
 use crate::renderer::resources::mesh::{MaterialDescriptor, MeshDescriptor};
+use crate::renderer::resources::GlobalClusterBuffer;
+use crate::renderer::vcgs::culling::CullObjectData;
 
 #[derive(Default)]
 pub struct CullingManager {
@@ -407,6 +408,9 @@ pub struct Renderer {
     directional_lights: Vec<DirectionalLight>,
     spot_lights: Vec<SpotLight>,
     pub debug_mode: DebugMode,
+    
+    // Phase 7: Host-Side Cluster Integration
+    global_cluster_buffer: Option<GlobalClusterBuffer>,
 
     // Bindless Indices for Phase 3
     vsm_page_index: u32,
@@ -506,6 +510,8 @@ pub struct MeshData {
     pub material_handle: MaterialHandle,
     pub is_hidden: bool,
     pub bounds: CullBoundingBox,
+    pub cluster_start_index: u32,
+    pub cluster_count: u32,
 }
 
 impl Default for MeshData {
@@ -518,6 +524,8 @@ impl Default for MeshData {
             material_handle: MaterialHandle { index: 0, version: 0 },
             is_hidden: false,
             bounds: CullBoundingBox::default(),
+            cluster_start_index: 0,
+            cluster_count: 0,
         }
     }
 }
@@ -646,6 +654,13 @@ impl Renderer {
                 256, // 256MB for vertices
                 128, // 128MB for indices
             )?);
+            
+            // Phase 7: Global Cluster Buffer (Static)
+            let global_cluster_buffer = GlobalClusterBuffer::new(
+                Arc::clone(&device.device),
+                Arc::clone(&alloc),
+                64, // 64MB capacity
+            )?;
 
             let model_renderer =
                 ModelRenderer::new(Arc::clone(&alloc), Arc::clone(&device.device), Arc::clone(&geometry_buffer));
@@ -1027,7 +1042,7 @@ impl Renderer {
                 &alloc.vma,
                 &device,
                 &mut bindless_manager,
-                crate::renderer::indirect_draw::MAX_INDIRECT_OBJECTS,
+                crate::renderer::vcgs::MAX_INDIRECT_OBJECTS,
             )?;
 
             log::info!("Finalizing Renderer construction");
@@ -1113,6 +1128,7 @@ impl Renderer {
                 adaptive_hiz_manager: AdaptiveHiZManager::new(3.0), // Target 3ms for Hi-Z
                 indirect_draw_pass: Some(indirect_draw_pass),
                 occlusion_culling: OcclusionCulling::new(),
+                global_cluster_buffer: Some(global_cluster_buffer),
                 vsr_pass: None,
                 motion_pass: None,
                 motion_framebuffer: None,
@@ -1506,7 +1522,7 @@ impl Renderer {
                 resources::InstanceBuffer::new(
                     Arc::clone(alloc),
                     Arc::clone(&device.device),
-                    crate::renderer::occlusion_culling::MAX_CULLABLE_OBJECTS,
+                    crate::renderer::vcgs::MAX_CULLABLE_OBJECTS,
                 )?
             };
             instance_buffers.push(buffer);
@@ -1974,9 +1990,20 @@ impl Renderer {
         &self.alloc
     }
 
-    /// Access the bindless manager (mutable).
-    pub fn bindless_manager_mut(&mut self) -> &mut BindlessManager {
+    pub fn bindless_manager(&self) -> &vulkan::BindlessManager {
+        &self.bindless_manager
+    }
+
+    pub fn bindless_manager_mut(&mut self) -> &mut vulkan::BindlessManager {
         &mut self.bindless_manager
+    }
+
+    pub fn get_mesh_material(&self, mesh_handle: u32) -> MaterialHandle {
+        if (mesh_handle as usize) < self.mesh_data.len() {
+            self.mesh_data[mesh_handle as usize].material_handle
+        } else {
+            MaterialHandle::null()
+        }
     }
 
     // Legacy lighting methods removed for modern RAGE pipeline
@@ -2038,7 +2065,53 @@ impl Renderer {
     pub fn register_mesh_handle(&mut self, handle: u32, mesh: &mut Mesh) -> Result<()> {
         // VCGS Phase 2: Build Cluster DAG
         // This generates the hierarchical cluster structure needed for GPU selection.
-        crate::renderer::cluster_builder::build_mesh_dag(mesh);
+        // crate::renderer::vcgs::build_mesh_dag(mesh); // DIAGNOSTIC: Disabled to test stability
+        
+        // Phase 7: Upload Clusters to Global Buffer
+        let mut cluster_start_index = 0;
+        let mut cluster_count = 0;
+        
+        if let Some(ref buffer) = self.global_cluster_buffer {
+            if !mesh.clusters.is_empty() {
+                // Convert MeshCluster to CullObjectData
+                let cull_objects: Vec<CullObjectData> = mesh.clusters.iter().map(|c| {
+                    let mut data = CullObjectData::default();
+                    
+                    // Box center and radius
+                    data.bounds.center = [c.bounds_center[0], c.bounds_center[1], c.bounds_center[2], c.bounds_radius];
+                    // Using extents to store radius as well or zero? Sticking to sphere culling for now.
+                     data.bounds.extents = [c.bounds_radius, c.bounds_radius, c.bounds_radius, 0.0];
+                    
+                     data.parent_index = c.parent_index;
+                     data.first_index = c.first_index;
+                     data.index_count = c.index_count;
+                     data.error_metric = c.error_metric;
+                     
+                     data
+                }).collect();
+                
+                unsafe {
+                    match buffer.upload_clusters(
+                        self.cmds.upload_command_pool_handle(),
+                        self.device.graphics_queue,
+                        &cull_objects
+                    ) {
+                        Ok(start_idx) => {
+                            cluster_start_index = start_idx;
+                            cluster_count = cull_objects.len() as u32;
+                            log::debug!("Uploaded {} clusters for mesh '{}' at index {}", cluster_count, mesh.name, start_idx);
+                        },
+                        Err(e) => {
+                            log::error!("Failed to upload clusters for mesh '{}': {}", mesh.name, e);
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Update mesh tracking
+        mesh.cluster_start_index = Some(cluster_start_index);
+        mesh.cluster_count = Some(cluster_count);
 
         unsafe {
             let key = mesh.name.clone();
@@ -2085,12 +2158,16 @@ impl Renderer {
                         emissive_texture_index: mesh.emissive_texture_index,
                     };
                     
-                    material_handle = self.material_manager.register_material(material);
-                    
-                    log::debug!(
-                        "Registered auto-material for mesh '{}': handle={:?}, metallic={:.2}, roughness={:.2}",
-                        &*mesh.name, material_handle, props.metallic_factor, props.roughness_factor
-                    );
+                    let material_clone = material.clone();
+                material_handle = self.material_manager.register_material(material);
+                
+                // CRITICAL: Auto-generated materials must be uploaded to GPU!
+                self.upload_material_to_gpu(material_handle.index as u32, &material_clone)?;
+                
+                log::debug!(
+                    "Registered auto-material for mesh '{}': handle={:?}, metallic={:.2}, roughness={:.2}",
+                    &*mesh.name, material_handle, props.metallic_factor, props.roughness_factor
+                );
                 }
             }
 
@@ -2129,6 +2206,8 @@ impl Renderer {
                 material_handle,
                 is_hidden: false,
                 bounds,
+                cluster_start_index,
+                cluster_count,
             };
 
             if handle as usize >= self.mesh_data.len() {
@@ -2190,11 +2269,13 @@ impl Renderer {
             mat_uniform.set_alpha_cutoff(material.alpha_cutoff);
             
             // Enable texture access by mapping indices from the material
-            let base_idx = material.texture_index.unwrap_or(0) as i32;
-            let normal_idx = material.normal_texture_index.unwrap_or(0) as i32;
-            let mr_idx = material.metallic_roughness_texture_index.unwrap_or(0) as i32;
-            let occ_idx = material.occlusion_texture_index.unwrap_or(0) as i32;
-            let emissive_idx = material.emissive_texture_index.unwrap_or(0) as i32;
+            let base_idx = material.texture_index.unwrap_or(u32::MAX) as i32;
+            let normal_idx = material.normal_texture_index.unwrap_or(u32::MAX) as i32;
+            let mr_idx = material
+                .metallic_roughness_texture_index
+                .unwrap_or(u32::MAX) as i32;
+            let occ_idx = material.occlusion_texture_index.unwrap_or(u32::MAX) as i32;
+            let emissive_idx = material.emissive_texture_index.unwrap_or(u32::MAX) as i32;
 
             // Validate texture indices before upload
             let max_res = vulkan::BindlessManager::DEFAULT_MAX_TEXTURES;
@@ -2390,10 +2471,10 @@ impl Renderer {
                             let mut instance = InstanceData::from_matrix(command.transform)
                                 .with_bounds(mesh_data_entry.bounds);
                             if command.cast_shadows {
-                                instance.set_flag(crate::renderer::occlusion_culling::CULL_FLAG_CAST_SHADOWS, true);
+                                instance.set_flag(crate::renderer::vcgs::CULL_FLAG_CAST_SHADOWS, true);
                             }
                             if command.is_hidden {
-                                instance.set_flag(crate::renderer::occlusion_culling::CULL_FLAG_HIDDEN, true);
+                                instance.set_flag(crate::renderer::vcgs::CULL_FLAG_HIDDEN, true);
                             }
                             let item = DrawItem {
                                 key: mesh_key.clone(),
@@ -3422,6 +3503,7 @@ impl Renderer {
                         0,
                         self.occlusion_culling.object_count() as u32,
                         0,
+                        self.global_cluster_buffer.as_ref().map(|b| b.device_address()).unwrap_or(0),
                     )?;
 
                     // CRITICAL BARRIER: Compute-to-Graphics for Indirect Buffers
@@ -4624,7 +4706,7 @@ impl Renderer {
                 &self.alloc.vma,
                 &self.device,
                 bindless_manager,
-                crate::renderer::indirect_draw::MAX_INDIRECT_OBJECTS,
+                crate::renderer::vcgs::MAX_INDIRECT_OBJECTS,
             )?;
             let hiz_view = if let Some(view) = hiz.hiz_view() {
                 view

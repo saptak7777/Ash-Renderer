@@ -1,6 +1,7 @@
 pub mod bindless_validator;
 pub mod buffer;
 pub mod buffer_pool;
+pub mod cluster_buffer;
 pub mod depth_buffer;
 pub mod descriptor;
 pub mod global_geometry_buffer;
@@ -24,6 +25,7 @@ pub mod uniform;
 pub use bindless_validator::BindlessValidator;
 pub use buffer::BufferHandle;
 pub use buffer_pool::{BufferAllocation, BufferPool};
+pub use cluster_buffer::GlobalClusterBuffer;
 pub use depth_buffer::DepthBuffer;
 pub use descriptor::DescriptorSetHandle;
 pub use global_geometry_buffer::DualHeapGeometryBuffer;

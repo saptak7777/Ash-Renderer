@@ -542,7 +542,7 @@ impl VsmShadowPass {
 
             // Execute indirect draw for this page's clipmap level
             let level_offset = (allocation.layer * max_commands_per_level) as vk::DeviceSize
-                * std::mem::size_of::<crate::renderer::occlusion_culling::IndirectDrawCommand>()
+                * std::mem::size_of::<crate::renderer::vcgs::IndirectDrawCommand>()
                     as vk::DeviceSize;
             let count_offset = (allocation.layer * 4) as vk::DeviceSize;
 
@@ -553,7 +553,7 @@ impl VsmShadowPass {
                 count_buffer,
                 count_offset,
                 max_commands_per_level,
-                std::mem::size_of::<crate::renderer::occlusion_culling::IndirectDrawCommand>()
+                std::mem::size_of::<crate::renderer::vcgs::IndirectDrawCommand>()
                     as u32,
             );
         }

@@ -96,13 +96,28 @@ layout(push_constant) uniform PushConstants {
 // ============================================================================
 
 void extractFrustumPlanes(mat4 vp, out vec4 planes[6]) {
-    planes[0] = vp[3] + vp[0]; // Left
-    planes[1] = vp[3] - vp[0]; // Right
-    planes[2] = vp[3] + vp[1]; // Bottom
-    planes[3] = vp[3] - vp[1]; // Top
-    planes[4] = vp[3] + vp[2]; // Near
-    planes[5] = vp[3] - vp[2]; // Far
-    for (int i = 0; i < 6; i++) planes[i] /= length(planes[i].xyz);
+    // Extract planes from view-projection matrix (Row addition/subtraction)
+    // GLSL matrices are column-major, so vp[0] is Column 0. 
+    // We need Rows to extract frustum planes correctly.
+    vec4 r0 = vec4(vp[0].x, vp[1].x, vp[2].x, vp[3].x);
+    vec4 r1 = vec4(vp[0].y, vp[1].y, vp[2].y, vp[3].y);
+    vec4 r2 = vec4(vp[0].z, vp[1].z, vp[2].z, vp[3].z);
+    vec4 r3 = vec4(vp[0].w, vp[1].w, vp[2].w, vp[3].w);
+
+    planes[0] = r3 + r0; // Left
+    planes[1] = r3 - r0; // Right
+    planes[2] = r3 + r1; // Bottom
+    planes[3] = r3 - r1; // Top
+    planes[4] = r2;      // Near (Vulkan [0,1] depth: z >= 0)
+    planes[5] = r3 - r2; // Far
+    
+    // Normalize planes for distance testing
+    for (int i = 0; i < 6; i++) {
+        float len = length(planes[i].xyz);
+        if (len > 0.0001) {
+            planes[i] /= len;
+        }
+    }
 }
 
 bool isSphereInFrustum(vec3 center, float radius, vec4 planes[6]) {
@@ -125,7 +140,7 @@ bool isSphereOccluded(vec3 center, float radius) {
     float mip = clamp(log2(pixelRadius), 0.0, textureQueryLevels(hizPyramid) - 1.0);
     
     float depth = textureLod(hizPyramid, uv, mip).r;
-    return ndc.z > depth + projRadius;
+    return ndc.z < depth - projRadius;
 }
 
 float calculateScreenError(vec3 center, float threshold) {

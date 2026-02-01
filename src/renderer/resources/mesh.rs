@@ -122,6 +122,10 @@ pub struct Mesh {
     pub emissive_texture_index: Option<u32>,
 
     pub clusters: Vec<MeshCluster>,
+
+    // Phase 7: Global Cluster Buffer tracking
+    pub cluster_start_index: Option<u32>,
+    pub cluster_count: Option<u32>,
 }
 
 /// Handle to a mesh uploaded to the Global Geometry Heap (BDA)

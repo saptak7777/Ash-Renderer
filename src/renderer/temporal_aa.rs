@@ -1,4 +1,4 @@
-﻿//! Temporal Anti-Aliasing (TAA) System
+//! Temporal Anti-Aliasing (TAA) System
 //!
 //! Provides high-quality anti-aliasing by blending the current frame with
 //! previous frames using motion vectors and color clamping.

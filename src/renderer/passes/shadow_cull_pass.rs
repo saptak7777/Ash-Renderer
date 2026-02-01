@@ -1,4 +1,4 @@
-use crate::renderer::occlusion_culling::IndirectDrawCommand;
+use crate::renderer::vcgs::IndirectDrawCommand;
 use crate::vulkan::Allocator;
 use crate::Result;
 use ash::vk;

@@ -57,3 +57,6 @@ test_results.txt
 *.md
 !README.md
 !CHANGELOG.md
+ 
+# Build Artifacts
+check_error.txt

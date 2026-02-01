@@ -1,4 +1,4 @@
-﻿//! Motion Vector Pass
+//! Motion Vector Pass
 //!
 //! Renders per-pixel motion vectors to G-Buffer for use with VSR/TAA.
 //! Motion vectors encode the screen-space velocity of each pixel between

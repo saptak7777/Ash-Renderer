@@ -6,7 +6,10 @@
 use ash_renderer::prelude::*;
 use ash_renderer::renderer::features::ambient_lighting::{AmbientPreset, LightingBuilder};
 use ash_renderer::renderer::resources::gltf_loader;
+use ash_renderer::renderer::resources::uniform::StorageBuffer;
 use glam::{Mat4, Vec3};
+use parking_lot::Mutex;
+use std::sync::Arc;
 use std::time::Instant;
 use winit::{
     application::ApplicationHandler,
@@ -20,6 +23,7 @@ struct App {
     renderer: Option<Renderer>,
     start_time: Instant,
     render_commands: Vec<ash_renderer::renderer::RenderCommand>,
+    tint_buffer: Option<Arc<Mutex<StorageBuffer<[f32; 4]>>>>,
 }
 
 impl Default for App {
@@ -29,6 +33,7 @@ impl Default for App {
             renderer: None,
             start_time: Instant::now(),
             render_commands: Vec::new(),
+            tint_buffer: None,
         }
     }
 }
@@ -45,13 +50,22 @@ impl ApplicationHandler for App {
 
         match Renderer::new(&surface_provider) {
             Ok(mut renderer) => {
+                // Register Global Default Tint Buffer (Required by Shader)
+                let tint_data = [[1.0f32, 1.0, 1.0, 1.0]];
+                let (tint_buffer, _tint_index) = renderer
+                    .register_bindless_storage_buffer(&tint_data, "GlobalTint")
+                    .expect("Failed to register global tint buffer");
+
+                // Keep buffer alive
+                self.tint_buffer = Some(tint_buffer);
+
                 // Load the car model from GLB file
                 let glb_path = r"C:\Users\tilok\Downloads\car retro muscle\base_basic_pbr.glb";
 
                 log::info!("Loading car model from: {glb_path}");
 
                 // Load the model using the utility bridge
-                let mut meshes = match gltf_loader::load_model(glb_path) {
+                let meshes = match gltf_loader::load_model(glb_path) {
                     Ok(m) if !m.is_empty() => {
                         log::info!("✓ Loaded {} meshes from GLB file", m.len());
                         m
@@ -62,97 +76,46 @@ impl ApplicationHandler for App {
                         return;
                     }
                     Err(e) => {
-                        log::error!("Failed to load GLB file: {e}");
+                        log::error!("Failed to load GLTF: {e}");
                         event_loop.exit();
                         return;
                     }
                 };
 
-                // Take the first mesh for this example
-                let mesh = meshes.remove(0);
-                let mesh_name = mesh.name.clone();
+                // Iterate all meshes and create render commands
+                for (i, mesh) in meshes.into_iter().enumerate() {
+                    let mesh_name = mesh.name.clone();
 
-                // Extract material properties from mesh BEFORE moving it
-                let material_props = mesh.material_properties;
-                let texture_indices = [
-                    mesh.texture_index.map(|i| i as i32).unwrap_or(-1),
-                    mesh.normal_texture_index.map(|i| i as i32).unwrap_or(-1),
-                    mesh.metallic_roughness_texture_index
-                        .map(|i| i as i32)
-                        .unwrap_or(-1),
-                    mesh.occlusion_texture_index.map(|i| i as i32).unwrap_or(-1),
-                ];
-                let emissive_index = mesh.emissive_texture_index.map(|i| i as i32).unwrap_or(-1);
+                    // Upload mesh (Auto-creates and uploads material now!)
+                    let mesh_handle = renderer.upload_mesh(mesh).unwrap();
 
-                // Upload mesh
-                let mesh_handle = renderer.upload_mesh(mesh).unwrap_or(0);
-                log::info!("✓ Mesh uploaded to GPU");
+                    // Retrieve the auto-created material handle
+                    let material_handle = renderer.get_mesh_material(mesh_handle);
 
-                // Create material from properties
-                let material = if let Some(props) = material_props {
-                    Material {
-                        name: format!("{mesh_name}_material"),
-                        color: props.base_color_factor,
-                        metallic: props.metallic_factor,
-                        roughness: props.roughness_factor,
-                        emissive: [
-                            props.emissive_factor[0],
-                            props.emissive_factor[1],
-                            props.emissive_factor[2],
-                            1.0,
-                        ],
-                        occlusion_strength: props.occlusion_strength,
-                        normal_scale: props.normal_scale,
-                        alpha_cutoff: props.alpha_cutoff,
-                        tint_index: -1,
-                        is_transparent: props.base_color_factor[3] < 1.0,
-                        texture_index: if texture_indices[0] >= 0 {
-                            Some(texture_indices[0] as u32)
-                        } else {
-                            None
-                        },
-                        normal_texture_index: if texture_indices[1] >= 0 {
-                            Some(texture_indices[1] as u32)
-                        } else {
-                            None
-                        },
-                        metallic_roughness_texture_index: if texture_indices[2] >= 0 {
-                            Some(texture_indices[2] as u32)
-                        } else {
-                            None
-                        },
-                        occlusion_texture_index: if texture_indices[3] >= 0 {
-                            Some(texture_indices[3] as u32)
-                        } else {
-                            None
-                        },
-                        emissive_texture_index: if emissive_index >= 0 {
-                            Some(emissive_index as u32)
-                        } else {
-                            None
-                        },
-                    }
-                } else {
-                    Material {
-                        name: format!("{mesh_name}_default"),
-                        color: [0.8, 0.8, 0.8, 1.0],
-                        metallic: 0.5,
-                        roughness: 0.5,
-                        ..Default::default()
-                    }
-                };
-
-                // Register and upload material
-                let _ = renderer.register_and_upload_material(material).unwrap();
-
-                // Submit render command with all texture indices passed to shader
-                self.render_commands
-                    .push(ash_renderer::renderer::RenderCommand {
+                    log::info!(
+                        "Scheduled Mesh {}: '{}' (Handle: {:?}, Material: {:?})",
+                        i,
+                        mesh_name,
                         mesh_handle,
-                        material_handle: ash_renderer::renderer::MaterialHandle::null(),
-                        transform: Mat4::from_scale(Vec3::splat(1.0)),
-                        ..Default::default()
-                    });
+                        material_handle
+                    );
+
+                    // Submit render command
+                    self.render_commands
+                        .push(ash_renderer::renderer::RenderCommand {
+                            mesh_handle,
+                            material_handle,
+                            transform: Mat4::from_scale(Vec3::splat(1.0)),
+                            cast_shadows: true,
+                            receive_shadows: true,
+                            ..Default::default()
+                        });
+                }
+
+                log::info!(
+                    "✓ {} meshes uploaded and scheduled",
+                    self.render_commands.len()
+                );
 
                 // Setup lighting (RAGE approach)
                 let lighting = LightingBuilder::new()

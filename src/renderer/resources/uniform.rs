@@ -5,7 +5,7 @@ use glam::{IVec4, Mat4, Vec3, Vec4};
 use std::sync::Arc;
 use vk_mem::Alloc;
 
-use crate::renderer::occlusion_culling::CullObjectData;
+use crate::renderer::vcgs::CullObjectData;
 
 /// Uniform buffer data for MVP matrices (Phase 5: improved memory management)
 #[repr(C)]
@@ -494,7 +494,7 @@ impl InstanceBuffer {
     /// Buffer must not be destroyed and data must fit within capacity.
     pub unsafe fn update(
         &mut self,
-        data: &[crate::renderer::occlusion_culling::CullObjectData],
+        data: &[crate::renderer::vcgs::CullObjectData],
     ) -> crate::Result<()> {
         if data.is_empty() {
             return Ok(());

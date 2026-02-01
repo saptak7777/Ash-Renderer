@@ -292,7 +292,7 @@ impl ModelRenderer {
         // BDA Vertex Pulling: No vertex buffer binding needed
 
         let material_handle = ctx.material.material_handle;
-        let vertex_ptr = ctx.uploaded.vertex_heap_address.unwrap_or(0);
+        let vertex_ptr = ctx.vertex_ptr;
 
         if vertex_ptr == 0 {
             log::error!("CRITICAL (Instanced): vertex_heap_ptr is NULL!");
@@ -366,7 +366,7 @@ impl ModelRenderer {
     /// # Safety
     /// Command buffer must be in recording state and all buffers must be valid.
     pub unsafe fn draw_indirect_count(&self, ctx: &DrawContext, params: &IndirectDrawCountParams) {
-        let vertex_ptr = ctx.uploaded.vertex_heap_address.unwrap_or(0);
+        let vertex_ptr = ctx.vertex_ptr;
         if vertex_ptr == 0 {
             log::error!("CRITICAL: vertex_heap_ptr is NULL in draw_indirect_count! Skipping draw.");
             return;

@@ -160,7 +160,7 @@ layout(push_constant) uniform PushConstants {
     layout(offset = 132) uint use_instancing;
     layout(offset = 136) uint flags;
     layout(offset = 140) uint debug_path;
-    layout(offset = 144) uint debug_visualization_enabled;
+    layout(offset = 144) uint debug_mode;
     layout(offset = 148) uint skybox_index;
 } push;
 #endif

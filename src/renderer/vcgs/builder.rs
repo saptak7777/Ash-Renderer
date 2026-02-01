@@ -1,6 +1,12 @@
-//! # VCGS (Virtual Clustered Geometry System)
-//! A directed acyclic graph (DAG) based geometry virtualization system
-//! designed for continuous LOD and occlusion culling.
+//! # VCGS (Virtual Clustered Geometry System) Builder
+//!
+//! This module provides the logic for converting standard [`Mesh`] data into a
+//! Virtual Clustered Geometry DAG. It handles:
+//! - Mesh simplification and clustering via `meshopt`.
+//! - Generation of cluster hierarchies for continuous LOD.
+//! - Building the GPU-ready DAG structure.
+//!
+//! The primary entry point is [`build_mesh_dag`].
 
 use crate::renderer::resources::mesh::Mesh;
 use crate::renderer::resources::mesh::MeshCluster;
@@ -97,7 +103,18 @@ pub fn build_mesh_dag(mesh: &mut Mesh) {
 
             let mut radius_sq = 0.0f32;
             for i in 0..meshlet.vertex_count {
+                // Bounds Check: Prevent panic on bad data
+                if (meshlet.vertex_offset as usize + i as usize) >= meshlets.vertices.len() {
+                    continue;
+                }
+
                 let v_idx = meshlets.vertices[meshlet.vertex_offset as usize + i as usize];
+
+                if (v_idx as usize) >= original_vertices.len() {
+                    // Start of panic prevention
+                    continue;
+                }
+
                 let v = original_vertices[v_idx as usize];
                 let d = [
                     v.position[0] - center[0],

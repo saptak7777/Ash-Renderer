@@ -328,8 +328,14 @@ pub struct CullingPushConstants {
     /// Base object index
     pub base_index: u32,
     /// Indirect command start index
+    /// Indirect command start index
     pub indirect_start: u32,
     pub object_buffer_addr: u64,
+    /// Debug mode (0=None, 1=LOD, 2=ClusterID)
+    pub debug_mode: u32,
+    pub _padding: u32,
+    /// Address of Global Cluster Buffer
+    pub cluster_buffer_addr: u64,
 }
 
 impl Default for CullingPushConstants {
@@ -342,6 +348,9 @@ impl Default for CullingPushConstants {
             base_index: 0,
             indirect_start: 0,
             object_buffer_addr: 0,
+            debug_mode: 0,
+            _padding: 0,
+            cluster_buffer_addr: 0,
         }
     }
 }
@@ -506,6 +515,9 @@ impl OcclusionCulling {
             base_index: 0,
             indirect_start: 0,
             object_buffer_addr: 0,
+            debug_mode: 0,
+            _padding: 0,
+            cluster_buffer_addr: 0,
         }
     }
 

@@ -16,7 +16,7 @@ layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 // Define this to prevent structures.glsl from defining the standard PushConstants
 // We need custom push constants for this specific compute shader
 #define SKIP_PUSH_CONSTANTS
-#include "include/structures.glsl"
+#include "../include/structures.glsl"
 
 // ============================================================================
 // DESCRIPTOR SETS
@@ -30,7 +30,7 @@ layout(std430, set = 0, binding = 3) writeonly buffer VisibilityFlags {
 layout(std430, set = 0, binding = 4) writeonly buffer IndirectCommands {
     IndirectDrawCommand commands[];
 };
-layout(std430, set = 0, binding = 5) buffer VisibleCount {
+layout(std430, set = 0, binding = 5) writeonly buffer VisibleCount {
     uint count;
 };
 
@@ -46,6 +46,9 @@ layout(push_constant) uniform CullingPushConstants {
     uint baseIndex;
     uint indirectStart;
     uint64_t objectBufferPtr; // BDA Pointer to object data
+    uint debugMode;           // 0=None, 1=LOD, 2=ClusterID
+    uint _padding;
+    uint64_t clusterBufferPtr; // BDA Pointer to cluster data
 } pc;
 
 // ============================================================================

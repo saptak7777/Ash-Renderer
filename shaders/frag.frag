@@ -485,25 +485,44 @@ void main() {
     outAlbedo = vec4(baseColor, 1.0);
     outMotion = motionVector;
 
-    // Debug Path Visualization - Only compiled when debug_visualization feature is enabled
-    #ifdef DEBUG_VISUALIZATION
-    if (push.debug_visualization_enabled == 1) {
-        // debug_path values: 1=GPU, 2=Legacy, 3=Albedo, 4=Normal, 5=Metallic, 6=Roughness, 7=Lighting
-        if (push.debug_path == 1) { // GPU-Driven Path
-            outColor = mix(outColor, vec4(0.0, 0.0, 1.0, 1.0), 0.3); // Blue tint
-        } else if (push.debug_path == 2) { // Legacy Path
-            outColor = mix(outColor, vec4(0.0, 1.0, 0.0, 1.0), 0.3); // Green tint
-        } else if (push.debug_path == 3) { // Albedo
-            outColor = vec4(baseColor, 1.0);
-        } else if (push.debug_path == 4) { // Normal
-            outColor = vec4(normal * 0.5 + 0.5, 1.0);
-        } else if (push.debug_path == 5) { // Metallic
-            outColor = vec4(vec3(metallic), 1.0);
-        } else if (push.debug_path == 6) { // Roughness
-            outColor = vec4(vec3(roughness), 1.0);
-        } else if (push.debug_path == 7) { // Lighting Only
-            outColor = vec4(ambient + directional + Lo, 1.0);
+    // Debug Path Visualization
+    if (push.debug_mode > 0) {
+        // Mode 1: Color by LOD (Error Metric)
+        // Red = High Error (Low Detail or Transition), Green = Low Error (High Detail)
+        if (push.debug_mode == 1) {
+             // Fetch error_metric from instance (if available)
+             float error = 0.0;
+             if (push.use_instancing == 1 && push.instance_ptr != 0) {
+                 InstanceBuffer instance_ctx = InstanceBuffer(push.instance_ptr);
+                 InstanceData instance = instance_ctx.instances[fragInstanceIndex];
+                 error = instance.error_metric;
+             }
+             // Visualize error: 0.0 -> Green, 0.1+ -> Red
+             outColor = vec4(mix(vec3(0.0, 1.0, 0.0), vec3(1.0, 0.0, 0.0), error * 10.0), 1.0);
+        }
+        // Mode 2: Color by Cluster/Instance ID
+        else if (push.debug_mode == 2) {
+             uint seed = fragInstanceIndex;
+             seed = (seed ^ 61u) ^ (seed >> 16u);
+             seed *= 9u;
+             seed = seed ^ (seed >> 4u);
+             seed *= 0x27d4eb2d;
+             seed = seed ^ (seed >> 15u);
+             float r = float(seed) * (1.0/4294967296.0);
+             float g = float(seed * 16807u) * (1.0/4294967296.0);
+             float b = float(seed * 48271u) * (1.0/4294967296.0);
+             outColor = vec4(r, g, b, 1.0);
+        }
+        // Mode 10+: Legacy Paths (mapped from debug_path)
+        else if (push.debug_mode >= 10) { 
+             uint path = push.debug_mode - 10;
+             if (path == 1) outColor = mix(outColor, vec4(0.0, 0.0, 1.0, 1.0), 0.3);
+             else if (path == 2) outColor = mix(outColor, vec4(0.0, 1.0, 0.0, 1.0), 0.3);
+             else if (path == 3) outColor = vec4(baseColor, 1.0);
+             else if (path == 4) outColor = vec4(normal * 0.5 + 0.5, 1.0);
+             else if (path == 5) outColor = vec4(vec3(metallic), 1.0);
+             else if (path == 6) outColor = vec4(vec3(roughness), 1.0);
+             else if (path == 7) outColor = vec4(ambient + directional + Lo, 1.0);
         }
     }
-    #endif
 }

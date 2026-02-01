@@ -8,7 +8,7 @@
 //! - Per-instance data (transform, color, custom)
 //! - Statistics tracking
 
-use crate::renderer::occlusion_culling::CullObjectData;
+use crate::renderer::vcgs::CullObjectData;
 use crate::renderer::resources::material::MaterialHandle;
 use ahash::AHasher;
 use std::collections::{HashMap, HashSet};
@@ -98,14 +98,14 @@ impl InstanceBatch {
     pub fn casts_shadows(&self) -> bool {
         self.instances
             .iter()
-            .any(|i| i.has_flag(crate::renderer::occlusion_culling::CULL_FLAG_CAST_SHADOWS))
+            .any(|i| i.has_flag(crate::renderer::vcgs::CULL_FLAG_CAST_SHADOWS))
     }
 
     /// Check if batch contains any shadow-receiving instances
     pub fn receives_shadows(&self) -> bool {
         self.instances
             .iter()
-            .any(|i| i.has_flag(crate::renderer::occlusion_culling::CULL_FLAG_RECEIVE_SHADOWS))
+            .any(|i| i.has_flag(crate::renderer::vcgs::CULL_FLAG_RECEIVE_SHADOWS))
     }
 
     /// Check if batch is shadow-only (casts shadows but doesn't receive them, used for Rage Engine optimization)
