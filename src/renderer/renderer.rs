@@ -195,10 +195,19 @@ pub struct SpecializationOverride {
     data: Vec<u8>,
 }
 
-#[derive(Default, Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug)]
 pub struct GBufferIndices {
     pub depth_index: u32,
     pub motion_index: u32,
+}
+
+impl Default for GBufferIndices {
+    fn default() -> Self {
+        Self {
+            depth_index: u32::MAX,
+            motion_index: u32::MAX,
+        }
+    }
 }
 
 impl SpecializationOverride {
@@ -924,20 +933,20 @@ impl Renderer {
             )?;
             
             // Phase 4: G-Buffer Registration
-            // Register created G-Buffer images with BindlessManager
             let mut gbuffer_indices = GBufferIndices::default();
             
+            // First-time registration (G-Buffer Motion)
             gbuffer_indices.motion_index = bindless_manager.add_sampled_image(
                 gbuffer.motion_view(),
                 default_texture.sampler(),
             )?;
             
-            // Note: Depth buffer was created earlier (line 663)
+            // First-time registration (Depth Buffer)
             gbuffer_indices.depth_index = bindless_manager.add_sampled_image(
                 depth_buffer.view(),
                 default_texture.sampler(),
             )?;
-            
+
             log::info!("Registered GBuffer indices: Motion={}, Depth={}", 
                 gbuffer_indices.motion_index, gbuffer_indices.depth_index);
             
@@ -3143,15 +3152,25 @@ impl Renderer {
         self.depth_buffer = Some(depth_buffer);
         self.depth_buffer_id = Some(depth_buffer_id);
         
-        // Register Depth Buffer
-        self.bindless_manager.update_sampled_image(
-            self.gbuffer_indices.depth_index,
-            self.depth_buffer
-                .as_ref()
-                .ok_or_else(|| AshError::VulkanError("Depth buffer not initialized".into()))?
-                .view(),
-            self._default_texture.sampler(),
-        )?;
+        // Register Depth Buffer (The Resize Trap & Order-Independence)
+        if self.gbuffer_indices.depth_index == u32::MAX {
+            self.gbuffer_indices.depth_index = self.bindless_manager.add_sampled_image(
+                self.depth_buffer
+                    .as_ref()
+                    .ok_or_else(|| AshError::VulkanError("Depth buffer not initialized".into()))?
+                    .view(),
+                self._default_texture.sampler(),
+            )?;
+        } else {
+            self.bindless_manager.update_sampled_image(
+                self.gbuffer_indices.depth_index,
+                self.depth_buffer
+                    .as_ref()
+                    .ok_or_else(|| AshError::VulkanError("Depth buffer not initialized".into()))?
+                    .view(),
+                self._default_texture.sampler(),
+            )?;
+        }
 
         Ok(())
     }
@@ -3166,12 +3185,19 @@ impl Renderer {
             )?
         };
         
-        // Register Motion Vector for VSR
-        self.bindless_manager.update_sampled_image(
-            self.gbuffer_indices.motion_index,
-            gbuffer.motion_view(),
-            self._default_texture.sampler(),
-        )?;
+        // Register Motion Vector for VSR (The Resize Trap & Order-Independence)
+        if self.gbuffer_indices.motion_index == u32::MAX {
+            self.gbuffer_indices.motion_index = self.bindless_manager.add_sampled_image(
+                gbuffer.motion_view(),
+                self._default_texture.sampler(),
+            )?;
+        } else {
+            self.bindless_manager.update_sampled_image(
+                self.gbuffer_indices.motion_index,
+                gbuffer.motion_view(),
+                self._default_texture.sampler(),
+            )?;
+        }
         
         self.gbuffer = Some(gbuffer);
         Ok(())
@@ -4516,8 +4542,16 @@ impl Renderer {
                     color_index: self.hdr_image_index.ok_or_else(|| {
                         AshError::VulkanError("HDR image index not initialized for VSR".to_string())
                     })?,
-                    depth_index: self.gbuffer_indices.depth_index,
-                    motion_index: self.gbuffer_indices.motion_index,
+                    depth_index: if self.gbuffer_indices.depth_index == u32::MAX {
+                        return Err(AshError::VulkanError("Depth index not initialized for VSR".to_string()));
+                    } else {
+                        self.gbuffer_indices.depth_index
+                    },
+                    motion_index: if self.gbuffer_indices.motion_index == u32::MAX {
+                        return Err(AshError::VulkanError("Motion index not initialized for VSR".to_string()));
+                    } else {
+                        self.gbuffer_indices.motion_index
+                    },
                     jitter: jitter_uv,
                 };
 

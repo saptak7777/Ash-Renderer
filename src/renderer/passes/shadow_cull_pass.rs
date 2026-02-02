@@ -210,36 +210,37 @@ impl ShadowCullPass {
         }
         self.destroyed = true;
 
-        if self.indirect_buffers.len() != self.indirect_allocs.len() {
-            log::error!(
-                "ShadowCullPass: Indirect buffer/alloc count mismatch ({} buffers, {} allocs). Potential memory leak!",
-                self.indirect_buffers.len(),
-                self.indirect_allocs.len()
-            );
+        // Robust cleanup: Drain both vectors fully even if counts mismatch to avoid GPU leaks
+        while !self.indirect_buffers.is_empty() || !self.indirect_allocs.is_empty() {
+            match (self.indirect_buffers.pop(), self.indirect_allocs.pop()) {
+                (Some(buffer), Some(mut alloc)) => allocator.destroy_buffer(buffer, &mut alloc),
+                (Some(_buffer), None) => {
+                    log::error!(
+                        "ShadowCullPass: Orphan indirect buffer detected during cleanup! GPU leak."
+                    );
+                }
+                (None, Some(mut alloc)) => {
+                    log::error!("ShadowCullPass: Orphan indirect allocation detected during cleanup! VMA leak.");
+                    allocator.destroy_buffer(vk::Buffer::null(), &mut alloc); // Try to free the allocation at least
+                }
+                (None, None) => break,
+            }
         }
 
-        for (buffer, mut alloc) in self
-            .indirect_buffers
-            .drain(..)
-            .zip(self.indirect_allocs.drain(..))
-        {
-            allocator.destroy_buffer(buffer, &mut alloc);
-        }
-
-        if self.count_buffers.len() != self.count_allocs.len() {
-            log::error!(
-                "ShadowCullPass: Count buffer/alloc count mismatch ({} buffers, {} allocs). Potential memory leak!",
-                self.count_buffers.len(),
-                self.count_allocs.len()
-            );
-        }
-
-        for (buffer, mut alloc) in self
-            .count_buffers
-            .drain(..)
-            .zip(self.count_allocs.drain(..))
-        {
-            allocator.destroy_buffer(buffer, &mut alloc);
+        while !self.count_buffers.is_empty() || !self.count_allocs.is_empty() {
+            match (self.count_buffers.pop(), self.count_allocs.pop()) {
+                (Some(buffer), Some(mut alloc)) => allocator.destroy_buffer(buffer, &mut alloc),
+                (Some(_buffer), None) => {
+                    log::error!(
+                        "ShadowCullPass: Orphan count buffer detected during cleanup! GPU leak."
+                    );
+                }
+                (None, Some(mut alloc)) => {
+                    log::error!("ShadowCullPass: Orphan count allocation detected during cleanup! VMA leak.");
+                    allocator.destroy_buffer(vk::Buffer::null(), &mut alloc);
+                }
+                (None, None) => break,
+            }
         }
         if self.pipeline != vk::Pipeline::null() {
             self.device.destroy_pipeline(self.pipeline, None);
