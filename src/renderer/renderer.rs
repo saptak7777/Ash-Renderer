@@ -5177,7 +5177,6 @@ impl Renderer {
 impl Drop for Renderer {
     fn drop(&mut self) {
         // Shutdown streamer FIRST to prevent background thread accessing resources while we destroy them
-        // Shutdown streamer FIRST to prevent background thread accessing resources while we destroy them
         {
             let mut lock = self.texture_streamer.lock();
             if let Some(streamer) = lock.take() {
@@ -5189,6 +5188,13 @@ impl Drop for Renderer {
             log::info!("Shutting down Ash Renderer...");
 
             let _ = self.device.device.device_wait_idle();
+
+            // Phase 7: Cleanup Global Cluster Buffer (BDA)
+            // CRITICAL: This BDA buffer must be destroyed explicitly while the device is still valid
+            // and BEFORE the allocator is dropped, as it depends on both.
+            if let Some(mut cluster_buffer) = self.global_cluster_buffer.take() {
+                cluster_buffer.destroy();
+            }
 
             // CRITICAL FIX: Explicitly drop post-processing resources before general resource cleanup.
             // This prevents access violations during shutdown if the window/surface is destroyed.

@@ -9,6 +9,7 @@ use ash_renderer::renderer::resources::gltf_loader;
 use ash_renderer::renderer::resources::uniform::StorageBuffer;
 use glam::{Mat4, Vec3};
 use parking_lot::Mutex;
+use std::mem::ManuallyDrop;
 use std::sync::Arc;
 use std::time::Instant;
 use winit::{
@@ -20,20 +21,32 @@ use winit::{
 
 struct App {
     window: Option<Window>,
+    // Use ManuallyDrop to explicitly control destruction order.
+    // This MUST be dropped BEFORE renderer to avoid STATUS_ACCESS_VIOLATION on exit.
+    tint_buffer: ManuallyDrop<Option<Arc<Mutex<StorageBuffer<[f32; 4]>>>>>,
     renderer: Option<Renderer>,
     start_time: Instant,
     render_commands: Vec<ash_renderer::renderer::RenderCommand>,
-    tint_buffer: Option<Arc<Mutex<StorageBuffer<[f32; 4]>>>>,
 }
 
 impl Default for App {
     fn default() -> Self {
         Self {
             window: None,
+            tint_buffer: ManuallyDrop::new(None),
             renderer: None,
             start_time: Instant::now(),
             render_commands: Vec::new(),
-            tint_buffer: None,
+        }
+    }
+}
+
+impl Drop for App {
+    fn drop(&mut self) {
+        unsafe {
+            // Manually drop the tint buffer FIRST while the renderer/device is still alive.
+            log::info!("App: Manually dropping GPU resources...");
+            ManuallyDrop::drop(&mut self.tint_buffer);
         }
     }
 }
@@ -57,7 +70,7 @@ impl ApplicationHandler for App {
                     .expect("Failed to register global tint buffer");
 
                 // Keep buffer alive
-                self.tint_buffer = Some(tint_buffer);
+                *self.tint_buffer = Some(tint_buffer);
 
                 // Load the car model from GLB file
                 let glb_path = r"C:\Users\tilok\Downloads\car retro muscle\base_basic_pbr.glb";
