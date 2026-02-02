@@ -114,20 +114,23 @@ impl MaterialKey {
             alpha_cutoff: quantize(material.alpha_cutoff),
             tint_index: material.tint_index,
             is_transparent: material.is_transparent,
-            texture_index: material.texture_index.map(|i| i as i32).unwrap_or(0),
-            normal_texture_index: material.normal_texture_index.map(|i| i as i32).unwrap_or(0),
+            texture_index: material.texture_index.map(|i| i as i32).unwrap_or(-1),
+            normal_texture_index: material
+                .normal_texture_index
+                .map(|i| i as i32)
+                .unwrap_or(-1),
             metallic_roughness_texture_index: material
                 .metallic_roughness_texture_index
                 .map(|i| i as i32)
-                .unwrap_or(0),
+                .unwrap_or(-1),
             occlusion_texture_index: material
                 .occlusion_texture_index
                 .map(|i| i as i32)
-                .unwrap_or(0),
+                .unwrap_or(-1),
             emissive_texture_index: material
                 .emissive_texture_index
                 .map(|i| i as i32)
-                .unwrap_or(0),
+                .unwrap_or(-1),
         }
     }
 
@@ -151,11 +154,11 @@ impl MaterialKey {
             alpha_cutoff: quantize(props.alpha_cutoff),
             tint_index: -1,
             is_transparent: props.base_color_factor[3] < 1.0,
-            texture_index: 0,
-            normal_texture_index: 0,
-            metallic_roughness_texture_index: 0,
-            occlusion_texture_index: 0,
-            emissive_texture_index: 0,
+            texture_index: -1,
+            normal_texture_index: -1,
+            metallic_roughness_texture_index: -1,
+            occlusion_texture_index: -1,
+            emissive_texture_index: -1,
         }
     }
 }

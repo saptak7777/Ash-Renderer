@@ -2135,13 +2135,125 @@ impl Renderer {
         // crate::renderer::vcgs::build_mesh_dag(mesh); // DIAGNOSTIC: Disabled to test stability
         
         // Phase 7: Upload Clusters to Global Buffer
+        // Phase 7: Upload Clusters to Global Buffer
         let mut cluster_start_index = 0;
         let mut cluster_count = 0;
 
         // Pre-clone shared resources to avoid self-borrow issues
         let alloc = Arc::clone(&self.alloc);
-        let cluster_buffer = self.global_cluster_buffer.as_ref();
 
+        // ---------------------------------------------------------
+        // PART 1: Texture & Material Registration (MOVED UP)
+        // ---------------------------------------------------------
+        // We must register materials FIRST so that we get a valid handle
+        // to pack into the cluster data.
+        
+        let key;
+        let flags;
+        let indices;
+        let emissive_index;
+        let bounds;
+        let material_handle;
+
+        unsafe {
+            key = mesh.name.clone();
+            let upload_pool = self.cmds.upload_command_pool_handle();
+            
+            // 1. Ensure Textures
+            mesh.ensure_texture(
+                Arc::clone(&self.alloc),
+                Arc::clone(&self.device.device),
+                upload_pool,
+                self.device.graphics_queue,
+                &mut self.vram_budget,
+                self.texture_compression,
+            )?;
+
+            // 2. Ensure Model Renderer
+            self.model_renderer
+                .ensure_mesh(&key, mesh, upload_pool, self.device.graphics_queue)?;
+
+            // 3. Register Bindless
+            register_mesh_textures(mesh, &mut self.bindless_manager)?;
+
+            // 4. Register Material
+            let mut handle_mat = self.material_manager.default_material();
+            if let Some(props) = &mesh.material_properties {
+                if !self.allow_auto_material {
+                    log::warn!(
+                        "Mesh '{}' has material properties but auto-material creation is disabled.",
+                        &*mesh.name
+                    );
+                } else {
+                    let material = Material {
+                        name: format!("{}_material_{handle}", &*mesh.name),
+                        color: props.base_color_factor,
+                        metallic: props.metallic_factor,
+                        roughness: props.roughness_factor,
+                        emissive: props.emissive_factor,
+                        occlusion_strength: props.occlusion_strength,
+                        normal_scale: props.normal_scale,
+                        alpha_cutoff: props.alpha_cutoff,
+                        tint_index: -1,
+                        is_transparent: props.base_color_factor[3] < 1.0,
+                        texture_index: mesh.texture_index,
+                        normal_texture_index: mesh.normal_texture_index,
+                        metallic_roughness_texture_index: mesh.metallic_roughness_texture_index,
+                        occlusion_texture_index: mesh.occlusion_texture_index,
+                        emissive_texture_index: mesh.emissive_texture_index,
+                    };
+                    
+                    let material_clone = material.clone();
+                    handle_mat = self.material_manager.register_material(material);
+                    
+                    // CRITICAL: Auto-generated materials must be uploaded to GPU!
+                    self.upload_material_to_gpu(handle_mat.index as u32, &material_clone)?;
+                    
+                    log::debug!(
+                        "Registered auto-material for mesh '{}': handle={:?}, metallic={:.2}, roughness={:.2}",
+                        &*mesh.name, handle_mat, props.metallic_factor, props.roughness_factor
+                    );
+                }
+            }
+            material_handle = handle_mat;
+            
+            // FIX: Update mesh material handle so cluster packing sees it!
+            if !material_handle.is_null() {
+                mesh.material_handle = Some(material_handle.index as u32);
+            }
+
+            flags = TexturePresenceFlags::from_mesh(mesh);
+
+            indices = [
+                mesh.texture_index.map(|i| i as i32).unwrap_or(-1),
+                mesh.normal_texture_index.map(|i| i as i32).unwrap_or(-1),
+                mesh.metallic_roughness_texture_index
+                    .map(|i| i as i32)
+                    .unwrap_or(-1),
+                mesh.occlusion_texture_index.map(|i| i as i32).unwrap_or(-1),
+            ];
+            emissive_index = mesh.emissive_texture_index.map(|i| i as i32).unwrap_or(-1);
+
+            // Calculate bounding box from mesh vertices
+            bounds = if !mesh.vertices.is_empty() {
+                let mut min = Vec3::splat(f32::MAX);
+                let mut max = Vec3::splat(f32::MIN);
+                for vertex in &mesh.vertices {
+                    let pos = Vec3::from(vertex.position);
+                    min = min.min(pos);
+                    max = max.max(pos);
+                }
+                CullBoundingBox::from_min_max(min, max)
+            } else {
+                // Fallback to unit cube if no vertices
+                CullBoundingBox::new(Vec3::ZERO, Vec3::ONE)
+            };
+        }
+
+        // ---------------------------------------------------------
+        // PART 2: Cluster Upload (Including FIX: Uses valid mesh.material_handle)
+        // ---------------------------------------------------------
+        let cluster_buffer = self.global_cluster_buffer.as_ref();
         if let Some(buffer) = cluster_buffer {
             if !mesh.clusters.is_empty() {
                 // Convert MeshCluster to CullObjectData
@@ -2171,7 +2283,7 @@ impl Renderer {
                         // Set Flag 1 (Enabled)
                         flags: 1,
                         
-                        // Material from mesh
+                        // Material from mesh (NOW HAS VALID HANDLE!)
                         material_index: mesh.material_handle.unwrap_or(0),
                         
                         ..Default::default()
@@ -2232,93 +2344,9 @@ impl Renderer {
         mesh.cluster_start_index = Some(cluster_start_index);
         mesh.cluster_count = Some(cluster_count);
 
-        // Continue with texture and model renderer registration
-
-        unsafe {
-            let key = mesh.name.clone();
-            let upload_pool = self.cmds.upload_command_pool_handle();
-            mesh.ensure_texture(
-                Arc::clone(&self.alloc),
-                Arc::clone(&self.device.device),
-                upload_pool,
-                self.device.graphics_queue,
-                &mut self.vram_budget,
-                self.texture_compression,
-            )?;
-
-            self.model_renderer
-                .ensure_mesh(&key, mesh, upload_pool, self.device.graphics_queue)?;
-
-            // Register textures with bindless manager
-            register_mesh_textures(mesh, &mut self.bindless_manager)?;
-
-            // Register material from mesh properties
-            let mut material_handle = self.material_manager.default_material();
-            if let Some(props) = &mesh.material_properties {
-                if !self.allow_auto_material {
-                    log::warn!(
-                        "Mesh '{}' has material properties but auto-material creation is disabled.",
-                        &*mesh.name
-                    );
-                } else {
-                    let material = Material {
-                        name: format!("{}_material_{handle}", &*mesh.name),
-                        color: props.base_color_factor,
-                        metallic: props.metallic_factor,
-                        roughness: props.roughness_factor,
-                        emissive: props.emissive_factor,
-                        occlusion_strength: props.occlusion_strength,
-                        normal_scale: props.normal_scale,
-                        alpha_cutoff: props.alpha_cutoff,
-                        tint_index: -1,
-                        is_transparent: props.base_color_factor[3] < 1.0,
-                        texture_index: mesh.texture_index,
-                        normal_texture_index: mesh.normal_texture_index,
-                        metallic_roughness_texture_index: mesh.metallic_roughness_texture_index,
-                        occlusion_texture_index: mesh.occlusion_texture_index,
-                        emissive_texture_index: mesh.emissive_texture_index,
-                    };
-                    
-                    let material_clone = material.clone();
-                material_handle = self.material_manager.register_material(material);
-                
-                // CRITICAL: Auto-generated materials must be uploaded to GPU!
-                self.upload_material_to_gpu(material_handle.index as u32, &material_clone)?;
-                
-                log::debug!(
-                    "Registered auto-material for mesh '{}': handle={:?}, metallic={:.2}, roughness={:.2}",
-                    &*mesh.name, material_handle, props.metallic_factor, props.roughness_factor
-                );
-                }
-            }
-
-            let flags = TexturePresenceFlags::from_mesh(mesh);
-
-            let indices = [
-                mesh.texture_index.map(|i| i as i32).unwrap_or(-1),
-                mesh.normal_texture_index.map(|i| i as i32).unwrap_or(-1),
-                mesh.metallic_roughness_texture_index
-                    .map(|i| i as i32)
-                    .unwrap_or(-1),
-                mesh.occlusion_texture_index.map(|i| i as i32).unwrap_or(-1),
-            ];
-            let emissive_index = mesh.emissive_texture_index.map(|i| i as i32).unwrap_or(-1);
-
-            // Calculate bounding box from mesh vertices
-            let bounds = if !mesh.vertices.is_empty() {
-                let mut min = Vec3::splat(f32::MAX);
-                let mut max = Vec3::splat(f32::MIN);
-                for vertex in &mesh.vertices {
-                    let pos = Vec3::from(vertex.position);
-                    min = min.min(pos);
-                    max = max.max(pos);
-                }
-                CullBoundingBox::from_min_max(min, max)
-            } else {
-                // Fallback to unit cube if no vertices
-                CullBoundingBox::new(Vec3::ZERO, Vec3::ONE)
-            };
-
+        // ---------------------------------------------------------
+        // PART 3: MeshData Update
+        // ---------------------------------------------------------
             let mesh_data = MeshData {
                 name: Arc::clone(&key),
                 texture_indices: indices,
@@ -2336,7 +2364,6 @@ impl Renderer {
                     .resize(handle as usize + 1, MeshData::default());
             }
             self.mesh_data[handle as usize] = mesh_data;
-        }
 
         Ok(())
     }
