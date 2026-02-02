@@ -1898,7 +1898,7 @@ impl Renderer {
 
         let clear_values = [vk::ClearValue {
             color: vk::ClearColorValue {
-                float32: [1.0, 0.0, 1.0, 1.0], // Use Magenta for post-processing clear to DEBUG
+                float32: [0.0, 0.0, 0.0, 1.0], // Black clear color
             },
         }];
 
@@ -4007,6 +4007,17 @@ impl Renderer {
                 matrices.view_proj = jittered_projection * view;
                 matrices.prev_view_proj = self.prev_view_proj;
                 matrices.camera_pos = camera_pos.extend(1.0);
+
+                // Phase 2: Lean Engine "Blind PBR" Fix
+                // Check if a skybox is present, otherwise use default and mark as disabled
+                if self.skybox_mesh.is_some() {
+                    self.scene_lighting.has_environment_map = 1;
+                    self.scene_lighting.environment_map_index = self.skybox_index;
+                } else {
+                    self.scene_lighting.has_environment_map = 0;
+                    self.scene_lighting.environment_map_index = 0;
+                }
+
                 matrices.set_lighting(&self.scene_lighting);
 
                 // Set light-space matrix for shadow mapping
@@ -4268,7 +4279,7 @@ impl Renderer {
                 vec![
                     vk::ClearValue {
                         color: vk::ClearColorValue {
-                            float32: [0.05, 0.05, 0.1, 1.0], // 0: Color - Deep Space Blue
+                            float32: [0.0, 0.0, 0.0, 1.0], // 0: Color - Black
                         },
                     },
                     vk::ClearValue {
@@ -4297,7 +4308,7 @@ impl Renderer {
                 vec![
                     vk::ClearValue {
                         color: vk::ClearColorValue {
-                            float32: [1.0, 0.0, 1.0, 1.0], // 0: Swapchain Color - MAGENTA DEBUG
+                            float32: [0.0, 0.0, 0.0, 1.0], // 0: Swapchain Color - Black
                         },
                     },
                     vk::ClearValue {

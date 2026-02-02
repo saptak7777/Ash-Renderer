@@ -47,10 +47,10 @@ impl TextureData {
 
 /// GPU texture with image, view, and sampler
 pub struct Texture {
-    image: vk::Image,
-    view: vk::ImageView,
-    sampler: vk::Sampler,
-    allocation: vk_mem::Allocation,
+    image: Option<vk::Image>,
+    view: Option<vk::ImageView>,
+    sampler: Option<vk::Sampler>,
+    allocation: Option<vk_mem::Allocation>,
     allocator: Arc<vulkan::Allocator>,
     device: Arc<ash::Device>,
 }
@@ -372,10 +372,10 @@ impl Texture {
         }
 
         Ok(Self {
-            image,
-            view: image_view,
-            sampler,
-            allocation,
+            image: Some(image),
+            view: Some(image_view),
+            sampler: Some(sampler),
+            allocation: Some(allocation),
             allocator,
             device,
         })
@@ -549,21 +549,21 @@ impl Texture {
         }
 
         Ok(Self {
-            image,
-            view,
-            sampler,
-            allocation,
+            image: Some(image),
+            view: Some(view),
+            sampler: Some(sampler),
+            allocation: Some(allocation),
             allocator,
             device,
         })
     }
 
     pub fn view(&self) -> vk::ImageView {
-        self.view
+        self.view.expect("Texture accessed after destruction")
     }
 
     pub fn sampler(&self) -> vk::Sampler {
-        self.sampler
+        self.sampler.expect("Texture accessed after destruction")
     }
 
     /// Creates a texture from a list of pre-generated mip levels.
@@ -784,10 +784,10 @@ impl Texture {
         }
 
         Ok(Self {
-            image,
-            view: image_view,
-            sampler,
-            allocation,
+            image: Some(image),
+            view: Some(image_view),
+            sampler: Some(sampler),
+            allocation: Some(allocation),
             allocator,
             device,
         })
@@ -1024,10 +1024,10 @@ impl Texture {
         log::info!("Created default black cubemap (1x1)");
 
         Ok(Self {
-            image,
-            view,
-            sampler,
-            allocation,
+            image: Some(image),
+            view: Some(view),
+            sampler: Some(sampler),
+            allocation: Some(allocation),
             allocator,
             device,
         })
@@ -1197,10 +1197,10 @@ impl Texture {
             log::info!("Created VSM default UINT texture (R32_UINT, NEAREST filtering)");
 
             Ok(Self {
-                image,
-                view,
-                sampler,
-                allocation,
+                image: Some(image),
+                view: Some(view),
+                sampler: Some(sampler),
+                allocation: Some(allocation),
                 allocator,
                 device,
             })
@@ -1380,10 +1380,10 @@ impl Texture {
             );
 
             Ok(Self {
-                image,
-                view,
-                sampler,
-                allocation,
+                image: Some(image),
+                view: Some(view),
+                sampler: Some(sampler),
+                allocation: Some(allocation),
                 allocator,
                 device,
             })
@@ -1626,10 +1626,10 @@ impl Texture {
         log::info!("Created procedural skybox ({resolution}x{resolution})");
 
         Ok(Self {
-            image,
-            view,
-            sampler,
-            allocation,
+            image: Some(image),
+            view: Some(view),
+            sampler: Some(sampler),
+            allocation: Some(allocation),
             allocator,
             device,
         })
@@ -1639,11 +1639,16 @@ impl Texture {
 impl Drop for Texture {
     fn drop(&mut self) {
         unsafe {
-            self.device.destroy_sampler(self.sampler, None);
-            self.device.destroy_image_view(self.view, None);
-            self.allocator
-                .vma
-                .destroy_image(self.image, &mut self.allocation);
+            if let Some(sampler) = self.sampler.take() {
+                self.device.destroy_sampler(sampler, None);
+            }
+            if let Some(view) = self.view.take() {
+                self.device.destroy_image_view(view, None);
+            }
+            if let (Some(image), Some(mut allocation)) = (self.image.take(), self.allocation.take())
+            {
+                self.allocator.vma.destroy_image(image, &mut allocation);
+            }
         }
     }
 }

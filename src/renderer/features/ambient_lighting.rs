@@ -137,9 +137,12 @@ pub struct SceneLighting {
     pub num_tiles_x: u32,
     pub num_tiles_y: u32,
     pub tile_size: u32,
+    pub environment_map_index: u32,
+    pub has_environment_map: u32,
+    pub _padding: [u32; 2],
 }
 
-const _: () = assert!(std::mem::size_of::<SceneLighting>() == 80);
+const _: () = assert!(std::mem::size_of::<SceneLighting>() == 96);
 const _: () = assert!(std::mem::align_of::<SceneLighting>() == 16);
 
 /// Type-state builder for SceneLighting
@@ -230,6 +233,9 @@ impl LightingBuilder<DirectionalSet> {
             num_tiles_x: 0,
             num_tiles_y: 0,
             tile_size: 16,
+            environment_map_index: 0,
+            has_environment_map: 0,
+            _padding: [0; 2],
         }
     }
 }
@@ -245,6 +251,9 @@ impl LightingPresets {
         num_tiles_x: 0,
         num_tiles_y: 0,
         tile_size: 16,
+        environment_map_index: 0,
+        has_environment_map: 0,
+        _padding: [0; 2],
     };
 
     pub const INDOOR_LIT: SceneLighting = SceneLighting {
@@ -254,6 +263,9 @@ impl LightingPresets {
         num_tiles_x: 0,
         num_tiles_y: 0,
         tile_size: 16,
+        environment_map_index: 0,
+        has_environment_map: 0,
+        _padding: [0; 2],
     };
 
     pub const OUTDOOR_DAY: SceneLighting = SceneLighting {
@@ -263,6 +275,9 @@ impl LightingPresets {
         num_tiles_x: 0,
         num_tiles_y: 0,
         tile_size: 16,
+        environment_map_index: 0,
+        has_environment_map: 0,
+        _padding: [0; 2],
     };
 
     pub const OUTDOOR_NIGHT: SceneLighting = SceneLighting {
@@ -272,6 +287,9 @@ impl LightingPresets {
         num_tiles_x: 0,
         num_tiles_y: 0,
         tile_size: 16,
+        environment_map_index: 0,
+        has_environment_map: 0,
+        _padding: [0; 2],
     };
 }
 
