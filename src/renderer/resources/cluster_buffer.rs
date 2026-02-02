@@ -70,102 +70,49 @@ impl GlobalClusterBuffer {
         })
     }
 
-    /// Upload clusters to the buffer
+    /// Records a copy of clusters from a staging buffer into the global buffer.
     ///
-    /// Returns the start index of the uploaded clusters (index = offset / sizeof(CullObjectData))
+    /// # Arguments
+    /// * `command_buffer` - Command buffer to record the copy command into.
+    /// * `staging_buffer` - Source buffer containing the clusters.
+    /// * `staging_offset` - Offset in the staging buffer.
+    /// * `cluster_count` - Number of clusters to copy.
+    ///
+    /// Returns the start index of the uploaded clusters in the global buffer.
     pub unsafe fn upload_clusters(
         &self,
-        command_pool: vk::CommandPool,
-        queue: vk::Queue,
-        clusters: &[CullObjectData],
+        command_buffer: vk::CommandBuffer,
+        staging_buffer: vk::Buffer,
+        staging_offset: u64,
+        cluster_count: u32,
     ) -> Result<u32> {
-        if clusters.is_empty() {
+        if cluster_count == 0 {
             return Ok(0);
         }
 
         let element_size = std::mem::size_of::<CullObjectData>() as u64;
-        let size = clusters.len() as u64 * element_size;
+        let size = cluster_count as u64 * element_size;
 
-        // Alignment check (CullObjectData should be 16-byte aligned, but check anyway)
-        // Global buffer is just a linear array of structs.
+        // Atomically reserve space in the buffer
+        let dst_offset = self.offset_bytes.fetch_add(size, Ordering::SeqCst);
 
-        let offset = self.offset_bytes.fetch_add(size, Ordering::SeqCst);
-
-        if offset + size > self.capacity_bytes {
+        if dst_offset + size > self.capacity_bytes {
             return Err(AshError::VulkanError(
                 "GlobalClusterBuffer: Overflow".to_string(),
             ));
         }
 
-        self.upload_data(
-            command_pool,
-            queue,
-            self.buffer,
-            offset,
-            bytemuck::cast_slice(clusters),
-        )?;
+        let region = vk::BufferCopy::default()
+            .src_offset(staging_offset)
+            .dst_offset(dst_offset)
+            .size(size);
 
-        // Return index
-        Ok((offset / element_size) as u32)
-    }
-
-    unsafe fn upload_data(
-        &self,
-        command_pool: vk::CommandPool,
-        queue: vk::Queue,
-        dst_buffer: vk::Buffer,
-        dst_offset: u64,
-        data: &[u8],
-    ) -> Result<()> {
-        // Reuse upload logic from DualHeapGeometryBuffer or similar utility
-        // For now, simpler inline implementation
-
-        let cmd_info = vk::CommandBufferAllocateInfo::default()
-            .command_pool(command_pool)
-            .level(vk::CommandBufferLevel::PRIMARY)
-            .command_buffer_count(1);
-
-        let cmd_buffers = self
-            .device
-            .allocate_command_buffers(&cmd_info)
-            .map_err(|e| AshError::VulkanError(format!("Alloc cmd: {}", e)))?;
-        let cmd = cmd_buffers[0];
-
+        // Record the copy command
         self.device
-            .begin_command_buffer(
-                cmd,
-                &vk::CommandBufferBeginInfo::default()
-                    .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
-            )
-            .map_err(|e| AshError::VulkanError(format!("Begin cmd: {}", e)))?;
+            .cmd_copy_buffer(command_buffer, staging_buffer, self.buffer, &[region]);
 
-        if data.len() <= 65536 {
-            self.device
-                .cmd_update_buffer(cmd, dst_buffer, dst_offset, data);
-        } else {
-            for (i, chunk) in data.chunks(65536).enumerate() {
-                let chunk_offset = dst_offset + (i * 65536) as u64;
-                self.device
-                    .cmd_update_buffer(cmd, dst_buffer, chunk_offset, chunk);
-            }
-        }
-
-        self.device
-            .end_command_buffer(cmd)
-            .map_err(|e| AshError::VulkanError(format!("End cmd: {}", e)))?;
-
-        let submit = vk::SubmitInfo::default().command_buffers(&cmd_buffers);
-        self.device
-            .queue_submit(queue, &[submit], vk::Fence::null())
-            .map_err(|e| AshError::VulkanError(format!("Submit: {}", e)))?;
-
-        self.device
-            .queue_wait_idle(queue)
-            .map_err(|e| AshError::VulkanError(format!("Wait: {}", e)))?;
-
-        self.device.free_command_buffers(command_pool, &cmd_buffers);
-
-        Ok(())
+        // Return the start index (base index in the global cluster array)
+        Ok((dst_offset / element_size) as u32)
     }
 
     pub fn device_address(&self) -> vk::DeviceAddress {

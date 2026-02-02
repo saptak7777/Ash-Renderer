@@ -2091,20 +2091,84 @@ impl Renderer {
                 }).collect();
                 
                 unsafe {
+                    let element_size = std::mem::size_of::<CullObjectData>();
+                    let total_size = (cull_objects.len() * element_size) as u64;
+
+                    // 1. Create Staging Buffer
+                    // TODO: Reuse a staging buffer instead of allocating per mesh for better performance
+                    let mut staging_buffer = crate::renderer::resources::BufferHandle::new_with_flags(
+                        Arc::clone(&self.alloc),
+                        total_size,
+                        vk::BufferUsageFlags::TRANSFER_SRC,
+                        vk_mem::MemoryUsage::Auto,
+                        vk_mem::AllocationCreateFlags::HOST_ACCESS_SEQUENTIAL_WRITE
+                            | vk_mem::AllocationCreateFlags::MAPPED,
+                        Some(format!("Staging_Clusters_{}", mesh.name)),
+                    )
+                    .map_err(|e| AshError::VulkanError(format!("Staging buffer alloc: {}", e)))?;
+
+                    // 2. Copy data to staged memory
+                    {
+                        let mut guard = self
+                            .alloc
+                            .map_allocation_guarded(staging_buffer.allocation_mut(), total_size)
+                            .map_err(|e| {
+                                AshError::VulkanError(format!("Map cluster staging memory: {}", e))
+                            })?;
+                        guard.copy_from_slice(&cull_objects);
+                    }
+
+                    // 3. Prepare Command Buffer
+                    let cmd = self
+                        .cmds
+                        .get_transfer_command_buffer()
+                        .map_err(|e| AshError::VulkanError(format!("Get cmd buffer: {}", e)))?;
+                    let ctx = self.cmds.context(cmd);
+
+                    ctx.begin(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT)?;
+
+                    // 4. Record Copy Command
                     match buffer.upload_clusters(
-                        self.cmds.upload_command_pool_handle(),
-                        self.device.graphics_queue,
-                        &cull_objects
+                        cmd,
+                        staging_buffer.handle(),
+                        0,
+                        cull_objects.len() as u32,
                     ) {
                         Ok(start_idx) => {
+                            ctx.end()?;
+
+                            // 5. Submit & Wait (Synchronous for safety in this phase)
+                            // Pro-coder Note: The CPU wait ensures memory visibility before the Compute Shader reads.
+                            let cmds_to_submit = [cmd];
+                            let submit_info = vk::SubmitInfo::default().command_buffers(&cmds_to_submit);
+                            self.cmds.submit(
+                                self.device.graphics_queue,
+                                &[submit_info],
+                                vk::Fence::null(),
+                            )?;
+                            self.device
+                                .device
+                                .queue_wait_idle(self.device.graphics_queue)
+                                .map_err(|e| {
+                                    AshError::VulkanError(format!("Queue wait idle: {}", e))
+                                })?;
+
                             cluster_start_index = start_idx;
                             cluster_count = cull_objects.len() as u32;
-                            log::debug!("Uploaded {} clusters for mesh '{}' at index {}", cluster_count, mesh.name, start_idx);
-                        },
+                            log::debug!(
+                                "Uploaded {} clusters for mesh '{}' at index {}",
+                                cluster_count,
+                                mesh.name,
+                                start_idx
+                            );
+                        }
                         Err(e) => {
                             log::error!("Failed to upload clusters for mesh '{}': {}", mesh.name, e);
                         }
                     }
+
+                    // 6. Cleanup of staging_buffer and cmd occurs via RAII or implicitly.
+                    // Note: cmd is transient and should ideally be recycled, but in this phase it is simple.
                 }
             }
         }
