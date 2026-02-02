@@ -1022,7 +1022,13 @@ impl Renderer {
 
             // Create Skybox Mesh (Unit Cube)
             let skybox_mesh = {
-                let mesh = crate::renderer::Mesh::create_cube(); 
+                let mut mesh = crate::renderer::Mesh::create_cube();
+                // SCALE FIX: Unit cube is 2m (-1 to 1). Scale to 1000m to avoid clipping.
+                for v in &mut mesh.vertices {
+                    v.position[0] *= 500.0;
+                    v.position[1] *= 500.0;
+                    v.position[2] *= 500.0;
+                }
                 model_renderer.upload_mesh_data(
                     &mesh,
                     command_manager.upload_command_pool_handle(),

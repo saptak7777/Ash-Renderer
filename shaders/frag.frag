@@ -304,15 +304,27 @@ void main() {
     float normal_scale = mat.parameters.w;
 
     // Normal Mapping
+    // Normal Mapping
     if (normal_idx >= 0) {
-        vec3 mapSample = texture(global_textures[nonuniformEXT(normal_idx)], fragUV).xyz;
-        if (length(mapSample) > 0.001) {
-            vec3 mapNormal = mapSample * 2.0 - 1.0;
-            mapNormal.xy *= normal_scale;
-            vec3 mapDir = TBN * mapNormal;
-            if (length(mapDir) > 0.001) {
-                normal = normalize(mapDir);
-            }
+        // BC5 Compression Store RG only. B is 0.0 or 1.0 depending on decoder, but we must reconstruct Z.
+        // We assume 2-channel normal maps if Z is consistently 0 (or simply enforce reconstruction).
+        // Since we aggressively optimize, we use Z-reconstruction for ALL normal maps to be safe.
+        vec2 mapSampleXY = texture(global_textures[nonuniformEXT(normal_idx)], fragUV).xy;
+        
+        // Unpack from [0,1] to [-1,1]
+        vec2 mapNormalXY = mapSampleXY * 2.0 - 1.0;
+        mapNormalXY *= normal_scale;
+
+        // Reconstruct Z: z = sqrt(1 - x^2 - y^2)
+        // Clamp to prevent NaN if normal map is invalid/unnormalized
+        float z2 = 1.0 - dot(mapNormalXY, mapNormalXY);
+        float mapNormalZ = sqrt(max(z2, 0.0));
+
+        vec3 mapNormal = vec3(mapNormalXY, mapNormalZ);
+
+        vec3 mapDir = TBN * mapNormal;
+        if (length(mapDir) > 0.001) {
+            normal = normalize(mapDir);
         }
     }
 
