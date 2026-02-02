@@ -154,7 +154,6 @@ struct RendererResources {
     material_storage_buffer: StorageBuffer<resources::uniform::MaterialUniform>,
     instance_buffers: Vec<resources::InstanceBuffer>,
     post_sampler: vk::Sampler,
-    safety_texture: Texture,
 }
 
 fn compute_worker_index(worker_count: usize, frame_index: usize) -> usize {
@@ -724,7 +723,6 @@ impl Renderer {
                 material_storage_buffer,
                 instance_buffers,
                 post_sampler,
-                safety_texture,
             } = renderer_resources;
 
             // CRITICAL: All frame data is now accessed via BDA (push.frame_ptr).
@@ -740,12 +738,12 @@ impl Renderer {
                 instance_buffer_addresses.push(buffer.device_address());
             }
 
-            // Mandatory Slot 0: Register safety texture as the absolute fallback.
-            let safety_tex_index = bindless_manager
-                .add_sampled_image(safety_texture.view(), safety_texture.sampler())?;
-            log::info!("Registered safety texture (Magenta) at bindless index {safety_tex_index}");
-            if safety_tex_index != 0 {
-                return Err(AshError::VulkanError(format!("Safety texture MUST be at index 0, but got {safety_tex_index}")));
+            // Mandatory Slot 0: Register black texture as the absolute fallback (The Void).
+            let black_tex_index = bindless_manager
+                .add_sampled_image(black_texture.view(), black_texture.sampler())?;
+            log::info!("Registered black texture at bindless index {black_tex_index}");
+            if black_tex_index != 0 {
+                return Err(AshError::VulkanError(format!("Black texture fallback MUST be at index 0, but got {black_tex_index}")));
             }
 
             // Register default texture.
@@ -1433,8 +1431,8 @@ impl Renderer {
             )?
         };
 
-        // Create dark grey texture for IBL fallback (provides some ambient light when IBL not loaded)
-        let black_texture_data = TextureData::solid_color([30, 30, 30, 255]);
+        // Create black texture for IBL fallback (provides some ambient light when IBL not loaded)
+        let black_texture_data = TextureData::solid_color([0, 0, 0, 255]);
         let black_texture = unsafe {
             Texture::from_data(
                 Arc::clone(alloc),
@@ -1551,19 +1549,6 @@ impl Renderer {
             ).map_err(|e| AshError::VulkanError(format!("Failed to create post_sampler: {e}")))?
         };
 
-        let safety_texture_data = TextureData::solid_color([255, 0, 255, 255]); // Magenta
-        let safety_texture = unsafe {
-            Texture::from_data(
-                Arc::clone(alloc),
-                Arc::clone(&device.device),
-                command_pool,
-                device.graphics_queue,
-                &safety_texture_data,
-                vk::Format::R8G8B8A8_SRGB,
-                Some("safety_texture"),
-            )?
-        };
-
         Ok(RendererResources {
             uniform_buffers,
             default_texture,
@@ -1576,7 +1561,6 @@ impl Renderer {
             material_storage_buffer,
             instance_buffers,
             post_sampler,
-            safety_texture,
         })
     }
 
@@ -3795,8 +3779,10 @@ impl Renderer {
         // (Only skinned meshes would remain here if we hadn't moved them, 
         // but for now we focus on opaque stability)
 
-        // 4. Render Skybox
-        // self.render_skybox(&cmd_ctx, frame_index, view, projection)?;
+        // 4. Render Skybox (WYSIWYG: Only if HDRI exists)
+        if self.scene_lighting.has_environment_map > 0 {
+            self.render_skybox(&cmd_ctx, frame_index, params.view, params.projection)?;
+        }
 
         Ok(())
     }
@@ -4159,14 +4145,14 @@ impl Renderer {
                 matrices.prev_view_proj = self.prev_view_proj;
                 matrices.camera_pos = camera_pos.extend(1.0);
 
-                // Phase 2: Lean Engine "Blind PBR" Fix
-                // Check if a skybox is present, otherwise use default and mark as disabled
+                // Phase 2: Lean Engine "Studio Architecture" Logic
+                // Single Source of Truth: environment map status drives shader and skybox
                 if self.skybox_mesh.is_some() {
                     self.scene_lighting.has_environment_map = 1;
                     self.scene_lighting.environment_map_index = self.skybox_index;
                 } else {
                     self.scene_lighting.has_environment_map = 0;
-                    self.scene_lighting.environment_map_index = 0;
+                    self.scene_lighting.environment_map_index = 0; // Safe dummy
                 }
 
                 matrices.set_lighting(&self.scene_lighting);
