@@ -210,12 +210,35 @@ impl ShadowCullPass {
         }
         self.destroyed = true;
 
-        for mut alloc in self.indirect_allocs.drain(..) {
-            let buffer = self.indirect_buffers.remove(0);
+        if self.indirect_buffers.len() != self.indirect_allocs.len() {
+            log::error!(
+                "ShadowCullPass: Indirect buffer/alloc count mismatch ({} buffers, {} allocs). Potential memory leak!",
+                self.indirect_buffers.len(),
+                self.indirect_allocs.len()
+            );
+        }
+
+        for (buffer, mut alloc) in self
+            .indirect_buffers
+            .drain(..)
+            .zip(self.indirect_allocs.drain(..))
+        {
             allocator.destroy_buffer(buffer, &mut alloc);
         }
-        for mut alloc in self.count_allocs.drain(..) {
-            let buffer = self.count_buffers.remove(0);
+
+        if self.count_buffers.len() != self.count_allocs.len() {
+            log::error!(
+                "ShadowCullPass: Count buffer/alloc count mismatch ({} buffers, {} allocs). Potential memory leak!",
+                self.count_buffers.len(),
+                self.count_allocs.len()
+            );
+        }
+
+        for (buffer, mut alloc) in self
+            .count_buffers
+            .drain(..)
+            .zip(self.count_allocs.drain(..))
+        {
             allocator.destroy_buffer(buffer, &mut alloc);
         }
         if self.pipeline != vk::Pipeline::null() {

@@ -197,7 +197,6 @@ pub struct SpecializationOverride {
 
 #[derive(Default, Clone, Copy, Debug)]
 pub struct GBufferIndices {
-    pub color_index: u32,
     pub depth_index: u32,
     pub motion_index: u32,
 }
@@ -419,6 +418,7 @@ pub struct Renderer {
     
     // Phase 4: G-Buffer & HDR Indices
     gbuffer_indices: GBufferIndices,
+    hdr_image_index: Option<u32>,
 
     // Post-processing descriptors
     post_descriptor_pool: vk::DescriptorPool,
@@ -1144,6 +1144,7 @@ impl Renderer {
                 skybox_index,
                 
                 gbuffer_indices,
+                hdr_image_index: None,
 
                 debug_mode: DebugMode::None,
                 post_descriptor_pool: vk::DescriptorPool::null(),
@@ -3143,17 +3144,14 @@ impl Renderer {
         self.depth_buffer_id = Some(depth_buffer_id);
         
         // Register Depth Buffer
-        // We need a sampler for depth. Shadow sampler (comparison) or standard?
-        // VSR likely needs standard sampling (raw depth).
-        // Let's use standard default sampler.
-        let depth_index = self.bindless_manager.add_sampled_image(
+        self.bindless_manager.update_sampled_image(
+            self.gbuffer_indices.depth_index,
             self.depth_buffer
                 .as_ref()
                 .ok_or_else(|| AshError::VulkanError("Depth buffer not initialized".into()))?
                 .view(),
             self._default_texture.sampler(),
         )?;
-        self.gbuffer_indices.depth_index = depth_index;
 
         Ok(())
     }
@@ -3169,13 +3167,11 @@ impl Renderer {
         };
         
         // Register Motion Vector for VSR
-        // Note: We register with standard sampler, though VSR often fetches.
-        // Assuming default sampler is fine for now.
-        let motion_index = self.bindless_manager.add_sampled_image(
+        self.bindless_manager.update_sampled_image(
+            self.gbuffer_indices.motion_index,
             gbuffer.motion_view(),
-            self._default_texture.sampler(), // Use default sampler
+            self._default_texture.sampler(),
         )?;
-        self.gbuffer_indices.motion_index = motion_index;
         
         self.gbuffer = Some(gbuffer);
         Ok(())
@@ -4517,7 +4513,9 @@ impl Renderer {
                 };
 
                 let vsr_inputs = VsrInputs {
-                    color_index: self.gbuffer_indices.color_index, // HDR input
+                    color_index: self.hdr_image_index.ok_or_else(|| {
+                        AshError::VulkanError("HDR image index not initialized for VSR".to_string())
+                    })?,
                     depth_index: self.gbuffer_indices.depth_index,
                     motion_index: self.gbuffer_indices.motion_index,
                     jitter: jitter_uv,
@@ -4896,8 +4894,27 @@ impl Renderer {
                 width,
                 height,
             )?;
+            
+            // Phase 2: GBuffer Correctness (The Resize Trap)
+            // If we have a previously registered hdr_image_index, update the bindless descriptor.
+            // Otherwise, register it for the first time.
+            if let Some(index) = self.hdr_image_index {
+                self.bindless_manager.update_sampled_image(
+                    index,
+                    hdr.view(),
+                    self._post_sampler,
+                )?;
+            } else {
+                // First-time registration
+                let index = self.bindless_manager.add_sampled_image(
+                    hdr.view(),
+                    self._post_sampler,
+                )?;
+                self.hdr_image_index = Some(index);
+            }
+
             self.hdr_framebuffer = Some(hdr);
-            log::info!("HDR framebuffer initialized ({width}x{height})");
+            log::info!("HDR framebuffer initialized ({width}x{height}) - Bindless Index: {:?}", self.hdr_image_index);
         }
 
         Ok(())

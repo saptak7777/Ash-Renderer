@@ -206,6 +206,47 @@ impl BindlessManager {
         self.descriptor_set.handle()
     }
 
+    /// Update an existing sampled image at a given index.
+    /// Used for transient resources like HDR buffers that are recreated on resize.
+    pub fn update_sampled_image(
+        &mut self,
+        index: u32,
+        image_view: vk::ImageView,
+        sampler: vk::Sampler,
+    ) -> Result<()> {
+        // Find the tracked resource and update its info
+        let res = self
+            .resources
+            .iter_mut()
+            .find(|r| r.index == index && r.binding == 0)
+            .ok_or_else(|| {
+                AshError::VulkanError(format!(
+                    "Bindless index {} (binding 0) not found for update",
+                    index
+                ))
+            })?;
+
+        res.info = ResourceInfo::Image {
+            view: image_view,
+            sampler,
+        };
+
+        // Update the actual descriptor set
+        let info = vk::DescriptorImageInfo {
+            sampler,
+            image_view,
+            image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+        };
+        self.descriptor_set.update_image_at(
+            0,
+            index,
+            info,
+            vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+        )?;
+
+        Ok(())
+    }
+
     pub fn add_sampled_image(
         &mut self,
         image_view: vk::ImageView,

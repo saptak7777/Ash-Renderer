@@ -444,8 +444,18 @@ impl IndirectDrawPass {
         if let Some(ref alloc) = self.object_allocation {
             let info = allocator.get_allocation_info(alloc);
             if !info.mapped_data.is_null() {
-                // CRITICAL SAFETY: Bounds check before write
-                let required_size = offset + objects.len() * std::mem::size_of::<CullObjectData>();
+                // CRITICAL SAFETY: Bounds check with overflow protection before write
+                let object_size = std::mem::size_of::<CullObjectData>();
+                let required_size = objects
+                    .len()
+                    .checked_mul(object_size)
+                    .and_then(|total_obj_size| offset.checked_add(total_obj_size))
+                    .ok_or_else(|| {
+                        crate::AshError::VulkanError(
+                            "IndirectDraw: Upload size arithmetic overflow".to_string(),
+                        )
+                    })?;
+
                 if required_size > info.size as usize {
                     return Err(crate::AshError::VulkanError(format!(
                         "IndirectDraw: Object buffer overrun. Size: {}, Allocation: {}",
