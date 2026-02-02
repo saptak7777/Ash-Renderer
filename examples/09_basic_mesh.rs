@@ -45,7 +45,7 @@ impl ApplicationHandler for App {
                 cube.texture_data = None;
 
                 // Upload mesh
-                let mesh_handle = renderer.upload_mesh(cube).unwrap_or(0);
+                let mesh_handle = renderer.upload_mesh_single(cube).unwrap_or(0);
 
                 // Simple grey matte material
                 let material = Material {

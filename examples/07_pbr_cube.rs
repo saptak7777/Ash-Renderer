@@ -72,7 +72,7 @@ impl ApplicationHandler for App {
                 };
 
                 // Upload mesh
-                let mesh_handle = renderer.upload_mesh(cube).unwrap();
+                let mesh_handle = renderer.upload_mesh_single(cube).unwrap();
                 log::info!("✓ Mesh uploaded to GPU");
 
                 // Register and upload material
@@ -284,7 +284,7 @@ fn run_headless(max_frames: u32) -> Result<()> {
         roughness: 0.2,
         ..Default::default()
     };
-    let mesh_handle = renderer.upload_mesh(cube).unwrap();
+    let mesh_handle = renderer.upload_mesh_single(cube).unwrap();
     let material_handle = renderer.register_and_upload_material(material).unwrap();
 
     let render_commands = vec![ash_renderer::renderer::RenderCommand {

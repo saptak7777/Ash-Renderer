@@ -57,7 +57,8 @@ impl ApplicationHandler for App {
                                 for (i, mut mesh) in meshes.into_iter().enumerate() {
                                     let handle = (i + 1) as u32; // Use 1-based handles
                                     let mesh_name = mesh.name.clone();
-                                    if let Err(e) = renderer.register_mesh_handle(handle, &mut mesh)
+                                    if let Err(e) =
+                                        renderer.register_mesh_handle_single(handle, &mut mesh)
                                     {
                                         log::error!("Failed to register mesh {i}: {e}");
                                     } else {
@@ -122,7 +123,7 @@ impl ApplicationHandler for App {
                         },
                     );
 
-                    if let Err(e) = renderer.register_mesh_handle(1, &mut cube) {
+                    if let Err(e) = renderer.register_mesh_handle_single(1, &mut cube) {
                         log::error!("Failed to register test cube: {e}");
                     } else {
                         log::info!("Test cube registered with material properties");

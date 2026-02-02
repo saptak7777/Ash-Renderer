@@ -68,7 +68,7 @@ impl ApplicationHandler for App {
                 mesh.indices = Some(vec![0, 1, 2]);
 
                 // Upload mesh
-                let mesh_handle = renderer.upload_mesh(mesh).unwrap_or(0);
+                let mesh_handle = renderer.upload_mesh_single(mesh).unwrap_or(0);
 
                 // Create default material
                 let material = Material {

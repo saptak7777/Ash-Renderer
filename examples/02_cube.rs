@@ -67,7 +67,7 @@ impl ApplicationHandler for App {
                 };
 
                 // Upload mesh
-                let mesh_handle = renderer.upload_mesh(cube).unwrap();
+                let mesh_handle = renderer.upload_mesh_single(cube).unwrap();
                 log::info!("✓ Mesh uploaded to GPU");
 
                 // Register and upload material

@@ -1,4 +1,4 @@
-use ash_renderer::renderer::{Renderer, MaterialHandle};
+use ash_renderer::renderer::{MaterialHandle, Renderer};
 use glam::Mat4;
 
 fn main() {
@@ -11,29 +11,21 @@ fn main() {
 
     #[allow(dead_code)]
     fn check_api(renderer: &mut Renderer) {
-        let matrices: Vec<Mat4> = vec![Mat4::IDENTITY; 10];
-        unsafe {
-            let _ = renderer.update_joint_ssbo(&matrices);
-            // Also check offset method
-            let _ = renderer.update_joint_ssbo_offset(&matrices, 0);
-        }
-
-        // The user report says this takes 3 args: mesh_handle, material_handle, transform
-        // Now it takes 4: mesh_handle, material_handle, transform, joint_offset
-        renderer.draw_skinned_mesh(0, MaterialHandle::null(), Mat4::IDENTITY, 0);
+        // Basic mesh registration check
+        let mut cube = ash_renderer::renderer::resources::Mesh::create_cube();
+        let _ = renderer.register_mesh_handle_single(0, &mut cube);
 
         // Check RenderCommand fields
-        // Since fields are public, this struct init checks their existence.
-        let _ = ash_renderer::renderer::RenderCommand {
+        let commands = vec![ash_renderer::renderer::RenderCommand {
             mesh_handle: 0,
             material_handle: MaterialHandle::null(),
             transform: Mat4::IDENTITY,
-            is_skinned: false,
-            joint_offset: 0,
             cast_shadows: true,
             receive_shadows: true,
             is_transparent: false,
             is_hidden: false,
-        };
+        }];
+
+        let _ = renderer.submit_render_commands(&commands);
     }
 }

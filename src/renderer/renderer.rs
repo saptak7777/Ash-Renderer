@@ -30,7 +30,7 @@ use crate::{
         vram_budget, DepthBuffer, GBuffer, Material, MaterialHandle, MaterialManager, Mesh,
         PipelineCache, Texture, TextureData, Transform,
     },
-    vulkan::{self, Allocator, BindlessManager, CommandBufferContext},
+    vulkan::{self, Allocator, CommandBufferContext},
     AshError, Result,
 };
 
@@ -323,7 +323,7 @@ pub struct Renderer {
     buffer_pool: Arc<BufferPool>,
     features: FeatureManager,
     _pipeline_cache: PipelineCache,
-    cmds: vulkan::CommandBufferManager,
+    pub cmds: vulkan::CommandBufferManager,
     worker_count: usize,
     command_buffers: Vec<vk::CommandBuffer>,
     frame_syncs: Vec<vulkan::FrameSync>,
@@ -466,8 +466,8 @@ pub struct Renderer {
     // This means foundation should be at the BOTTOM so they are dropped LAST.
     texture_streamer: Mutex<Option<resources::TextureStreamer>>,
     resources: Arc<ResourceRegistry>,
-    alloc: Arc<vulkan::Allocator>,
-    device: vulkan::VulkanDevice,
+    pub alloc: Arc<vulkan::Allocator>,
+    pub device: vulkan::VulkanDevice,
 }
 
 #[derive(Clone)]
@@ -2064,15 +2064,88 @@ impl Renderer {
         &mut self.material_manager
     }
 
-    /// Uploads a mesh to the GPU and returns its handle.
-    /// This is the modern replacement for `set_mesh`.
-    pub fn upload_mesh(&mut self, mut mesh: Mesh) -> Result<u32> {
-        let handle = self.mesh_data.len() as u32;
-        self.register_mesh_handle(handle, &mut mesh)?;
+    /// Returns a one-time use command buffer for transfer operations.
+    pub fn get_transfer_command_buffer(&self) -> Result<vk::CommandBuffer> {
+        self.cmds.get_transfer_command_buffer()
+    }
+
+    /// Uploads a single mesh to the GPU with its own transient command buffer.
+    /// This is a convenience wrapper for simple cases/examples.
+    pub fn upload_mesh_single(&mut self, mesh: Mesh) -> Result<u32> {
+        let upload_cmd = self.get_transfer_command_buffer()?;
+        {
+            let cmd_ctx = self.cmds.context(upload_cmd);
+            cmd_ctx.begin(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT)?;
+        }
+
+        let mut staging_resources = Vec::new();
+        let handle = self.upload_mesh(mesh, upload_cmd, &mut staging_resources)?;
+
+        {
+            let cmd_ctx = self.cmds.context(upload_cmd);
+            cmd_ctx.end()?;
+        }
+        let cmds = [upload_cmd];
+        let submit_info = vk::SubmitInfo::default().command_buffers(&cmds);
+        self.cmds.submit(self.device.graphics_queue, &[submit_info], vk::Fence::null())?;
+        
+        unsafe {
+            self.device.device.queue_wait_idle(self.device.graphics_queue)
+                .map_err(|e| AshError::VulkanError(format!("Queue wait: {e}")))?;
+        }
+
         Ok(handle)
     }
 
-    pub fn register_mesh_handle(&mut self, handle: u32, mesh: &mut Mesh) -> Result<()> {
+    /// Uploads a mesh to the GPU and returns its handle.
+    /// This is the modern replacement for `set_mesh`.
+    pub fn upload_mesh(
+        &mut self,
+        mut mesh: Mesh,
+        upload_cmd: vk::CommandBuffer,
+        staging_resources: &mut Vec<crate::renderer::resources::BufferHandle>,
+    ) -> Result<u32> {
+        let handle = self.mesh_data.len() as u32;
+        self.register_mesh_handle(handle, &mut mesh, upload_cmd, staging_resources)?;
+        Ok(handle)
+    }
+
+    /// Registers a mesh handle with its own transient command buffer.
+    pub fn register_mesh_handle_single(&mut self, handle: u32, mesh: &mut Mesh) -> Result<()> {
+        let upload_cmd = self.get_transfer_command_buffer()?;
+        let mut staging_resources = Vec::new();
+        
+        {
+            let ctx = self.cmds.context(upload_cmd);
+            ctx.begin(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT)?;
+        }
+        
+        self.register_mesh_handle(handle, mesh, upload_cmd, &mut staging_resources)?;
+        
+        {
+            let ctx = self.cmds.context(upload_cmd);
+            ctx.end()?;
+        }
+        
+        let cmds = [upload_cmd];
+        let submit_info = vk::SubmitInfo::default().command_buffers(&cmds);
+        self.cmds.submit(self.device.graphics_queue, &[submit_info], vk::Fence::null())?;
+        
+        unsafe {
+            self.device.device.queue_wait_idle(self.device.graphics_queue)
+                .map_err(|e| AshError::VulkanError(format!("Queue wait: {e}")))?;
+        }
+        
+        Ok(())
+    }
+
+    pub fn register_mesh_handle(
+        &mut self,
+        handle: u32,
+        mesh: &mut Mesh,
+        upload_cmd: vk::CommandBuffer,
+        staging_resources: &mut Vec<crate::renderer::resources::BufferHandle>,
+    ) -> Result<()> {
         // VCGS Phase 2: Build Cluster DAG
         // This generates the hierarchical cluster structure needed for GPU selection.
         // crate::renderer::vcgs::build_mesh_dag(mesh); // DIAGNOSTIC: Disabled to test stability
@@ -2080,34 +2153,55 @@ impl Renderer {
         // Phase 7: Upload Clusters to Global Buffer
         let mut cluster_start_index = 0;
         let mut cluster_count = 0;
-        
-        if let Some(ref buffer) = self.global_cluster_buffer {
+
+        // Pre-clone shared resources to avoid self-borrow issues
+        let alloc = Arc::clone(&self.alloc);
+        let cluster_buffer = self.global_cluster_buffer.as_ref();
+
+        if let Some(buffer) = cluster_buffer {
             if !mesh.clusters.is_empty() {
                 // Convert MeshCluster to CullObjectData
                 let cull_objects: Vec<CullObjectData> = mesh.clusters.iter().map(|c| {
-                    let mut data = CullObjectData::default();
+                    // Start with IDENTITY matrix to prevent geometry squashing
+                    let identity = glam::Mat4::IDENTITY;
+                    let cols = identity.to_cols_array_2d();
+
+                    let data = CullObjectData {
+                        // Pack matrix rows (GPU expects column-major for mat4, which is cols[0..3] in memory)
+                        model_row0: cols[0],
+                        model_row1: cols[1],
+                        model_row2: cols[2],
+                        model_row3: cols[3],
+                        
+                        // Sphere packing: vec4(center.xyz, radius)
+                        bounds: crate::renderer::vcgs::CullBoundingBox {
+                            center: [c.bounds_center[0], c.bounds_center[1], c.bounds_center[2], c.bounds_radius],
+                            extents: [c.bounds_radius, c.bounds_radius, c.bounds_radius, 0.0],
+                        },
+                        
+                        parent_index: c.parent_index,
+                        first_index: c.first_index,
+                        index_count: c.index_count,
+                        error_metric: c.error_metric,
+                        
+                        // Set Flag 1 (Enabled)
+                        flags: 1,
+                        
+                        // Material from mesh
+                        material_index: mesh.material_handle.unwrap_or(0),
+                        
+                        ..Default::default()
+                    };
                     
-                    // Box center and radius
-                    data.bounds.center = [c.bounds_center[0], c.bounds_center[1], c.bounds_center[2], c.bounds_radius];
-                    // Using extents to store radius as well or zero? Sticking to sphere culling for now.
-                     data.bounds.extents = [c.bounds_radius, c.bounds_radius, c.bounds_radius, 0.0];
-                    
-                     data.parent_index = c.parent_index;
-                     data.first_index = c.first_index;
-                     data.index_count = c.index_count;
-                     data.error_metric = c.error_metric;
-                     
-                     data
+                    data
                 }).collect();
                 
                 unsafe {
                     let element_size = std::mem::size_of::<CullObjectData>();
                     let total_size = (cull_objects.len() * element_size) as u64;
 
-                    // 1. Create Staging Buffer
-                    // TODO: Reuse a staging buffer instead of allocating per mesh for better performance
                     let mut staging_buffer = crate::renderer::resources::BufferHandle::new_with_flags(
-                        Arc::clone(&self.alloc),
+                        Arc::clone(&alloc),
                         total_size,
                         vk::BufferUsageFlags::TRANSFER_SRC,
                         vk_mem::MemoryUsage::Auto,
@@ -2118,74 +2212,43 @@ impl Renderer {
                     .map_err(|e| AshError::VulkanError(format!("Staging buffer alloc: {}", e)))?;
 
                     // 2. Copy data to staged memory
+                    let total_size_val = total_size; // Avoid borrow issues
                     {
-                        let mut guard = self
-                            .alloc
-                            .map_allocation_guarded(staging_buffer.allocation_mut(), total_size)
+                        let mut guard = alloc
+                            .map_allocation_guarded(staging_buffer.allocation_mut(), total_size_val)
                             .map_err(|e| {
                                 AshError::VulkanError(format!("Map cluster staging memory: {}", e))
                             })?;
                         guard.copy_from_slice(&cull_objects);
                     }
 
-                    // 3. Prepare Command Buffer
-                    let cmd = self
-                        .cmds
-                        .get_transfer_command_buffer()
-                        .map_err(|e| AshError::VulkanError(format!("Get cmd buffer: {}", e)))?;
-                    let ctx = self.cmds.context(cmd);
-
-                    ctx.begin(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT)?;
-
-                    // 4. Record Copy Command
-                    match buffer.upload_clusters(
-                        cmd,
+                    // 3. Record Copy Command (No submit, no wait here - we are batching!)
+                    let start_idx = buffer.upload_clusters(
+                        upload_cmd,
                         staging_buffer.handle(),
                         0,
                         cull_objects.len() as u32,
-                    ) {
-                        Ok(start_idx) => {
-                            ctx.end()?;
+                    ).map_err(|e| AshError::VulkanError(format!("Cluster upload recording: {}", e)))?;
 
-                            // 5. Submit & Wait (Synchronous for safety in this phase)
-                            // Pro-coder Note: The CPU wait ensures memory visibility before the Compute Shader reads.
-                            let cmds_to_submit = [cmd];
-                            let submit_info = vk::SubmitInfo::default().command_buffers(&cmds_to_submit);
-                            self.cmds.submit(
-                                self.device.graphics_queue,
-                                &[submit_info],
-                                vk::Fence::null(),
-                            )?;
-                            self.device
-                                .device
-                                .queue_wait_idle(self.device.graphics_queue)
-                                .map_err(|e| {
-                                    AshError::VulkanError(format!("Queue wait idle: {}", e))
-                                })?;
+                    // Store staging buffer to keep it alive until command buffer finishes (Move ownership)
+                    staging_resources.push(staging_buffer);
 
-                            cluster_start_index = start_idx;
-                            cluster_count = cull_objects.len() as u32;
-                            log::debug!(
-                                "Uploaded {} clusters for mesh '{}' at index {}",
-                                cluster_count,
-                                mesh.name,
-                                start_idx
-                            );
-                        }
-                        Err(e) => {
-                            log::error!("Failed to upload clusters for mesh '{}': {}", mesh.name, e);
-                        }
-                    }
-
-                    // 6. Cleanup of staging_buffer and cmd occurs via RAII or implicitly.
-                    // Note: cmd is transient and should ideally be recycled, but in this phase it is simple.
+                    cluster_start_index = start_idx;
+                    cluster_count = cull_objects.len() as u32;
+                    log::debug!(
+                        "Recorded {} clusters for batch upload of mesh '{}' at index {}",
+                        cluster_count,
+                        mesh.name,
+                        start_idx
+                    );
                 }
             }
         }
-        
         // Update mesh tracking
         mesh.cluster_start_index = Some(cluster_start_index);
         mesh.cluster_count = Some(cluster_count);
+
+        // Continue with texture and model renderer registration
 
         unsafe {
             let key = mesh.name.clone();
@@ -2434,11 +2497,13 @@ impl Renderer {
         &mut self,
         handle: u32,
         descriptor: &MeshDescriptor,
+        upload_cmd: vk::CommandBuffer,
+        staging_resources: &mut Vec<crate::renderer::resources::BufferHandle>,
     ) -> Result<String> {
         let mut mesh = Mesh::from_descriptor(descriptor);
         let key = Arc::clone(&mesh.name);
 
-        self.register_mesh_handle(handle, &mut mesh)?;
+        self.register_mesh_handle(handle, &mut mesh, upload_cmd, staging_resources)?;
 
         Ok(key.to_string())
     }

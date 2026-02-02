@@ -24,7 +24,7 @@ fn main() -> Result<()> {
 
     // 3. Set up scene (Cube)
     let cube = Mesh::create_cube();
-    let mesh_handle = renderer.upload_mesh(cube)?;
+    let mesh_handle = renderer.upload_mesh_single(cube)?;
 
     let material = Material {
         color: [0.2, 0.8, 0.2, 1.0], // Green cube

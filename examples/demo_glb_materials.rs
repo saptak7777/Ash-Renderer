@@ -65,7 +65,7 @@ impl ApplicationHandler for App {
 
                 // Register the mesh with the renderer (this triggers material registration)
                 let handle = 1u32;
-                if let Err(e) = renderer.register_mesh_handle(handle, &mut demo_mesh) {
+                if let Err(e) = renderer.register_mesh_handle_single(handle, &mut demo_mesh) {
                     log::error!("Failed to register demo mesh: {e}");
                 } else {
                     log::info!("✅ Demo mesh registered with handle {handle}");

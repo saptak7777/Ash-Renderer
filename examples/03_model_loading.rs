@@ -51,7 +51,10 @@ impl ApplicationHandler for App {
                         Ok(meshes) => {
                             for (i, mut mesh) in meshes.into_iter().enumerate() {
                                 let handle = (i + 1) as u32;
-                                if renderer.register_mesh_handle(handle, &mut mesh).is_ok() {
+                                if renderer
+                                    .register_mesh_handle_single(handle, &mut mesh)
+                                    .is_ok()
+                                {
                                     self.mesh_handles.push(handle);
                                     log::info!(
                                         "Registered mesh {} with handle {}",
@@ -66,7 +69,7 @@ impl ApplicationHandler for App {
                 } else {
                     log::warn!("Model not found at {glb_path}. Using default cube.");
                     let mut cube = Mesh::create_cube();
-                    if renderer.register_mesh_handle(1, &mut cube).is_ok() {
+                    if renderer.register_mesh_handle_single(1, &mut cube).is_ok() {
                         self.mesh_handles.push(1);
                     }
                 }

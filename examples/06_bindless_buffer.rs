@@ -83,7 +83,7 @@ impl ApplicationHandler for App {
                 log::info!("✓ Cube mesh created and renamed to 'OrangeCube' for Phase 1");
 
                 // Upload mesh
-                let mesh_handle = renderer.upload_mesh(cube).unwrap_or(0);
+                let mesh_handle = renderer.upload_mesh_single(cube).unwrap_or(0);
                 log::info!("✓ Mesh uploaded to GPU");
 
                 // 4. Setup render command
@@ -233,7 +233,7 @@ fn run_headless(max_frames: u32) -> Result<()> {
         v.color = [1.0, 1.0, 1.0];
     }
     cube.name = Arc::from("OrangeCubeHeadless");
-    let mesh_handle = renderer.upload_mesh(cube).unwrap_or(0);
+    let mesh_handle = renderer.upload_mesh_single(cube).unwrap_or(0);
 
     let render_commands = vec![ash_renderer::renderer::RenderCommand {
         mesh_handle,

@@ -53,7 +53,7 @@ fn main() -> Result<()> {
         let mut mesh = Mesh::from_descriptor(&descriptor);
 
         log::info!("Registering mesh {i}...");
-        if let Err(e) = renderer.register_mesh_handle(i as u32, &mut mesh) {
+        if let Err(e) = renderer.register_mesh_handle_single(i as u32, &mut mesh) {
             log::error!("Failed to register mesh {i}: {e}");
             break;
         }

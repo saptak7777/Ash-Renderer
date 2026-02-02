@@ -95,12 +95,23 @@ impl ApplicationHandler for App {
                     }
                 };
 
+                // Prepare batched upload
+                let upload_cmd = renderer.get_transfer_command_buffer().unwrap();
+                let cmd_ctx = renderer.cmds.context(upload_cmd);
+                cmd_ctx
+                    .begin(ash::vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT)
+                    .unwrap();
+
+                let mut staging_resources = Vec::new();
+
                 // Iterate all meshes and create render commands
                 for (i, mesh) in meshes.into_iter().enumerate() {
                     let mesh_name = mesh.name.clone();
 
-                    // Upload mesh (Auto-creates and uploads material now!)
-                    let mesh_handle = renderer.upload_mesh(mesh).unwrap();
+                    // Upload mesh (Recorded into batch command buffer)
+                    let mesh_handle = renderer
+                        .upload_mesh(mesh, upload_cmd, &mut staging_resources)
+                        .unwrap();
 
                     // Retrieve the auto-created material handle
                     let material_handle = renderer.get_mesh_material(mesh_handle);
@@ -125,8 +136,33 @@ impl ApplicationHandler for App {
                         });
                 }
 
+                // Finalize batch and submit
+                {
+                    let cmd_ctx = renderer.cmds.context(upload_cmd);
+                    cmd_ctx.end().unwrap();
+                }
+                let cmds = [upload_cmd];
+                let submit_info = ash::vk::SubmitInfo::default().command_buffers(&cmds);
+                renderer
+                    .cmds
+                    .submit(
+                        renderer.device.graphics_queue,
+                        &[submit_info],
+                        ash::vk::Fence::null(),
+                    )
+                    .unwrap();
+
+                // Synchronous wait for startup (Avoids complex frame syncing for initial load)
+                unsafe {
+                    renderer
+                        .device
+                        .device
+                        .queue_wait_idle(renderer.device.graphics_queue)
+                        .unwrap();
+                }
+
                 log::info!(
-                    "✓ {} meshes uploaded and scheduled",
+                    "✓ {} meshes uploaded in a single batch and scheduled",
                     self.render_commands.len()
                 );
 

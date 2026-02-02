@@ -67,7 +67,7 @@ impl ApplicationHandler for App {
                 cube.texture_data = None;
 
                 // Upload mesh
-                let mesh_handle = renderer.upload_mesh(cube).unwrap_or(0);
+                let mesh_handle = renderer.upload_mesh_single(cube).unwrap_or(0);
                 log::info!("✓ Mesh uploaded to GPU");
 
                 // Register bindless storage buffer (prevents crash)
@@ -88,11 +88,12 @@ impl ApplicationHandler for App {
                 // Load pre-baked IBL environment map for realistic PBR lighting
                 // Load pre-baked IBL environment map using the new Asset System
                 // We use archetype_asset for Zero-Copy loading!
-                if let Ok(asset) =
+                if let Ok(_asset) =
                     archetype_asset::ibl::MappedIblAsset::load("assets/textures/skybox.ibl")
                 {
                     log::info!("✓ IBL asset loaded via Zero-Copy MappedIblAsset");
 
+                    /*
                     // Convert header (fields match 1:1)
                     let header = ash_renderer::renderer::resources::IblAssetHeader {
                         magic: asset.header.magic,
@@ -105,7 +106,6 @@ impl ApplicationHandler for App {
                         _padding: asset.header._padding,
                     };
 
-                    /*
                     if let Err(e) = renderer.upload_ibl(
                         &header,
                         asset.cubemap_data(),
