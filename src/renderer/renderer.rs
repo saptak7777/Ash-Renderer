@@ -5,7 +5,7 @@ use crate::{
         },
         features::{
             AutoRotateFeature, DirectionalLight, FeatureFrameContext, FeatureManager,
-            FeatureRenderContext, PointLight, SpotLight,
+            FeatureRenderContext, PointLight, SceneLighting, SpotLight,
             VsmFeature, default_vsm_config,
         },
         ForwardPlusIntegration,
@@ -3812,9 +3812,11 @@ impl Renderer {
         // (Only skinned meshes would remain here if we hadn't moved them, 
         // but for now we focus on opaque stability)
 
-        // 4. Render Skybox (WYSIWYG: Only if HDRI exists)
-        if self.scene_lighting.has_environment_map > 0 {
-            self.render_skybox(&cmd_ctx, frame_index, params.view, params.projection)?;
+        // 4. Render Skybox (Sentinel Pattern: Only if environment_map_index is NOT MAX)
+        if self.scene_lighting.environment_map_index != SceneLighting::NO_ENVIRONMENT_MAP {
+            if let Err(e) = self.render_skybox(&cmd_ctx, frame_index, params.view, params.projection) {
+                log::warn!("Skybox render failed: {e}");
+            }
         }
 
         Ok(())
@@ -4180,12 +4182,13 @@ impl Renderer {
 
                 // Phase 2: Lean Engine "Studio Architecture" Logic
                 // Single Source of Truth: environment map status drives shader and skybox
-                if self.skybox_mesh.is_some() {
+                // Phase 4: Sentinel Pattern Logic
+                // If the app hasn't explicitly set a skybox texture, index is SceneLighting::NO_ENVIRONMENT_MAP.
+                // We no longer check if skybox_mesh exists (it always does as a fallback).
+                if self.scene_lighting.environment_map_index != SceneLighting::NO_ENVIRONMENT_MAP {
                     self.scene_lighting.has_environment_map = 1;
-                    self.scene_lighting.environment_map_index = self.skybox_index;
                 } else {
                     self.scene_lighting.has_environment_map = 0;
-                    self.scene_lighting.environment_map_index = 0; // Safe dummy
                 }
 
                 matrices.set_lighting(&self.scene_lighting);

@@ -127,7 +127,10 @@ impl Default for DirectionalLight {
     }
 }
 
-/// Complete scene lighting configuration
+impl SceneLighting {
+    pub const NO_ENVIRONMENT_MAP: u32 = u32::MAX;
+}
+
 #[repr(C, align(16))]
 #[derive(Clone, Copy, Debug, Default, Pod, Zeroable)]
 pub struct SceneLighting {
@@ -137,7 +140,7 @@ pub struct SceneLighting {
     pub num_tiles_x: u32,
     pub num_tiles_y: u32,
     pub tile_size: u32,
-    pub environment_map_index: u32,
+    pub environment_map_index: u32, // SENTINEL: u32::MAX = No Skybox
     pub has_environment_map: u32,
     pub _padding: [u32; 2],
 }
@@ -233,7 +236,7 @@ impl LightingBuilder<DirectionalSet> {
             num_tiles_x: 0,
             num_tiles_y: 0,
             tile_size: 16,
-            environment_map_index: 0,
+            environment_map_index: SceneLighting::NO_ENVIRONMENT_MAP, // Sentinel: No Skybox
             has_environment_map: 0,
             _padding: [0; 2],
         }
@@ -251,7 +254,7 @@ impl LightingPresets {
         num_tiles_x: 0,
         num_tiles_y: 0,
         tile_size: 16,
-        environment_map_index: 0,
+        environment_map_index: SceneLighting::NO_ENVIRONMENT_MAP,
         has_environment_map: 0,
         _padding: [0; 2],
     };
@@ -263,7 +266,7 @@ impl LightingPresets {
         num_tiles_x: 0,
         num_tiles_y: 0,
         tile_size: 16,
-        environment_map_index: 0,
+        environment_map_index: SceneLighting::NO_ENVIRONMENT_MAP,
         has_environment_map: 0,
         _padding: [0; 2],
     };
@@ -275,7 +278,7 @@ impl LightingPresets {
         num_tiles_x: 0,
         num_tiles_y: 0,
         tile_size: 16,
-        environment_map_index: 0,
+        environment_map_index: SceneLighting::NO_ENVIRONMENT_MAP,
         has_environment_map: 0,
         _padding: [0; 2],
     };
@@ -287,7 +290,7 @@ impl LightingPresets {
         num_tiles_x: 0,
         num_tiles_y: 0,
         tile_size: 16,
-        environment_map_index: 0,
+        environment_map_index: SceneLighting::NO_ENVIRONMENT_MAP,
         has_environment_map: 0,
         _padding: [0; 2],
     };
