@@ -292,7 +292,10 @@ void main() {
     vec3 T_raw = fragTangent.xyz;
     vec3 T = length(T_raw) > 0.001 ? normalize(T_raw) : vec3(1.0, 0.0, 0.0);
     
-    T = normalize(T - dot(T, N) * N);
+    // Gram-Schmidt orthogonalization - Safety check for degenerate T
+    if (dot(T, T) > 0.001) {
+        T = normalize(T - dot(T, N) * N);
+    }
     
     // Note: gl_FrontFacing check removed - redundant with backface culling enabled
     

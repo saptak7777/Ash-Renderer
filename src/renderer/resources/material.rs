@@ -202,9 +202,9 @@ impl MaterialHandle {
 }
 
 pub struct MaterialManager {
-    materials: Vec<Material>,
-    versions: Vec<u16>,
-    next_material_id: u16,
+    pub materials: Vec<Material>,
+    pub versions: Vec<u16>,
+    pub next_material_id: u16,
     default_material: MaterialHandle,
     key_to_handle: HashMap<MaterialKey, MaterialHandle>,
 }

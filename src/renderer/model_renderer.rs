@@ -137,12 +137,17 @@ struct DrawPushConstants {
     vsm_page_index: u32,  // 56
     vsm_cache_index: u32, // 60
 
-    // Control stage (64-127)
-    model: Mat4Push,                  // 64
-    material_index: u32,              // 128
-    use_instancing: u32,              // 132
-    flags: u32,                       // 136
-    debug_path: u32,                  // 140
+    // Phase 19: Transient Transform (64-79)
+    transform_ptr_low: u32,  // 64
+    transform_ptr_high: u32, // 68
+    transform_index: u32,    // 72
+    _padding_ptr: u32,       // 76
+
+    // Control stage (80-111)
+    material_index: u32,              // 80
+    use_instancing: u32,              // 84
+    flags: u32,                       // 88
+    debug_path: u32,                  // 92
     debug_visualization_enabled: u32, // 144
     skybox_index: u32,                // 148
     _padding: [u32; 2],               // 152 (Total 160)
@@ -164,12 +169,13 @@ pub struct DrawContext<'a> {
     pub light_ptr: u64,
     pub tile_ptr: u64,
 
-    // Bindless Indices
+    pub skybox_index: u32,
     pub vsm_page_index: u32,
     pub vsm_cache_index: u32,
-    pub skybox_index: u32,
 
-    pub model: glam::Mat4, // Carrying the transform from RenderCommand
+    // Phase 19: Transient Transform data
+    pub transform_ptr: u64,
+    pub transform_index: u32,
 }
 
 /// Parameters for indirect draw with count buffer
@@ -316,7 +322,10 @@ impl ModelRenderer {
             tile_ptr_high: (ctx.tile_ptr >> 32) as u32,
             vsm_page_index: ctx.vsm_page_index,
             vsm_cache_index: ctx.vsm_cache_index,
-            model: ctx.model.into(),
+            transform_ptr_low: ctx.transform_ptr as u32,
+            transform_ptr_high: (ctx.transform_ptr >> 32) as u32,
+            transform_index: ctx.transform_index,
+            _padding_ptr: 0,
             material_index: material_handle.index as u32,
             use_instancing: 0,
             flags: ctx.material.flags,
@@ -390,7 +399,10 @@ impl ModelRenderer {
             tile_ptr_high: (ctx.tile_ptr >> 32) as u32,
             vsm_page_index: ctx.vsm_page_index,
             vsm_cache_index: ctx.vsm_cache_index,
-            model: ctx.model.into(),
+            transform_ptr_low: ctx.transform_ptr as u32,
+            transform_ptr_high: (ctx.transform_ptr >> 32) as u32,
+            transform_index: ctx.transform_index,
+            _padding_ptr: 0,
             material_index: ctx.material.material_handle.index as u32,
             use_instancing: 1,
             flags: ctx.material.flags,
@@ -449,7 +461,10 @@ impl ModelRenderer {
             tile_ptr_high: (ctx.tile_ptr >> 32) as u32,
             vsm_page_index: ctx.vsm_page_index,
             vsm_cache_index: ctx.vsm_cache_index,
-            model: ctx.model.into(),
+            transform_ptr_low: ctx.transform_ptr as u32,
+            transform_ptr_high: (ctx.transform_ptr >> 32) as u32,
+            transform_index: ctx.transform_index,
+            _padding_ptr: 0,
             material_index: material_handle.index as u32,
             use_instancing: 1,
             flags: ctx.material.flags,

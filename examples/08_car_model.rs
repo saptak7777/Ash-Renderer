@@ -22,6 +22,7 @@ use winit::{
 
 enum LoaderMessage {
     ModelLoaded(Vec<ash_renderer::renderer::Mesh>),
+    LoadError(String),
 }
 
 struct App {
@@ -97,24 +98,36 @@ impl ApplicationHandler for App {
                 let (tx, rx) = mpsc::channel();
                 self.loader_rx = Some(rx);
 
-                std::thread::spawn(move || {
-                    let result = std::panic::catch_unwind(move || {
-                        log::info!("Async Loader: Starting disk I/O for car model...");
-                        match gltf_loader::load_model(glb_path) {
-                            Ok(meshes) => {
-                                let _ = tx.send(LoaderMessage::ModelLoaded(meshes));
-                                log::info!("Async Loader: Disk I/O complete.");
+                if let Err(e) = std::thread::Builder::new()
+                    .name("AsyncLoader".to_string())
+                    .spawn(move || {
+                        let tx_panic = tx.clone();
+                        let result = std::panic::catch_unwind(move || {
+                            log::info!("Async Loader: Starting disk I/O for car model...");
+                            match gltf_loader::load_model(glb_path) {
+                                Ok(meshes) => {
+                                    let _ = tx.send(LoaderMessage::ModelLoaded(meshes));
+                                    log::info!("Async Loader: Disk I/O complete.");
+                                }
+                                Err(e) => {
+                                    log::error!("Async Loader: Failed to load model: {e}");
+                                    let _ = tx.send(LoaderMessage::LoadError(e.to_string()));
+                                }
                             }
-                            Err(e) => {
-                                log::error!("Async Loader: Failed to load model: {e}");
-                            }
-                        }
-                    });
+                        });
 
-                    if let Err(panic) = result {
-                        log::error!("Async Loader: Thread panicked: {:?}", panic);
-                    }
-                });
+                        if let Err(panic) = result {
+                            log::error!("Async Loader: Thread panicked: {:?}", panic);
+                            let _ = tx_panic.send(LoaderMessage::LoadError(format!(
+                                "Thread panicked: {:?}",
+                                panic
+                            )));
+                        }
+                    })
+                {
+                    log::error!("Async Loader: Failed to spawn thread: {e}");
+                    self.loader_rx = None;
+                }
 
                 self.renderer = Some(renderer);
                 self.window = Some(window);
@@ -147,7 +160,17 @@ impl ApplicationHandler for App {
                     if let Some(rx) = &self.loader_rx {
                         match rx.try_recv() {
                             Ok(LoaderMessage::ModelLoaded(meshes)) => {
-                                log::info!("Async Loader: Data received on main thread. Starting GPU upload...");
+                                if meshes.is_empty() {
+                                    log::error!("Async Loader: GLB file contains no meshes.");
+                                    window.set_title("ASH Renderer - Error: No meshes found");
+                                    self.loader_rx = None;
+                                    return;
+                                }
+
+                                log::info!(
+                                    "Async Loader: Data received on main thread ({} meshes). Starting GPU upload...",
+                                    meshes.len()
+                                );
 
                                 // Prepare batched upload
                                 let upload_cmd = renderer.get_transfer_command_buffer().unwrap();
@@ -244,11 +267,15 @@ impl ApplicationHandler for App {
                                     )
                                     .build();
                                 renderer.set_lighting(&lighting);
-
                                 window.set_title("ASH Renderer - Retro Muscle Car (Live)");
                                 log::info!(
                                     "✓ Car Model GPU Upload scheduled. Switching to rendering."
                                 );
+                            }
+                            Ok(LoaderMessage::LoadError(err)) => {
+                                log::error!("Async Loader: Failed to load model: {err}");
+                                window.set_title(&format!("ASH Renderer - Error: {err}"));
+                                self.loader_rx = None;
                             }
                             Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                                 log::error!("Async Loader: Thread disconnected unexpectedly (Check logs for panics)");
@@ -258,8 +285,9 @@ impl ApplicationHandler for App {
                         }
                     }
 
-                    // 2. RENDERING: Start assuming ready unless fence says otherwise
-                    let mut ready_to_draw = true;
+                    // 2. RENDERING: Check if we have something to draw
+                    let mut ready_to_draw =
+                        !self.render_commands.is_empty() && self.loader_rx.is_none();
 
                     // Non-blocking check for upload completion
                     if let Some(fence) = self.upload_fence {
@@ -272,12 +300,22 @@ impl ApplicationHandler for App {
                                     self.upload_fence = None;
                                     log::info!("GPU Upload Complete. Starting Render Loop.");
                                 }
-                                _ => {
-                                    // Still uploading or error. Skip frame to keep window responsive.
+                                Ok(false) => {
+                                    // Still uploading. Skip frame.
+                                    ready_to_draw = false;
+                                }
+                                Err(e) => {
+                                    log::error!(
+                                        "Failed to check fence status: {e}, destroying fence"
+                                    );
+                                    renderer.device.device.destroy_fence(fence, None);
+                                    self.upload_fence = None;
                                     ready_to_draw = false;
                                 }
                             }
                         }
+                    } else if self.render_commands.is_empty() {
+                        ready_to_draw = false;
                     }
 
                     if ready_to_draw {

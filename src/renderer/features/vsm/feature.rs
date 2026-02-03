@@ -215,6 +215,8 @@ impl VsmFeature {
         index_ptr: u64,
         light_ptr: u64,
         tile_ptr: u64,
+        transform_ptr: u64,
+        transform_index: u32,
     ) {
         let allocations = self.page_manager.get_allocated_pages();
         if allocations.is_empty() {
@@ -337,6 +339,8 @@ impl VsmFeature {
             frame_ptr,
             vertex_ptr,
             instance_ptr,
+            transform_ptr,
+            transform_index,
         );
     }
 

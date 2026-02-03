@@ -22,7 +22,12 @@ void main() {
     // Access Frame Data via BDA
     FrameData frame = FrameData(push.frame_ptr);
     
-    mat4 model = push.model;
+    mat4 model;
+    if (push.transform_ptr != 0) {
+        model = TransformBuffer(push.transform_ptr).matrices[push.transform_index];
+    } else {
+        model = mat4(1.0);
+    }
     int vertex_offset = 0;
     
     // Modern BDA Instancing

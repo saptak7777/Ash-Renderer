@@ -59,7 +59,10 @@ pub fn load_model(path: impl AsRef<Path>) -> Result<Vec<Mesh>> {
             let tangents = reader
                 .read_tangents()
                 .map(|iter| iter.collect::<Vec<_>>())
-                .unwrap_or_else(|| vec![[0.0, 0.0, 0.0, 1.0]; positions.len()]);
+                // Industry standard: Use [1,0,0,1] as default tangent if missing.
+                // This ensures unit length and common perpendicularity to [0,0,1] normals.
+                // Preventing degenerate TBN matrices while avoiding heavy CPU re-calculation.
+                .unwrap_or_else(|| vec![[1.0, 0.0, 0.0, 1.0]; positions.len()]);
 
             // Build vertices
             let vertices: Vec<Vertex> = (0..positions.len())

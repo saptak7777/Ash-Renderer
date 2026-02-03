@@ -5,11 +5,11 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::renderer::Transform;
-use crate::vulkan::DescriptorManager;
+use crate::vulkan::DescriptorAllocator;
 
 pub struct FeatureFrameContext<'a> {
     pub device: &'a Device,
-    pub descriptor_manager: Option<&'a DescriptorManager>,
+    pub descriptor_allocator: Option<&'a DescriptorAllocator>,
     pub transform: &'a mut Transform,
     pub auto_rotate: bool,
     pub elapsed_seconds: f32,
@@ -17,7 +17,7 @@ pub struct FeatureFrameContext<'a> {
 
 pub struct FeatureRenderContext<'a> {
     pub device: &'a Device,
-    pub descriptor_manager: Option<&'a DescriptorManager>,
+    pub descriptor_allocator: Option<&'a DescriptorAllocator>,
     pub command_buffer: vk::CommandBuffer,
     pub transform: &'a Transform,
     pub frame_index: usize,

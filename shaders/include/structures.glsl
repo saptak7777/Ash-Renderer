@@ -100,6 +100,10 @@ layout(buffer_reference, scalar) buffer LightBuffer {
     Light lights[];
 };
 
+layout(buffer_reference, scalar) readonly buffer TransformBuffer {
+    mat4 matrices[];
+};
+
 // Set 0: Unified Bindless consolidated resources
 layout(set = 0, binding = 0) uniform sampler2D global_textures[];
 layout(set = 0, binding = 1) uniform usampler2DArray global_page_tables[];
@@ -154,13 +158,17 @@ layout(push_constant) uniform PushConstants {
     uint vsm_page_index;
     uint vsm_cache_index;
 
-    // Control stage (64-127)
-    layout(offset = 64) mat4 model; 
-    layout(offset = 128) uint material_index;
-    layout(offset = 132) uint use_instancing;
-    layout(offset = 136) uint flags;
-    layout(offset = 140) uint debug_path;
-    layout(offset = 144) uint debug_mode;
-    layout(offset = 148) uint skybox_index;
+    // Phase 19: Transient Transform (64-79)
+    uint64_t transform_ptr;           // 64
+    uint transform_index;             // 72
+    uint _padding_ptr;                // 76
+
+    // Control stage (80-111)
+    layout(offset = 80) uint material_index;
+    layout(offset = 84) uint use_instancing;
+    layout(offset = 88) uint flags;
+    layout(offset = 92) uint debug_path;
+    layout(offset = 96) uint debug_mode;
+    layout(offset = 100) uint skybox_index;
 } push;
 #endif

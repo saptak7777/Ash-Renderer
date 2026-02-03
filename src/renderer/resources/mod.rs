@@ -1,6 +1,5 @@
 pub mod bindless_validator;
 pub mod buffer;
-pub mod buffer_pool;
 pub mod cluster_buffer;
 pub mod depth_buffer;
 pub mod descriptor;
@@ -24,7 +23,6 @@ pub mod uniform;
 
 pub use bindless_validator::BindlessValidator;
 pub use buffer::BufferHandle;
-pub use buffer_pool::{BufferAllocation, BufferPool};
 pub use cluster_buffer::GlobalClusterBuffer;
 pub use depth_buffer::DepthBuffer;
 pub use descriptor::DescriptorSetHandle;
@@ -33,7 +31,7 @@ pub use image::ImageHandle;
 pub use material::{Material, MaterialHandle, MaterialManager};
 pub use mesh::{Mesh, Vertex};
 pub use motion::ObjectMotionData;
-pub use optimized_buffer_pool::{BufferPoolConfig, BufferPoolStats};
+pub use optimized_buffer_pool::{BufferAllocation, BufferPool, BufferPoolConfig, BufferPoolStats};
 pub use pipeline::PipelineHandle;
 pub use safe_resource::SafeResource;
 pub use texture::{Texture, TextureData};

@@ -41,6 +41,7 @@ use parking_lot::Mutex;
 use rayon::prelude::*;
 use resources::BufferPool;
 use std::collections::{HashMap, HashSet};
+use std::ptr;
 use std::sync::Arc;
 use std::thread;
 use std::time::Instant;
@@ -153,6 +154,8 @@ struct RendererResources {
     vsm_default_array: Texture, // 2DArray version for clipmaps
     material_storage_buffer: StorageBuffer<resources::uniform::MaterialUniform>,
     instance_buffers: Vec<resources::InstanceBuffer>,
+    transform_arena: vk::Buffer,
+    transform_arena_alloc: vk_mem::Allocation,
     post_sampler: vk::Sampler,
 }
 
@@ -358,7 +361,7 @@ pub struct Renderer {
     // material_buffer_index: u32, // DELETED: Using BDA
     pipeline_layout: Option<vulkan::PipelineLayout>,
     pipeline_layout_id: Option<ResourceId>,
-    descriptors: Option<vulkan::DescriptorManager>,
+    descriptors: Option<vulkan::DescriptorAllocator>,
     framebuffers: Vec<vulkan::Framebuffer>,
     framebuffer_ids: Vec<ResourceId>,
     start_time: Instant,
@@ -393,6 +396,7 @@ pub struct Renderer {
     vsm_feature: Option<VsmFeature>,
     // Bindless textures
     bindless_manager: vulkan::BindlessManager,
+    texture_registry: HashMap<u32, Arc<Texture>>,
     // Forward+ lighting
     forward_plus: Option<ForwardPlusIntegration>,
     // GPU-driven occlusion culling (Hi-Z + Indirect Draw)
@@ -437,8 +441,13 @@ pub struct Renderer {
     vram_budget: vram_budget::VramBudget,
     texture_compression: bool,
     instancing_manager: InstancingManager,
-    instance_buffer: Vec<resources::InstanceBuffer>, // One per frame
+    instance_buffers: Vec<resources::InstanceBuffer>,
     transform_system: resources::TransformSystem,
+    // Transient Transform Arena (Phase 19)
+    transform_arena: vk::Buffer,
+    transform_arena_alloc: vk_mem::Allocation,
+    transform_arena_addr: u64,
+    transform_arena_offset: u32,
     // Image-Based Lighting
     allow_auto_material: bool,
     strict_mode: bool,
@@ -673,10 +682,10 @@ impl Renderer {
             let model_renderer =
                 ModelRenderer::new(Arc::clone(&alloc), Arc::clone(&device.device), Arc::clone(&geometry_buffer));
 
-            log::info!("Initializing DescriptorManager and BindlessManager");
-            let mut descriptor_manager = vulkan::DescriptorManager::new(
+            log::info!("Initializing DescriptorAllocator and BindlessManager");
+            let mut descriptor_allocator = vulkan::DescriptorAllocator::new(
                 Arc::clone(&device.device),
-                framebuffers.len() as u32,
+                2048, // Equivalent to EXTRA_TEXTURE_SETS previously in DescriptorManager
                 Some(Arc::clone(&resources)),
             )?;
 
@@ -686,7 +695,7 @@ impl Renderer {
                 instance.instance(),
                 device.physical_device,
                 Arc::clone(&device.device),
-                descriptor_manager.allocator_mut(),
+                &mut descriptor_allocator,
                 crate::vulkan::BindlessManager::DEFAULT_MAX_TEXTURES,
                 crate::vulkan::BindlessManager::DEFAULT_MAX_PAGE_TABLES,
                 crate::vulkan::BindlessManager::DEFAULT_MAX_CUBEMAPS,
@@ -722,6 +731,8 @@ impl Renderer {
                 vsm_default_array,
                 material_storage_buffer,
                 instance_buffers,
+                transform_arena,
+                transform_arena_alloc,
                 post_sampler,
             } = renderer_resources;
 
@@ -1040,9 +1051,16 @@ impl Renderer {
             let material_manager = MaterialManager::new();
             let instancing_manager = InstancingManager::new();
             let transform_system = resources::TransformSystem::new();
-            let instance_buffer = instance_buffers;
             let config = &renderer_config;
             let swapchain_extent = swapchain.extent;
+
+            // Missing initializations
+            let point_lights = Vec::new();
+            let directional_lights = Vec::new();
+            let spot_lights = Vec::new();
+            let scene_lighting = SceneLighting::default();
+            let occlusion_culling = OcclusionCulling::new();
+            let culling_manager = CullingManager::new();
 
             // Initialize GPU-driven pipeline components
             log::info!("Initializing Hi-Z Pass");
@@ -1057,6 +1075,10 @@ impl Renderer {
                 &mut bindless_manager,
                 crate::renderer::vcgs::MAX_INDIRECT_OBJECTS,
             )?;
+
+            let transform_arena_addr = unsafe {
+                device.device.get_buffer_device_address(&vk::BufferDeviceAddressInfo::default().buffer(transform_arena))
+            };
 
             log::info!("Finalizing Renderer construction");
             let mut renderer = Self {
@@ -1105,7 +1127,7 @@ impl Renderer {
                 material_heap_address,
                 pipeline_layout: Some(pipeline_layout),
                 pipeline_layout_id: Some(pipeline_layout_id),
-                descriptors: Some(descriptor_manager),
+                descriptors: Some(descriptor_allocator),
                 framebuffers,
                 framebuffer_ids,
                 start_time,
@@ -1136,41 +1158,45 @@ impl Renderer {
                 diagnostics_overlay: DiagnosticsOverlay::new(),
                 vsm_feature,
                 bindless_manager,
+                texture_registry: HashMap::new(),
                 forward_plus: Some(forward_plus),
                 hiz_pass: Some(hiz_pass),
                 adaptive_hiz_manager: AdaptiveHiZManager::new(3.0), // Target 3ms for Hi-Z
                 indirect_draw_pass: Some(indirect_draw_pass),
-                occlusion_culling: OcclusionCulling::new(),
-                global_cluster_buffer: Some(global_cluster_buffer),
+                occlusion_culling,
                 vsr_pass: None,
                 motion_pass: None,
                 motion_framebuffer: None,
                 gbuffer: Some(gbuffer),
-                culling_manager: CullingManager::new(),
-                scene_lighting: crate::renderer::features::SceneLighting::default(),
-                point_lights: Vec::new(),
-                directional_lights: Vec::new(),
-                spot_lights: Vec::new(),
-
-                vsm_page_index: active_vsm_page_index,
-                vsm_cache_index,
+                culling_manager,
+                scene_lighting,
+                point_lights,
+                directional_lights,
+                spot_lights,
+                debug_mode: DebugMode::default(),
+                global_cluster_buffer: Some(global_cluster_buffer),
+                vsm_page_index,
+                vsm_cache_index: vsm_cache_index, // Using the correct one
                 skybox_index,
-                
-                gbuffer_indices,
+                gbuffer_indices: GBufferIndices::default(),
                 hdr_image_index: None,
-
-                debug_mode: DebugMode::None,
-                post_descriptor_pool: vk::DescriptorPool::null(),
+                post_descriptor_pool: vk::DescriptorPool::null(), // To be updated
                 post_descriptor_sets: Vec::new(),
                 _post_sampler: post_sampler,
                 post_pipeline: None,
                 post_framebuffers: Vec::new(),
                 vram_budget,
-                texture_compression: config.texture_compression,
+                texture_compression: renderer_config.texture_compression,
                 instancing_manager,
-                instance_buffer,
+                instance_buffers: instance_buffers,
                 transform_system,
-                allow_auto_material: config.allow_auto_material,
+                // Phase 19 Transient Arena
+                transform_arena,
+                transform_arena_alloc,
+                transform_arena_addr,
+                transform_arena_offset: 0,
+
+                allow_auto_material: renderer_config.allow_auto_material,
                 strict_mode: config.strict_mode,
                 readback_buffer,
                 last_image_index: 0,
@@ -1555,6 +1581,19 @@ impl Renderer {
             ).map_err(|e| AshError::VulkanError(format!("Failed to create post_sampler: {e}")))?
         };
 
+        // Phase 19: Transient Transform Arena
+        let transform_arena_size = 1024 * 1024; // 1MB
+        let (transform_arena, transform_arena_alloc) = unsafe {
+            alloc.create_buffer_with_flags_and_name(
+                transform_arena_size,
+                vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
+                vk_mem::MemoryUsage::AutoPreferHost,
+                vk_mem::AllocationCreateFlags::HOST_ACCESS_SEQUENTIAL_WRITE
+                    | vk_mem::AllocationCreateFlags::MAPPED,
+                Some("Transform Arena (Phase 19)".to_string()),
+            )?
+        };
+
         Ok(RendererResources {
             uniform_buffers,
             default_texture,
@@ -1566,6 +1605,8 @@ impl Renderer {
             vsm_default_array,
             material_storage_buffer,
             instance_buffers,
+            transform_arena,
+            transform_arena_alloc,
             post_sampler,
         })
     }
@@ -2180,7 +2221,7 @@ impl Renderer {
                 .ensure_mesh(&key, mesh, upload_pool, self.device.graphics_queue)?;
 
             // 3. Register Bindless
-            register_mesh_textures(mesh, &mut self.bindless_manager)?;
+            register_mesh_textures(mesh, &mut self.bindless_manager, &mut self.texture_registry)?;
 
             // 4. Register Material
             let mut handle_mat = self.material_manager.default_material();
@@ -2396,6 +2437,12 @@ impl Renderer {
         self.get_stats().log_frame_stats();
     }
 
+    /// Unloads all currently registered textures from the host-side registry.
+    /// Caution: Ensure no GPU frames are in flight using these textures before clearing.
+    pub fn clear_texture_registry(&mut self) {
+        self.texture_registry.clear();
+    }
+
     /// Updates the GPU material buffer with a material at the specified index (AAA-grade direct streaming)
     /// Uses single-element writes instead of read-modify-write to avoid GPU stalls and race conditions.
     /// This must be called after registering the material to ensure the GPU sees the correct material.
@@ -2492,6 +2539,32 @@ impl Renderer {
             Err(AshError::VulkanError("Material storage buffer not initialized".to_string()))
         }
     }
+    
+    /// Synchronizes all materials from MaterialManager to the GPU buffer.
+    pub fn sync_materials_to_gpu(&mut self) -> Result<()> {
+        let sync_list: Vec<(u32, resources::Material)> = {
+            let mgr = &self.material_manager;
+            
+            // Collect materials that need uploading (UE5/Unity lazy-upload pattern)
+            // Use iter().enumerate() because mgr.materials is a Vec
+            mgr.materials.iter().enumerate()
+                .filter_map(|(id, material)| {
+                    let id_u32 = id as u32;
+                    if !self.uploaded_material_indices.contains(&id_u32) {
+                        Some((id_u32, material.clone()))
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        };
+
+        for (handle, material) in sync_list {
+            self.upload_material_to_gpu(handle, &material)?;
+        }
+
+        Ok(())
+    }
 
     /// Standardized material registration and upload helper.
     /// 
@@ -2523,6 +2596,58 @@ impl Renderer {
         self.register_mesh_handle(handle, &mut mesh, upload_cmd, staging_resources)?;
 
         Ok(key.to_string())
+    }
+
+    /// AAA-grade transient transform upload (Phase 19).
+    /// Offloads heavy matrices to a storage buffer via BDA.
+    pub fn upload_transform(&mut self, model: Mat4) -> u32 {
+        let size = std::mem::size_of::<Mat4>() as u32;
+        
+        // Ensure 64-byte alignment (standard for mat4)
+        debug_assert!(self.transform_arena_offset % 64 == 0);
+        
+        let index = self.transform_arena_offset / size;
+
+        // Check for overflow (1MB limit) - UE5/RAGE safety pattern
+        if self.transform_arena_offset + size > 1024 * 1024 {
+             log::error!("Transform arena overflow (1MB)! Skipping transform upload for this object.");
+             #[cfg(debug_assertions)]
+             {
+                panic!("Transform arena overflow! Increase TRANSFORM_ARENA_SIZE or optimize draw count.");
+             }
+             #[cfg(not(debug_assertions))]
+             {
+                return 0; // Fallback to index 0 (Identity or previous frame data)
+             }
+        }
+
+        unsafe {
+            // AAA Pattern: Use persistent mapping (assigned during create_buffer with MAPPED flag)
+            let mapping = self.alloc.vma.get_allocation_info(&self.transform_arena_alloc);
+            let ptr = mapping.mapped_data as *mut u8;
+            
+            if !ptr.is_null() {
+                let dst = ptr.add(self.transform_arena_offset as usize);
+                
+                ptr::copy_nonoverlapping(
+                    model.as_ref().as_ptr() as *const u8,
+                    dst,
+                    size as usize
+                );
+                
+                // Flush only the modified range to ensure GPU visibility
+                let _ = self.alloc.vma.flush_allocation(
+                    &self.transform_arena_alloc,
+                    self.transform_arena_offset as u64,
+                    size as u64
+                );
+            } else {
+                log::error!("Transform arena NOT mapped! Visuals will be broken.");
+            }
+        }
+
+        self.transform_arena_offset += size;
+        index
     }
 
     /// Converts a material descriptor into a renderer material and registers it.
@@ -2625,7 +2750,8 @@ impl Renderer {
 
                             let key = BatchKey::new(command.mesh_handle, material_handle);
                             let mut instance = InstanceData::from_matrix(command.transform)
-                                .with_bounds(mesh_data_entry.bounds);
+                                .with_bounds(mesh_data_entry.bounds)
+                                .with_material_index(material_handle.index as u32);
                             if command.cast_shadows {
                                 instance.set_flag(crate::renderer::vcgs::CULL_FLAG_CAST_SHADOWS, true);
                             }
@@ -2735,7 +2861,8 @@ impl Renderer {
                             .with_hidden(command.is_hidden)
                             .with_index_count(uploaded.index_count())
                             .with_first_index((uploaded.index_offset.unwrap_or(0) / 4) as u32)
-                            .with_vertex_offset((uploaded.vertex_offset.unwrap_or(0) / 64) as i32);
+                            .with_vertex_offset((uploaded.vertex_offset.unwrap_or(0) / 64) as i32)
+                            .with_material_index(material_handle.index as u32);
                         self.instancing_manager.add_instance(key, instance);
                     } else {
                         log::error!("Mesh '{}' found in registry but not in model renderer cache!", mesh_data.name);
@@ -3787,10 +3914,11 @@ impl Renderer {
                     index_ptr,
                     light_ptr: params.light_ptr,
                     tile_ptr: params.tile_ptr,
+                    skybox_index: self.skybox_index,
                     vsm_page_index: self.vsm_page_index,
                     vsm_cache_index: self.vsm_cache_index,
-                    skybox_index: self.skybox_index,
-                    model: glam::Mat4::IDENTITY,
+                    transform_ptr: self.transform_arena_addr,
+                    transform_index: 0, // Using index 0 for main indirect pass
                 };
                 
                 let count_params = crate::renderer::model_renderer::IndirectDrawCountParams {
@@ -3835,7 +3963,7 @@ impl Renderer {
             unsafe {
                 cmd_ctx.bind_pipeline(vk::PipelineBindPoint::GRAPHICS, pipeline.pipeline);
 
-                if let Some(_descriptor_manager) = self.descriptors.as_ref() {
+                if let Some(_descriptor_allocator) = self.descriptors.as_ref() {
                     let layout = match self.skybox_pipeline_layout.as_ref() {
                         Some(l) => l.handle(),
                         None => {
@@ -3992,6 +4120,14 @@ impl Renderer {
     ) -> Result<()> {
         self.transform_system.update();
         self.flush_old_swapchains();
+
+        // Phase 19: Reset Transform Arena for the new frame
+        self.transform_arena_offset = 0;
+
+        // Phase 20: Sync Materials to GPU
+        if let Err(e) = self.sync_materials_to_gpu() {
+            log::error!("Failed to sync materials to GPU: {e}");
+        }
 
         // Recycle per-frame descriptor pools (static pools are unaffected)
         if let Some(dm) = self.descriptors.as_mut() {
@@ -4153,7 +4289,7 @@ impl Renderer {
                 let elapsed = self.start_time.elapsed().as_secs_f32();
                 let mut feature_ctx = FeatureFrameContext {
                     device: self.device.device.as_ref(),
-                    descriptor_manager: self.descriptors.as_ref(),
+                    descriptor_allocator: self.descriptors.as_ref(),
                     transform: &mut dummy_transform, // Use dummy
                     auto_rotate: false, // Auto-rotate now handled by examples
                     elapsed_seconds: elapsed,
@@ -4329,7 +4465,7 @@ impl Renderer {
                 }
             }
             if !all_instances.is_empty() {
-                self.instance_buffer[frame_index].update(&all_instances)?;
+                self.instance_buffers[frame_index].update(&all_instances)?;
             }
 
             if let Some(vsm) = &self.vsm_feature {
@@ -4367,6 +4503,8 @@ impl Renderer {
                                 index_ptr,
                                 light_ptr,
                                 tile_ptr,
+                                self.transform_arena_addr,
+                                0, // Using index 0 for shadows for now + 1MB is huge anyway
                             );
                         }
                     } else {
@@ -4562,7 +4700,7 @@ impl Renderer {
 
             let render_ctx = FeatureRenderContext {
                 device: self.device.device.as_ref(),
-                descriptor_manager: self.descriptors.as_ref(),
+                descriptor_allocator: self.descriptors.as_ref(),
                 command_buffer,
                 transform: &dummy_render_transform,
                 frame_index,
@@ -5307,7 +5445,7 @@ impl Renderer {
         );
 
         // Collect memory stats from buffer pool
-        let (available, in_use, total_allocated) = self.buffer_pool.stats();
+        let (available, in_use, total_allocated) = self.buffer_pool.simple_stats();
         self.diagnostics.memory_stats.buffer_pool = (available, in_use, total_allocated);
 
         // Collect GPU timings (if profiler initialized)
@@ -5468,6 +5606,11 @@ impl Drop for Renderer {
 
             self.model_renderer.clear();
             self.draw_items.clear();
+            
+            // Phase 19 Transient Arena Cleanup
+            unsafe {
+                self.alloc.destroy_buffer(self.transform_arena, &mut self.transform_arena_alloc);
+            }
 
             // DELETED: Legacy mesh cleanup
 
@@ -5485,13 +5628,15 @@ impl Drop for Renderer {
 /// Helper to register a single texture with the bindless manager.
 fn register_single_texture(
     bindless_manager: &mut vulkan::BindlessManager,
+    registry: &mut HashMap<u32, Arc<Texture>>,
     texture_name: &str,
-    texture: Option<&resources::texture::Texture>,
+    texture: Option<Arc<Texture>>,
 ) -> Result<Option<u32>> {
     match texture {
         Some(tex) => match bindless_manager.add_sampled_image(tex.view(), tex.sampler()) {
             Ok(idx) => {
                 log::debug!("Registered {texture_name} texture at bindless index {idx}");
+                registry.insert(idx, tex);
                 Ok(Some(idx))
             }
             Err(e) => {
@@ -5512,25 +5657,29 @@ fn register_single_texture(
 fn register_mesh_textures(
     mesh: &mut Mesh,
     bindless_manager: &mut vulkan::BindlessManager,
+    registry: &mut HashMap<u32, Arc<Texture>>,
 ) -> Result<()> {
     mesh.texture_index =
-        register_single_texture(bindless_manager, "base_color", mesh.texture.as_deref())?;
+        register_single_texture(bindless_manager, registry, "base_color", mesh.texture.clone())?;
     mesh.normal_texture_index =
-        register_single_texture(bindless_manager, "normal", mesh.normal_texture.as_deref())?;
+        register_single_texture(bindless_manager, registry, "normal", mesh.normal_texture.clone())?;
     mesh.metallic_roughness_texture_index = register_single_texture(
         bindless_manager,
+        registry,
         "metallic_roughness",
-        mesh.metallic_roughness_texture.as_deref(),
+        mesh.metallic_roughness_texture.clone(),
     )?;
     mesh.occlusion_texture_index = register_single_texture(
         bindless_manager,
+        registry,
         "occlusion",
-        mesh.occlusion_texture.as_deref(),
+        mesh.occlusion_texture.clone(),
     )?;
     mesh.emissive_texture_index = register_single_texture(
         bindless_manager,
+        registry,
         "emissive",
-        mesh.emissive_texture.as_deref(),
+        mesh.emissive_texture.clone(),
     )?;
     Ok(())
 }

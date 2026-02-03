@@ -11,33 +11,23 @@ use super::resources::{PageAllocation, VsmResources};
 #[repr(C, align(16))]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct ShadowPushConstants {
-    pub frame_ptr_low: u32,
-    pub frame_ptr_high: u32,
+    // 0-31: BDA pointers (32 bytes)
     pub vertex_ptr_low: u32,
     pub vertex_ptr_high: u32,
     pub instance_ptr_low: u32,
     pub instance_ptr_high: u32,
-    pub material_ptr_low: u32,
-    pub material_ptr_high: u32,
     pub index_ptr_low: u32,
     pub index_ptr_high: u32,
-    pub light_ptr_low: u32,
-    pub light_ptr_high: u32,
-    pub tile_ptr_low: u32,
-    pub tile_ptr_high: u32,
+    pub transform_ptr_low: u32,
+    pub transform_ptr_high: u32,
 
-    pub vsm_page_index: u32,
-    pub vsm_cache_index: u32,
-
-    pub model: [[f32; 4]; 4], // Mat4
-    pub material_index: u32,
+    // 32-63: Indices and Flags (32 bytes)
+    pub transform_index: u32,
     pub use_instancing: u32,
-    pub flags: u32,
-    pub debug_path: u32,
-    pub debug_visualization_enabled: u32,
-    pub skybox_index: u32,
-    pub _padding: [u32; 2],
-    pub light_space_matrix: [[f32; 4]; 4], // Mat4
+    pub _padding_lean: [u32; 6], // Padding to reach offset 64 for light_space_matrix
+
+    // 64-127: Light Space Matrix (64 bytes)
+    pub light_space_matrix: [[f32; 4]; 4], // Mat4 at offset 64
 }
 
 /// VSM shadow rendering pass
@@ -406,13 +396,15 @@ impl VsmShadowPass {
         count_buffer: vk::Buffer,
         max_commands_per_level: u32,
         level_matrices: &[glam::Mat4],
-        frame_ptr: u64,
-        vertex_ptr: u64,
-        instance_ptr: u64,
         material_ptr: u64,
         index_ptr: u64,
         light_ptr: u64,
         tile_ptr: u64,
+        frame_ptr: u64,
+        vertex_ptr: u64,
+        instance_ptr: u64,
+        transform_ptr: u64,
+        transform_index: u32,
     ) {
         if allocations.is_empty() {
             return;
@@ -502,31 +494,18 @@ impl VsmShadowPass {
                 .unwrap_or(glam::Mat4::IDENTITY);
 
             let push_constants = ShadowPushConstants {
-                frame_ptr_low: frame_ptr as u32,
-                frame_ptr_high: (frame_ptr >> 32) as u32,
                 vertex_ptr_low: vertex_ptr as u32,
                 vertex_ptr_high: (vertex_ptr >> 32) as u32,
                 instance_ptr_low: instance_ptr as u32,
                 instance_ptr_high: (instance_ptr >> 32) as u32,
-                material_ptr_low: material_ptr as u32,
-                material_ptr_high: (material_ptr >> 32) as u32,
                 index_ptr_low: index_ptr as u32,
                 index_ptr_high: (index_ptr >> 32) as u32,
-                light_ptr_low: light_ptr as u32,
-                light_ptr_high: (light_ptr >> 32) as u32,
-                tile_ptr_low: tile_ptr as u32,
-                tile_ptr_high: (tile_ptr >> 32) as u32,
+                transform_ptr_low: transform_ptr as u32,
+                transform_ptr_high: (transform_ptr >> 32) as u32,
 
-                vsm_page_index: 0,
-                vsm_cache_index: 0,
-                model: glam::Mat4::IDENTITY.to_cols_array_2d(),
-                material_index: 0,
+                transform_index: transform_index,
                 use_instancing: 1, // DrawIndirect uses gl_InstanceIndex
-                flags: 0,
-                debug_path: 0,
-                debug_visualization_enabled: 0,
-                skybox_index: 0,
-                _padding: [0, 0],
+                _padding_lean: [0; 6],
                 light_space_matrix: level_matrix.to_cols_array_2d(),
             };
 
@@ -553,8 +532,7 @@ impl VsmShadowPass {
                 count_buffer,
                 count_offset,
                 max_commands_per_level,
-                std::mem::size_of::<crate::renderer::vcgs::IndirectDrawCommand>()
-                    as u32,
+                std::mem::size_of::<crate::renderer::vcgs::IndirectDrawCommand>() as u32,
             );
         }
 

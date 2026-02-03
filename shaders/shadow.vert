@@ -13,38 +13,27 @@
 
 layout(location = 0) out vec2 outUV;
 
-// Combined push constants for shadow pass
+// Combined push constants for shadow pass (Lean 128-byte version)
 layout(push_constant) uniform ShadowPushConstants {
-    // Pointer stage (0-55)
-    uint64_t frame_ptr;    // 0
-    uint64_t vertex_ptr;   // 8
-    uint64_t instance_ptr; // 16
-    uint64_t material_ptr; // 24
-    uint64_t index_ptr;    // 32
-    uint64_t light_ptr;    // 40
-    uint64_t tile_ptr;     // 48
-
-    // Texture indices (56-63)
-    uint vsm_page_index;   // 56
-    uint vsm_cache_index;  // 60
-
-    // Control his (64-127)
-    layout(offset = 64) mat4 model; 
+    uint64_t vertex_ptr;   // 0
+    uint64_t instance_ptr; // 8
+    uint64_t index_ptr;    // 16
+    uint64_t transform_ptr;// 24
     
-    // Material & Flags (128-159)
-    layout(offset = 128) uint material_index;
-    layout(offset = 132) uint use_instancing;
-    layout(offset = 136) uint flags;
-    layout(offset = 140) uint debug_path;
-    layout(offset = 144) uint debug_visualization_enabled;
-    layout(offset = 148) uint skybox_index;
+    uint transform_index;  // 32
+    uint use_instancing;   // 36
     
-    // VSM-specific (160-223)
-    layout(offset = 160) mat4 lightSpaceMatrix;
+    // Mat4 at offset 64
+    layout(offset = 64) mat4 lightSpaceMatrix;
 } pc;
 
 void main() {
-    mat4 modelMatrix = pc.model;
+    mat4 modelMatrix;
+    if (pc.transform_ptr != 0) {
+        modelMatrix = TransformBuffer(pc.transform_ptr).matrices[pc.transform_index];
+    } else {
+        modelMatrix = mat4(1.0);
+    }
     
     // Manual Index Pulling (Phase 5)
     // We use gl_VertexIndex as the absolute index into the Index Buffer
