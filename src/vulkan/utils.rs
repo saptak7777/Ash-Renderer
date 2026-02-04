@@ -167,11 +167,11 @@ where
         .map_err(|e| crate::AshError::VulkanError(format!("Failed to submit queue: {e}")))?;
 
     device
-        .wait_for_fences(&[fence], true, 10_000_000_000)
+        .wait_for_fences(&[fence], true, 60_000_000_000)
         .map_err(|e| {
             if e == vk::Result::TIMEOUT {
                 crate::AshError::VulkanError(
-                    "GPU timeout (10s) in execute_single_use_fenced. The GPU may have hung."
+                    "GPU timeout (60s) in execute_single_use_fenced. The GPU may have hung."
                         .to_string(),
                 )
             } else {

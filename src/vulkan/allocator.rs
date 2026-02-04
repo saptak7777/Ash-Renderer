@@ -232,6 +232,7 @@ impl Allocator {
         );
 
         if let Some(ref n) = name {
+            #[cfg(debug_assertions)]
             crate::vulkan::set_debug_object_name(
                 self.debug_utils.as_ref(),
                 buffer,
