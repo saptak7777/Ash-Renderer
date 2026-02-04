@@ -2543,19 +2543,8 @@ impl Renderer {
     /// Synchronizes all materials from MaterialManager to the GPU buffer.
     pub fn sync_materials_to_gpu(&mut self) -> Result<()> {
         let sync_list: Vec<(u32, resources::Material)> = {
-            let mgr = &self.material_manager;
-            
-            // Collect materials that need uploading (UE5/Unity lazy-upload pattern)
-            // Use iter().enumerate() because mgr.materials is a Vec
-            mgr.materials.iter().enumerate()
-                .filter_map(|(id, material)| {
-                    let id_u32 = id as u32;
-                    if !self.uploaded_material_indices.contains(&id_u32) {
-                        Some((id_u32, material.clone()))
-                    } else {
-                        None
-                    }
-                })
+            self.material_manager.iter_unsynced(&self.uploaded_material_indices)
+                .map(|(id, material)| (id, material.clone()))
                 .collect()
         };
 
@@ -2600,7 +2589,7 @@ impl Renderer {
 
     /// AAA-grade transient transform upload (Phase 19).
     /// Offloads heavy matrices to a storage buffer via BDA.
-    pub fn upload_transform(&mut self, model: Mat4) -> u32 {
+    pub fn upload_transform(&mut self, model: Mat4) -> Result<u32> {
         let size = std::mem::size_of::<Mat4>() as u32;
         
         // Ensure 64-byte alignment (standard for mat4)
@@ -2611,14 +2600,7 @@ impl Renderer {
         // Check for overflow (1MB limit) - UE5/RAGE safety pattern
         if self.transform_arena_offset + size > 1024 * 1024 {
              log::error!("Transform arena overflow (1MB)! Skipping transform upload for this object.");
-             #[cfg(debug_assertions)]
-             {
-                panic!("Transform arena overflow! Increase TRANSFORM_ARENA_SIZE or optimize draw count.");
-             }
-             #[cfg(not(debug_assertions))]
-             {
-                return 0; // Fallback to index 0 (Identity or previous frame data)
-             }
+             return Err(AshError::TransformArenaOverflow);
         }
 
         unsafe {
@@ -2647,7 +2629,7 @@ impl Renderer {
         }
 
         self.transform_arena_offset += size;
-        index
+        Ok(index)
     }
 
     /// Converts a material descriptor into a renderer material and registers it.

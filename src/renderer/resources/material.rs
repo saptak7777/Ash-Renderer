@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::default::Default;
 
 /// Material properties supporting a PBR workflow
@@ -202,9 +202,9 @@ impl MaterialHandle {
 }
 
 pub struct MaterialManager {
-    pub materials: Vec<Material>,
-    pub versions: Vec<u16>,
-    pub next_material_id: u16,
+    materials: Vec<Material>,
+    versions: Vec<u16>,
+    next_material_id: u16,
     default_material: MaterialHandle,
     key_to_handle: HashMap<MaterialKey, MaterialHandle>,
 }
@@ -212,6 +212,24 @@ pub struct MaterialManager {
 impl MaterialManager {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Returns an iterator over materials that have not been synced to the GPU yet.
+    pub fn iter_unsynced<'a>(
+        &'a self,
+        uploaded_indices: &'a HashSet<u32>,
+    ) -> impl Iterator<Item = (u32, &'a Material)> + 'a {
+        self.materials
+            .iter()
+            .enumerate()
+            .filter_map(move |(id, mat)| {
+                let id = id as u32;
+                if !uploaded_indices.contains(&id) {
+                    Some((id, mat))
+                } else {
+                    None
+                }
+            })
     }
 
     pub fn register_material(&mut self, material: Material) -> MaterialHandle {

@@ -68,6 +68,9 @@ pub enum AshError {
     /// Required hardware capability missing.
     #[error("Hardware capability missing: {0}")]
     HardwareCapabilityMissing(String),
+    /// Transform arena overflow.
+    #[error("Transform arena overflow (1MB limit reached)")]
+    TransformArenaOverflow,
 }
 
 /// Alias for [`AshError`] to match Phase 1 requirements.
