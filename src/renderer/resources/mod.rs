@@ -13,7 +13,6 @@ pub mod pipeline;
 pub mod safe_resource;
 pub mod texture;
 pub mod texture_compressor;
-pub mod texture_streamer;
 
 #[cfg(feature = "gltf_loading")]
 pub mod gltf_loader;
@@ -36,7 +35,6 @@ pub use pipeline::PipelineHandle;
 pub use safe_resource::SafeResource;
 pub use texture::{Texture, TextureData};
 pub use texture_compressor::{CompressionFormat, TextureCompressor};
-pub use texture_streamer::TextureStreamer;
 pub use thread_safe_pool::{PoolStats, PooledResource, ThreadSafeResourcePool};
 pub use transform::{Camera, TemporalCamera, Transform, TransformHandle, TransformSystem, MVP};
 pub use uniform::{InstanceBuffer, MvpMatrices, UniformBuffer};

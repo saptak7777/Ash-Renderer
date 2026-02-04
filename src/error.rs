@@ -73,10 +73,6 @@ pub enum AshError {
     TransformArenaOverflow,
 }
 
-/// Alias for [`AshError`] to match Phase 1 requirements.
-#[allow(dead_code)]
-pub type RendererError = AshError;
-
 impl AshError {
     /// Helper to create a Vulkan error from a message.
     pub fn vulkan<S: Into<String>>(msg: S) -> Self {

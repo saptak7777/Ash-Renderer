@@ -37,7 +37,6 @@ use crate::{
 use ash::vk;
 use bytemuck::Pod;
 use glam::{Mat4, Vec3, Vec4};
-use parking_lot::Mutex;
 use rayon::prelude::*;
 use resources::BufferPool;
 use std::collections::{HashMap, HashSet};
@@ -472,7 +471,6 @@ pub struct Renderer {
     // WAIT! In Rust, fields are dropped in the order they are DECLARED.
     // So the FIRST field is dropped FIRST.
     // This means foundation should be at the BOTTOM so they are dropped LAST.
-    texture_streamer: Mutex<Option<resources::TextureStreamer>>,
     resources: Arc<ResourceRegistry>,
     pub alloc: Arc<vulkan::Allocator>,
     pub device: vulkan::VulkanDevice,
@@ -899,21 +897,6 @@ impl Renderer {
             // let mut mesh = Mesh::create_cube();
             // ...
 
-            // Initialize Texture Streamer
-            let transfer_pool_info = vk::CommandPoolCreateInfo::default()
-                .queue_family_index(device.graphics_queue_family)
-                .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER);
-
-            let transfer_command_pool = device
-                .device
-                .create_command_pool(&transfer_pool_info, None)?;
-
-            let texture_streamer = resources::TextureStreamer::new(
-                Arc::clone(&alloc),
-                Arc::clone(&device.device),
-                transfer_command_pool,
-                device.present_queue,
-            );
             // DELETED: Legacy texture registration
 
 
@@ -1001,7 +984,7 @@ impl Renderer {
             )?;
 
             // 2. Page Tables (Binding 1)
-            let vsm_page_index = bindless_manager.add_page_table(
+            let default_vsm_page_index = bindless_manager.add_page_table(
                 vsm_default_array.view(),
                 vsm_default_array.sampler(),
             )?;
@@ -1012,13 +995,12 @@ impl Renderer {
                 default_skybox.sampler(),
             )?;
 
-            log::info!("Bindless Defaults registered (Page: {vsm_page_index}, Skybox: {skybox_index})");
+            log::info!("Bindless Defaults registered (Page: {default_vsm_page_index}, Skybox: {skybox_index})");
 
-            // 4. Actual VSM registration (if active)
+            let mut vsm_page_index = default_vsm_page_index;
             let mut vsm_cache_index = 0;
-            let mut active_vsm_page_index = vsm_page_index;
             if let Some(ref vsm) = vsm_feature {
-                active_vsm_page_index = bindless_manager.add_page_table(
+                vsm_page_index = bindless_manager.add_page_table(
                     vsm.resources.page_table_view,
                     vsm.resources.page_table_sampler,
                 )?;
@@ -1026,7 +1008,7 @@ impl Renderer {
                     vsm.resources.physical_cache_view,
                     vsm.resources.physical_cache_sampler,
                 )?;
-                log::info!("VSM registered in bindless array (Page: {active_vsm_page_index}, Cache: {vsm_cache_index})");
+                log::info!("VSM registered in bindless array (Page: {vsm_page_index}, Cache: {vsm_cache_index})");
             }
 
             // Create Skybox Mesh (Unit Cube)
@@ -1076,13 +1058,10 @@ impl Renderer {
                 crate::renderer::vcgs::MAX_INDIRECT_OBJECTS,
             )?;
 
-            let transform_arena_addr = unsafe {
-                device.device.get_buffer_device_address(&vk::BufferDeviceAddressInfo::default().buffer(transform_arena))
-            };
+            let transform_arena_addr = device.device.get_buffer_device_address(&vk::BufferDeviceAddressInfo::default().buffer(transform_arena));
 
             log::info!("Finalizing Renderer construction");
             let mut renderer = Self {
-                texture_streamer: Mutex::new(Some(texture_streamer)),
                 buffer_pool: buffer_pool,
                 resources,
                 features,
@@ -1953,21 +1932,18 @@ impl Renderer {
             .clear_values(&clear_values);
 
         unsafe {
-            log::debug!("DEBUG: Beginning post-processing render pass");
             self.device.device.cmd_begin_render_pass(
                 command_buffer,
                 &render_pass_info,
                 vk::SubpassContents::INLINE,
             );
 
-            log::debug!("DEBUG: Binding post-processing pipeline");
             self.device.device.cmd_bind_pipeline(
                 command_buffer,
                 vk::PipelineBindPoint::GRAPHICS,
                 pipeline.pipeline,
             );
 
-            log::debug!("DEBUG: Binding post-processing descriptor sets");
             self.device.device.cmd_bind_descriptor_sets(
                 command_buffer,
                 vk::PipelineBindPoint::GRAPHICS,
@@ -1988,7 +1964,6 @@ impl Renderer {
                 tonemapping_enabled: if self.tonemapping_enabled { 1.0 } else { 0.0 },
             };
 
-            log::debug!("DEBUG: Pushing post-processing constants");
             self.device.device.cmd_push_constants(
                 command_buffer,
                 pass.pipeline_layout(),
@@ -2014,10 +1989,8 @@ impl Renderer {
             self.device.device.cmd_set_scissor(command_buffer, 0, &[scissor]);
 
             // Draw 3 vertices for a single fullscreen triangle
-            log::debug!("DEBUG: Drawing fullscreen triangle");
             self.device.device.cmd_draw(command_buffer, 3, 1, 0, 0);
 
-            log::debug!("DEBUG: Ending post-processing render pass");
             self.device.device.cmd_end_render_pass(command_buffer);
         }
 
@@ -5509,14 +5482,6 @@ impl Renderer {
 
 impl Drop for Renderer {
     fn drop(&mut self) {
-        // Shutdown streamer FIRST to prevent background thread accessing resources while we destroy them
-        {
-            let mut lock = self.texture_streamer.lock();
-            if let Some(streamer) = lock.take() {
-                drop(streamer); // Joins thread and destroys command pool
-            }
-        }
-
         unsafe {
             log::info!("Shutting down Ash Renderer...");
 
@@ -5590,9 +5555,7 @@ impl Drop for Renderer {
             self.draw_items.clear();
             
             // Phase 19 Transient Arena Cleanup
-            unsafe {
-                self.alloc.destroy_buffer(self.transform_arena, &mut self.transform_arena_alloc);
-            }
+            self.alloc.destroy_buffer(self.transform_arena, &mut self.transform_arena_alloc);
 
             // DELETED: Legacy mesh cleanup
 
