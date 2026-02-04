@@ -136,6 +136,25 @@ pub unsafe fn end_single_time_commands(
     Ok(())
 }
 /// Execute a command buffer and wait for a fence instead of the entire queue.
+///
+/// This is more efficient than `execute_single_time_commands()` because it
+/// waits on a specific fence rather than the entire queue, allowing the CPU
+/// to resume work after only this specific submission is finished.
+///
+/// # Performance
+///
+/// This function is optimized for one-off operations (uploads, transitions). For high-frequency
+/// per-frame operations, consider using a persistent command buffer or a
+/// dedicated transfer queue to avoid the overhead of fence creation and destruction.
+///
+/// # Safety
+///
+/// Caller must ensure:
+/// - `command_pool` is a valid, existing Vulkan command pool.
+/// - `queue` is a valid Vulkan queue compatible with the command buffer.
+/// - The closure `f` does not outlive the command buffer execution.
+/// - Sufficient synchronization is handled externally if the closure accesses shared resources.
+/// - The GPU timeout is 60 seconds; extremely long operations may fail with a timeout error.
 #[inline]
 pub unsafe fn execute_single_use_fenced<F>(
     device: &ash::Device,

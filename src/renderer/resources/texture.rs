@@ -113,99 +113,98 @@ impl Texture {
         let (image, allocation) =
             allocator.create_image(&image_info, vk_mem::MemoryUsage::AutoPreferDevice)?;
 
-        // 3. Transition to Transfer Destiny and Copy
-        let cmd = vulkan::utils::begin_single_time_commands(&device, command_pool)?;
-
-        // Transition ALL layers and mips to TRANSFER_DST_OPTIMAL
-        let layout_barrier = vk::ImageMemoryBarrier::default()
-            .src_access_mask(vk::AccessFlags::empty())
-            .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE)
-            .old_layout(vk::ImageLayout::UNDEFINED)
-            .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
-            .image(image)
-            .subresource_range(
-                vk::ImageSubresourceRange::default()
-                    .aspect_mask(vk::ImageAspectFlags::COLOR)
-                    .base_mip_level(0)
-                    .level_count(mip_levels)
-                    .base_array_layer(0)
-                    .layer_count(6),
-            );
-
-        device.cmd_pipeline_barrier(
-            cmd,
-            vk::PipelineStageFlags::TOP_OF_PIPE,
-            vk::PipelineStageFlags::TRANSFER,
-            vk::DependencyFlags::empty(),
-            &[],
-            &[],
-            &[layout_barrier],
-        );
-
-        // Copy all mips and faces
-        let mut regions = Vec::new();
-        let mut offset = 0;
         let bytes_per_pixel = match format {
             vk::Format::R32G32B32A32_SFLOAT => 16,
             vk::Format::R16G16B16A16_SFLOAT => 8,
             vk::Format::R8G8B8A8_UNORM | vk::Format::R8G8B8A8_SRGB => 4,
             _ => {
-                return Err(AshError::VulkanError(format!(
+                return Err(crate::AshError::VulkanError(format!(
                     "Unsupported texture format for bytes_per_pixel calculation: {:?}",
                     format
                 )))
             }
         };
 
-        for mip in 0..mip_levels {
-            let mip_res = (resolution >> mip).max(1);
-            let face_size = (mip_res * mip_res * bytes_per_pixel) as u64;
+        // 3. Transition to Transfer Destiny and Copy
+        vulkan::utils::execute_single_use_fenced(&device, command_pool, queue, |cmd| {
+            // Transition ALL layers and mips to TRANSFER_DST_OPTIMAL
+            let layout_barrier = vk::ImageMemoryBarrier::default()
+                .src_access_mask(vk::AccessFlags::empty())
+                .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                .old_layout(vk::ImageLayout::UNDEFINED)
+                .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                .image(image)
+                .subresource_range(
+                    vk::ImageSubresourceRange::default()
+                        .aspect_mask(vk::ImageAspectFlags::COLOR)
+                        .base_mip_level(0)
+                        .level_count(mip_levels)
+                        .base_array_layer(0)
+                        .layer_count(6),
+                );
 
-            for face in 0..6 {
-                let region = vk::BufferImageCopy::default()
-                    .buffer_offset(offset)
-                    .image_subresource(
-                        vk::ImageSubresourceLayers::default()
-                            .aspect_mask(vk::ImageAspectFlags::COLOR)
-                            .mip_level(mip)
-                            .base_array_layer(face)
-                            .layer_count(1),
-                    )
-                    .image_extent(vk::Extent3D {
-                        width: mip_res,
-                        height: mip_res,
-                        depth: 1,
-                    });
-                regions.push(region);
-                offset += face_size;
-            }
-        }
-
-        device.cmd_copy_buffer_to_image(
-            cmd,
-            staging_buffer,
-            image,
-            vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-            &regions,
-        );
-
-        // Transition to SHADER_READ_ONLY_OPTIMAL
-        let read_barrier = vk::ImageMemoryBarrier::default()
-            .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
-            .dst_access_mask(vk::AccessFlags::SHADER_READ)
-            .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
-            .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
-            .image(image)
-            .subresource_range(
-                vk::ImageSubresourceRange::default()
-                    .aspect_mask(vk::ImageAspectFlags::COLOR)
-                    .base_mip_level(0)
-                    .level_count(mip_levels)
-                    .base_array_layer(0)
-                    .layer_count(6),
+            device.cmd_pipeline_barrier(
+                cmd,
+                vk::PipelineStageFlags::TOP_OF_PIPE,
+                vk::PipelineStageFlags::TRANSFER,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[],
+                &[layout_barrier],
             );
 
-        vulkan::utils::execute_single_use_fenced(&device, command_pool, queue, |cmd| {
+            // Copy all mips and faces
+            let mut regions = Vec::new();
+            let mut offset = 0;
+            // Note: bytes_per_pixel calculated outside closure for clarity
+            for mip in 0..mip_levels {
+                let mip_res = (resolution >> mip).max(1);
+                let face_size = (mip_res * mip_res * bytes_per_pixel) as u64;
+
+                for face in 0..6 {
+                    let region = vk::BufferImageCopy::default()
+                        .buffer_offset(offset)
+                        .image_subresource(
+                            vk::ImageSubresourceLayers::default()
+                                .aspect_mask(vk::ImageAspectFlags::COLOR)
+                                .mip_level(mip)
+                                .base_array_layer(face)
+                                .layer_count(1),
+                        )
+                        .image_extent(vk::Extent3D {
+                            width: mip_res,
+                            height: mip_res,
+                            depth: 1,
+                        });
+                    regions.push(region);
+                    offset += face_size;
+                }
+            }
+
+            device.cmd_copy_buffer_to_image(
+                cmd,
+                staging_buffer,
+                image,
+                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                &regions,
+            );
+
+            // Transition to SHADER_READ_ONLY_OPTIMAL
+            let read_barrier = vk::ImageMemoryBarrier::default()
+                .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                .dst_access_mask(vk::AccessFlags::SHADER_READ)
+                .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+                .image(image)
+                .subresource_range(
+                    vk::ImageSubresourceRange::default()
+                        .aspect_mask(vk::ImageAspectFlags::COLOR)
+                        .base_mip_level(0)
+                        .level_count(mip_levels)
+                        .base_array_layer(0)
+                        .layer_count(6),
+                );
+
             device.cmd_pipeline_barrier(
                 cmd,
                 vk::PipelineStageFlags::TRANSFER,
