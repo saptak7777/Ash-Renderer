@@ -54,20 +54,31 @@ pub use sync::FrameSync;
 pub use transfer_context::TransferContext;
 
 #[inline]
-pub fn set_debug_name(
+pub fn set_debug_object_name<T: vk::Handle>(
     loader: Option<&ash::ext::debug_utils::Device>,
-    handle: vk::Image,
+    handle: T,
+    object_type: vk::ObjectType,
     name: &str,
 ) {
     #[cfg(debug_assertions)]
     if let Some(loader) = loader {
         let c_name = std::ffi::CString::new(name).unwrap_or_default();
         let mut info = vk::DebugUtilsObjectNameInfoEXT::default();
-        info.object_type = vk::ObjectType::IMAGE;
+        info.object_type = object_type;
         info.object_handle = vk::Handle::as_raw(handle);
         info.p_object_name = c_name.as_ptr();
         unsafe {
             let _ = loader.set_debug_utils_object_name(&info);
         }
     }
+}
+
+/// Legacy wrapper for image debug naming
+#[inline]
+pub fn set_debug_name(
+    loader: Option<&ash::ext::debug_utils::Device>,
+    handle: vk::Image,
+    name: &str,
+) {
+    set_debug_object_name(loader, handle, vk::ObjectType::IMAGE, name);
 }

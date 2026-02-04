@@ -15,7 +15,6 @@ struct BufferAllocation {
 pub struct Allocator {
     pub vma: vk_mem::Allocator,
     pub device: Arc<ash::Device>,
-    pub instance: Arc<crate::vulkan::VulkanInstance>,
     pub debug_utils: Option<ash::ext::debug_utils::Device>,
     buffer_allocations: parking_lot::Mutex<HashMap<vk::Buffer, BufferAllocation>>,
 }
@@ -41,7 +40,6 @@ impl Allocator {
         Ok(Self {
             vma,
             device: Arc::clone(&device.device),
-            instance: Arc::clone(&device.instance),
             debug_utils: device.debug_utils.clone(),
             buffer_allocations: parking_lot::Mutex::new(HashMap::new()),
         })
@@ -234,6 +232,12 @@ impl Allocator {
         );
 
         if let Some(ref n) = name {
+            crate::vulkan::set_debug_object_name(
+                self.debug_utils.as_ref(),
+                buffer,
+                vk::ObjectType::BUFFER,
+                n,
+            );
             log::info!("Created buffer '{n}': {size} bytes");
         }
 

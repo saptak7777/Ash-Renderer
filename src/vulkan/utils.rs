@@ -167,8 +167,17 @@ where
         .map_err(|e| crate::AshError::VulkanError(format!("Failed to submit queue: {e}")))?;
 
     device
-        .wait_for_fences(&[fence], true, u64::MAX)
-        .map_err(|e| crate::AshError::VulkanError(format!("Failed to wait for fence: {e}")))?;
+        .wait_for_fences(&[fence], true, 10_000_000_000)
+        .map_err(|e| {
+            if e == vk::Result::TIMEOUT {
+                crate::AshError::VulkanError(
+                    "GPU timeout (10s) in execute_single_use_fenced. The GPU may have hung."
+                        .to_string(),
+                )
+            } else {
+                crate::AshError::VulkanError(format!("Failed to wait for fence: {e}"))
+            }
+        })?;
 
     device.destroy_fence(fence, None);
     device.free_command_buffers(command_pool, &command_buffers);
