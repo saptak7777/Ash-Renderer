@@ -156,7 +156,7 @@ impl Texture {
             // Copy all mips and faces
             let mut regions = Vec::new();
             let mut offset = 0;
-            // Note: bytes_per_pixel calculated outside closure for clarity
+            // Note: bytes_per_pixel is calculated outside closure for correctness
             for mip in 0..mip_levels {
                 let mip_res = (resolution >> mip).max(1);
                 let face_size = (mip_res * mip_res * bytes_per_pixel) as u64;
