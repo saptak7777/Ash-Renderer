@@ -330,28 +330,6 @@ impl BufferPool {
 
         stats
     }
-
-    /// Get simple stats tuple (legacy API compatibility)
-    pub fn simple_stats(&self) -> (usize, usize, u64) {
-        let buckets = match self.buckets.lock() {
-            Ok(b) => b,
-            Err(_) => {
-                log::error!("Buffer pool lock poisoned during simple_stats");
-                return (0, 0, self.total_allocated_bytes.load(Ordering::Relaxed));
-            }
-        };
-        let mut available = 0;
-        let mut in_use = 0;
-        for bucket in buckets.iter() {
-            available += bucket.available.len();
-            in_use += bucket.in_use.len();
-        }
-        (
-            available,
-            in_use,
-            self.total_allocated_bytes.load(Ordering::Relaxed),
-        )
-    }
 }
 
 impl Drop for BufferPool {

@@ -247,7 +247,12 @@ impl Texture {
         let sampler = device.create_sampler(&sampler_info, None)?;
 
         if let Some(name) = name {
-            vulkan::set_debug_name(allocator.debug_utils.as_ref(), image, name);
+            vulkan::set_debug_object_name(
+                allocator.debug_utils.as_ref(),
+                image,
+                vk::ObjectType::IMAGE,
+                name,
+            );
         }
 
         Ok(Self {
@@ -558,7 +563,12 @@ impl Texture {
         let sampler = device.create_sampler(&sampler_info, None)?;
 
         if let Some(label) = name {
-            vulkan::set_debug_name(allocator.debug_utils.as_ref(), image, label);
+            vulkan::set_debug_object_name(
+                allocator.debug_utils.as_ref(),
+                image,
+                vk::ObjectType::IMAGE,
+                label,
+            );
             log::info!(
                 "Created texture '{label}' ({}x{}, {} mips)",
                 data.width,

@@ -149,7 +149,11 @@ impl ImageHandle {
         }
 
         let (readback_buffer, mut readback_alloc) =
-            allocator.create_readback_buffer(total_size as u64)?;
+            crate::vulkan::buffer_builder::BufferBuilder::new(total_size as u64)
+                .transfer_dst()
+                .cpu_readable()
+                .named("Readback Buffer")
+                .build(allocator)?;
 
         crate::vulkan::utils::execute_single_use(
             self.device.as_ref(),

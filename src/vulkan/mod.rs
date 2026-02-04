@@ -72,13 +72,3 @@ pub fn set_debug_object_name<T: vk::Handle>(
         }
     }
 }
-
-/// Legacy wrapper for image debug naming
-#[inline]
-pub fn set_debug_name(
-    loader: Option<&ash::ext::debug_utils::Device>,
-    handle: vk::Image,
-    name: &str,
-) {
-    set_debug_object_name(loader, handle, vk::ObjectType::IMAGE, name);
-}

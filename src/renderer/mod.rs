@@ -7,7 +7,6 @@ pub mod cleanup_traits;
 pub mod command_list;
 pub mod diagnostics;
 pub mod features;
-// pub mod forward_plus_descriptor; // DELETED: Using BDA
 pub mod forward_plus_integration;
 pub mod frame_graph;
 pub mod fullscreen_pass;
@@ -36,7 +35,6 @@ pub mod vsr_pass;
 // Re-exports for public API
 pub use cleanup_traits::{BufferCleanup, VulkanResourceCleanup};
 pub use features::{AutoRotateFeature, FeatureManager, RenderFeature};
-// pub use forward_plus_descriptor::ForwardPlusDescriptor; // DELETED
 pub use forward_plus_integration::ForwardPlusIntegration;
 pub use gbuffer::GBuffer;
 pub use hiz_pass::HiZPass;

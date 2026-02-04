@@ -351,22 +351,17 @@ pub struct Renderer {
     // Skybox Rendering
     skybox_pipeline: Option<vulkan::Pipeline>,
     skybox_pipeline_layout: Option<vulkan::PipelineLayout>,
-    // skybox_pipeline_layout_id: Option<ResourceId>,
     skybox_mesh: Option<UploadedMesh>,
     
     depth_buffer: Option<DepthBuffer>,
     uniform_buffers: Vec<UniformBuffer>,
     material_storage_buffer: Option<StorageBuffer<resources::uniform::MaterialUniform>>,
-    // material_buffer_index: u32, // DELETED: Using BDA
     pipeline_layout: Option<vulkan::PipelineLayout>,
     pipeline_layout_id: Option<ResourceId>,
     descriptors: Option<vulkan::DescriptorAllocator>,
     framebuffers: Vec<vulkan::Framebuffer>,
     framebuffer_ids: Vec<ResourceId>,
     start_time: Instant,
-    // mesh: Option<Mesh>,    // DELETED: Legacy field
-    // material: Material,    // DELETED: Legacy field
-    // transform: Transform,  // DELETED: Legacy field
     mesh_data: Vec<MeshData>, // Indexed by mesh handle for O(1) access
     material_manager: MaterialManager,
     uploaded_material_indices: HashSet<u32>, // Track which materials are GPU-resident (UE5 pattern)
@@ -893,17 +888,6 @@ impl Renderer {
                 })?;
             }
 
-            // DELETED: Default cube creation. Renderer now starts empty.
-            // let mut mesh = Mesh::create_cube();
-            // ...
-
-            // DELETED: Legacy texture registration
-
-
-            // DELETED: material_manager (unused)
-            // DELETED: Legacy mesh/material initialization
-
-
 
             // Mesh data already added to mesh_data Vec above
             let start_time = Instant::now();
@@ -1096,10 +1080,6 @@ impl Renderer {
                 skybox_mesh: Some(skybox_mesh),
                 
                 depth_buffer: Some(depth_buffer),
-                // DELETED: Legacy fields
-                // mesh: Some(mesh),
-                // material,
-                // transform,
                 uniform_buffers,
                 material_storage_buffer: Some(material_storage_buffer),
                 instance_buffer_addresses,
@@ -4264,10 +4244,6 @@ impl Renderer {
             let in_flight_fence = sync.in_flight;
 
 
-            // DELETED: Transform overwrite bug (lines 4105-4108)
-            // if let Some(item) = self.draw_items.get_mut(0) {
-            //     item.transform = self.transform.model_matrix();
-            // }
 
             // Build object registry once per frame
             self.culling_manager.build(&self.draw_items);
@@ -4486,7 +4462,6 @@ impl Renderer {
                 }
             }
 
-            // DELETED: update_post_descriptors call moved to end of main passes for efficiency
             // --- Phase 8: Instance Data Preparation ---
             // 1. Prepare and upload all instances to the InstanceBuffer
             let mut all_instances = Vec::new();
@@ -4905,13 +4880,11 @@ impl Renderer {
         }
     }
 
-    // DELETED: transform(), transform_mut() accessors
 
     pub fn buffer_pool(&self) -> Arc<BufferPool> {
         Arc::clone(&self.buffer_pool)
     }
 
-    // DELETED: Legacy accessor methods (mesh_mut, material, material_mut, refresh_draw_items)
 
 
     // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -4921,7 +4894,6 @@ impl Renderer {
 
 
     /// Enables or disables tonemapping
-    // DELETED: Use set_debug_mode instead.
 
     /// Returns whether tonemapping is enabled
     pub fn tonemapping_enabled(&self) -> bool {
@@ -5478,8 +5450,12 @@ impl Renderer {
         );
 
         // Collect memory stats from buffer pool
-        let (available, in_use, total_allocated) = self.buffer_pool.simple_stats();
-        self.diagnostics.memory_stats.buffer_pool = (available, in_use, total_allocated);
+        let stats = self.buffer_pool.stats();
+        self.diagnostics.memory_stats.buffer_pool = (
+            stats.current_available,
+            stats.current_in_use,
+            stats.total_allocated_bytes,
+        );
 
         // Collect GPU timings (if profiler initialized)
         if let Some(ref mut profiler) = self.gpu_profiler {
@@ -5635,7 +5611,6 @@ impl Drop for Renderer {
             // Phase 19 Transient Arena Cleanup
             self.alloc.destroy_buffer(self.transform_arena, &mut self.transform_arena_alloc);
 
-            // DELETED: Legacy mesh cleanup
 
             self.depth_buffer = None;
             self.pipeline = None;

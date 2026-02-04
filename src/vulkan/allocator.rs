@@ -340,59 +340,6 @@ impl Allocator {
         }
     }
 
-    // ============================================================================
-    // COMMON PRESET BUILDERS (Convenience Methods)
-    // ============================================================================
-
-    /// Create uniform buffer (read-only, constant data)
-    pub fn create_uniform_buffer(
-        &self,
-        size: vk::DeviceSize,
-    ) -> crate::Result<(vk::Buffer, vk_mem::Allocation)> {
-        crate::vulkan::buffer_builder::BufferBuilder::new(size)
-            .uniform_buffer()
-            .gpu_only()
-            .build(self)
-    }
-
-    /// Create staging buffer (CPU → GPU transfer)
-    pub fn create_staging_buffer(
-        &self,
-        size: vk::DeviceSize,
-    ) -> crate::Result<(vk::Buffer, vk_mem::Allocation)> {
-        crate::vulkan::buffer_builder::BufferBuilder::new(size)
-            .transfer_src()
-            .cpu_writable()
-            .named("Staging Buffer")
-            .build(self)
-    }
-
-    /// Create indirect draw buffer (GPU-written, GPU-consumed)
-    pub fn create_indirect_buffer(
-        &self,
-        size: vk::DeviceSize,
-    ) -> crate::Result<(vk::Buffer, vk_mem::Allocation)> {
-        crate::vulkan::buffer_builder::BufferBuilder::new(size)
-            .indirect_buffer()
-            .storage_buffer()
-            .transfer_dst()
-            .gpu_only()
-            .named("Indirect Draw Buffer")
-            .build(self)
-    }
-
-    /// Create readback buffer (GPU → CPU transfer)
-    pub fn create_readback_buffer(
-        &self,
-        size: vk::DeviceSize,
-    ) -> crate::Result<(vk::Buffer, vk_mem::Allocation)> {
-        crate::vulkan::buffer_builder::BufferBuilder::new(size)
-            .transfer_dst()
-            .cpu_readable()
-            .named("Readback Buffer")
-            .build(self)
-    }
-
     /// Map an allocation and return the raw pointer.
     ///
     /// # Safety
