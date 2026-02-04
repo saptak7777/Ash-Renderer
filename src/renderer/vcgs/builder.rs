@@ -50,6 +50,7 @@ pub fn build_mesh_dag(mesh: &mut Mesh) {
         cone_weight,
     );
 
+    let mut total_errors = 0;
     let mut clusters = Vec::with_capacity(meshlets.len() * 2); // Reserve space for parents
     let mut new_global_indices = Vec::with_capacity(indices.len() * 2); // Global index buffer
 
@@ -60,6 +61,7 @@ pub fn build_mesh_dag(mesh: &mut Mesh) {
         clusters: &mut Vec<MeshCluster>,
         global_indices: &mut Vec<u32>,
         error_metric: f32,
+        error_count: &mut usize,
     ) -> std::ops::Range<usize> {
         let start_cluster_idx = clusters.len();
 
@@ -105,6 +107,7 @@ pub fn build_mesh_dag(mesh: &mut Mesh) {
             for i in 0..meshlet.vertex_count {
                 // Bounds Check: Prevent panic on bad data
                 if (meshlet.vertex_offset as usize + i as usize) >= meshlets.vertices.len() {
+                    *error_count += 1;
                     continue;
                 }
 
@@ -112,6 +115,7 @@ pub fn build_mesh_dag(mesh: &mut Mesh) {
 
                 if (v_idx as usize) >= original_vertices.len() {
                     // Start of panic prevention
+                    *error_count += 1;
                     continue;
                 }
 
@@ -144,6 +148,7 @@ pub fn build_mesh_dag(mesh: &mut Mesh) {
         &mut clusters,
         &mut new_global_indices,
         0.0,
+        &mut total_errors,
     );
     let mut level = 0;
 
@@ -229,6 +234,7 @@ pub fn build_mesh_dag(mesh: &mut Mesh) {
                 &mut clusters,
                 &mut new_global_indices,
                 target_error,
+                &mut total_errors,
             );
 
             if !parent_range.is_empty() {
@@ -247,6 +253,14 @@ pub fn build_mesh_dag(mesh: &mut Mesh) {
         }
 
         current_range = next_level_start..next_level_end;
+    }
+
+    if total_errors > 0 {
+        log::warn!(
+            "VCGS Builder: Skipped {} invalid indices/vertices for mesh '{}'",
+            total_errors,
+            mesh.name
+        );
     }
 
     // Replace indices and clusters

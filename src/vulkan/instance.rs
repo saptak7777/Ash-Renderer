@@ -158,6 +158,10 @@ impl VulkanInstance {
         self.surface
     }
 
+    pub fn debug_utils(&self) -> Option<&debug_utils::Instance> {
+        self.debug_utils.as_ref()
+    }
+
     fn query_validation_layers(entry: &Entry) -> Result<Vec<*const i8>> {
         unsafe {
             let available_layers = entry.enumerate_instance_layer_properties().map_err(|e| {

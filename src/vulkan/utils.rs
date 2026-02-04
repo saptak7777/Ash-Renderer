@@ -135,3 +135,43 @@ pub unsafe fn end_single_time_commands(
 
     Ok(())
 }
+/// Execute a command buffer and wait for a fence instead of the entire queue.
+#[inline]
+pub unsafe fn execute_single_use_fenced<F>(
+    device: &ash::Device,
+    command_pool: vk::CommandPool,
+    queue: vk::Queue,
+    f: F,
+) -> crate::Result<()>
+where
+    F: FnOnce(vk::CommandBuffer),
+{
+    let command_buffer = begin_single_time_commands(device, command_pool)?;
+    f(command_buffer);
+
+    device
+        .end_command_buffer(command_buffer)
+        .map_err(|e| crate::AshError::VulkanError(format!("Failed to end command buffer: {e}")))?;
+
+    let fence_info = vk::FenceCreateInfo::default();
+    let fence = device
+        .create_fence(&fence_info, None)
+        .map_err(|e| crate::AshError::VulkanError(format!("Failed to create fence: {e}")))?;
+
+    let command_buffers = [command_buffer];
+    let submit_info = vk::SubmitInfo::default().command_buffers(&command_buffers);
+    let submit_infos = [submit_info];
+
+    device
+        .queue_submit(queue, &submit_infos, fence)
+        .map_err(|e| crate::AshError::VulkanError(format!("Failed to submit queue: {e}")))?;
+
+    device
+        .wait_for_fences(&[fence], true, u64::MAX)
+        .map_err(|e| crate::AshError::VulkanError(format!("Failed to wait for fence: {e}")))?;
+
+    device.destroy_fence(fence, None);
+    device.free_command_buffers(command_pool, &command_buffers);
+
+    Ok(())
+}

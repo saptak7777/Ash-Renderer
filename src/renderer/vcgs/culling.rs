@@ -383,6 +383,8 @@ pub struct OcclusionCulling {
     pub enabled: bool,
     pub frustum_only: bool,
     pub debug_enabled: bool,
+    /// Cache for visible indices set to avoid per-frame allocation in debug_boxes
+    visible_set_cache: std::collections::HashSet<u32>,
     objects: Vec<CullObjectData>,
     stats: CullStats,
 }
@@ -393,6 +395,7 @@ impl OcclusionCulling {
             enabled: true,
             frustum_only: false,
             debug_enabled: false,
+            visible_set_cache: std::collections::HashSet::with_capacity(1024),
             objects: Vec::with_capacity(1024),
             stats: CullStats::default(),
         }
@@ -535,16 +538,20 @@ impl OcclusionCulling {
     ///
     /// Returns a vector of (transform, color) pairs for rendering bounding boxes.
     /// Color encoding: Green = Visible, Red = Culled
-    pub fn debug_boxes(&self, visible_indices: &[u32]) -> Vec<(Mat4, [f32; 4])> {
+    pub fn debug_boxes(&mut self, visible_indices: &[u32]) -> Vec<(Mat4, [f32; 4])> {
         if !self.debug_enabled || self.objects.is_empty() {
             return Vec::new();
         }
 
         let mut boxes = Vec::with_capacity(self.objects.len());
-        let visible_set: std::collections::HashSet<u32> = visible_indices.iter().copied().collect();
+
+        // Use the persistent set to avoid re-allocation
+        self.visible_set_cache.clear();
+        self.visible_set_cache
+            .extend(visible_indices.iter().copied());
 
         for (i, obj) in self.objects.iter().enumerate() {
-            let is_visible = visible_set.contains(&(i as u32));
+            let is_visible = self.visible_set_cache.contains(&(i as u32));
 
             // Reconstruct model matrix from rows
             let model = Mat4::from_cols_array_2d(&[

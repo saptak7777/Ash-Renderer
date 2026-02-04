@@ -12,6 +12,7 @@ pub struct VulkanDevice {
     pub present_queue: vk::Queue,
     pub graphics_queue_family: u32,
     pub present_queue_family: u32,
+    pub debug_utils: Option<ash::ext::debug_utils::Device>,
     /// Timestamp period in nanoseconds (for GPU timing queries)
     pub timestamp_period_ns: f32,
     pub sample_rate_shading_supported: bool,
@@ -141,6 +142,10 @@ impl VulkanDevice {
             let graphics_queue = device.get_device_queue(graphics_queue_family, 0);
             let present_queue = device.get_device_queue(present_queue_family, 0);
 
+            let debug_utils = instance
+                .debug_utils()
+                .map(|_| ash::ext::debug_utils::Device::new(instance.instance(), &device));
+
             Ok(Self {
                 instance,
                 physical_device,
@@ -153,6 +158,7 @@ impl VulkanDevice {
                 sample_rate_shading_supported,
                 memory_properties,
                 headless,
+                debug_utils,
             })
         }
     }

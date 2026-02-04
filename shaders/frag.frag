@@ -264,8 +264,9 @@ vec3 calculateIBL(vec3 N, vec3 V, vec3 albedo, float metallic, float roughness, 
     vec3 diffuse = irradiance * albedo;
 
     // 2. Specular Part: Prefilter Map + BRDF LUT
-    const float MAX_REFLECTION_LOD = 4.0; // Typical for 512x512 cubemap
-    vec3 prefilteredColor = textureLod(global_cubemaps[nonuniformEXT(frame.scene_lighting.ibl_prefilter_index)], R, roughness * MAX_REFLECTION_LOD).rgb;
+    int prefilter_idx = frame.scene_lighting.ibl_prefilter_index;
+    float max_lod = float(textureQueryLevels(global_cubemaps[nonuniformEXT(prefilter_idx)])) - 1.0;
+    vec3 prefilteredColor = textureLod(global_cubemaps[nonuniformEXT(prefilter_idx)], R, roughness * max_lod).rgb;
     
     vec2 brdf = vec2(0.0);
     if (frame.scene_lighting.ibl_brdf_lut_index >= 0) {

@@ -53,7 +53,21 @@ pub use swapchain::SwapchainWrapper;
 pub use sync::FrameSync;
 pub use transfer_context::TransferContext;
 
-pub fn set_debug_name(device: &ash::Device, handle: vk::Image, name: &str) {
-    // Stub for debug markers
-    let _ = (device, handle, name);
+#[inline]
+pub fn set_debug_name(
+    loader: Option<&ash::ext::debug_utils::Device>,
+    handle: vk::Image,
+    name: &str,
+) {
+    #[cfg(debug_assertions)]
+    if let Some(loader) = loader {
+        let c_name = std::ffi::CString::new(name).unwrap_or_default();
+        let mut info = vk::DebugUtilsObjectNameInfoEXT::default();
+        info.object_type = vk::ObjectType::IMAGE;
+        info.object_handle = vk::Handle::as_raw(handle);
+        info.p_object_name = c_name.as_ptr();
+        unsafe {
+            let _ = loader.set_debug_utils_object_name(&info);
+        }
+    }
 }

@@ -87,7 +87,7 @@ impl Texture {
         )?;
 
         {
-            let mut guard = allocator.vma.map_memory(&mut staging_alloc)?;
+            let guard = allocator.vma.map_memory(&mut staging_alloc)?;
             std::ptr::copy_nonoverlapping(data.as_ptr(), guard, data.len());
             allocator.vma.unmap_memory(&mut staging_alloc);
         }
@@ -149,7 +149,12 @@ impl Texture {
             vk::Format::R32G32B32A32_SFLOAT => 16,
             vk::Format::R16G16B16A16_SFLOAT => 8,
             vk::Format::R8G8B8A8_UNORM | vk::Format::R8G8B8A8_SRGB => 4,
-            _ => 16, // Fallback for HDR
+            _ => {
+                return Err(AshError::VulkanError(format!(
+                    "Unsupported texture format for bytes_per_pixel calculation: {:?}",
+                    format
+                )))
+            }
         };
 
         for mip in 0..mip_levels {
@@ -200,17 +205,17 @@ impl Texture {
                     .layer_count(6),
             );
 
-        device.cmd_pipeline_barrier(
-            cmd,
-            vk::PipelineStageFlags::TRANSFER,
-            vk::PipelineStageFlags::FRAGMENT_SHADER,
-            vk::DependencyFlags::empty(),
-            &[],
-            &[],
-            &[read_barrier],
-        );
-
-        vulkan::utils::end_single_time_commands(&device, command_pool, queue, cmd)?;
+        vulkan::utils::execute_single_use_fenced(&device, command_pool, queue, |cmd| {
+            device.cmd_pipeline_barrier(
+                cmd,
+                vk::PipelineStageFlags::TRANSFER,
+                vk::PipelineStageFlags::FRAGMENT_SHADER,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[],
+                &[read_barrier],
+            );
+        })?;
 
         // 4. Create View and Sampler
         let view_info = vk::ImageViewCreateInfo::default()
@@ -243,7 +248,7 @@ impl Texture {
         let sampler = device.create_sampler(&sampler_info, None)?;
 
         if let Some(name) = name {
-            vulkan::set_debug_name(&device, image, name);
+            vulkan::set_debug_name(allocator.debug_utils.as_ref(), image, name);
         }
 
         Ok(Self {
@@ -554,6 +559,7 @@ impl Texture {
         let sampler = device.create_sampler(&sampler_info, None)?;
 
         if let Some(label) = name {
+            vulkan::set_debug_name(allocator.debug_utils.as_ref(), image, label);
             log::info!(
                 "Created texture '{label}' ({}x{}, {} mips)",
                 data.width,
