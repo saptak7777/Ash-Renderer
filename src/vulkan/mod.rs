@@ -1,3 +1,5 @@
+use ash::vk;
+
 pub mod allocator;
 pub mod buffer_builder;
 pub mod buffer_types;
@@ -50,3 +52,8 @@ pub use surface_provider::{HeadlessSurfaceProvider, SurfaceProvider, WindowSurfa
 pub use swapchain::SwapchainWrapper;
 pub use sync::FrameSync;
 pub use transfer_context::TransferContext;
+
+pub fn set_debug_name(device: &ash::Device, handle: vk::Image, name: &str) {
+    // Stub for debug markers
+    let _ = (device, handle, name);
+}

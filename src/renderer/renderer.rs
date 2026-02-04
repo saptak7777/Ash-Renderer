@@ -2854,6 +2854,91 @@ impl Renderer {
     /// and generates irradiance and prefiltered maps for image-based lighting.
     /// Currently unused but preserved for runtime environment map loading features.
 
+    pub fn upload_ibl(&mut self, params: resources::IblUploadParams) -> Result<()> {
+        let name = "Global_IBL"; // Internal name for debug
+
+        // 1. Upload Irradiance (Cubemap, 1 mip)
+        let irradiance_texture = unsafe {
+            resources::Texture::create_cubemap_from_data(
+                self.alloc.clone(),
+                self.device.device.clone(),
+                self.cmds.upload_command_pool_handle(),
+                self.device.graphics_queue,
+                params.irradiance,
+                params.irradiance_size,
+                1,
+                params.format,
+                Some(&(name.to_owned() + "_Irradiance")),
+            )?
+        };
+        let irradiance_idx = self.bindless_manager.add_cubemap(
+            irradiance_texture.view(),
+            irradiance_texture.sampler(),
+        )?;
+
+        // 2. Upload Prefilter (Cubemap, N mips)
+        let prefilter_texture = unsafe {
+            resources::Texture::create_cubemap_from_data(
+                self.alloc.clone(),
+                self.device.device.clone(),
+                self.cmds.upload_command_pool_handle(),
+                self.device.graphics_queue,
+                params.prefilter,
+                params.prefilter_size,
+                params.prefilter_mips,
+                params.format,
+                Some(&(name.to_owned() + "_Prefilter")),
+            )?
+        };
+        let prefilter_idx = self.bindless_manager.add_cubemap(
+            prefilter_texture.view(),
+            prefilter_texture.sampler(),
+        )?;
+
+        // 3. Upload BRDF LUT (2D Texture)
+        // IBL BRDF LUTs are typically 512x512 RG16F or similar. 
+        // We use a simplified 2D texture upload here.
+        let brdf_data = resources::TextureData {
+            width: 512, // Standard IBL LUT size
+            height: 512,
+            pixels: params.brdf.to_vec(),
+        };
+        let brdf_texture = unsafe {
+            resources::Texture::from_data(
+                self.alloc.clone(),
+                self.device.device.clone(),
+                self.cmds.upload_command_pool_handle(),
+                self.device.graphics_queue,
+                &brdf_data,
+                vk::Format::R16G16_SFLOAT, // Standard for BRDF LUTs
+                Some(&(name.to_owned() + "_BRDF_LUT")),
+            )?
+        };
+        let brdf_idx = self.bindless_manager.add_sampled_image(
+            brdf_texture.view(),
+            brdf_texture.sampler(),
+        )?;
+
+        // 4. Update Scene State
+        self.scene_lighting.ibl_irradiance_index = irradiance_idx as i32;
+        self.scene_lighting.ibl_prefilter_index = prefilter_idx as i32;
+        self.scene_lighting.ibl_brdf_lut_index = brdf_idx as i32;
+        self.scene_lighting.ibl_intensity = 1.0;
+
+        // 5. Register with Registry to keep alive
+        self.texture_registry.insert(irradiance_idx, Arc::new(irradiance_texture));
+        self.texture_registry.insert(prefilter_idx, Arc::new(prefilter_texture));
+        self.texture_registry.insert(brdf_idx, Arc::new(brdf_texture));
+
+        log::info!(
+            "IBL maps uploaded to bindless slots (Irradiance: {}, Prefilter: {}, BRDF: {})",
+            irradiance_idx,
+            prefilter_idx,
+            brdf_idx
+        );
+
+        Ok(())
+    }
     pub fn request_swapchain_resize(&mut self, new_extent: vk::Extent2D) {
         self.pending_extent = Some(new_extent);
         if !self.resize_pending {
@@ -3895,8 +3980,8 @@ impl Renderer {
         // (Only skinned meshes would remain here if we hadn't moved them, 
         // but for now we focus on opaque stability)
 
-        // 4. Render Skybox (Sentinel Pattern: Only if environment_map_index is NOT MAX)
-        if self.scene_lighting.environment_map_index != SceneLighting::NO_ENVIRONMENT_MAP {
+        // 4. Render Skybox (Sentinel Pattern: Only if ibl_prefilter_index is NOT MAX)
+        if self.scene_lighting.ibl_prefilter_index >= 0 {
             if let Err(e) = self.render_skybox(&cmd_ctx, frame_index, params.view, params.projection) {
                 log::warn!("Skybox render failed: {e}");
             }
@@ -4272,15 +4357,8 @@ impl Renderer {
                 matrices.camera_pos = camera_pos.extend(1.0);
 
                 // Phase 2: Lean Engine "Studio Architecture" Logic
-                // Single Source of Truth: environment map status drives shader and skybox
-                // Phase 4: Sentinel Pattern Logic
-                // If the app hasn't explicitly set a skybox texture, index is SceneLighting::NO_ENVIRONMENT_MAP.
-                // We no longer check if skybox_mesh exists (it always does as a fallback).
-                if self.scene_lighting.environment_map_index != SceneLighting::NO_ENVIRONMENT_MAP {
-                    self.scene_lighting.has_environment_map = 1;
-                } else {
-                    self.scene_lighting.has_environment_map = 0;
-                }
+                // Single Source of Truth: environment map indices drive shader logic.
+                // Indices < 0 indicate no IBL/Environment map is bound.
 
                 matrices.set_lighting(&self.scene_lighting);
 

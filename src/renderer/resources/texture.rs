@@ -58,6 +58,204 @@ pub struct Texture {
 impl Texture {
     /// # Safety
     /// Caller must ensure the provided Vulkan handles remain valid for the lifetime of the texture.
+    /// Creates a cubemap from raw data (6 faces).
+    /// Mips: The data is expected to contain all 6 faces for each mip level sequentially.
+    pub unsafe fn create_cubemap_from_data(
+        allocator: Arc<vulkan::Allocator>,
+        device: Arc<ash::Device>,
+        command_pool: vk::CommandPool,
+        queue: vk::Queue,
+        data: &[u8],
+        resolution: u32,
+        mip_levels: u32,
+        format: vk::Format,
+        name: Option<&str>,
+    ) -> Result<Self> {
+        let image_size = data.len() as vk::DeviceSize;
+        if image_size == 0 {
+            return Err(crate::AshError::VulkanError(
+                "Cannot create cubemap from empty pixel data".to_string(),
+            ));
+        }
+
+        // 1. Create Staging Buffer and upload data
+        let (staging_buffer, mut staging_alloc) = allocator.create_buffer_with_flags(
+            image_size,
+            vk::BufferUsageFlags::TRANSFER_SRC,
+            vk_mem::MemoryUsage::AutoPreferHost,
+            vk_mem::AllocationCreateFlags::HOST_ACCESS_SEQUENTIAL_WRITE,
+        )?;
+
+        {
+            let mut guard = allocator.vma.map_memory(&mut staging_alloc)?;
+            std::ptr::copy_nonoverlapping(data.as_ptr(), guard, data.len());
+            allocator.vma.unmap_memory(&mut staging_alloc);
+        }
+
+        // 2. Create Cubemap Image
+        let image_info = vk::ImageCreateInfo::default()
+            .image_type(vk::ImageType::TYPE_2D)
+            .format(format)
+            .extent(vk::Extent3D {
+                width: resolution,
+                height: resolution,
+                depth: 1,
+            })
+            .mip_levels(mip_levels)
+            .array_layers(6)
+            .samples(vk::SampleCountFlags::TYPE_1)
+            .tiling(vk::ImageTiling::OPTIMAL)
+            .usage(vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::SAMPLED)
+            .sharing_mode(vk::SharingMode::EXCLUSIVE)
+            .flags(vk::ImageCreateFlags::CUBE_COMPATIBLE)
+            .initial_layout(vk::ImageLayout::UNDEFINED);
+
+        let (image, allocation) =
+            allocator.create_image(&image_info, vk_mem::MemoryUsage::AutoPreferDevice)?;
+
+        // 3. Transition to Transfer Destiny and Copy
+        let cmd = vulkan::utils::begin_single_time_commands(&device, command_pool)?;
+
+        // Transition ALL layers and mips to TRANSFER_DST_OPTIMAL
+        let layout_barrier = vk::ImageMemoryBarrier::default()
+            .src_access_mask(vk::AccessFlags::empty())
+            .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+            .old_layout(vk::ImageLayout::UNDEFINED)
+            .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+            .image(image)
+            .subresource_range(
+                vk::ImageSubresourceRange::default()
+                    .aspect_mask(vk::ImageAspectFlags::COLOR)
+                    .base_mip_level(0)
+                    .level_count(mip_levels)
+                    .base_array_layer(0)
+                    .layer_count(6),
+            );
+
+        device.cmd_pipeline_barrier(
+            cmd,
+            vk::PipelineStageFlags::TOP_OF_PIPE,
+            vk::PipelineStageFlags::TRANSFER,
+            vk::DependencyFlags::empty(),
+            &[],
+            &[],
+            &[layout_barrier],
+        );
+
+        // Copy all mips and faces
+        let mut regions = Vec::new();
+        let mut offset = 0;
+        let bytes_per_pixel = match format {
+            vk::Format::R32G32B32A32_SFLOAT => 16,
+            vk::Format::R16G16B16A16_SFLOAT => 8,
+            vk::Format::R8G8B8A8_UNORM | vk::Format::R8G8B8A8_SRGB => 4,
+            _ => 16, // Fallback for HDR
+        };
+
+        for mip in 0..mip_levels {
+            let mip_res = (resolution >> mip).max(1);
+            let face_size = (mip_res * mip_res * bytes_per_pixel) as u64;
+
+            for face in 0..6 {
+                let region = vk::BufferImageCopy::default()
+                    .buffer_offset(offset)
+                    .image_subresource(
+                        vk::ImageSubresourceLayers::default()
+                            .aspect_mask(vk::ImageAspectFlags::COLOR)
+                            .mip_level(mip)
+                            .base_array_layer(face)
+                            .layer_count(1),
+                    )
+                    .image_extent(vk::Extent3D {
+                        width: mip_res,
+                        height: mip_res,
+                        depth: 1,
+                    });
+                regions.push(region);
+                offset += face_size;
+            }
+        }
+
+        device.cmd_copy_buffer_to_image(
+            cmd,
+            staging_buffer,
+            image,
+            vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+            &regions,
+        );
+
+        // Transition to SHADER_READ_ONLY_OPTIMAL
+        let read_barrier = vk::ImageMemoryBarrier::default()
+            .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+            .dst_access_mask(vk::AccessFlags::SHADER_READ)
+            .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+            .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+            .image(image)
+            .subresource_range(
+                vk::ImageSubresourceRange::default()
+                    .aspect_mask(vk::ImageAspectFlags::COLOR)
+                    .base_mip_level(0)
+                    .level_count(mip_levels)
+                    .base_array_layer(0)
+                    .layer_count(6),
+            );
+
+        device.cmd_pipeline_barrier(
+            cmd,
+            vk::PipelineStageFlags::TRANSFER,
+            vk::PipelineStageFlags::FRAGMENT_SHADER,
+            vk::DependencyFlags::empty(),
+            &[],
+            &[],
+            &[read_barrier],
+        );
+
+        vulkan::utils::end_single_time_commands(&device, command_pool, queue, cmd)?;
+
+        // 4. Create View and Sampler
+        let view_info = vk::ImageViewCreateInfo::default()
+            .image(image)
+            .view_type(vk::ImageViewType::CUBE)
+            .format(format)
+            .subresource_range(
+                vk::ImageSubresourceRange::default()
+                    .aspect_mask(vk::ImageAspectFlags::COLOR)
+                    .base_mip_level(0)
+                    .level_count(mip_levels)
+                    .base_array_layer(0)
+                    .layer_count(6),
+            );
+
+        let view = device.create_image_view(&view_info, None)?;
+
+        let sampler_info = vk::SamplerCreateInfo::default()
+            .mag_filter(vk::Filter::LINEAR)
+            .min_filter(vk::Filter::LINEAR)
+            .mipmap_mode(vk::SamplerMipmapMode::LINEAR)
+            .address_mode_u(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+            .address_mode_v(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+            .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+            .min_lod(0.0)
+            .max_lod(mip_levels as f32)
+            .anisotropy_enable(true)
+            .max_anisotropy(16.0);
+
+        let sampler = device.create_sampler(&sampler_info, None)?;
+
+        if let Some(name) = name {
+            vulkan::set_debug_name(&device, image, name);
+        }
+
+        Ok(Self {
+            image: Some(image),
+            view: Some(view),
+            sampler: Some(sampler),
+            allocation: Some(allocation),
+            allocator,
+            device,
+        })
+    }
+
     pub unsafe fn from_data(
         allocator: Arc<vulkan::Allocator>,
         device: Arc<ash::Device>,

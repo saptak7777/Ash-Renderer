@@ -86,35 +86,24 @@ impl ApplicationHandler for App {
                 }
 
                 // Load pre-baked IBL environment map for realistic PBR lighting
-                // Load pre-baked IBL environment map using the new Asset System
-                // We use archetype_asset for Zero-Copy loading!
-                if let Ok(_asset) =
+                if let Ok(asset) =
                     archetype_asset::ibl::MappedIblAsset::load("assets/textures/skybox.ibl")
                 {
                     log::info!("✓ IBL asset loaded via Zero-Copy MappedIblAsset");
 
-                    /*
-                    // Convert header (fields match 1:1)
-                    let header = ash_renderer::renderer::resources::IblAssetHeader {
-                        magic: asset.header.magic,
-                        version: asset.header.version,
-                        cubemap_size: asset.header.cubemap_size,
+                    let params = ash_renderer::renderer::resources::IblUploadParams {
+                        irradiance: asset.irradiance_data(),
+                        prefilter: asset.prefiltered_data(),
+                        brdf: asset.brdf_data(),
                         irradiance_size: asset.header.irradiance_size,
-                        prefiltered_size: asset.header.prefiltered_size,
-                        prefiltered_mips: asset.header.prefiltered_mips,
-                        format: asset.header.format,
-                        _padding: asset.header._padding,
+                        prefilter_size: asset.header.prefiltered_size,
+                        prefilter_mips: asset.header.prefiltered_mips,
+                        format: ash::vk::Format::from_raw(asset.header.format as i32),
                     };
 
-                    if let Err(e) = renderer.upload_ibl(
-                        &header,
-                        asset.cubemap_data(),
-                        asset.irradiance_data(),
-                        asset.prefiltered_data(),
-                    ) {
+                    if let Err(e) = renderer.upload_ibl(params) {
                         log::warn!("Failed to upload IBL: {e}");
                     }
-                    */
                 } else {
                     log::warn!("Failed to load IBL asset or file not found");
                     log::warn!("Continuing without IBL - cubes will have minimal ambient lighting");

@@ -128,7 +128,7 @@ impl Default for DirectionalLight {
 }
 
 impl SceneLighting {
-    pub const NO_ENVIRONMENT_MAP: u32 = u32::MAX;
+    // IBL indices are -1 for None
 }
 
 #[repr(C, align(16))]
@@ -140,9 +140,10 @@ pub struct SceneLighting {
     pub num_tiles_x: u32,
     pub num_tiles_y: u32,
     pub tile_size: u32,
-    pub environment_map_index: u32, // SENTINEL: u32::MAX = No Skybox
-    pub has_environment_map: u32,
-    pub _padding: [u32; 2],
+    pub ibl_irradiance_index: i32, // -1 = None
+    pub ibl_prefilter_index: i32,  // -1 = None
+    pub ibl_brdf_lut_index: i32,   // -1 = None
+    pub ibl_intensity: f32,
 }
 
 const _: () = assert!(std::mem::size_of::<SceneLighting>() == 96);
@@ -236,9 +237,10 @@ impl LightingBuilder<DirectionalSet> {
             num_tiles_x: 0,
             num_tiles_y: 0,
             tile_size: 16,
-            environment_map_index: SceneLighting::NO_ENVIRONMENT_MAP, // Sentinel: No Skybox
-            has_environment_map: 0,
-            _padding: [0; 2],
+            ibl_irradiance_index: -1,
+            ibl_prefilter_index: -1,
+            ibl_brdf_lut_index: -1,
+            ibl_intensity: 0.0,
         }
     }
 }
@@ -254,9 +256,10 @@ impl LightingPresets {
         num_tiles_x: 0,
         num_tiles_y: 0,
         tile_size: 16,
-        environment_map_index: SceneLighting::NO_ENVIRONMENT_MAP,
-        has_environment_map: 0,
-        _padding: [0; 2],
+        ibl_irradiance_index: -1,
+        ibl_prefilter_index: -1,
+        ibl_brdf_lut_index: -1,
+        ibl_intensity: 0.0,
     };
 
     pub const INDOOR_LIT: SceneLighting = SceneLighting {
@@ -266,9 +269,10 @@ impl LightingPresets {
         num_tiles_x: 0,
         num_tiles_y: 0,
         tile_size: 16,
-        environment_map_index: SceneLighting::NO_ENVIRONMENT_MAP,
-        has_environment_map: 0,
-        _padding: [0; 2],
+        ibl_irradiance_index: -1,
+        ibl_prefilter_index: -1,
+        ibl_brdf_lut_index: -1,
+        ibl_intensity: 0.0,
     };
 
     pub const OUTDOOR_DAY: SceneLighting = SceneLighting {
@@ -278,9 +282,10 @@ impl LightingPresets {
         num_tiles_x: 0,
         num_tiles_y: 0,
         tile_size: 16,
-        environment_map_index: SceneLighting::NO_ENVIRONMENT_MAP,
-        has_environment_map: 0,
-        _padding: [0; 2],
+        ibl_irradiance_index: -1,
+        ibl_prefilter_index: -1,
+        ibl_brdf_lut_index: -1,
+        ibl_intensity: 0.0,
     };
 
     pub const OUTDOOR_NIGHT: SceneLighting = SceneLighting {
@@ -290,9 +295,10 @@ impl LightingPresets {
         num_tiles_x: 0,
         num_tiles_y: 0,
         tile_size: 16,
-        environment_map_index: SceneLighting::NO_ENVIRONMENT_MAP,
-        has_environment_map: 0,
-        _padding: [0; 2],
+        ibl_irradiance_index: -1,
+        ibl_prefilter_index: -1,
+        ibl_brdf_lut_index: -1,
+        ibl_intensity: 0.0,
     };
 }
 

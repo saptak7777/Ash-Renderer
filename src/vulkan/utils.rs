@@ -82,3 +82,56 @@ pub fn find_memory_type(
     }
     None
 }
+
+/// Helper to begin a single-time command buffer.
+pub unsafe fn begin_single_time_commands(
+    device: &ash::Device,
+    command_pool: vk::CommandPool,
+) -> crate::Result<vk::CommandBuffer> {
+    let alloc_info = vk::CommandBufferAllocateInfo::default()
+        .level(vk::CommandBufferLevel::PRIMARY)
+        .command_pool(command_pool)
+        .command_buffer_count(1);
+
+    let command_buffer = device.allocate_command_buffers(&alloc_info).map_err(|e| {
+        crate::AshError::VulkanError(format!("Failed to allocate command buffer: {e}"))
+    })?[0];
+
+    let begin_info =
+        vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+
+    device
+        .begin_command_buffer(command_buffer, &begin_info)
+        .map_err(|e| {
+            crate::AshError::VulkanError(format!("Failed to begin command buffer: {e}"))
+        })?;
+
+    Ok(command_buffer)
+}
+
+/// Helper to end and submit a single-time command buffer.
+pub unsafe fn end_single_time_commands(
+    device: &ash::Device,
+    command_pool: vk::CommandPool,
+    queue: vk::Queue,
+    command_buffer: vk::CommandBuffer,
+) -> crate::Result<()> {
+    device
+        .end_command_buffer(command_buffer)
+        .map_err(|e| crate::AshError::VulkanError(format!("Failed to end command buffer: {e}")))?;
+
+    let command_buffers = [command_buffer];
+    let submit_info = vk::SubmitInfo::default().command_buffers(&command_buffers);
+    let submit_infos = [submit_info];
+
+    device
+        .queue_submit(queue, &submit_infos, vk::Fence::null())
+        .map_err(|e| crate::AshError::VulkanError(format!("Failed to submit queue: {e}")))?;
+    device
+        .queue_wait_idle(queue)
+        .map_err(|e| crate::AshError::VulkanError(format!("Failed to wait for queue idle: {e}")))?;
+
+    device.free_command_buffers(command_pool, &command_buffers);
+
+    Ok(())
+}

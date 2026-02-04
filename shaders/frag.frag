@@ -244,6 +244,45 @@ vec3 calculateDirectionalLight(
     return (diffuse + specular) * radiance * NdotL * (1.0 - shadow);
 }
 
+// ============================================================================
+// IMAGE-BASED LIGHTING (IBL) - SPLIT SUM APPROXIMATION
+// ============================================================================
+
+vec3 calculateIBL(vec3 N, vec3 V, vec3 albedo, float metallic, float roughness, float occlusion) {
+    FrameData frame = FrameData(push.frame_ptr);
+    
+    // Fallback if IBL is not bound
+    if (frame.scene_lighting.ibl_irradiance_index < 0 || frame.scene_lighting.ibl_prefilter_index < 0) {
+        return calculateHemisphereAmbient(N, albedo) * occlusion;
+    }
+
+    vec3 R = reflect(-V, N);
+    vec3 F0 = mix(vec3(0.04), albedo, metallic);
+    
+    // 1. Diffuse Part: Irradiance Map
+    vec3 irradiance = texture(global_cubemaps[nonuniformEXT(frame.scene_lighting.ibl_irradiance_index)], N).rgb;
+    vec3 diffuse = irradiance * albedo;
+
+    // 2. Specular Part: Prefilter Map + BRDF LUT
+    const float MAX_REFLECTION_LOD = 4.0; // Typical for 512x512 cubemap
+    vec3 prefilteredColor = textureLod(global_cubemaps[nonuniformEXT(frame.scene_lighting.ibl_prefilter_index)], R, roughness * MAX_REFLECTION_LOD).rgb;
+    
+    vec2 brdf = vec2(0.0);
+    if (frame.scene_lighting.ibl_brdf_lut_index >= 0) {
+        // Sample BRDF LUT using NdotV and roughness
+        float NdotV = max(dot(N, V), 0.0);
+        brdf = texture(global_textures[nonuniformEXT(frame.scene_lighting.ibl_brdf_lut_index)], vec2(NdotV, roughness)).rg;
+    }
+    
+    vec3 F = fresnel_schlick_roughness(max(dot(N, V), 0.0), F0, roughness);
+    vec3 specular = prefilteredColor * (F * brdf.x + brdf.y);
+
+    vec3 kS = F;
+    vec3 kD = (1.0 - kS) * (1.0 - metallic);
+    
+    return (kD * diffuse + specular) * occlusion * frame.scene_lighting.ibl_intensity;
+}
+
 void main() {
     FrameData frame = FrameData(push.frame_ptr);
     // Extract actual index from handle (lower 16 bits)
@@ -475,15 +514,14 @@ void main() {
         Lo += (diffuse + specular) * radiance * NdotL * attenuation;
     }
     
-    // Ambient Calculation - Hemisphere Fallback
-    vec3 ambient = calculateHemisphereAmbient(normal, baseColor) * occlusion;
+    // Layer 1: Ambient / IBL
+    vec3 ambient = calculateIBL(normal, viewDir, baseColor, metallic, roughness, occlusion);
     
     // Layer 2: Global Directional Light
     vec3 directional = calculateDirectionalLight(
         normal, viewDir, baseColor, metallic, roughness, fragPosLightSpace
     );
 
-    
     // Emissive
     int emissive_idx = mat.emissive_texture_index;
     vec3 emissive = mat.emissive_factor.rgb;
@@ -491,7 +529,7 @@ void main() {
         emissive *= texture(global_textures[nonuniformEXT(emissive_idx)], fragUV).rgb;
     }
 
-    // Combine: Ambient + Directional + Dynamic(Lo) + Emissive
+    // Combine: IBL + Directional + Dynamic(Lo) + Emissive
     vec3 color = ambient + directional + Lo + emissive;
 
     // Final Output

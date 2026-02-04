@@ -18,6 +18,11 @@ Oh, and did I mention it's **FULL BDA** (Buffer Device Address) and **FULL BINDL
 
 ---
 
+## 🎯 Architecture & Goals
+Before you dive in, read our [Philosophy & Goals](GOALS.md) document. It explains why we do things the way we do (and why we delete legacy features without mercy).
+
+---
+
 ## Core Concepts
 
 ### What It Does (Mostly)

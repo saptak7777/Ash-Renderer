@@ -68,6 +68,10 @@ struct SceneLighting {
     uint num_tiles_x;
     uint num_tiles_y;
     uint tile_size;
+    int ibl_irradiance_index;
+    int ibl_prefilter_index;
+    int ibl_brdf_lut_index;
+    float ibl_intensity;
 };
 
 // --- BDA Buffer References (Require structs above) ---
