@@ -98,7 +98,7 @@ impl Allocator {
         memory_usage: vk_mem::MemoryUsage,
         flags: vk_mem::AllocationCreateFlags,
     ) -> crate::Result<()> {
-        // 🛑 Hard Errors
+        // [Error] Hard Errors
         if size == 0 {
             return Err(crate::AshError::VulkanError(
                 "Buffer size must be > 0".into(),
@@ -119,7 +119,7 @@ impl Allocator {
             ));
         }
 
-        // ⚠️ Defensive Warnings
+        // [Warning] Defensive Warnings
         if size > 4 * 1024 * 1024 * 1024 {
             log::warn!("Buffer size is very large ({size} bytes), may cause issues");
         }

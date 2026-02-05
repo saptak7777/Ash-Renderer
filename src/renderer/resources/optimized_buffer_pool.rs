@@ -14,6 +14,7 @@ use ash::vk;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use vk_mem::Allocation;
 
 /// Size class configuration
 const MIN_SIZE_CLASS: u32 = 8; // 256 bytes (2^8)
@@ -40,6 +41,7 @@ fn size_class_size(index: usize) -> u64 {
 #[derive(Debug, Clone)]
 pub struct BufferAllocation {
     pub buffer: vk::Buffer,
+    pub allocation: Allocation,
     pub size: u64,
     pub actual_size: u64, // Actual allocated size (may be larger)
     pub offset: u64,
@@ -136,6 +138,17 @@ pub struct BufferPool {
     total_allocated_bytes: AtomicU64,
 }
 
+/*
+ * LOCK ORDERING CONVENTION:
+ * 1. BufferPool Bucket Mutex (granular)
+ * 2. Allocator Mutex (global)
+ *
+ * Never acquire a higher-level lock (Allocator) while holding a lower-level lock (Bucket)
+ * if there is any risk of circular dependency.
+ * Buffer destruction must happen outside the Bucket lock.
+ * Buckets are locked individually; never hold two bucket locks at once.
+ */
+
 impl BufferPool {
     /// Creates a new optimized buffer pool
     pub fn new(allocator: Arc<Allocator>) -> Self {
@@ -211,7 +224,7 @@ impl BufferPool {
             log::debug!("Allocating new buffer '{n}' (class {class_index}, {actual_size} bytes)");
         }
 
-        let (buffer, _allocation) =
+        let (buffer, allocation) =
             self.allocator
                 .create_buffer(actual_size, usage, memory_usage)?;
 
@@ -221,6 +234,7 @@ impl BufferPool {
 
         let alloc = BufferAllocation {
             buffer,
+            allocation,
             size,
             actual_size,
             offset: 0,
@@ -245,43 +259,79 @@ impl BufferPool {
     /// Returns a buffer to the pool
     pub fn deallocate(&self, buffer: BufferAllocation) {
         let class_index = buffer.size_class;
-        let mut bucket = match self.buckets[class_index].lock() {
-            Ok(b) => b,
-            Err(_) => {
-                log::error!("Buffer pool lock poisoned during deallocation (class {class_index})");
-                return;
-            }
-        };
+        let mut to_destroy = None;
 
-        // Remove from in_use
-        bucket.in_use.retain(|b| b.buffer != buffer.buffer);
+        // Scope for bucket lock
+        {
+            let mut bucket = match self.buckets[class_index].lock() {
+                Ok(b) => b,
+                Err(_) => {
+                    log::error!(
+                        "Buffer pool lock poisoned during deallocation (class {class_index})"
+                    );
+                    return;
+                }
+            };
 
-        // Validate retention criteria.
-        if bucket.available.len() < self.config.max_per_class {
-            if let Some(ref name) = buffer.name {
-                log::trace!("Returning buffer '{name}' to pool (class {class_index})");
+            // Remove from in_use
+            bucket.in_use.retain(|b| b.buffer != buffer.buffer);
+
+            // Validate retention criteria.
+            if bucket.available.len() < self.config.max_per_class {
+                if let Some(ref name) = buffer.name {
+                    log::trace!("Returning buffer '{name}' to pool (class {class_index})");
+                }
+                bucket.available.push_back(buffer);
+            } else {
+                // Pool is full for this class, we will destroy the buffer outside the lock
+                log::trace!("Pool full for class {class_index}, buffer will be destroyed");
+                to_destroy = Some(buffer);
             }
-            bucket.available.push_back(buffer);
-        } else {
-            // Pool is full for this class, actually free the buffer
-            log::trace!("Pool full for class {class_index}, buffer will be dropped");
+
+            bucket.stats.deallocations += 1;
         }
 
-        bucket.stats.deallocations += 1;
+        // Destroy outside the lock to prevent deadlocks and maintain strict lock ordering:
+        // BucketLock -> AllocatorLock (if destroy_buffer locks anything)
+        if let Some(mut alloc) = to_destroy {
+            unsafe {
+                self.allocator
+                    .destroy_buffer(alloc.buffer, &mut alloc.allocation);
+            }
+        }
     }
 
     /// Reclaim memory from unused buffers
     pub fn reclaim_memory(&self) {
         let frame = self.current_frame.load(Ordering::Relaxed);
         let retention = self.config.retention_frames;
+        let mut to_destroy = Vec::new();
 
         for (i, bucket_mutex) in self.buckets.iter().enumerate() {
             if let Ok(mut bucket) = bucket_mutex.lock() {
-                bucket
-                    .available
-                    .retain(|alloc| frame.saturating_sub(alloc.frame_last_used) < retention);
+                // Collect expired buffers
+                let mut still_valid = VecDeque::with_capacity(bucket.available.len());
+                while let Some(alloc) = bucket.available.pop_front() {
+                    if frame.saturating_sub(alloc.frame_last_used) < retention {
+                        still_valid.push_back(alloc);
+                    } else {
+                        to_destroy.push(alloc);
+                    }
+                }
+                bucket.available = still_valid;
             } else {
                 log::error!("Buffer pool lock poisoned during reclaim (class {i})");
+            }
+        }
+
+        // Destroy outside the locks
+        if !to_destroy.is_empty() {
+            log::debug!("Reclaiming {} expired buffers from pool", to_destroy.len());
+            for mut alloc in to_destroy {
+                unsafe {
+                    self.allocator
+                        .destroy_buffer(alloc.buffer, &mut alloc.allocation);
+                }
             }
         }
     }

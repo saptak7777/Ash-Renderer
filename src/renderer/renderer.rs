@@ -425,20 +425,12 @@ pub struct Renderer {
 }
 
 #[derive(Clone)]
-#[allow(dead_code)]
 pub struct DrawItem {
     pub key: Arc<str>,
     pub mesh_id: u32,
     pub transform: Mat4,
     pub material: Material,
     pub material_handle: MaterialHandle,
-    pub texture_flags: TexturePresenceFlags,
-    pub texture_indices: [i32; 4], // base, normal, mr, occ
-    pub emissive_index: i32,
-    pub alpha_cutoff: f32,
-    pub cast_shadows: bool,
-    pub receive_shadows: bool,
-    pub is_hidden: bool,
 }
 
 #[derive(Copy, Clone, Default, Debug)]
@@ -2631,8 +2623,6 @@ impl Renderer {
                                 }
                             }
 
-                            let texture_flags = mesh_data_entry.texture_flags;
-                            let (indices, emissive_index) = (mesh_data_entry.texture_indices, mesh_data_entry.emissive_index);
 
                             let key = BatchKey::new(command.mesh_handle, material_handle);
                             let mut instance = InstanceData::from_matrix(command.transform)
@@ -2650,13 +2640,6 @@ impl Renderer {
                                 transform: command.transform,
                                 material: material.clone(),
                                 material_handle,
-                                texture_flags,
-                                texture_indices: indices,
-                                emissive_index,
-                                alpha_cutoff: material.alpha_cutoff,
-                                cast_shadows: command.cast_shadows,
-                                receive_shadows: command.receive_shadows,
-                                is_hidden: command.is_hidden,
                             };
                             
                             let mut items = items;
@@ -2720,8 +2703,6 @@ impl Renderer {
 
                     // We must fetch the uploaded mesh to get the actual buffer offsets
                     if let Some(uploaded) = self.model_renderer.get(&mesh_data.name) {
-                        let texture_flags = mesh_data.texture_flags;
-                        let (indices, emissive_index) = (mesh_data.texture_indices, mesh_data.emissive_index);
 
                         let key = BatchKey::new(command.mesh_handle, material_handle);
                         let item = DrawItem {
@@ -2730,13 +2711,6 @@ impl Renderer {
                             transform: command.transform,
                             material: material.clone(),
                             material_handle,
-                            texture_flags,
-                            texture_indices: indices,
-                            emissive_index,
-                            alpha_cutoff: material.alpha_cutoff,
-                            cast_shadows: command.cast_shadows,
-                            receive_shadows: command.receive_shadows,
-                            is_hidden: command.is_hidden,
                         };
                         self.draw_items.push(item);
 

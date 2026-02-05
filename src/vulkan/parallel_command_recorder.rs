@@ -176,9 +176,22 @@ impl Drop for ParallelCommandRecorder {
 mod tests {
     use super::*;
 
+    /// Create a dummy device that satisfies the non-null function pointer requirement.
+    /// NEVER call methods on this device as it contains dummy data.
+    fn create_dummy_device() -> Arc<ash::Device> {
+        unsafe {
+            // Creating a zeroed high-level ash::Device is UB because it contains function pointers
+            // that must be non-null. We use a non-zero pattern to satisfy the layout requirements
+            // for these tests where the device is never actually dereferenced.
+            let mut dummy = std::mem::MaybeUninit::<ash::Device>::uninit();
+            std::ptr::write_bytes(dummy.as_mut_ptr(), 0x01, 1);
+            Arc::new(dummy.assume_init())
+        }
+    }
+
     #[test]
     fn test_threshold_logic() {
-        let recorder = ParallelCommandRecorder::new(Arc::new(unsafe { std::mem::zeroed() }), 0);
+        let recorder = ParallelCommandRecorder::new(create_dummy_device(), 0);
         assert_eq!(recorder.parallel_threshold, 4);
 
         let recorder = recorder.with_threshold(8);
@@ -188,8 +201,7 @@ mod tests {
     #[test]
     fn test_parallel_threshold() {
         // Verify that passes below threshold use serial path
-        let recorder = ParallelCommandRecorder::new(Arc::new(unsafe { std::mem::zeroed() }), 0)
-            .with_threshold(5);
+        let recorder = ParallelCommandRecorder::new(create_dummy_device(), 0).with_threshold(5);
 
         assert!(3 < recorder.parallel_threshold); // Should use serial
         assert!(5 >= recorder.parallel_threshold); // Should use parallel
