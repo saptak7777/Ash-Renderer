@@ -50,52 +50,6 @@ use crate::renderer::resources::mesh::{MaterialDescriptor, MeshDescriptor};
 use crate::renderer::resources::GlobalClusterBuffer;
 use crate::renderer::vcgs::culling::CullObjectData;
 
-#[derive(Default)]
-pub struct CullingManager {
-    pub shadow_casters: HashSet<u32>,
-    pub shadow_receivers: HashSet<u32>,
-    pub transparent_objects: HashSet<u32>,
-}
-
-impl CullingManager {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn build(
-        &mut self,
-        draw_items: &[DrawItem],
-    ) {
-        self.shadow_casters.clear();
-        self.shadow_receivers.clear();
-        self.transparent_objects.clear();
-
-        for item in draw_items {
-            let mesh_handle = item.mesh_id;
-
-            // Track shadow casters/receivers
-            if item.cast_shadows {
-                self.shadow_casters.insert(mesh_handle);
-            }
-            if item.receive_shadows {
-                self.shadow_receivers.insert(mesh_handle);
-            }
-
-            // Track which are transparent
-            if item.material.is_transparent {
-                self.transparent_objects.insert(mesh_handle);
-            }
-        }
-    }
-
-    pub fn is_shadow_caster(&self, mesh_id: u32) -> bool {
-        self.shadow_casters.contains(&mesh_id)
-    }
-
-    pub fn is_transparent(&self, mesh_id: u32) -> bool {
-        self.transparent_objects.contains(&mesh_id)
-    }
-}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum DebugMode {
@@ -406,7 +360,6 @@ pub struct Renderer {
     // G-Buffer for Normals and Motion Vectors
     gbuffer: Option<GBuffer>,
     // Pipeline optimization
-    culling_manager: CullingManager,
     // Lighting
     scene_lighting: crate::renderer::features::SceneLighting,
     point_lights: Vec<PointLight>,
@@ -1026,7 +979,6 @@ impl Renderer {
             let spot_lights = Vec::new();
             let scene_lighting = SceneLighting::default();
             let occlusion_culling = OcclusionCulling::new();
-            let culling_manager = CullingManager::new();
 
             // Initialize GPU-driven pipeline components
             log::info!("Initializing Hi-Z Pass");
@@ -1127,7 +1079,6 @@ impl Renderer {
                 motion_pass: None,
                 motion_framebuffer: None,
                 gbuffer: Some(gbuffer),
-                culling_manager,
                 scene_lighting,
                 point_lights,
                 directional_lights,
@@ -4246,7 +4197,6 @@ impl Renderer {
 
 
             // Build object registry once per frame
-            self.culling_manager.build(&self.draw_items);
 
             // Prepare culling data for this frame
             self.occlusion_culling.begin_frame();

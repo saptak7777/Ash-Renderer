@@ -127,7 +127,7 @@ impl Default for BufferPoolConfig {
 /// Optimized buffer pool with size-class bucketing
 pub struct BufferPool {
     allocator: Arc<Allocator>,
-    buckets: Mutex<Vec<SizeClassBucket>>,
+    buckets: Vec<Mutex<SizeClassBucket>>,
     config: BufferPoolConfig,
     current_frame: AtomicU64,
     // Global stats (atomic for lock-free reads)
@@ -145,12 +145,12 @@ impl BufferPool {
     /// Creates a buffer pool with custom configuration
     pub fn with_config(allocator: Arc<Allocator>, config: BufferPoolConfig) -> Self {
         let buckets = (0..NUM_SIZE_CLASSES)
-            .map(|_| SizeClassBucket::new())
+            .map(|_| Mutex::new(SizeClassBucket::new()))
             .collect();
 
         Self {
             allocator,
-            buckets: Mutex::new(buckets),
+            buckets,
             config,
             current_frame: AtomicU64::new(0),
             total_allocations: AtomicU64::new(0),
@@ -184,30 +184,29 @@ impl BufferPool {
         let actual_size = size_class_size(class_index);
         let frame = self.current_frame.load(Ordering::Relaxed);
 
-        let mut buckets = self
-            .buckets
-            .lock()
-            .map_err(|_| crate::AshError::VulkanError("Buffer pool lock poisoned".into()))?;
-        let bucket = &mut buckets[class_index];
+        // Scope for the first lock to check for reusable buffers
+        {
+            let mut bucket = self.buckets[class_index]
+                .lock()
+                .map_err(|_| crate::AshError::VulkanError("Buffer pool lock poisoned".into()))?;
 
-        // Try to find a reusable buffer in this size class
-        if let Some(mut alloc) = bucket.available.pop_front() {
-            alloc.size = size;
-            alloc.name = name.clone();
-            alloc.frame_last_used = frame;
-            bucket.in_use.push(alloc.clone());
-            bucket.stats.reuses += 1;
-            self.total_reuses.fetch_add(1, Ordering::Relaxed);
+            // Try to find a reusable buffer in this size class
+            if let Some(mut alloc) = bucket.available.pop_front() {
+                alloc.size = size;
+                alloc.name = name.clone();
+                alloc.frame_last_used = frame;
+                bucket.in_use.push(alloc.clone());
+                bucket.stats.reuses += 1;
+                self.total_reuses.fetch_add(1, Ordering::Relaxed);
 
-            if let Some(ref n) = name {
-                log::trace!("Reusing buffer '{n}' (class {class_index}, {actual_size} bytes)");
+                if let Some(ref n) = name {
+                    log::trace!("Reusing buffer '{n}' (class {class_index}, {actual_size} bytes)");
+                }
+                return Ok(alloc);
             }
-            return Ok(alloc);
         }
 
-        // Need to allocate new buffer
-        drop(buckets); // Release lock during expensive allocation
-
+        // Need to allocate new buffer - no lock held during expensive allocation
         if let Some(ref n) = name {
             log::debug!("Allocating new buffer '{n}' (class {class_index}, {actual_size} bytes)");
         }
@@ -231,13 +230,14 @@ impl BufferPool {
         };
 
         // Re-acquire lock to update tracking
-        let mut buckets = self
-            .buckets
-            .lock()
-            .map_err(|_| crate::AshError::VulkanError("Buffer pool lock poisoned".into()))?;
-        buckets[class_index].in_use.push(alloc.clone());
-        buckets[class_index].stats.allocations += 1;
-        buckets[class_index].stats.total_bytes += actual_size;
+        {
+            let mut bucket = self.buckets[class_index]
+                .lock()
+                .map_err(|_| crate::AshError::VulkanError("Buffer pool lock poisoned".into()))?;
+            bucket.in_use.push(alloc.clone());
+            bucket.stats.allocations += 1;
+            bucket.stats.total_bytes += actual_size;
+        }
 
         Ok(alloc)
     }
@@ -245,14 +245,13 @@ impl BufferPool {
     /// Returns a buffer to the pool
     pub fn deallocate(&self, buffer: BufferAllocation) {
         let class_index = buffer.size_class;
-        let mut buckets = match self.buckets.lock() {
+        let mut bucket = match self.buckets[class_index].lock() {
             Ok(b) => b,
             Err(_) => {
-                log::error!("Buffer pool lock poisoned during deallocation");
+                log::error!("Buffer pool lock poisoned during deallocation (class {class_index})");
                 return;
             }
         };
-        let bucket = &mut buckets[class_index];
 
         // Remove from in_use
         bucket.in_use.retain(|b| b.buffer != buffer.buffer);
@@ -265,7 +264,6 @@ impl BufferPool {
             bucket.available.push_back(buffer);
         } else {
             // Pool is full for this class, actually free the buffer
-            // Buffers are destroyed via the allocator instance.
             log::trace!("Pool full for class {class_index}, buffer will be dropped");
         }
 
@@ -277,30 +275,19 @@ impl BufferPool {
         let frame = self.current_frame.load(Ordering::Relaxed);
         let retention = self.config.retention_frames;
 
-        let mut buckets = match self.buckets.lock() {
-            Ok(b) => b,
-            Err(_) => {
-                log::error!("Buffer pool lock poisoned during reclaim");
-                return;
+        for (i, bucket_mutex) in self.buckets.iter().enumerate() {
+            if let Ok(mut bucket) = bucket_mutex.lock() {
+                bucket
+                    .available
+                    .retain(|alloc| frame.saturating_sub(alloc.frame_last_used) < retention);
+            } else {
+                log::error!("Buffer pool lock poisoned during reclaim (class {i})");
             }
-        };
-        for bucket in buckets.iter_mut() {
-            bucket
-                .available
-                .retain(|alloc| frame.saturating_sub(alloc.frame_last_used) < retention);
         }
     }
 
     /// Get comprehensive statistics
     pub fn stats(&self) -> BufferPoolStats {
-        let buckets = match self.buckets.lock() {
-            Ok(b) => b,
-            Err(_) => {
-                log::error!("Buffer pool lock poisoned during stats");
-                return BufferPoolStats::default();
-            }
-        };
-
         let mut stats = BufferPoolStats {
             total_allocations: self.total_allocations.load(Ordering::Relaxed),
             total_deallocations: 0,
@@ -312,15 +299,20 @@ impl BufferPool {
             size_classes: Vec::with_capacity(NUM_SIZE_CLASSES),
         };
 
-        for bucket in buckets.iter() {
-            stats.current_available += bucket.available.len();
-            stats.current_in_use += bucket.in_use.len();
-            stats.total_deallocations += bucket.stats.deallocations;
+        for (i, bucket_mutex) in self.buckets.iter().enumerate() {
+            if let Ok(bucket) = bucket_mutex.lock() {
+                stats.current_available += bucket.available.len();
+                stats.current_in_use += bucket.in_use.len();
+                stats.total_deallocations += bucket.stats.deallocations;
 
-            let mut class_stats = bucket.stats.clone();
-            class_stats.current_available = bucket.available.len();
-            class_stats.current_in_use = bucket.in_use.len();
-            stats.size_classes.push(class_stats);
+                let mut class_stats = bucket.stats.clone();
+                class_stats.current_available = bucket.available.len();
+                class_stats.current_in_use = bucket.in_use.len();
+                stats.size_classes.push(class_stats);
+            } else {
+                log::error!("Buffer pool lock poisoned during stats (class {i})");
+                stats.size_classes.push(SizeClassStats::default());
+            }
         }
 
         let total_requests = stats.total_allocations + stats.total_reuses;

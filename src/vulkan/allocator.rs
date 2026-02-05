@@ -44,83 +44,6 @@ impl Allocator {
             buffer_allocations: parking_lot::Mutex::new(HashMap::new()),
         })
     }
-
-    /// Validate buffer creation parameters
-    fn validate_buffer_params(
-        &self,
-        size: vk::DeviceSize,
-        usage: vk::BufferUsageFlags,
-        memory_usage: vk_mem::MemoryUsage,
-        flags: vk_mem::AllocationCreateFlags,
-    ) -> crate::Result<()> {
-        validate_buffer_params_impl(size, usage, memory_usage, flags)
-    }
-}
-
-/// Standalone implementation of buffer validation logic (for testing without Allocator instance)
-fn validate_buffer_params_impl(
-    size: vk::DeviceSize,
-    usage: vk::BufferUsageFlags,
-    memory_usage: vk_mem::MemoryUsage,
-    flags: vk_mem::AllocationCreateFlags,
-) -> crate::Result<()> {
-    // Check 1: Size > 0
-    if size == 0 {
-        return Err(crate::AshError::VulkanError(
-            "Buffer size must be > 0".into(),
-        ));
-    }
-
-    if size > 4 * 1024 * 1024 * 1024 {
-        log::warn!("Buffer size is very large ({size} bytes), may cause issues");
-    }
-
-    // Check 2: GPU-only buffers can't be mapped
-    if memory_usage == vk_mem::MemoryUsage::AutoPreferDevice {
-        if flags.contains(vk_mem::AllocationCreateFlags::MAPPED) {
-            return Err(crate::AshError::VulkanError(
-                "Cannot map GPU-only buffer. Use CpuToGpu for CPU access.".into(),
-            ));
-        }
-
-        if flags.contains(vk_mem::AllocationCreateFlags::HOST_ACCESS_SEQUENTIAL_WRITE) {
-            return Err(crate::AshError::VulkanError(
-                "GPU-only buffer cannot be CPU-writable. Use CpuToGpu.".into(),
-            ));
-        }
-    }
-
-    // Check 3: Conflicting usage flags
-    let index_related = vk::BufferUsageFlags::INDEX_BUFFER;
-    let storage_related =
-        vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::UNIFORM_BUFFER;
-
-    if usage.contains(index_related) && usage.contains(storage_related) {
-        log::warn!("Buffer has conflicting usage flags: index + storage. Unusual combo.");
-    }
-
-    // Check 4: Transfer-only buffers (warning)
-    if (usage == vk::BufferUsageFlags::TRANSFER_DST || usage == vk::BufferUsageFlags::TRANSFER_SRC)
-        && usage != (vk::BufferUsageFlags::TRANSFER_DST | vk::BufferUsageFlags::TRANSFER_SRC)
-    {
-        log::warn!("Buffer is ONLY for one-way transfers. Verify this is intentional.");
-    }
-
-    // Check 5: CPU-writable without transfer capability
-    if flags.contains(vk_mem::AllocationCreateFlags::HOST_ACCESS_SEQUENTIAL_WRITE)
-        && !usage.contains(vk::BufferUsageFlags::TRANSFER_DST)
-        && !usage.contains(vk::BufferUsageFlags::STORAGE_BUFFER)
-    {
-        log::warn!(
-            "CPU-writable buffer missing TRANSFER_DST or STORAGE_BUFFER usage. \
-             VMA might fail or performance will be poor (size={size}, usage={usage:?})."
-        );
-    }
-
-    Ok(())
-}
-
-impl Allocator {
     /// Allocate a GPU buffer.
     ///
     /// # Safety
@@ -168,6 +91,73 @@ impl Allocator {
     ///
     /// # Safety
     /// // SAFETY: Standard VMA allocation. Params must be valid for the device.
+    /// Internal validation helper to catch common Vulkan/VMA errors and performance pitfalls.
+    fn validate_config(
+        size: u64,
+        usage: vk::BufferUsageFlags,
+        memory_usage: vk_mem::MemoryUsage,
+        flags: vk_mem::AllocationCreateFlags,
+    ) -> crate::Result<()> {
+        // 🛑 Hard Errors
+        if size == 0 {
+            return Err(crate::AshError::VulkanError(
+                "Buffer size must be > 0".into(),
+            ));
+        }
+
+        if memory_usage == vk_mem::MemoryUsage::AutoPreferDevice
+            && flags.contains(vk_mem::AllocationCreateFlags::MAPPED)
+        {
+            return Err(crate::AshError::VulkanError(
+                "Cannot map GPU-only buffer. Use CpuToGpu for CPU access.".into(),
+            ));
+        }
+
+        if usage.is_empty() {
+            return Err(crate::AshError::VulkanError(
+                "Buffer must have at least one usage flag".into(),
+            ));
+        }
+
+        // ⚠️ Defensive Warnings
+        if size > 4 * 1024 * 1024 * 1024 {
+            log::warn!("Buffer size is very large ({size} bytes), may cause issues");
+        }
+
+        // Check for conflicting usage flags
+        let index_related = vk::BufferUsageFlags::INDEX_BUFFER;
+        let storage_related =
+            vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::UNIFORM_BUFFER;
+
+        if usage.contains(index_related) && usage.contains(storage_related) {
+            log::warn!("Buffer has conflicting usage flags: index + storage. Unusual combo.");
+        }
+
+        // Transfer-only buffers (warning)
+        if (usage == vk::BufferUsageFlags::TRANSFER_DST
+            || usage == vk::BufferUsageFlags::TRANSFER_SRC)
+            && usage != (vk::BufferUsageFlags::TRANSFER_DST | vk::BufferUsageFlags::TRANSFER_SRC)
+        {
+            log::warn!("Buffer is ONLY for one-way transfers. Verify this is intentional.");
+        }
+
+        // CPU-writable without transfer capability
+        if flags.contains(vk_mem::AllocationCreateFlags::HOST_ACCESS_SEQUENTIAL_WRITE)
+            && !usage.contains(vk::BufferUsageFlags::TRANSFER_DST)
+            && !usage.contains(vk::BufferUsageFlags::STORAGE_BUFFER)
+        {
+            log::warn!(
+                "CPU-writable buffer missing TRANSFER_DST or STORAGE_BUFFER usage. \n             VMA might fail or performance will be poor (size={size}, usage={usage:?})."
+            );
+        }
+
+        Ok(())
+    }
+
+    /// Allocate a GPU buffer with custom VMA allocation flags and a debug name.
+    ///
+    /// # Safety
+    /// // SAFETY: Standard VMA allocation. Params must be valid for the device.
     pub unsafe fn create_buffer_with_flags_and_name(
         &self,
         size: u64,
@@ -176,22 +166,7 @@ impl Allocator {
         flags: vk_mem::AllocationCreateFlags,
         name: Option<String>,
     ) -> crate::Result<(vk::Buffer, vk_mem::Allocation)> {
-        // ✅ Validate first (catches errors early)
-        self.validate_buffer_params(size, usage, memory_usage, flags)?;
-
-        // ✅ Debug assertions for sanity checks
-        debug_assert!(size > 0, "Buffer size must be > 0");
-
-        debug_assert!(
-            !(memory_usage == vk_mem::MemoryUsage::AutoPreferDevice
-                && flags.contains(vk_mem::AllocationCreateFlags::MAPPED)),
-            "Cannot map GPU-only buffer"
-        );
-
-        debug_assert!(
-            !usage.is_empty(),
-            "Buffer must have at least one usage flag"
-        );
+        Self::validate_config(size, usage, memory_usage, flags)?;
 
         // Log for debugging
         if let Some(ref n) = name {
@@ -313,10 +288,20 @@ impl Allocator {
     /// // SAFETY: Handles must be valid and not currently in use by the GPU.
     pub unsafe fn destroy_buffer(&self, buffer: vk::Buffer, allocation: &mut vk_mem::Allocation) {
         // Track removal
-        if let Some(alloc) = self.buffer_allocations.lock().remove(&buffer) {
-            let name = alloc.name.as_deref().unwrap_or("unnamed");
-            let age = alloc.created_at.elapsed().as_secs_f32();
-            log::debug!("Destroying buffer '{name}' (age: {age:.1}s)");
+        let (name, age) = {
+            if let Some(alloc) = self.buffer_allocations.lock().remove(&buffer) {
+                (
+                    Some(alloc.name.clone()),
+                    Some(alloc.created_at.elapsed().as_secs_f32()),
+                )
+            } else {
+                (None, None)
+            }
+        };
+
+        if let (Some(name), Some(age)) = (name, age) {
+            let name_str = name.as_deref().unwrap_or("unnamed");
+            log::debug!("Destroying buffer '{name_str}' (age: {age:.1}s)");
         } else {
             log::warn!("Destroying untracked buffer: {buffer:?}");
         }
@@ -326,14 +311,18 @@ impl Allocator {
 
     /// Print current buffer allocation statistics
     pub fn print_buffer_stats(&self) {
-        let allocations = self.buffer_allocations.lock();
-        log::info!("=== Buffer Allocation Statistics ===");
-        let total: vk::DeviceSize = allocations.values().map(|b| b.size).sum();
+        let allocations_copy: Vec<_> = {
+            let allocations = self.buffer_allocations.lock();
+            allocations.values().cloned().collect()
+        };
 
-        log::info!("Total buffers: {}", allocations.len());
+        log::info!("=== Buffer Allocation Statistics ===");
+        let total: vk::DeviceSize = allocations_copy.iter().map(|b| b.size).sum();
+
+        log::info!("Total buffers: {}", allocations_copy.len());
         log::info!("Total memory: {:.2} MB", total as f32 / 1_000_000.0);
 
-        for alloc in allocations.values() {
+        for alloc in allocations_copy {
             let age = alloc.created_at.elapsed().as_secs_f32();
             let name = alloc.name.as_deref().unwrap_or("unnamed");
             log::info!("  {} ({} bytes, {:.1}s old)", name, alloc.size, age);
@@ -379,19 +368,6 @@ impl Allocator {
             size,
         })
     }
-
-    /*
-    /// Calculate aggregate statistics about memory usage.
-    pub fn get_statistics(&self) -> vk_mem::Statistics {
-        self.vma.calculate_statistics().unwrap_or_default()
-    }
-
-    /// Query current heap budgets.
-    /// Requires VK_EXT_memory_budget to be enabled on the device.
-    pub fn get_heap_budgets(&self) -> Vec<vk_mem::Statistics> {
-        self.vma.get_heap_budgets().unwrap_or_default()
-    }
-    */
 }
 
 /// RAII guard for mapped GPU memory.
@@ -473,9 +449,8 @@ mod tests {
 
     #[test]
     fn test_buffer_validation_logic() {
-        // Test the standalone validation function directly without needing an Allocator instance
-        // Test 1: Size 0 should fail
-        let res = validate_buffer_params_impl(
+        // Test size 0 (Hard Error)
+        let res = Allocator::validate_config(
             0,
             vk::BufferUsageFlags::STORAGE_BUFFER,
             vk_mem::MemoryUsage::AutoPreferDevice,
@@ -483,8 +458,8 @@ mod tests {
         );
         assert!(res.is_err(), "Size 0 should be rejected");
 
-        // Test 2: GPU-only + Mapped should fail
-        let res = validate_buffer_params_impl(
+        // Test GPU-only + Mapped (Hard Error)
+        let res = Allocator::validate_config(
             1024,
             vk::BufferUsageFlags::STORAGE_BUFFER,
             vk_mem::MemoryUsage::AutoPreferDevice,
@@ -492,8 +467,17 @@ mod tests {
         );
         assert!(res.is_err(), "GPU-only + Mapped should be rejected");
 
-        // Test 3: Valid params should pass
-        let res = validate_buffer_params_impl(
+        // Test Empty Usage (Hard Error)
+        let res = Allocator::validate_config(
+            1024,
+            vk::BufferUsageFlags::empty(),
+            vk_mem::MemoryUsage::AutoPreferDevice,
+            vk_mem::AllocationCreateFlags::empty(),
+        );
+        assert!(res.is_err(), "Empty usage should be rejected");
+
+        // Test valid params should pass
+        let res = Allocator::validate_config(
             1024,
             vk::BufferUsageFlags::STORAGE_BUFFER,
             vk_mem::MemoryUsage::AutoPreferDevice,
