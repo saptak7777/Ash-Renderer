@@ -32,8 +32,9 @@ use crate::{
         vsr_pass::{SharpenConfig, VsrConfig, VsrInputs, VsrPass, VsrQuality, VsrUpscaleConfig},
         hiz_pass::AdaptiveHiZManager,
         vram_budget, DepthBuffer, GBuffer, Material, MaterialHandle, MaterialManager, Mesh,
-        PipelineCache, Texture, TextureData, Transform,
+        PipelineCache, Texture, Transform,
         initialization,
+        init_types::*,
     },
     vulkan::{self, Allocator, CommandBufferContext},
     AshError, Result,
@@ -56,19 +57,7 @@ use crate::renderer::vcgs::culling::CullObjectData;
 
 
 
-struct RendererResources {
-    uniform_buffers: Vec<UniformBuffer>,
-    default_texture: Texture,
-    black_texture: Texture,
-    white_texture: Texture,
-    default_skybox: Texture, // Procedural skybox
-    default_cube_black: Texture,
-    material_storage_buffer: StorageBuffer<resources::uniform::MaterialUniform>,
-    instance_buffers: Vec<resources::InstanceBuffer>,
-    transform_arena: vk::Buffer,
-    transform_arena_alloc: vk_mem::Allocation,
-    post_sampler: vk::Sampler,
-}
+// RendererResources moved to init_types.rs
 
 fn compute_worker_index(worker_count: usize, frame_index: usize) -> usize {
     if worker_count == 0 {
@@ -334,8 +323,12 @@ impl Renderer {
             let extent = vk::Extent2D { width, height };
             log::info!("Creating swapchain and depth buffer for extent {}x{}", width, height);
             
-            let (mut swapchain, render_pass_handle, mut framebuffers, mut depth_buffer) = 
+            let swapchain_data = 
                 initialization::create_swapchain_data(&device, &alloc, extent)?;
+            let mut swapchain = swapchain_data.swapchain;
+            let render_pass_handle = swapchain_data.render_pass;
+            let mut framebuffers = swapchain_data.framebuffers;
+            let mut depth_buffer = swapchain_data.depth_buffer;
 
             log::info!("Registering swapchain resources");
             let mut swapchain_image_view_ids = Vec::with_capacity(swapchain.image_views.len());
@@ -360,8 +353,11 @@ impl Renderer {
             }
 
             log::info!("Creating frame resources");
-            let (command_buffers, mut frame_syncs, command_manager) = 
+            let frame_data = 
                 initialization::create_frame_resources(&device, framebuffers.len())?;
+            let command_buffers = frame_data.command_buffers;
+            let mut frame_syncs = frame_data.frame_syncs;
+            let command_manager = frame_data.command_manager;
 
             let mut frame_sync_ids = Vec::with_capacity(frame_syncs.len());
             for sync in &mut frame_syncs {
@@ -427,7 +423,7 @@ impl Renderer {
             forward_plus.on_resize(swapchain.extent.width, swapchain.extent.height);
             
             log::info!("Initializing Renderer Resources (Uniforms, Textures, Materials)");
-            let renderer_resources = Self::init_resources(
+            let renderer_resources = initialization::init_resources(
                 &alloc,
                 &device,
                 command_manager.upload_command_pool_handle(),
@@ -483,24 +479,19 @@ impl Renderer {
             log::debug!("Main Pipeline Set Layouts: Unified={:?}", 
                 set_layouts[0]);
 
-            let (pipeline_handle, pipeline_layout_handle) =
+            let (pipeline_layout, pipeline_layout_id, pipeline, pipeline_id) =
                 initialization::create_main_pipeline(
                     &device,
+                    &resources,
                     swapchain.extent,
                     render_pass_handle,
+                    render_pass_id,
                     &set_layouts,
                     &pipeline_cfg,
                     depth_buffer.format(),
                     pipeline_cache.handle(),
                 )?;
 
-            let pipeline_layout_id = resources.register_pipeline_layout(pipeline_layout_handle)?;
-            let pipeline_id = resources.register_pipeline(pipeline_handle, &[pipeline_layout_id, render_pass_id])?;
-
-            let mut pipeline_layout = vulkan::PipelineLayout::from_handle(Arc::clone(&device.device), pipeline_layout_handle);
-            pipeline_layout.mark_managed_by_registry();
-            let mut pipeline = vulkan::Pipeline::from_handle(Arc::clone(&device.device), pipeline_handle);
-            pipeline.mark_managed_by_registry();
             let mut render_pass_wrapper = vulkan::RenderPass::from_handle(Arc::clone(&device.device), render_pass_handle);
             render_pass_wrapper.mark_managed_by_registry();
 
@@ -986,177 +977,6 @@ impl Renderer {
 
         log::debug!("Motion framebuffer created ({width}x{height})");
         Ok(())
-    }
-
-    fn init_resources(
-        alloc: &Arc<vulkan::Allocator>,
-        device: &vulkan::VulkanDevice,
-        command_pool: vk::CommandPool,
-        frame_count: usize,
-        aspect: f32,
-    ) -> Result<RendererResources> {
-        // Initialize uniform buffers
-        let mut uniform_buffers = Vec::with_capacity(frame_count);
-        for _ in 0..frame_count {
-            let mut buffer =
-                // SAFETY: We provide a valid allocator and device. The buffer size is determined strictly by `UniformBuffer::new` logic.
-                unsafe { UniformBuffer::new(Arc::clone(alloc), Arc::clone(&device.device))? };
-            {
-                let matrices = buffer.matrices_mut();
-                matrices.set_view(
-                    glam::Vec3::new(0.0, 2.0, 5.0),
-                    glam::Vec3::new(0.0, 0.0, 0.0),
-                    glam::Vec3::new(0.0, 1.0, 0.0),
-                );
-                matrices.set_projection(std::f32::consts::PI / 4.0, aspect, 0.5, 1000.0);
-            }
-            unsafe {
-                buffer.update()?;
-            }
-            uniform_buffers.push(buffer);
-        }
-
-
-        // Create default texture
-        let default_texture_data = TextureData::solid_color([255, 255, 255, 255]);
-        let default_texture = unsafe {
-            Texture::from_data(
-                Arc::clone(alloc),
-                Arc::clone(&device.device),
-                command_pool,
-                device.graphics_queue,
-                &default_texture_data,
-                vk::Format::R8G8B8A8_SRGB,
-                Some("default_texture"),
-            )?
-        };
-
-        // Create black texture for IBL fallback (provides some ambient light when IBL not loaded)
-        let black_texture_data = TextureData::solid_color([0, 0, 0, 255]);
-        let black_texture = unsafe {
-            Texture::from_data(
-                Arc::clone(alloc),
-                Arc::clone(&device.device),
-                command_pool,
-                device.graphics_queue,
-                &black_texture_data,
-                vk::Format::R8G8B8A8_SRGB,
-                Some("black_texture"),
-            )?
-        };
-
-        // Create white texture for Occlusion Culling fallback (Standard-Z Far Plane = 1.0)
-        let white_texture_data = TextureData::solid_color([255, 255, 255, 255]);
-        let white_texture = unsafe {
-            Texture::from_data(
-                Arc::clone(alloc),
-                Arc::clone(&device.device),
-                command_pool,
-                device.graphics_queue,
-                &white_texture_data,
-                vk::Format::R8G8B8A8_UNORM, // Use UNORM for precise 1.0 mapping
-                Some("white_texture"),
-            )?
-        };
-
-        // Create procedural skybox
-        let default_skybox = Texture::create_procedural_skybox(
-            Arc::clone(alloc),
-            Arc::clone(&device.device),
-            command_pool,
-            device.graphics_queue,
-            512,
-        )?;
-
-        // Create default cube black
-        let default_cube_black = Texture::create_default_cube_black(
-            Arc::clone(alloc),
-            Arc::clone(&device.device),
-            command_pool,
-            device.graphics_queue,
-        )?;
-
-        // Initialize material storage buffer (Bindless-ready)
-        let max_materials = 1024;
-        let mut material_storage_buffer = unsafe {
-            StorageBuffer::<resources::uniform::MaterialUniform>::new(
-                Arc::clone(alloc),
-                Arc::clone(&device.device),
-                max_materials,
-                "material_storage_buffer",
-            )?
-        };
-
-        // Populate with default material at index 0
-        let default_mat = Material::default();
-        let mut initial_materials =
-            vec![resources::uniform::MaterialUniform::default(); max_materials];
-
-        let mut first_mat = resources::uniform::MaterialUniform::default();
-        first_mat.set_base_color_factor(glam::Vec4::from_array(default_mat.color));
-        first_mat.set_emissive_factor(glam::Vec4::from_array(default_mat.emissive));
-        first_mat.set_metallic_roughness(default_mat.metallic, default_mat.roughness);
-        first_mat.set_occlusion_strength(default_mat.occlusion_strength);
-        first_mat.set_normal_scale(default_mat.normal_scale);
-        first_mat.set_alpha_cutoff(default_mat.alpha_cutoff);
-        initial_materials[0] = first_mat;
-
-        unsafe {
-            material_storage_buffer.update(&initial_materials)?;
-        }
-
-        // Initialize instance buffers for GPU culling/instancing
-        let mut instance_buffers = Vec::with_capacity(frame_count);
-        for _ in 0..frame_count {
-            let buffer = unsafe {
-                resources::InstanceBuffer::new(
-                    Arc::clone(alloc),
-                    Arc::clone(&device.device),
-                    crate::renderer::vcgs::MAX_CULLABLE_OBJECTS,
-                )?
-            };
-            instance_buffers.push(buffer);
-        }
-
-        let post_sampler = unsafe {
-            device.device.create_sampler(
-                &vk::SamplerCreateInfo::default()
-                    .mag_filter(vk::Filter::LINEAR)
-                    .min_filter(vk::Filter::LINEAR)
-                    .mipmap_mode(vk::SamplerMipmapMode::LINEAR)
-                    .address_mode_u(vk::SamplerAddressMode::CLAMP_TO_EDGE)
-                    .address_mode_v(vk::SamplerAddressMode::CLAMP_TO_EDGE)
-                    .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_EDGE),
-                None,
-            ).map_err(|e| AshError::VulkanError(format!("Failed to create post_sampler: {e}")))?
-        };
-
-        // Phase 19: Transient Transform Arena
-        let transform_arena_size = 1024 * 1024; // 1MB
-        let (transform_arena, transform_arena_alloc) = unsafe {
-            alloc.create_buffer_with_flags_and_name(
-                transform_arena_size,
-                vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
-                vk_mem::MemoryUsage::AutoPreferHost,
-                vk_mem::AllocationCreateFlags::HOST_ACCESS_SEQUENTIAL_WRITE
-                    | vk_mem::AllocationCreateFlags::MAPPED,
-                Some("Transform Arena (Phase 19)".to_string()),
-            )?
-        };
-
-        Ok(RendererResources {
-            uniform_buffers,
-            default_texture,
-            black_texture,
-            white_texture,
-            default_skybox,
-            default_cube_black,
-            material_storage_buffer,
-            instance_buffers,
-            transform_arena,
-            transform_arena_alloc,
-            post_sampler,
-        })
     }
 
 
@@ -2902,11 +2722,12 @@ impl Renderer {
 
         self.frame_syncs.clear();
 
-        let mut frame_syncs = Vec::with_capacity(count);
+        let mut frame_syncs = unsafe {
+            initialization::create_frame_syncs_internal(&self.device.device, count)?
+        };
         let mut frame_sync_ids = Vec::with_capacity(count);
 
-        for _ in 0..count {
-            let mut sync = vulkan::FrameSync::new(Arc::clone(&self.device.device))?;
+        for sync in &mut frame_syncs {
             let image_available_id = self
                 .resources
                 .register_semaphore(sync.image_available)
@@ -2928,7 +2749,6 @@ impl Renderer {
             })?;
 
             sync.mark_managed_by_registry();
-            frame_syncs.push(sync);
             frame_sync_ids.push((image_available_id, render_finished_id, fence_id));
         }
 
@@ -4329,9 +4149,7 @@ impl Renderer {
     }
 
 
-    // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-    // Post-Processing Initialization & Application
-    // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    
 
     /// Enables HDR rendering. Should be called after initialization.
     /// Allocates GPU memory for the HDR buffer.

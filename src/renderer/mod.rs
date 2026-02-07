@@ -13,6 +13,7 @@ pub mod fullscreen_pass;
 pub mod gbuffer;
 pub mod hdr_framebuffer;
 pub mod hiz_pass;
+pub mod init_types;
 pub mod initialization;
 pub mod instancing;
 pub mod light_culling_integration;
