@@ -6,7 +6,7 @@ use crate::{
         features::{
             AutoRotateFeature, DirectionalLight, FeatureFrameContext, FeatureManager,
             FeatureRenderContext, PointLight, SceneLighting, SpotLight,
-            VsmFeature, default_vsm_config,
+            default_vsm_config,
         },
         ForwardPlusIntegration,
         fullscreen_pass, hdr_framebuffer,
@@ -14,10 +14,11 @@ use crate::{
         vcgs::{CullBoundingBox, IndirectDrawPass, OcclusionCulling},
         instancing::{BatchKey, InstanceData, InstancingManager},
         model_renderer::{
-            MaterialPushConstants, ModelRenderer, UploadedMesh, DRAW_PUSH_FRAGMENT_BYTES,
+            MaterialPushConstants, ModelRenderer, DRAW_PUSH_FRAGMENT_BYTES,
             DRAW_PUSH_VERTEX_BYTES,
         },
         motion_pass::MotionVectorPass,
+        passes,
         resource_registry::{ResourceId, ResourceRegistry},
         resources,
         resources::uniform::{StorageBuffer, UniformBuffer},
@@ -103,8 +104,6 @@ struct RendererResources {
     white_texture: Texture,
     default_skybox: Texture, // Procedural skybox
     default_cube_black: Texture,
-    vsm_default_uint: Texture,
-    vsm_default_array: Texture, // 2DArray version for clipmaps
     material_storage_buffer: StorageBuffer<resources::uniform::MaterialUniform>,
     instance_buffers: Vec<resources::InstanceBuffer>,
     transform_arena: vk::Buffer,
@@ -264,15 +263,6 @@ impl Default for RendererConfig {
 ///    buffer is destroyed or the allocator is dropped.
 /// 3. **Validation**: Use Vulkan validation layers (`VK_LAYER_KHRONOS_validation`) in
 ///    development to verify that no resources leak or are accessed after destruction.
-#[repr(C)]
-#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-struct SkyboxPushConstants {
-    frame_ptr: u64,
-    skybox_index: u32,
-    _padding: [u32; 17],
-    vertex_heap_ptr: u64,
-}
-
 pub struct Renderer {
     // Resources dependent on allocator/device - dropped in reverse order.
     buffer_pool: Arc<BufferPool>,
@@ -289,8 +279,6 @@ pub struct Renderer {
     _white_texture: Texture,
     _default_skybox: Texture, // Procedural skybox fallback
     _default_cube_black: Texture, // Keep alive
-    _vsm_default_uint: Texture, // Keep alive (VSM bind default)
-    _vsm_default_array: Texture, // Keep alive (VSM clipmap bind default)
     model_renderer: ModelRenderer,
     draw_items: Vec<DrawItem>,
     swapchain: Option<vulkan::SwapchainWrapper>,
@@ -302,10 +290,8 @@ pub struct Renderer {
     pipeline: Option<vulkan::Pipeline>,
     pipeline_id: Option<ResourceId>,
     
-    // Skybox Rendering
-    skybox_pipeline: Option<vulkan::Pipeline>,
-    skybox_pipeline_layout: Option<vulkan::PipelineLayout>,
-    skybox_mesh: Option<UploadedMesh>,
+    // Skybox Rendering (Modularized)
+    skybox_pass: Option<passes::SkyboxPass>,
     
     depth_buffer: Option<DepthBuffer>,
     uniform_buffers: Vec<UniformBuffer>,
@@ -340,8 +326,8 @@ pub struct Renderer {
     frame_profiler: FrameProfiler,
     gpu_profiler: Option<GpuProfiler>,
     diagnostics_overlay: DiagnosticsOverlay,
-    // Virtual Shadow Maps
-    vsm_feature: Option<VsmFeature>,
+    // Shadow System
+    shadow_system: Option<crate::renderer::features::ShadowSystem>,
     // Bindless textures
     bindless_manager: vulkan::BindlessManager,
     texture_registry: HashMap<u32, Arc<Texture>>,
@@ -370,9 +356,6 @@ pub struct Renderer {
     // Phase 7: Host-Side Cluster Integration
     global_cluster_buffer: Option<GlobalClusterBuffer>,
 
-    // Bindless Indices for Phase 3
-    vsm_page_index: u32,
-    vsm_cache_index: u32,
     skybox_index: u32,
     
     // Phase 4: G-Buffer & HDR Indices
@@ -665,8 +648,6 @@ impl Renderer {
                 white_texture,
                 default_skybox,
                 default_cube_black,
-                vsm_default_uint,
-                vsm_default_array,
                 material_storage_buffer,
                 instance_buffers,
                 transform_arena,
@@ -722,116 +703,25 @@ impl Renderer {
                     &set_layouts,
                 )?;
 
-            log::info!("Initializing VSM Feature...");
-            let mut vsm_feature = match VsmFeature::new(
+            log::info!("Initializing Shadow System...");
+            let shadow_system = match crate::renderer::features::ShadowSystem::new(
                 Arc::clone(&device.device),
                 Arc::clone(&alloc),
+                &mut bindless_manager,
+                command_manager.upload_command_pool_handle(),
+                device.graphics_queue,
                 default_vsm_config(),
                 frame_syncs.len() as u32,
             ) {
-                Ok(vsm) => {
-                    log::info!("VSM Feature initialized successfully.");
-                    Some(vsm)
+                Ok(system) => {
+                    log::info!("Shadow System initialized successfully.");
+                    Some(system)
                 },
                 Err(e) => {
-                    log::error!("Failed to initialize VSM feature: {e}");
+                    log::error!("Failed to initialize Shadow System: {e}");
                     None
                 }
             };
-
-            // Create shadow pipeline if VSM was initialized successfully
-            if let Some(ref mut vsm) = vsm_feature {
-                log::info!("Creating VSM shadow pipeline...");
-                
-                // Use the unified Bindless layout
-                let descriptor_layouts = vec![
-                    bindless_manager.descriptor_set_layout(), // Set 0
-                ];
-
-                // Create the shadow rendering pipeline
-                match vsm.shadow_pass.create_pipeline(&descriptor_layouts) {
-                    Ok(()) => {
-                        log::info!("VSM shadow pipeline created successfully.");
-                    },
-                    Err(e) => {
-                        log::error!("Failed to create VSM shadow pipeline: {e}");
-                    }
-                }
-
-                // --- VSM INITIALIZATION ---
-                // Transition images to GENERAL layout and clear them
-                let physical_cache = vsm.resources.physical_cache;
-                let page_table = vsm.resources.page_table;
-                let page_table_layers = vsm.config().clipmap_levels.max(1);
-
-                device.execute_single_use(command_manager.upload_command_pool_handle(), |cmd| {
-                    // 1. Transition to GENERAL
-                    let barriers = [
-                        vk::ImageMemoryBarrier::default()
-                            .image(physical_cache)
-                            .old_layout(vk::ImageLayout::UNDEFINED)
-                            .new_layout(vk::ImageLayout::GENERAL)
-                            .src_access_mask(vk::AccessFlags::empty())
-                            .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE | vk::AccessFlags::COLOR_ATTACHMENT_WRITE)
-                            .subresource_range(vk::ImageSubresourceRange {
-                                aspect_mask: vk::ImageAspectFlags::COLOR,
-                                base_mip_level: 0,
-                                level_count: 1,
-                                base_array_layer: 0,
-                                layer_count: 1,
-                            }),
-                        vk::ImageMemoryBarrier::default()
-                            .image(page_table)
-                            .old_layout(vk::ImageLayout::UNDEFINED)
-                            .new_layout(vk::ImageLayout::GENERAL)
-                            .src_access_mask(vk::AccessFlags::empty())
-                            .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE | vk::AccessFlags::SHADER_WRITE)
-                            .subresource_range(vk::ImageSubresourceRange {
-                                aspect_mask: vk::ImageAspectFlags::COLOR,
-                                base_mip_level: 0,
-                                level_count: 1,
-                                base_array_layer: 0,
-                                layer_count: page_table_layers,
-                            }),
-                    ];
-
-                    device.device.cmd_pipeline_barrier(
-                        cmd,
-                        vk::PipelineStageFlags::TOP_OF_PIPE,
-                        vk::PipelineStageFlags::TRANSFER | vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT | vk::PipelineStageFlags::COMPUTE_SHADER,
-                        vk::DependencyFlags::empty(),
-                        &[],
-                        &[],
-                        &barriers,
-                    );
-
-                    // 2. Clear Page Table to 0xFFFFFFFF
-                    let clear_color = vk::ClearColorValue {
-                        uint32: [0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF],
-                    };
-                    let range = vk::ImageSubresourceRange {
-                        aspect_mask: vk::ImageAspectFlags::COLOR,
-                        base_mip_level: 0,
-                        level_count: 1,
-                        base_array_layer: 0,
-                        layer_count: page_table_layers,
-                    };
-                    device.device.cmd_clear_color_image(cmd, page_table, vk::ImageLayout::GENERAL, &clear_color, &[range]);
-
-                    // 3. Clear Physical Cache to 1.0 (Far)
-                    let clear_depth = vk::ClearColorValue {
-                        float32: [1.0, 1.0, 1.0, 1.0],
-                    };
-                    let range_cache = vk::ImageSubresourceRange {
-                        aspect_mask: vk::ImageAspectFlags::COLOR,
-                        base_mip_level: 0,
-                        level_count: 1,
-                        base_array_layer: 0,
-                        layer_count: 1,
-                    };
-                    device.device.cmd_clear_color_image(cmd, physical_cache, vk::ImageLayout::GENERAL, &clear_depth, &[range_cache]);
-                })?;
-            }
 
 
             // Mesh data already added to mesh_data Vec above
@@ -893,29 +783,10 @@ impl Renderer {
 
             // Initialize Skybox
             log::info!("Initializing Skybox...");
-            let (skybox_pl_layout, _skybox_pl_layout_id, skybox_pipe, _skybox_pipe_id) = 
-                Self::create_skybox_pipeline(
-                    &device,
-                    &resources,
-                    render_pass.handle(),
-                    swapchain.extent,
-                    pipeline_cache.handle(),
-                    depth_buffer.format(),
-                    &pipeline_cfg,
-                    &set_layouts,
-                )?;
-            
-            // Phase 3: Register Bindless Defaults (Index 0 safety)
             // 1. Textures (Binding 0)
             bindless_manager.add_sampled_image(
                 black_texture.view(),
                 black_texture.sampler(),
-            )?;
-
-            // 2. Page Tables (Binding 1)
-            let default_vsm_page_index = bindless_manager.add_page_table(
-                vsm_default_array.view(),
-                vsm_default_array.sampler(),
             )?;
 
             // 3. Cubemaps (Binding 2)
@@ -924,21 +795,7 @@ impl Renderer {
                 default_skybox.sampler(),
             )?;
 
-            log::info!("Bindless Defaults registered (Page: {default_vsm_page_index}, Skybox: {skybox_index})");
-
-            let mut vsm_page_index = default_vsm_page_index;
-            let mut vsm_cache_index = 0;
-            if let Some(ref vsm) = vsm_feature {
-                vsm_page_index = bindless_manager.add_page_table(
-                    vsm.resources.page_table_view,
-                    vsm.resources.page_table_sampler,
-                )?;
-                vsm_cache_index = bindless_manager.add_sampled_image(
-                    vsm.resources.physical_cache_view,
-                    vsm.resources.physical_cache_sampler,
-                )?;
-                log::info!("VSM registered in bindless array (Page: {vsm_page_index}, Cache: {vsm_cache_index})");
-            }
+            log::info!("Bindless Defaults registered (Skybox: {skybox_index})");
 
             // Create Skybox Mesh (Unit Cube)
 
@@ -986,7 +843,23 @@ impl Renderer {
                 crate::renderer::vcgs::MAX_INDIRECT_OBJECTS,
             )?;
 
+
             let transform_arena_addr = device.device.get_buffer_device_address(&vk::BufferDeviceAddressInfo::default().buffer(transform_arena));
+
+            // Create SkyboxPass
+            log::info!("Creating SkyboxPass...");
+            let skybox_pass = passes::SkyboxPass::new(
+                &device,
+                &resources,
+                render_pass.handle(),
+                swapchain.extent,
+                pipeline_cache.handle(),
+                depth_buffer.format(),
+                pipeline_cfg.multisample_config(),
+                &set_layouts,
+                skybox_mesh,
+                skybox_index,
+            )?;
 
             log::info!("Finalizing Renderer construction");
             let mut renderer = Self {
@@ -1005,8 +878,6 @@ impl Renderer {
                 _white_texture: white_texture,
                 _default_skybox: default_skybox,
                 _default_cube_black: default_cube_black,
-                _vsm_default_uint: vsm_default_uint,
-                _vsm_default_array: vsm_default_array,
                 model_renderer,
                 draw_items: Vec::new(),
                 swapchain: Some(swapchain),
@@ -1017,11 +888,7 @@ impl Renderer {
                 pipeline: Some(pipeline),
                 pipeline_id: Some(pipeline_id),
                 
-                skybox_pipeline: Some(skybox_pipe),
-                // skybox_pipeline_id: Some(skybox_pipe_id),
-                skybox_pipeline_layout: Some(skybox_pl_layout),
-                // skybox_pipeline_layout_id: Some(skybox_pl_layout_id),
-                skybox_mesh: Some(skybox_mesh),
+                skybox_pass: Some(skybox_pass),
                 
                 depth_buffer: Some(depth_buffer),
                 uniform_buffers,
@@ -1059,7 +926,7 @@ impl Renderer {
                 frame_profiler: FrameProfiler::new(),
                 gpu_profiler: None,
                 diagnostics_overlay: DiagnosticsOverlay::new(),
-                vsm_feature,
+                shadow_system,
                 bindless_manager,
                 texture_registry: HashMap::new(),
                 forward_plus: Some(forward_plus),
@@ -1077,8 +944,6 @@ impl Renderer {
                 spot_lights,
                 debug_mode: DebugMode::default(),
                 global_cluster_buffer: Some(global_cluster_buffer),
-                vsm_page_index,
-                vsm_cache_index: vsm_cache_index, // Using the correct one
                 skybox_index,
                 gbuffer_indices: GBufferIndices::default(),
                 hdr_image_index: None,
@@ -1410,24 +1275,6 @@ impl Renderer {
             device.graphics_queue,
         )?;
 
-        // Create R32_UINT 1x1 texture for VSM page table default (invalid page = 0xFFFFFFFF)
-        // CRITICAL: Uses NEAREST filtering (required for integer textures)
-        let vsm_default_uint = Texture::create_vsm_default_uint(
-            Arc::clone(alloc),
-            Arc::clone(&device.device),
-            command_pool,
-            device.graphics_queue,
-        )?;
-
-        // Create R32_UINT 1x1x8 texture array for VSM clipmap default
-        let vsm_default_array = Texture::create_vsm_default_array(
-            Arc::clone(alloc),
-            Arc::clone(&device.device),
-            command_pool,
-            device.graphics_queue,
-            8, // 8 clipmap levels
-        )?;
-
         // Initialize material storage buffer (Bindless-ready)
         let max_materials = 1024;
         let mut material_storage_buffer = unsafe {
@@ -1503,8 +1350,6 @@ impl Renderer {
             white_texture,
             default_skybox,
             default_cube_black,
-            vsm_default_uint,
-            vsm_default_array,
             material_storage_buffer,
             instance_buffers,
             transform_arena,
@@ -1732,74 +1577,6 @@ impl Renderer {
         let pipeline_id = resources
             .register_pipeline(pipeline.pipeline, &[pipeline_layout_id])
             .map_err(|e| AshError::VulkanError(format!("Failed to register pipeline: {e}")))?;
-        pipeline.mark_managed_by_registry();
-
-        Ok((pipeline_layout, pipeline_layout_id, pipeline, pipeline_id))
-    }
-
-    unsafe fn create_skybox_pipeline(
-        device: &vulkan::VulkanDevice,
-        resources: &Arc<ResourceRegistry>,
-        render_pass: vk::RenderPass,
-        extent: vk::Extent2D,
-        pipeline_cache: vk::PipelineCache,
-        depth_format: vk::Format,
-        pipeline_cfg: &PipelineConfig,
-        set_layouts: &[vk::DescriptorSetLayout],
-    ) -> Result<(
-        vulkan::PipelineLayout,
-        ResourceId,
-        vulkan::Pipeline,
-        ResourceId,
-    )> {
-        // reuse set layouts from main pipeline (Frame, Bindless, Environment)
-        let mut pipeline_layout_builder =
-            vulkan::PipelineLayout::builder(Arc::clone(&device.device));
-        for layout in set_layouts {
-            pipeline_layout_builder = pipeline_layout_builder.add_set_layout(*layout);
-        }
-
-        let push_range = vk::PushConstantRange::default()
-            .stage_flags(vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT)
-            .offset(0)
-            .size(std::mem::size_of::<SkyboxPushConstants>() as u32);
-        pipeline_layout_builder = pipeline_layout_builder.add_push_constant(push_range);
-        
-        let mut pipeline_layout = pipeline_layout_builder.build()?;
-        let pipeline_layout_id = resources
-            .register_pipeline_layout(pipeline_layout.handle())
-            .map_err(|e| {
-                AshError::VulkanError(format!("Failed to register skybox pipeline layout: {e}"))
-            })?;
-        pipeline_layout.mark_managed_by_registry();
-
-        let pipeline_builder = vulkan::Pipeline::builder(Arc::clone(&device.device))
-            .with_layout(pipeline_layout.handle())
-            .with_render_pass(render_pass)
-            .with_extent(extent)
-            .with_pipeline_cache(pipeline_cache)
-            .with_depth_format(depth_format)
-            // REVERSE-Z: Skybox at 0.0 (Far)
-            // Depth Test: GREATER_OR_EQUAL handles z=0.0 (far) vs z=0.0 (clear) correctly.
-            .with_depth_test(vk::CompareOp::GREATER_OR_EQUAL, false) 
-            .with_cull_mode(vk::CullModeFlags::FRONT) // Inside cube
-            .with_front_face(vk::FrontFace::CLOCKWISE)
-            .with_multisampling(pipeline_cfg.multisample_config())
-            .add_shader_from_bytes(
-                include_bytes!(concat!(env!("OUT_DIR"), "/skybox.vert.spv")),
-                vk::ShaderStageFlags::VERTEX,
-                "main",
-            )?
-            .add_shader_from_bytes(
-                include_bytes!(concat!(env!("OUT_DIR"), "/skybox.frag.spv")),
-                vk::ShaderStageFlags::FRAGMENT,
-                "main",
-            )?;
-
-        let mut pipeline = pipeline_builder.build()?;
-        let pipeline_id = resources
-            .register_pipeline(pipeline.pipeline, &[pipeline_layout_id])
-            .map_err(|e| AshError::VulkanError(format!("Failed to register skybox pipeline: {e}")))?;
         pipeline.mark_managed_by_registry();
 
         Ok((pipeline_layout, pipeline_layout_id, pipeline, pipeline_id))
@@ -3200,57 +2977,13 @@ impl Renderer {
     }
 
     fn recreate_skybox_pipeline(&mut self) -> Result<()> {
-        log::info!("Recreating skybox pipeline...");
+        log::info!("Checking skybox pipeline status...");
 
-        // Ensure we have a valid render pass
-        let render_pass = self.render_pass
-            .as_ref()
-            .ok_or_else(|| AshError::VulkanError("Render pass missing during skybox recreation".to_string()))?
-            .handle();
-
-        let extent = self.swapchain
-            .as_ref()
-            .ok_or_else(|| AshError::VulkanError("Swapchain missing".to_string()))?
-            .extent;
-
-        let depth_format = self.depth_buffer
-            .as_ref()
-            .ok_or_else(|| AshError::VulkanError("Depth buffer missing".to_string()))?
-            .format();
-
-        let pipeline_info = PipelineConfig {
-            sample_shading: self.sample_shading,
-            ..Default::default()
-        };
-
-        // We need the set layouts. 
-        // 0: Frame, 1: Bindless
-        let _descriptors = self.descriptors.as_ref().ok_or_else(|| AshError::VulkanError("Descriptors missing".to_string()))?;
-        let bindless = &self.bindless_manager;
-
-        let set_layouts = vec![
-            bindless.descriptor_set_layout(),
-        ];
-
-        // Set layouts: 0: Frame, 1: Bindless
-
-        let (new_layout, _new_layout_id, new_pipeline, _new_pipeline_id) = unsafe {
-            Self::create_skybox_pipeline(
-                &self.device,
-                &self.resources,
-                render_pass,
-                extent,
-                self._pipeline_cache.handle(),
-                depth_format,
-                &pipeline_info,
-                &set_layouts,
-            )?
-        };
-
-        self.skybox_pipeline = Some(new_pipeline);
-        self.skybox_pipeline_layout = Some(new_layout);
-        // Note: We're not updating IDs here as we're just replacing the instance.
-        // In a full system we might want to update the registry properly.
+        // Skybox pass uses dynamic viewport and scissor states, so it adapts to 
+        // swapchain extent changes automatically at draw time. The pipeline only needs
+        // full recreation if the render pass format or descriptor layouts change,
+        // which is already handled during root swapchain recreation.
+        log::debug!("Skybox pass adapts via dynamic state; no explicit recreation needed.");
         
         Ok(())
     }
@@ -3835,11 +3568,15 @@ impl Renderer {
                     .with_receive_shadows(true)
                     .with_debug_visualization(debug_enabled);
 
-                let uploaded = match self.skybox_mesh.as_ref() {
-                    Some(mesh) => mesh,
-                    None => return Ok(()),
+                // Note: This code path uses indirect draw, not direct mesh rendering
+                // The uploaded field in DrawContext is not used for indirect drawing
+                // (all data is pulled via BDA), but the struct requires it.
+                // We use any available mesh from the cache as a placeholder.
+                let Some(uploaded) = self.model_renderer.uploaded_meshes().next().map(|(_, mesh)| mesh) else {
+                    // If no meshes are uploaded yet, we can't proceed with indirect draw
+                    log::warn!("No uploaded meshes available for indirect draw context");
+                    return Ok(());
                 };
-                let _ = uploaded; 
 
                 let (width, height) = match self.swapchain.as_ref() {
                     Some(sw) => (sw.extent.width, sw.extent.height),
@@ -3860,8 +3597,8 @@ impl Renderer {
                     light_ptr: params.light_ptr,
                     tile_ptr: params.tile_ptr,
                     skybox_index: self.skybox_index,
-                    vsm_page_index: self.vsm_page_index,
-                    vsm_cache_index: self.vsm_cache_index,
+                    vsm_page_index: self.shadow_system.as_ref().map(|s| s.vsm_page_index()).unwrap_or(0),
+                    vsm_cache_index: self.shadow_system.as_ref().map(|s| s.vsm_cache_index()).unwrap_or(0),
                     transform_ptr: self.transform_arena_addr,
                     transform_index: 0, // Using index 0 for main indirect pass
                 };
@@ -3904,73 +3641,12 @@ impl Renderer {
         _view: Mat4,
         _projection: Mat4,
     ) -> Result<()> {
-        if let (Some(pipeline), Some(mesh)) = (self.skybox_pipeline.as_ref(), self.skybox_mesh.as_ref()) {
+        if let Some(ref skybox_pass) = self.skybox_pass {
+            let bindless_set = self.bindless_manager.descriptor_set();
+            let frame_ptr = self.uniform_buffers[frame_index].device_address();
+            
             unsafe {
-                cmd_ctx.bind_pipeline(vk::PipelineBindPoint::GRAPHICS, pipeline.pipeline);
-
-                if let Some(_descriptor_allocator) = self.descriptors.as_ref() {
-                    let layout = match self.skybox_pipeline_layout.as_ref() {
-                        Some(l) => l.handle(),
-                        None => {
-                            log::error!("Skybox pipeline layout missing during render!");
-                            return Ok(());
-                        }
-                    };
-                    
-                    let sets = [
-                        self.bindless_manager.descriptor_set(),
-                    ];
-                    
-                    // Bind sets 0 (Frame/MVP) and 1 (Bindless)
-                    // Set 2 (Environment) removed in Phase 3
-                    self.device.device.cmd_bind_descriptor_sets(
-                        cmd_ctx.handle(),
-                        vk::PipelineBindPoint::GRAPHICS,
-                        layout,
-                        0, 
-                        &sets,
-                        &[],
-                    );
-                }
-
-                // Push Constants: Skybox View/Proj + Vertex Ptr
-                let vertex_ptr = mesh.vertex_heap_address.unwrap_or(0);
-                
-                // CRITICAL BDA SAFETY: Check for null vertex heap address
-                if vertex_ptr == 0 {
-                    log::error!(
-                        "CRITICAL: Skybox mesh has null BDA (vertex_heap_address=0). Skipping skybox draw to prevent DEVICE_LOST."
-                    );
-                    return Ok(());
-                }
-                
-                // Construct SkyboxPushConstants
-                let push = SkyboxPushConstants {
-                    frame_ptr: self.uniform_buffers[frame_index].device_address(),
-                    skybox_index: self.skybox_index,
-                    _padding: [0; 17],
-                    vertex_heap_ptr: vertex_ptr,
-                };
-                
-                let push_bytes = bytemuck::bytes_of(&push);
-                
-                let layout_handle = match self.skybox_pipeline_layout.as_ref() {
-                    Some(l) => l.handle(),
-                    None => {
-                        log::error!("Skybox pipeline layout missing during render!");
-                        return Ok(());
-                    }
-                };
-
-                self.device.device.cmd_push_constants(
-                    cmd_ctx.handle(),
-                    layout_handle,
-                    vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
-                    0,
-                    push_bytes,
-                );
-
-                self.device.device.cmd_draw(cmd_ctx.handle(), 36, 1, 0, 0);
+                skybox_pass.render(&self.device, cmd_ctx, bindless_set, frame_ptr)?;
             }
         }
         Ok(())
@@ -4237,8 +3913,8 @@ impl Renderer {
                 self.features.before_frame(&mut feature_ctx);
 
                 // Update VSM clipmap centers and page manager
-                if let Some(vsm) = &mut self.vsm_feature {
-                    vsm.begin_frame(frame_index as u32, camera_pos);
+                if let Some(shadow_system) = &mut self.shadow_system {
+                    shadow_system.vsm_feature_mut().begin_frame(frame_index as u32, camera_pos);
                 }
 
                 // Matrices provided via function arguments.
@@ -4400,10 +4076,10 @@ impl Renderer {
                 self.instance_buffers[frame_index].update(&all_instances)?;
             }
 
-            if let Some(vsm) = &self.vsm_feature {
+            if let Some(shadow_system) = &mut self.shadow_system {
                     // ROBUST CHECK: Do not panic if pipeline failed to build.
                     // Just skip shadows for this frame
-                    if vsm.shadow_pipeline_layout().is_some() {
+                    if shadow_system.vsm_feature().shadow_pipeline_layout().is_some() {
                         // Set 2 is gone. VSM resources are now in Set 1 (Bindless)
                         // and indices are passed via push constants in draw_context.
 
@@ -4421,7 +4097,7 @@ impl Renderer {
                         if vertex_ptr == 0 || index_ptr == 0 {
                             log::warn!("Shadow pass: Invalid BDA pointers (V: {}, I: {}). Skipping.", vertex_ptr, index_ptr);
                         } else {
-                            vsm.render_shadows(
+                            shadow_system.vsm_feature_mut().render_shadows(
                                 command_buffer,
                                 light_dir,
                                 all_instances.len() as u32,
@@ -4446,9 +4122,9 @@ impl Renderer {
 
             // --- VSM TO MAIN PASS SYNCHRONIZATION ---
             // Barrier to ensure all shadow writes are visible to the main pass
-            if let Some(vsm) = &self.vsm_feature {
+            if let Some(shadow_system) = &self.shadow_system {
                 let vsm_barrier = vk::ImageMemoryBarrier::default()
-                    .image(vsm.resources.physical_cache)
+                    .image(shadow_system.vsm_feature().resources.physical_cache)
                     .old_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
                     .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
                     .src_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE)
@@ -5485,8 +5161,8 @@ impl Drop for Renderer {
             self.cleanup_pipeline();
 
             // Cleanup VSM (Explicit)
-            if let Some(mut vsm) = self.vsm_feature.take() {
-                vsm.destroy();
+            if let Some(mut shadow_system) = self.shadow_system.take() {
+                shadow_system.destroy();
             }
 
             self.flush_old_swapchains();
