@@ -3,6 +3,7 @@
 //! This module provides the main [`Renderer`] struct and all supporting types
 //! for PBR rendering, materials, meshes, and textures.
 
+pub mod assets;
 pub mod cleanup_traits;
 pub mod command_list;
 pub mod diagnostics;

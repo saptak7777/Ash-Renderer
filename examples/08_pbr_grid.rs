@@ -101,8 +101,19 @@ impl ApplicationHandler for App {
                         format: ash::vk::Format::from_raw(asset.header.format as i32),
                     };
 
-                    if let Err(e) = renderer.upload_ibl(params) {
-                        log::warn!("Failed to upload IBL: {e}");
+                    match renderer.assets.upload_ibl(
+                        renderer.alloc.clone(),
+                        &renderer.device,
+                        renderer.cmds.upload_command_pool_handle(),
+                        renderer.device.graphics_queue,
+                        params,
+                    ) {
+                        Ok((irradiance, prefilter, brdf)) => {
+                            renderer.set_ibl_indices(irradiance, prefilter, brdf);
+                        }
+                        Err(e) => {
+                            log::warn!("Failed to upload IBL: {e}");
+                        }
                     }
                 } else {
                     log::warn!("Failed to load IBL asset or file not found");

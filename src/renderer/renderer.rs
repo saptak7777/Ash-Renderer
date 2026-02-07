@@ -35,6 +35,7 @@ use crate::{
         PipelineCache, Texture, Transform,
         initialization,
         init_types::*,
+        assets::AssetManager,
     },
     vulkan::{self, Allocator, CommandBufferContext},
     AshError, Result,
@@ -172,8 +173,7 @@ pub struct Renderer {
     // Shadow System
     shadow_system: Option<crate::renderer::features::ShadowSystem>,
     // Bindless textures
-    bindless_manager: vulkan::BindlessManager,
-    texture_registry: HashMap<u32, Arc<Texture>>,
+    pub assets: AssetManager,
     // Forward+ lighting
     forward_plus: Option<ForwardPlusIntegration>,
     // GPU-driven occlusion culling (Hi-Z + Indirect Draw)
@@ -719,8 +719,7 @@ impl Renderer {
                 gpu_profiler: None,
                 diagnostics_overlay: DiagnosticsOverlay::new(),
                 shadow_system,
-                bindless_manager,
-                texture_registry: HashMap::new(),
+                assets: AssetManager::new(bindless_manager),
                 forward_plus: Some(forward_plus),
                 hiz_pass: Some(hiz_pass),
                 adaptive_hiz_manager: AdaptiveHiZManager::new(3.0), // Target 3ms for Hi-Z
@@ -1105,11 +1104,11 @@ impl Renderer {
     }
 
     pub fn bindless_manager(&self) -> &vulkan::BindlessManager {
-        &self.bindless_manager
+        &self.assets.bindless_manager
     }
 
     pub fn bindless_manager_mut(&mut self) -> &mut vulkan::BindlessManager {
-        &mut self.bindless_manager
+        &mut self.assets.bindless_manager
     }
 
     pub fn get_mesh_material(&self, mesh_handle: u32) -> MaterialHandle {
@@ -1294,7 +1293,7 @@ impl Renderer {
                 .ensure_mesh(&key, mesh, upload_pool, self.device.graphics_queue)?;
 
             // 3. Register Bindless
-            register_mesh_textures(mesh, &mut self.bindless_manager, &mut self.texture_registry)?;
+            register_mesh_textures(mesh, &mut self.assets.bindless_manager, &mut self.assets.texture_registry)?;
 
             // 4. Register Material
             let mut handle_mat = self.material_manager.default_material();
@@ -1513,7 +1512,7 @@ impl Renderer {
     /// Unloads all currently registered textures from the host-side registry.
     /// Caution: Ensure no GPU frames are in flight using these textures before clearing.
     pub fn clear_texture_registry(&mut self) {
-        self.texture_registry.clear();
+        self.assets.texture_registry.clear();
     }
 
     /// Updates the GPU material buffer with a material at the specified index (AAA-grade direct streaming)
@@ -1727,7 +1726,7 @@ impl Renderer {
         Arc<parking_lot::Mutex<resources::uniform::StorageBuffer<T>>>,
         u32,
     )> {
-        let bindless_manager = &mut self.bindless_manager;
+        let bindless_manager = &mut self.assets.bindless_manager;
 
         unsafe {
             let mut buffer = resources::uniform::StorageBuffer::new(
@@ -1936,91 +1935,7 @@ impl Renderer {
     /// and generates irradiance and prefiltered maps for image-based lighting.
     /// Currently unused but preserved for runtime environment map loading features.
 
-    pub fn upload_ibl(&mut self, params: resources::IblUploadParams) -> Result<()> {
-        let name = "Global_IBL"; // Internal name for debug
 
-        // 1. Upload Irradiance (Cubemap, 1 mip)
-        let irradiance_texture = unsafe {
-            resources::Texture::create_cubemap_from_data(
-                self.alloc.clone(),
-                self.device.device.clone(),
-                self.cmds.upload_command_pool_handle(),
-                self.device.graphics_queue,
-                params.irradiance,
-                params.irradiance_size,
-                1,
-                params.format,
-                Some(&(name.to_owned() + "_Irradiance")),
-            )?
-        };
-        let irradiance_idx = self.bindless_manager.add_cubemap(
-            irradiance_texture.view(),
-            irradiance_texture.sampler(),
-        )?;
-
-        // 2. Upload Prefilter (Cubemap, N mips)
-        let prefilter_texture = unsafe {
-            resources::Texture::create_cubemap_from_data(
-                self.alloc.clone(),
-                self.device.device.clone(),
-                self.cmds.upload_command_pool_handle(),
-                self.device.graphics_queue,
-                params.prefilter,
-                params.prefilter_size,
-                params.prefilter_mips,
-                params.format,
-                Some(&(name.to_owned() + "_Prefilter")),
-            )?
-        };
-        let prefilter_idx = self.bindless_manager.add_cubemap(
-            prefilter_texture.view(),
-            prefilter_texture.sampler(),
-        )?;
-
-        // 3. Upload BRDF LUT (2D Texture)
-        // IBL BRDF LUTs are typically 512x512 RG16F or similar. 
-        // We use a simplified 2D texture upload here.
-        let brdf_data = resources::TextureData {
-            width: 512, // Standard IBL LUT size
-            height: 512,
-            pixels: params.brdf.to_vec(),
-        };
-        let brdf_texture = unsafe {
-            resources::Texture::from_data(
-                self.alloc.clone(),
-                self.device.device.clone(),
-                self.cmds.upload_command_pool_handle(),
-                self.device.graphics_queue,
-                &brdf_data,
-                vk::Format::R16G16_SFLOAT, // Standard for BRDF LUTs
-                Some(&(name.to_owned() + "_BRDF_LUT")),
-            )?
-        };
-        let brdf_idx = self.bindless_manager.add_sampled_image(
-            brdf_texture.view(),
-            brdf_texture.sampler(),
-        )?;
-
-        // 4. Update Scene State
-        self.scene_lighting.ibl_irradiance_index = irradiance_idx as i32;
-        self.scene_lighting.ibl_prefilter_index = prefilter_idx as i32;
-        self.scene_lighting.ibl_brdf_lut_index = brdf_idx as i32;
-        self.scene_lighting.ibl_intensity = 1.0;
-
-        // 5. Register with Registry to keep alive
-        self.texture_registry.insert(irradiance_idx, Arc::new(irradiance_texture));
-        self.texture_registry.insert(prefilter_idx, Arc::new(prefilter_texture));
-        self.texture_registry.insert(brdf_idx, Arc::new(brdf_texture));
-
-        log::info!(
-            "IBL maps uploaded to bindless slots (Irradiance: {}, Prefilter: {}, BRDF: {})",
-            irradiance_idx,
-            prefilter_idx,
-            brdf_idx
-        );
-
-        Ok(())
-    }
     pub fn request_swapchain_resize(&mut self, new_extent: vk::Extent2D) {
         self.pending_extent = Some(new_extent);
         if !self.resize_pending {
@@ -2446,7 +2361,7 @@ impl Renderer {
         
         // Register Depth Buffer (The Resize Trap & Order-Independence)
         if self.gbuffer_indices.depth_index == u32::MAX {
-            self.gbuffer_indices.depth_index = self.bindless_manager.add_sampled_image(
+            self.gbuffer_indices.depth_index = self.assets.bindless_manager.add_sampled_image(
                 self.depth_buffer
                     .as_ref()
                     .ok_or_else(|| AshError::VulkanError("Depth buffer not initialized".into()))?
@@ -2454,7 +2369,7 @@ impl Renderer {
                 self._default_texture.sampler(),
             )?;
         } else {
-            self.bindless_manager.update_sampled_image(
+            self.assets.bindless_manager.update_sampled_image(
                 self.gbuffer_indices.depth_index,
                 self.depth_buffer
                     .as_ref()
@@ -2479,12 +2394,12 @@ impl Renderer {
         
         // Register Motion Vector for VSR (The Resize Trap & Order-Independence)
         if self.gbuffer_indices.motion_index == u32::MAX {
-            self.gbuffer_indices.motion_index = self.bindless_manager.add_sampled_image(
+            self.gbuffer_indices.motion_index = self.assets.bindless_manager.add_sampled_image(
                 gbuffer.motion_view(),
                 self._default_texture.sampler(),
             )?;
         } else {
-            self.bindless_manager.update_sampled_image(
+            self.assets.bindless_manager.update_sampled_image(
                 self.gbuffer_indices.motion_index,
                 gbuffer.motion_view(),
                 self._default_texture.sampler(),
@@ -2503,7 +2418,7 @@ impl Renderer {
                 vsr.init(
                     &self.alloc.vma,
                     &self.device,
-                    &mut self.bindless_manager,
+                    &mut self.assets.bindless_manager,
                     display_extent.width,
                     display_extent.height,
                     self.vsr_config.quality,
@@ -2939,7 +2854,7 @@ impl Renderer {
                 
                 // Use public accessor methods instead of private fields
                 // frame_set returns Option<vk::DescriptorSet>
-                let bindless_set = self.bindless_manager.descriptor_set();
+                let bindless_set = self.assets.bindless_manager.descriptor_set();
 
                 let sets = [bindless_set];
                 
@@ -3047,7 +2962,7 @@ impl Renderer {
         _projection: Mat4,
     ) -> Result<()> {
         if let Some(ref skybox_pass) = self.skybox_pass {
-            let bindless_set = self.bindless_manager.descriptor_set();
+            let bindless_set = self.assets.bindless_manager.descriptor_set();
             let frame_ptr = self.uniform_buffers[frame_index].device_address();
             
             unsafe {
@@ -3491,7 +3406,7 @@ impl Renderer {
                         // VSM GPU-Driven Shadow Pass
                         let light_dir = glam::Vec3::from_slice(&self.scene_lighting.directional.direction[0..3]);
                         let frame_descriptor_set = vk::DescriptorSet::null();
-                        let bindless_descriptor_set = self.bindless_manager.descriptor_set();
+                        let bindless_descriptor_set = self.assets.bindless_manager.descriptor_set();
 
                         let light_ptr = self.forward_plus.as_ref().map(|fp| fp.get_lights().light_ptr(frame_index)).unwrap_or(0);
                         let tile_ptr = self.forward_plus.as_ref().map(|fp| fp.get_lights().tile_ptr(frame_index)).unwrap_or(0);
@@ -3732,7 +3647,7 @@ impl Renderer {
                         vk::PipelineBindPoint::GRAPHICS,
                         pipeline_layout_handle,
                         0, // Set 0: Unified Bindless (Textures, Materials, Instances, Shadows, Storage)
-                        &[self.bindless_manager.descriptor_set()],
+                        &[self.assets.bindless_manager.descriptor_set()],
                         &[],
                     );
                 }
@@ -4041,7 +3956,7 @@ impl Renderer {
                 "DescriptorManager not initialized".to_string(),
             ));
         }
-        let bindless_manager = &mut self.bindless_manager;
+        let bindless_manager = &mut self.assets.bindless_manager;
 
         unsafe {
             indirect.init(
@@ -4108,7 +4023,7 @@ impl Renderer {
             vsr.init(
                 &self.alloc.vma,
                 &self.device,
-                &mut self.bindless_manager,
+                &mut self.assets.bindless_manager,
                 extent.width,
                 extent.height,
                 quality,
@@ -4166,14 +4081,14 @@ impl Renderer {
             // If we have a previously registered hdr_image_index, update the bindless descriptor.
             // Otherwise, register it for the first time.
             if let Some(index) = self.hdr_image_index {
-                self.bindless_manager.update_sampled_image(
+                self.assets.bindless_manager.update_sampled_image(
                     index,
                     hdr.view(),
                     self._post_sampler,
                 )?;
             } else {
                 // First-time registration
-                let index = self.bindless_manager.add_sampled_image(
+                let index = self.assets.bindless_manager.add_sampled_image(
                     hdr.view(),
                     self._post_sampler,
                 )?;
@@ -4534,6 +4449,14 @@ impl Renderer {
     /// Get mutable reference to diagnostics overlay for configuration
     pub fn diagnostics_overlay_mut(&mut self) -> &mut DiagnosticsOverlay {
         &mut self.diagnostics_overlay
+    }
+
+    pub fn set_ibl_indices(&mut self, irradiance_idx: u32, prefilter_idx: u32, brdf_idx: u32) {
+        self.scene_lighting.ibl_irradiance_index = irradiance_idx as i32;
+        self.scene_lighting.ibl_prefilter_index = prefilter_idx as i32;
+        self.scene_lighting.ibl_brdf_lut_index = brdf_idx as i32;
+        self.scene_lighting.ibl_intensity = 1.0;
+        log::info!("IBL indices updated via set_ibl_indices");
     }
 }
 
