@@ -91,6 +91,16 @@ impl Pipeline {
     pub fn mark_managed_by_registry(&mut self) {
         self.managed_by_registry = true;
     }
+
+    pub fn from_handle(device: Arc<ash::Device>, pipeline: vk::Pipeline) -> Self {
+        Self {
+            pipeline,
+            device,
+            state: PipelineState::default(),
+            shader_watch: Vec::new(),
+            managed_by_registry: false,
+        }
+    }
 }
 
 impl Drop for Pipeline {

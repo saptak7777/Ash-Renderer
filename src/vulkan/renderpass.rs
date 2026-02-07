@@ -22,6 +22,14 @@ impl RenderPass {
     pub fn mark_managed_by_registry(&mut self) {
         self.managed_by_registry = true;
     }
+
+    pub fn from_handle(device: Arc<ash::Device>, render_pass: vk::RenderPass) -> Self {
+        Self {
+            render_pass,
+            device,
+            managed_by_registry: false,
+        }
+    }
 }
 
 impl Drop for RenderPass {

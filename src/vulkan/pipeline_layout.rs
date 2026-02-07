@@ -22,6 +22,14 @@ impl PipelineLayout {
     pub fn mark_managed_by_registry(&mut self) {
         self.managed_by_registry = true;
     }
+
+    pub fn from_handle(device: Arc<ash::Device>, layout: vk::PipelineLayout) -> Self {
+        Self {
+            layout,
+            device,
+            managed_by_registry: false,
+        }
+    }
 }
 
 impl Drop for PipelineLayout {

@@ -8,14 +8,17 @@ use crate::{
             FeatureRenderContext, PointLight, SceneLighting, SpotLight,
             default_vsm_config,
         },
+        types::{
+            DebugMode, DrawItem, GBufferIndices, MeshData, RenderCommand,
+            RendererConfig, SampleShadingQuality, TexturePresenceFlags,
+        },
         ForwardPlusIntegration,
         fullscreen_pass, hdr_framebuffer,
         hiz_pass::HiZPass,
         vcgs::{CullBoundingBox, IndirectDrawPass, OcclusionCulling},
         instancing::{BatchKey, InstanceData, InstancingManager},
         model_renderer::{
-            MaterialPushConstants, ModelRenderer, DRAW_PUSH_FRAGMENT_BYTES,
-            DRAW_PUSH_VERTEX_BYTES,
+            MaterialPushConstants, ModelRenderer,
         },
         motion_pass::MotionVectorPass,
         passes,
@@ -30,20 +33,19 @@ use crate::{
         hiz_pass::AdaptiveHiZManager,
         vram_budget, DepthBuffer, GBuffer, Material, MaterialHandle, MaterialManager, Mesh,
         PipelineCache, Texture, TextureData, Transform,
+        initialization,
     },
     vulkan::{self, Allocator, CommandBufferContext},
     AshError, Result,
 };
 
 use ash::vk;
-use bytemuck::Pod;
 use glam::{Mat4, Vec3, Vec4};
 use rayon::prelude::*;
 use resources::BufferPool;
 use std::collections::{HashMap, HashSet};
 use std::ptr;
 use std::sync::Arc;
-use std::thread;
 use std::time::Instant;
 
 use crate::renderer::resources::buffer::BufferHandle;
@@ -52,50 +54,7 @@ use crate::renderer::resources::GlobalClusterBuffer;
 use crate::renderer::vcgs::culling::CullObjectData;
 
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum DebugMode {
-    #[default]
-    None,            // Final render
-    Albedo,         // Visualize Albedo channel
-    Normal,         // Visualize Normal channel
-    Metallic,       // Visualize Metallic channel
-    Roughness,      // Visualize Roughness channel
-    Lighting,       // Visualize Lighting only
-}
 
-
-
-#[derive(Clone, Debug)]
-pub struct RenderCommand {
-    /// Handle identifying the mesh to render
-    pub mesh_handle: u32,
-    /// Handle identifying the material to use
-    pub material_handle: MaterialHandle,
-    /// Transform matrix for positioning the mesh in world space
-    pub transform: Mat4,
-    /// Whether this object should cast shadows
-    pub cast_shadows: bool,
-    /// Whether this object should receive shadows
-    pub receive_shadows: bool,
-    /// Whether this object is transparent
-    pub is_transparent: bool,
-    /// Whether this object is hidden from rendering
-    pub is_hidden: bool,
-}
-
-impl Default for RenderCommand {
-    fn default() -> Self {
-        Self {
-            mesh_handle: 0,
-            material_handle: MaterialHandle::null(),
-            transform: Mat4::IDENTITY,
-            cast_shadows: true,
-            receive_shadows: true,
-            is_transparent: false,
-            is_hidden: false,
-        }
-    }
-}
 
 struct RendererResources {
     uniform_buffers: Vec<UniformBuffer>,
@@ -142,114 +101,9 @@ mod tests {
 
 
 
-#[derive(Clone, Debug)]
-pub struct SpecializationOverride {
-    pub stage: vk::ShaderStageFlags,
-    pub constant_id: u32,
-    data: Vec<u8>,
-}
 
-#[derive(Clone, Copy, Debug)]
-pub struct GBufferIndices {
-    pub depth_index: u32,
-    pub motion_index: u32,
-}
 
-impl Default for GBufferIndices {
-    fn default() -> Self {
-        Self {
-            depth_index: u32::MAX,
-            motion_index: u32::MAX,
-        }
-    }
-}
 
-impl SpecializationOverride {
-    pub fn from_value<T: Pod>(stage: vk::ShaderStageFlags, constant_id: u32, value: &T) -> Self {
-        Self {
-            stage,
-            constant_id,
-            data: bytemuck::bytes_of(value).to_vec(),
-        }
-    }
-
-    pub fn bytes(&self) -> &[u8] {
-        &self.data
-    }
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub enum SampleShadingQuality {
-    Disabled,           // Maximum performance
-    Low,               // 25% samples
-    #[default]
-    Medium,            // 50% samples
-    High,              // 75% samples
-    Full,              // 100% samples
-}
-
-impl SampleShadingQuality {
-    pub fn min_sample_shading(&self) -> f32 {
-        match self {
-            Self::Disabled => 0.0,
-            Self::Low => 0.25,
-            Self::Medium => 0.5,
-            Self::High => 0.75,
-            Self::Full => 1.0,
-        }
-    }
-
-    pub fn enabled(&self) -> bool {
-        *self != Self::Disabled
-    }
-}
-
-#[derive(Clone, Debug)]
-pub struct PipelineConfig {
-
-    pub sample_shading: SampleShadingQuality,
-    pub watch_shaders: bool,
-    pub specialization_constants: Vec<SpecializationOverride>,
-}
-
-impl Default for PipelineConfig {
-    fn default() -> Self {
-        Self {
-            sample_shading: SampleShadingQuality::Disabled,
-            watch_shaders: false,
-            specialization_constants: Vec::new(),
-        }
-    }
-}
-
-impl PipelineConfig {
-    fn multisample_config(&self) -> vulkan::MultisampleConfig {
-        vulkan::MultisampleConfig {
-            sample_count: vk::SampleCountFlags::TYPE_1,
-            enable_sample_shading: self.sample_shading.enabled(),
-            min_sample_shading: self.sample_shading.min_sample_shading(),
-        }
-    }
-}
-
-#[derive(Clone, Debug)]
-pub struct RendererConfig {
-    pub pipeline: PipelineConfig,
-    pub texture_compression: bool,
-    pub allow_auto_material: bool,
-    pub strict_mode: bool,
-}
-
-impl Default for RendererConfig {
-    fn default() -> Self {
-        Self {
-            pipeline: PipelineConfig::default(),
-            texture_compression: true,
-            allow_auto_material: true,
-            strict_mode: false,
-        }
-    }
-}
 
 /// Main rendering system.
 ///
@@ -407,87 +261,6 @@ pub struct Renderer {
     pub device: vulkan::VulkanDevice,
 }
 
-#[derive(Clone)]
-pub struct DrawItem {
-    pub key: Arc<str>,
-    pub mesh_id: u32,
-    pub transform: Mat4,
-    pub material: Material,
-    pub material_handle: MaterialHandle,
-}
-
-#[derive(Copy, Clone, Default, Debug)]
-pub struct TexturePresenceFlags {
-    pub base_color: bool,
-    pub normal: bool,
-    pub metallic_roughness: bool,
-    pub occlusion: bool,
-    pub emissive: bool,
-}
-
-impl TexturePresenceFlags {
-    pub fn from_mesh(mesh: &Mesh) -> Self {
-        Self {
-            base_color: mesh.texture.is_some(),
-            normal: mesh.normal_texture.is_some(),
-            metallic_roughness: mesh.metallic_roughness_texture.is_some(),
-            occlusion: mesh.occlusion_texture.is_some(),
-            emissive: mesh.emissive_texture.is_some(),
-        }
-    }
-}
-
-/// Consolidated mesh data for efficient lookup.
-/// Replaces multiple HashMap lookups with a single Vec access.
-#[derive(Clone, Debug)]
-pub struct MeshData {
-    pub name: Arc<str>,
-    pub texture_indices: [i32; 4], // base, normal, mr, occlusion
-    pub emissive_index: i32,
-    pub texture_flags: TexturePresenceFlags,
-    pub material_handle: MaterialHandle,
-    pub is_hidden: bool,
-    pub bounds: CullBoundingBox,
-    pub cluster_start_index: u32,
-    pub cluster_count: u32,
-}
-
-impl Default for MeshData {
-    fn default() -> Self {
-        Self {
-            name: Arc::from(""),
-            texture_indices: [-1, -1, -1, -1],
-            emissive_index: -1,
-            texture_flags: TexturePresenceFlags::default(),
-            material_handle: MaterialHandle { index: 0, version: 0 },
-            is_hidden: false,
-            bounds: CullBoundingBox::default(),
-            cluster_start_index: 0,
-            cluster_count: 0,
-        }
-    }
-}
-
-/// Internal struct for swapchain-related resources used during initialization.
-struct SwapchainData {
-    swapchain: vulkan::SwapchainWrapper,
-    swapchain_image_view_ids: Vec<ResourceId>,
-    depth_buffer: DepthBuffer,
-    depth_buffer_id: ResourceId,
-    render_pass: vulkan::RenderPass,
-    render_pass_id: ResourceId,
-}
-
-/// Internal struct for frame-related resources used during initialization.
-struct FrameData {
-    framebuffers: Vec<vulkan::Framebuffer>,
-    framebuffer_ids: Vec<ResourceId>,
-    command_manager: vulkan::CommandBufferManager,
-    command_buffers: Vec<vk::CommandBuffer>,
-    frame_syncs: Vec<vulkan::FrameSync>,
-    frame_sync_ids: Vec<(ResourceId, ResourceId, ResourceId)>,
-    worker_count: usize,
-}
 
 pub struct MainPassParameters<'a> {
     pub cmd_ctx: &'a CommandBufferContext<'a>,
@@ -559,31 +332,51 @@ impl Renderer {
             let buffer_pool = Arc::new(BufferPool::new(Arc::clone(&alloc)));
             let (width, height) = surface_provider.physical_size();
             let extent = vk::Extent2D { width, height };
-            log::info!("Creating SwapchainData for extent {}x{}", width, height);
-            let swapchain_data = Self::create_swapchain_data(&device, &alloc, &resources, extent)?;
-            log::info!("Creating FrameData");
-            let frame_data = Self::create_frame_resources(&device, &resources, &swapchain_data)?;
+            log::info!("Creating swapchain and depth buffer for extent {}x{}", width, height);
+            
+            let (mut swapchain, render_pass_handle, mut framebuffers, mut depth_buffer) = 
+                initialization::create_swapchain_data(&device, &alloc, extent)?;
 
-            // Unpack for use in the rest of initialization
-            let SwapchainData {
-                swapchain,
-                swapchain_image_view_ids,
-                depth_buffer,
-                depth_buffer_id,
-                render_pass,
-                render_pass_id,
-            } = swapchain_data;
+            log::info!("Registering swapchain resources");
+            let mut swapchain_image_view_ids = Vec::with_capacity(swapchain.image_views.len());
+            for &view in &swapchain.image_views {
+                let id = resources.register_image_view(view)?;
+                swapchain_image_view_ids.push(id);
+            }
+            swapchain.mark_image_views_managed_by_registry();
 
-            let FrameData {
-                framebuffers,
-                framebuffer_ids,
-                command_manager,
-                command_buffers,
-                frame_syncs,
-                frame_sync_ids,
-                worker_count,
-            } = frame_data;
-            log::info!("Frame resources created successfully");
+            let depth_buffer_id = depth_buffer.register_with_registry(&resources)?;
+            let render_pass_id = resources.register_render_pass(render_pass_handle)?;
+
+            let mut framebuffer_ids = Vec::with_capacity(framebuffers.len());
+            for (idx, fb) in framebuffers.iter_mut().enumerate() {
+                 let id = resources.register_framebuffer(fb.handle(), &[
+                     render_pass_id,
+                     depth_buffer_id,
+                     swapchain_image_view_ids[idx],
+                 ])?;
+                 fb.mark_managed_by_registry();
+                 framebuffer_ids.push(id);
+            }
+
+            log::info!("Creating frame resources");
+            let (command_buffers, mut frame_syncs, command_manager) = 
+                initialization::create_frame_resources(&device, framebuffers.len())?;
+
+            let mut frame_sync_ids = Vec::with_capacity(frame_syncs.len());
+            for sync in &mut frame_syncs {
+                let image_available_id = resources.register_semaphore(sync.image_available)?;
+                let render_finished_id = resources.register_semaphore(sync.render_finished)?;
+                let fence_id = resources.register_fence(sync.in_flight)?;
+                sync.mark_managed_by_registry();
+                frame_sync_ids.push((image_available_id, render_finished_id, fence_id));
+            }
+
+            resources.register_command_pool(command_manager.upload_command_pool_handle())?;
+            command_manager.mark_pool_managed_by_registry();
+            log::info!("Frame resources created and registered successfully");
+
+            let worker_count = command_manager.worker_count();
 
             log::info!("Initializing GeometryBuffer and ModelRenderer");
             let geometry_buffer = Arc::new(resources::DualHeapGeometryBuffer::new(
@@ -690,18 +483,26 @@ impl Renderer {
             log::debug!("Main Pipeline Set Layouts: Unified={:?}", 
                 set_layouts[0]);
 
-            log::info!("Creating Main Graphics Pipeline");
-            let (pipeline_layout, pipeline_layout_id, pipeline, pipeline_id) =
-                Self::create_main_pipeline(
+            let (pipeline_handle, pipeline_layout_handle) =
+                initialization::create_main_pipeline(
                     &device,
-                    &resources,
-                    render_pass.handle(),
                     swapchain.extent,
-                    pipeline_cache.handle(),
-                    depth_buffer.format(),
-                    &pipeline_cfg,
+                    render_pass_handle,
                     &set_layouts,
+                    &pipeline_cfg,
+                    depth_buffer.format(),
+                    pipeline_cache.handle(),
                 )?;
+
+            let pipeline_layout_id = resources.register_pipeline_layout(pipeline_layout_handle)?;
+            let pipeline_id = resources.register_pipeline(pipeline_handle, &[pipeline_layout_id, render_pass_id])?;
+
+            let mut pipeline_layout = vulkan::PipelineLayout::from_handle(Arc::clone(&device.device), pipeline_layout_handle);
+            pipeline_layout.mark_managed_by_registry();
+            let mut pipeline = vulkan::Pipeline::from_handle(Arc::clone(&device.device), pipeline_handle);
+            pipeline.mark_managed_by_registry();
+            let mut render_pass_wrapper = vulkan::RenderPass::from_handle(Arc::clone(&device.device), render_pass_handle);
+            render_pass_wrapper.mark_managed_by_registry();
 
             log::info!("Initializing Shadow System...");
             let shadow_system = match crate::renderer::features::ShadowSystem::new(
@@ -851,7 +652,7 @@ impl Renderer {
             let skybox_pass = passes::SkyboxPass::new(
                 &device,
                 &resources,
-                render_pass.handle(),
+                render_pass_handle,
                 swapchain.extent,
                 pipeline_cache.handle(),
                 depth_buffer.format(),
@@ -881,7 +682,7 @@ impl Renderer {
                 model_renderer,
                 draw_items: Vec::new(),
                 swapchain: Some(swapchain),
-                render_pass: Some(render_pass),
+                render_pass: Some(render_pass_wrapper),
                 render_pass_id: Some(render_pass_id),
                 hdr_render_pass: None,
                 hdr_render_pass_id: None,
@@ -1359,228 +1160,7 @@ impl Renderer {
     }
 
 
-    unsafe fn create_swapchain_data(
-        device: &vulkan::VulkanDevice,
-        alloc: &Arc<vulkan::Allocator>,
-        resources: &Arc<ResourceRegistry>,
-        extent: vk::Extent2D,
-    ) -> Result<SwapchainData> {
-        let mut swapchain = vulkan::SwapchainWrapper::new(device, device.headless, extent)?;
-        let mut swapchain_image_view_ids = Vec::with_capacity(swapchain.image_views.len());
-        for &image_view in &swapchain.image_views {
-            let image_view_id = resources.register_image_view(image_view).map_err(|e| {
-                AshError::VulkanError(format!("Failed to register swapchain image view: {e}"))
-            })?;
-            swapchain_image_view_ids.push(image_view_id);
-        }
-        swapchain.mark_image_views_managed_by_registry();
 
-        let mut depth_buffer = DepthBuffer::new(
-            Arc::clone(&device.device),
-            Arc::clone(alloc),
-            swapchain.extent.width,
-            swapchain.extent.height,
-        )?;
-        let depth_buffer_id = depth_buffer
-            .register_with_registry(resources)
-            .map_err(|e| AshError::VulkanError(format!("Failed to register depth buffer: {e}")))?;
-
-        let mut render_pass_builder = vulkan::RenderPass::builder(Arc::clone(&device.device));
-
-        if device.headless {
-            render_pass_builder = render_pass_builder.with_swapchain_color(swapchain.format, vk::ImageLayout::TRANSFER_SRC_OPTIMAL);
-        } else {
-            render_pass_builder = render_pass_builder.with_swapchain_color(swapchain.format, vk::ImageLayout::PRESENT_SRC_KHR);
-        }
-
-        let mut render_pass = render_pass_builder
-            .with_depth_attachment(
-                depth_buffer.format(),
-                vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
-            )
-            .build()?;
-        let render_pass_id = resources
-            .register_render_pass(render_pass.handle())
-            .map_err(|e| AshError::VulkanError(format!("Failed to register render pass: {e}")))?;
-        render_pass.mark_managed_by_registry();
-
-        Ok(SwapchainData {
-            swapchain,
-            swapchain_image_view_ids,
-            depth_buffer,
-            depth_buffer_id,
-            render_pass,
-            render_pass_id,
-        })
-    }
-
-    unsafe fn create_frame_resources(
-        device: &vulkan::VulkanDevice,
-        resources: &Arc<ResourceRegistry>,
-        swapchain_data: &SwapchainData,
-    ) -> Result<FrameData> {
-        let mut framebuffers = Vec::new();
-        let mut framebuffer_ids = Vec::new();
-        for (index, &image_view) in swapchain_data.swapchain.image_views.iter().enumerate() {
-            let attachments = [image_view, swapchain_data.depth_buffer.view()];
-            let framebuffer = vulkan::Framebuffer::new(
-                Arc::clone(&device.device),
-                swapchain_data.render_pass.handle(),
-                &attachments,
-                swapchain_data.swapchain.extent,
-            )?;
-            let framebuffer_id = resources
-                .register_framebuffer(
-                    framebuffer.handle(),
-                    &[
-                        swapchain_data.render_pass_id,
-                        swapchain_data.depth_buffer_id,
-                        swapchain_data.swapchain_image_view_ids[index],
-                    ],
-                )
-                .map_err(|e| {
-                    AshError::VulkanError(format!("Failed to register framebuffer: {e}"))
-                })?;
-            let mut framebuffer = framebuffer;
-            framebuffer.mark_managed_by_registry();
-            framebuffers.push(framebuffer);
-            framebuffer_ids.push(framebuffer_id);
-        }
-
-        let worker_count = thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(1);
-
-        let command_manager = vulkan::CommandBufferManager::new(
-            Arc::clone(&device.device),
-            device.graphics_queue_family,
-            worker_count,
-        )?;
-
-        let command_buffers = command_manager.allocate_primary_buffers(framebuffers.len() as u32)?;
-
-        let mut frame_syncs = Vec::with_capacity(framebuffers.len());
-        let mut frame_sync_ids = Vec::with_capacity(framebuffers.len());
-        for _ in 0..framebuffers.len() {
-            let mut sync = vulkan::FrameSync::new(Arc::clone(&device.device))?;
-            let image_available_id =
-                resources
-                    .register_semaphore(sync.image_available)
-                    .map_err(|e| {
-                        AshError::VulkanError(format!(
-                            "Failed to register image-available semaphore: {e}"
-                        ))
-                    })?;
-            let render_finished_id =
-                resources
-                    .register_semaphore(sync.render_finished)
-                    .map_err(|e| {
-                        AshError::VulkanError(format!(
-                            "Failed to register render-finished semaphore: {e}"
-                        ))
-                    })?;
-            let fence_id = resources.register_fence(sync.in_flight).map_err(|e| {
-                AshError::VulkanError(format!("Failed to register in-flight fence: {e}"))
-            })?;
-            sync.mark_managed_by_registry();
-            frame_syncs.push(sync);
-            frame_sync_ids.push((image_available_id, render_finished_id, fence_id));
-        }
-
-        resources
-            .register_command_pool(command_manager.upload_command_pool_handle())
-            .map_err(|e| AshError::VulkanError(format!("Failed to register command pool: {e}")))?;
-        command_manager.mark_pool_managed_by_registry();
-
-        Ok(FrameData {
-            framebuffers,
-            framebuffer_ids,
-            command_manager,
-            command_buffers,
-            frame_syncs,
-            frame_sync_ids,
-            worker_count,
-        })
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    unsafe fn create_main_pipeline(
-        device: &vulkan::VulkanDevice,
-        resources: &Arc<ResourceRegistry>,
-        render_pass: vk::RenderPass,
-        extent: vk::Extent2D,
-        pipeline_cache: vk::PipelineCache,
-        depth_format: vk::Format,
-        pipeline_cfg: &PipelineConfig,
-        set_layouts: &[vk::DescriptorSetLayout],
-    ) -> Result<(
-        vulkan::PipelineLayout,
-        ResourceId,
-        vulkan::Pipeline,
-        ResourceId,
-    )> {
-        let push_constant_ranges = [
-            vk::PushConstantRange {
-                stage_flags: vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
-                offset: 0,
-                size: DRAW_PUSH_VERTEX_BYTES + DRAW_PUSH_FRAGMENT_BYTES,
-            },
-        ];
-
-        let mut pipeline_layout_builder =
-            vulkan::PipelineLayout::builder(Arc::clone(&device.device));
-        for layout in set_layouts {
-            pipeline_layout_builder = pipeline_layout_builder.add_set_layout(*layout);
-        }
-        for range in &push_constant_ranges {
-            pipeline_layout_builder = pipeline_layout_builder.add_push_constant(*range);
-        }
-        let mut pipeline_layout = pipeline_layout_builder.build()?;
-        let pipeline_layout_id = resources
-            .register_pipeline_layout(pipeline_layout.handle())
-            .map_err(|e| {
-                AshError::VulkanError(format!("Failed to register pipeline layout: {e}"))
-            })?;
-        pipeline_layout.mark_managed_by_registry();
-
-        let mut pipeline_builder = vulkan::Pipeline::builder(Arc::clone(&device.device))
-            .with_layout(pipeline_layout.handle())
-            .with_render_pass(render_pass)
-            .with_extent(extent)
-            .with_pipeline_cache(pipeline_cache)
-            .with_depth_format(depth_format)
-            // CRITICAL FIX: Reverse-Z uses GREATER_OR_EQUAL (Z=1 Near, Z=0 Far)
-            .with_depth_test(vk::CompareOp::GREATER_OR_EQUAL, true)
-            .with_cull_mode(vk::CullModeFlags::NONE)
-            .with_front_face(vk::FrontFace::CLOCKWISE)
-            .with_multisampling(pipeline_cfg.multisample_config())
-            .add_shader_from_bytes(
-                include_bytes!(concat!(env!("OUT_DIR"), "/vert.vert.spv")),
-                vk::ShaderStageFlags::VERTEX,
-                "main",
-            )?
-            .add_shader_from_bytes(
-                include_bytes!(concat!(env!("OUT_DIR"), "/frag.frag.spv")),
-                vk::ShaderStageFlags::FRAGMENT,
-                "main",
-            )?;
-
-        for specialization in &pipeline_cfg.specialization_constants {
-            pipeline_builder = pipeline_builder.with_specialization_bytes(
-                specialization.stage,
-                specialization.constant_id,
-                specialization.bytes(),
-            );
-        }
-
-        let mut pipeline = pipeline_builder.build()?;
-        let pipeline_id = resources
-            .register_pipeline(pipeline.pipeline, &[pipeline_layout_id])
-            .map_err(|e| AshError::VulkanError(format!("Failed to register pipeline: {e}")))?;
-        pipeline.mark_managed_by_registry();
-
-        Ok((pipeline_layout, pipeline_layout_id, pipeline, pipeline_id))
-    }
 
 
 
