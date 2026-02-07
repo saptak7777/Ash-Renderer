@@ -2977,6 +2977,11 @@ impl Renderer {
     }
 
     fn recreate_skybox_pipeline(&mut self) -> Result<()> {
+        if self.skybox_pass.is_none() {
+            log::info!("Skybox pass not initialized; skipping pipeline status check.");
+            return Ok(());
+        }
+
         log::info!("Checking skybox pipeline status...");
 
         // Skybox pass uses dynamic viewport and scissor states, so it adapts to 

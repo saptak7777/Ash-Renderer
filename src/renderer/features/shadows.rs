@@ -47,6 +47,9 @@ pub struct ShadowSystem {
 
     /// Allocator for cleanup
     _allocator: Arc<Allocator>,
+
+    /// Whether the system has been destroyed
+    destroyed: bool,
 }
 
 impl ShadowSystem {
@@ -114,6 +117,7 @@ impl ShadowSystem {
             _default_array_texture: default_array_texture,
             device,
             _allocator: allocator,
+            destroyed: false,
         })
     }
 
@@ -229,6 +233,11 @@ impl ShadowSystem {
     /// # Safety
     /// Must be called before device is destroyed. Resources must not be in use.
     pub unsafe fn destroy(&mut self) {
+        if self.destroyed {
+            return;
+        }
+        self.destroyed = true;
+
         log::debug!("Destroying Shadow System");
         self.vsm_feature.destroy();
         // Textures will be dropped automatically via their Drop impl
