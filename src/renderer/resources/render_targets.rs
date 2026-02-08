@@ -1,6 +1,6 @@
-//! HDR (High Dynamic Range) Framebuffer
+//! Render Targets
 //!
-//! Provides a 16-bit float framebuffer for HDR rendering before tonemapping.
+//! Provides specialized render targets for HDR and deferred rendering.
 
 use ash::vk;
 use std::sync::Arc;
@@ -9,7 +9,9 @@ use crate::vulkan::Allocator;
 use crate::{AshError, Result};
 
 /// HDR render target for pre-tonemapping scene rendering
-pub struct HdrFramebuffer {
+///
+/// Also referred to as HdrSystem in the high-level architecture.
+pub struct HdrSystem {
     image: vk::Image,
     view: vk::ImageView,
     allocation: Option<vk_mem::Allocation>,
@@ -20,7 +22,7 @@ pub struct HdrFramebuffer {
     sampler: vk::Sampler,
 }
 
-impl HdrFramebuffer {
+impl HdrSystem {
     /// Creates a new HDR framebuffer with 16-bit float format
     ///
     /// # Safety
@@ -33,7 +35,7 @@ impl HdrFramebuffer {
     ) -> Result<Self> {
         let format = vk::Format::R16G16B16A16_SFLOAT;
 
-        log::info!("Creating HDR framebuffer ({width}x{height}, R16G16B16A16_SFLOAT)");
+        log::info!("Creating HDR System target ({width}x{height}, R16G16B16A16_SFLOAT)");
 
         let image_create_info = vk::ImageCreateInfo::default()
             .image_type(vk::ImageType::TYPE_2D)
@@ -95,7 +97,7 @@ impl HdrFramebuffer {
             .create_sampler(&sampler_create_info, None)
             .map_err(|e| AshError::VulkanError(format!("HDR sampler creation failed: {e}")))?;
 
-        log::info!("HDR framebuffer created successfully");
+        log::info!("HDR System target created successfully");
 
         Ok(Self {
             image,
@@ -144,11 +146,11 @@ impl HdrFramebuffer {
     }
 }
 
-impl Drop for HdrFramebuffer {
+impl Drop for HdrSystem {
     fn drop(&mut self) {
         if let Some(mut allocation) = self.allocation.take() {
             unsafe {
-                log::debug!("Destroying HDR framebuffer");
+                log::debug!("Destroying HDR System target");
                 self.device.destroy_sampler(self.sampler, None);
                 self.device.destroy_image_view(self.view, None);
                 self.allocator

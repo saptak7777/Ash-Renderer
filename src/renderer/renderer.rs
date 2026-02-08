@@ -14,7 +14,6 @@ use crate::{
         },
         ForwardPlusIntegration,
         passes::{
-            fullscreen as fullscreen_pass,
             hiz as hiz_pass,
             vsr as vsr_pass,
             hiz::{AdaptiveHiZManager, HiZPass},
@@ -34,10 +33,9 @@ use crate::{
         resource_registry::{ResourceId, ResourceRegistry},
         resources,
         resources::{
-            hdr_framebuffer,
             uniform::{StorageBuffer, UniformBuffer},
         },
-        vram_budget, DepthBuffer, GBuffer, Material, MaterialHandle, MaterialManager, Mesh,
+        vram_budget, DepthBuffer, GBuffer, HdrSystem, Material, MaterialHandle, MaterialManager, Mesh,
         PipelineCache, Texture, Transform,
         initialization,
         init_types::*,
@@ -58,6 +56,7 @@ use std::time::Instant;
 use std::thread;
 
 use crate::renderer::queue::RenderQueue;
+use super::swapchain_manager;
 use crate::renderer::resources::buffer::BufferHandle;
 use crate::renderer::resources::mesh::{MaterialDescriptor, MeshDescriptor};
 use crate::renderer::resources::GlobalClusterBuffer;
@@ -120,11 +119,6 @@ pub struct Renderer {
     buffer_pool: Arc<BufferPool>,
     features: FeatureManager,
     _pipeline_cache: PipelineCache,
-    pub tonemapping_enabled: bool,
-    tonemapping_exposure: f32,
-    tonemapping_gamma: f32,
-    bloom_enabled: bool,
-    bloom_intensity: f32,
     prev_view_proj: Mat4,
     _default_texture: Texture,
     _black_texture: Texture,
@@ -133,63 +127,63 @@ pub struct Renderer {
     _default_cube_black: Texture, // Keep alive
     model_renderer: ModelRenderer,
     draw_items: Vec<DrawItem>,
-    swapchain: Option<vulkan::SwapchainWrapper>,
-    render_pass: Option<vulkan::RenderPass>,
-    render_pass_id: Option<ResourceId>,
+    pub(crate) swapchain: Option<vulkan::SwapchainWrapper>,
+    pub(crate) render_pass: Option<vulkan::RenderPass>,
+    pub(crate) render_pass_id: Option<ResourceId>,
     /// Dedicated render pass for HDR rendering (ensures format compatibility)
-    hdr_render_pass: Option<vulkan::RenderPass>,
-    hdr_render_pass_id: Option<ResourceId>,
-    pipeline: Option<vulkan::Pipeline>,
-    pipeline_id: Option<ResourceId>,
+    pub(crate) hdr_render_pass: Option<vulkan::RenderPass>,
+    pub(crate) hdr_render_pass_id: Option<ResourceId>,
+    pub(crate) pipeline: Option<vulkan::Pipeline>,
+    pub(crate) pipeline_id: Option<ResourceId>,
     
     // Skybox Rendering (Modularized)
     skybox_pass: Option<passes::SkyboxPass>,
     
-    depth_buffer: Option<DepthBuffer>,
-    uniform_buffers: Vec<UniformBuffer>,
-    material_storage_buffer: Option<StorageBuffer<resources::uniform::MaterialUniform>>,
-    pipeline_layout: Option<vulkan::PipelineLayout>,
-    pipeline_layout_id: Option<ResourceId>,
-    descriptors: Option<vulkan::DescriptorAllocator>,
-    framebuffers: Vec<vulkan::Framebuffer>,
-    framebuffer_ids: Vec<ResourceId>,
+    pub(crate) depth_buffer: Option<DepthBuffer>,
+    pub(crate) uniform_buffers: Vec<UniformBuffer>,
+    pub(crate) material_storage_buffer: Option<StorageBuffer<resources::uniform::MaterialUniform>>,
+    pub(crate) pipeline_layout: Option<vulkan::PipelineLayout>,
+    pub(crate) pipeline_layout_id: Option<ResourceId>,
+    pub(crate) descriptors: Option<vulkan::DescriptorAllocator>,
+    pub(crate) framebuffers: Vec<vulkan::Framebuffer>,
+    pub(crate) framebuffer_ids: Vec<ResourceId>,
     start_time: Instant,
     mesh_data: Vec<MeshData>, // Indexed by mesh handle for O(1) access
     material_manager: MaterialManager,
     uploaded_material_indices: HashSet<u32>, // Track which materials are GPU-resident (UE5 pattern)
-    swapchain_image_view_ids: Vec<ResourceId>,
-    depth_buffer_id: Option<ResourceId>,
-    frame_sync_ids: Vec<(ResourceId, ResourceId, ResourceId)>,
+    pub(crate) swapchain_image_view_ids: Vec<ResourceId>,
+    pub(crate) depth_buffer_id: Option<ResourceId>,
+    pub(crate) frame_sync_ids: Vec<(ResourceId, ResourceId, ResourceId)>,
     // Post-processing support
     sample_shading: SampleShadingQuality,
-    hdr_framebuffer: Option<hdr_framebuffer::HdrFramebuffer>,
-    fullscreen_pass: Option<fullscreen_pass::FullscreenPass>,
+    pub(crate) hdr_system: Option<HdrSystem>,
+
     // Diagnostics
     diagnostics: DiagnosticsState,
     frame_profiler: FrameProfiler,
     gpu_profiler: Option<GpuProfiler>,
     diagnostics_overlay: DiagnosticsOverlay,
     // Shadow System
-    shadow_system: Option<crate::renderer::features::ShadowSystem>,
+    pub(crate) shadow_system: Option<crate::renderer::features::ShadowSystem>,
     // Bindless textures
     pub assets: AssetManager,
     // Forward+ lighting
-    forward_plus: Option<ForwardPlusIntegration>,
+    pub(crate) forward_plus: Option<ForwardPlusIntegration>,
     // GPU-driven occlusion culling (Hi-Z + Indirect Draw)
-    hiz_pass: Option<HiZPass>,
+    pub(crate) hiz_pass: Option<HiZPass>,
     adaptive_hiz_manager: AdaptiveHiZManager,
-    indirect_draw_pass: Option<IndirectDrawPass>,
-    occlusion_culling: OcclusionCulling,
+    pub(crate) indirect_draw_pass: Option<IndirectDrawPass>,
+    pub(crate) occlusion_culling: OcclusionCulling,
     // Temporal Super-Resolution
-    vsr_pass: Option<VsrPass>,
+    pub(crate) vsr_pass: Option<VsrPass>,
     // Motion Vector Pass for VSR/TAA
-    motion_pass: Option<MotionVectorPass>,
-    motion_framebuffer: Option<vk::Framebuffer>,
+    pub(crate) motion_pass: Option<MotionVectorPass>,
+    pub(crate) motion_framebuffer: Option<vk::Framebuffer>,
     // G-Buffer for Normals and Motion Vectors
-    gbuffer: Option<GBuffer>,
+    pub(crate) gbuffer: Option<GBuffer>,
     // Pipeline optimization
     // Lighting
-    scene_lighting: crate::renderer::features::SceneLighting,
+    pub(crate) scene_lighting: crate::renderer::features::SceneLighting,
     point_lights: Vec<PointLight>,
     directional_lights: Vec<DirectionalLight>,
     spot_lights: Vec<SpotLight>,
@@ -201,15 +195,13 @@ pub struct Renderer {
     skybox_index: u32,
     
     // Phase 4: G-Buffer & HDR Indices
-    gbuffer_indices: GBufferIndices,
-    hdr_image_index: Option<u32>,
+    pub(crate) gbuffer_indices: GBufferIndices,
+    pub(crate) hdr_image_index: Option<u32>,
 
     // Post-processing descriptors
-    post_descriptor_pool: vk::DescriptorPool,
-    post_descriptor_sets: Vec<vk::DescriptorSet>,
-    _post_sampler: vk::Sampler,
-    post_pipeline: Option<vulkan::Pipeline>,
-    post_framebuffers: Vec<vulkan::Framebuffer>,
+
+    post_process: crate::renderer::systems::post_process::PostProcessSystem,
+
     vram_budget: vram_budget::VramBudget,
     texture_compression: bool,
     instancing_manager: InstancingManager,
@@ -244,7 +236,7 @@ pub struct Renderer {
     // WAIT! In Rust, fields are dropped in the order they are DECLARED.
     // So the FIRST field is dropped FIRST.
     // This means foundation should be at the BOTTOM so they are dropped LAST.
-    resources: Arc<ResourceRegistry>,
+    pub(crate) resources: Arc<ResourceRegistry>,
     pub alloc: Arc<vulkan::Allocator>,
     pub queue: RenderQueue,
     pub device: vulkan::VulkanDevice,
@@ -303,7 +295,6 @@ impl Renderer {
             features.add_feature(AutoRotateFeature::new());
 
 
-            // VSM replaces legacy shadow system
             // Initialize Pipeline Cache
             log::info!("Creating PipelineCache");
             let pipeline_cache = PipelineCache::new(Arc::clone(&device.device))?;
@@ -448,7 +439,7 @@ impl Renderer {
                 instance_buffers,
                 transform_arena,
                 transform_arena_alloc,
-                post_sampler,
+                post_sampler: _post_sampler,
             } = renderer_resources;
 
             // CRITICAL: All frame data is now accessed via BDA (push.frame_ptr).
@@ -622,6 +613,9 @@ impl Renderer {
             let transform_system = resources::TransformSystem::new();
             let config = &renderer_config;
             let swapchain_extent = swapchain.extent;
+            let swapchain_format = swapchain.format;
+            let swapchain_image_count = framebuffers.len();
+            let device_handle = Arc::clone(&device.device);
 
             // Missing initializations
             let point_lights = Vec::new();
@@ -707,13 +701,8 @@ impl Renderer {
                 frame_sync_ids,
 
                 sample_shading: pipeline_cfg.sample_shading,
-                hdr_framebuffer: None,
-                fullscreen_pass: None,
-                tonemapping_enabled: true,
-                tonemapping_exposure: 1.2,
-                tonemapping_gamma: 2.2,
-                bloom_enabled: true,
-                bloom_intensity: 0.1,
+                hdr_system: None,
+
                 diagnostics: DiagnosticsState::default(),
                 frame_profiler: FrameProfiler::new(),
                 gpu_profiler: None,
@@ -738,12 +727,14 @@ impl Renderer {
                 skybox_index,
                 gbuffer_indices: GBufferIndices::default(),
                 hdr_image_index: None,
-                post_descriptor_pool: vk::DescriptorPool::null(), // To be updated
-                post_descriptor_sets: Vec::new(),
-                _post_sampler: post_sampler,
-                post_pipeline: None,
-                post_framebuffers: Vec::new(),
+
                 vram_budget,
+                post_process: crate::renderer::systems::post_process::PostProcessSystem::new(
+                    device_handle,
+                    swapchain_image_count,
+                    swapchain_extent,
+                    swapchain_format,
+                )?,
                 texture_compression: renderer_config.texture_compression,
                 instancing_manager,
                 instance_buffers: instance_buffers,
@@ -982,120 +973,10 @@ impl Renderer {
 
 
 
-
-
     fn worker_index_for_frame(&self, frame_index: usize) -> usize {
         compute_worker_index(self.queue.cmds.worker_count(), frame_index)
     }
 
-    fn render_post_processing(
-        &self,
-        command_buffer: vk::CommandBuffer,
-        image_index: usize,
-    ) -> Result<()> {
-        if self.fullscreen_pass.is_none()
-            || self.post_pipeline.is_none()
-            || self.post_framebuffers.is_empty()
-            || self.post_descriptor_sets.is_empty()
-        {
-            return Ok(());
-        }
-
-        let pass = self.fullscreen_pass.as_ref().ok_or_else(|| {
-            AshError::RenderPassMissing("Fullscreen post-process pass".to_string())
-        })?;
-        let pipeline = self
-            .post_pipeline
-            .as_ref()
-            .ok_or_else(|| AshError::PipelineMissing("Post-process pipeline".to_string()))?;
-        let framebuffer = &self.post_framebuffers[image_index];
-        let descriptor_set = self.post_descriptor_sets[image_index];
-        let extent = self
-            .swapchain
-            .as_ref()
-            .ok_or_else(|| AshError::SwapchainMissing("Required for post-processing".to_string()))?
-            .extent;
-
-        let clear_values = [vk::ClearValue {
-            color: vk::ClearColorValue {
-                float32: [0.0, 0.0, 0.0, 1.0], // Black clear color
-            },
-        }];
-
-        let render_pass_info = vk::RenderPassBeginInfo::default()
-            .render_pass(pass.render_pass())
-            .framebuffer(framebuffer.handle())
-            .render_area(vk::Rect2D {
-                offset: vk::Offset2D { x: 0, y: 0 },
-                extent,
-            })
-            .clear_values(&clear_values);
-
-        unsafe {
-            self.device.device.cmd_begin_render_pass(
-                command_buffer,
-                &render_pass_info,
-                vk::SubpassContents::INLINE,
-            );
-
-            self.device.device.cmd_bind_pipeline(
-                command_buffer,
-                vk::PipelineBindPoint::GRAPHICS,
-                pipeline.pipeline,
-            );
-
-            self.device.device.cmd_bind_descriptor_sets(
-                command_buffer,
-                vk::PipelineBindPoint::GRAPHICS,
-                pass.pipeline_layout(),
-                0,
-                &[descriptor_set],
-                &[],
-            );
-
-            let push_constants = fullscreen_pass::PostProcessPushConstants {
-                exposure: self.tonemapping_exposure,
-                gamma: self.tonemapping_gamma,
-                bloom_intensity: if self.bloom_enabled {
-                    self.bloom_intensity
-                } else {
-                    0.0
-                },
-                tonemapping_enabled: if self.tonemapping_enabled { 1.0 } else { 0.0 },
-            };
-
-            self.device.device.cmd_push_constants(
-                command_buffer,
-                pass.pipeline_layout(),
-                vk::ShaderStageFlags::FRAGMENT,
-                0,
-                bytemuck::bytes_of(&push_constants),
-            );
-
-            // Set viewport and scissor for dynamic state
-            let viewport = vk::Viewport {
-                x: 0.0,
-                y: 0.0,
-                width: extent.width as f32,
-                height: extent.height as f32,
-                min_depth: 0.0,
-                max_depth: 1.0,
-            };
-            let scissor = vk::Rect2D {
-                offset: vk::Offset2D { x: 0, y: 0 },
-                extent,
-            };
-            self.device.device.cmd_set_viewport(command_buffer, 0, &[viewport]);
-            self.device.device.cmd_set_scissor(command_buffer, 0, &[scissor]);
-
-            // Draw 3 vertices for a single fullscreen triangle
-            self.device.device.cmd_draw(command_buffer, 3, 1, 0, 0);
-
-            self.device.device.cmd_end_render_pass(command_buffer);
-        }
-
-        Ok(())
-    }
 
 
 
@@ -1941,211 +1822,17 @@ impl Renderer {
         self.queue.request_resize(new_extent);
     }
 
-    fn resize_if_needed(&mut self) -> Result<()> {
-        if !self.queue.resize_pending {
-            return Ok(());
-        }
+    // Simplified/Removed resize_if_needed and flush_old_swapchains as they are now handled by RenderQueue and SwapchainManager
 
-        if let Some(extent) = self.queue.pending_extent {
-            if extent.width == 0 || extent.height == 0 {
-                // Window minimized; await valid swapchain extent.
-                return Ok(());
-            }
-        }
 
-        log::info!("Recreating swapchain and dependent resources");
-
-        self.queue.wait_for_inflight_frames()?;
-
-        self.recreate_swapchain_resources()?;
-
-        self.queue.resize_pending = false;
-        if let Some(swapchain) = self.swapchain.as_ref() {
-            self.queue.pending_extent = Some(swapchain.extent);
-        }
-
-        Ok(())
-    }
-
-    // Moved to RenderQueue::wait_for_inflight_frames
-
-    fn defer_old_swapchain(&mut self, handle: vk::SwapchainKHR) {
-        self.queue.defer_old_swapchain(handle);
-    }
-
-    fn flush_old_swapchains(&mut self) {
-        if let Some(ref swapchain) = self.swapchain {
-            self.queue.flush_old_swapchains(swapchain);
-        } else {
-            self.queue.old_swapchain_handles.clear();
-            self.queue.swapchain_cleanup_pending = false;
-        }
-    }
-
-    fn recreate_swapchain_resources(&mut self) -> Result<()> {
-        log::info!("Starting swapchain recreation...");
-        
-        // CRITICAL SYNC: Wait for GPU to finish all work before destroying resources.
-        // Without this, recreation during window resize triggers 0xc000041d / DEVICE_LOST.
-        unsafe {
-            self.device.device.device_wait_idle().map_err(|e| {
-                AshError::VulkanError(format!("Failed to wait for device idle during resize: {e:?}"))
-            })?;
-        }
-
-        // Paranoid Validation for enterprise reliability.
-        // We cannot proceed with swapchain recreation if surfaces are zero-dimensioned.
-        if let Some(extent) = self.queue.pending_extent {
-            if extent.width == 0 || extent.height == 0 {
-                return Err(AshError::VulkanError(
-                    "Cannot recreate swapchain with zero dimensions".into(),
-                ));
-            }
-        }
-
-        let old_swapchain = unsafe {
-            if let Some(ref mut swapchain) = self.swapchain {
-                Some(swapchain.recreate(&self.device)?)
-            } else {
-                let extent = self.queue.pending_extent.unwrap_or(vk::Extent2D {
-                    width: 1280,
-                    height: 720,
-                });
-                self.swapchain = Some(vulkan::SwapchainWrapper::new(
-                    &self.device,
-                    self.device.headless,
-                    extent,
-                )?);
-                None
-            }
-        };
-
-        if let Some(handle) = old_swapchain {
-            self.defer_old_swapchain(handle);
-        }
-
-        let (swapchain_extent, swapchain_format, image_views, image_count) = {
-            let swapchain = self.swapchain.as_ref().ok_or_else(|| {
-                AshError::VulkanError("Swapchain unavailable after recreation".into())
-            })?;
-            (
-                swapchain.extent,
-                swapchain.format,
-                swapchain.image_views.clone(),
-                swapchain.images.len(),
-            )
-        };
-
-        // Cleanup resources in dependency order (dependents first).
-        // 1. Destroy pipeline.
-        self.cleanup_pipeline();
-        // 2. Destroy framebuffers.
-        self.cleanup_framebuffers();
-        // 3. Destroy render pass.
-        self.cleanup_render_pass();
-        // 4. Update image views.
-        self.update_image_views(&image_views)?;
-        
-        // 5. Recreate offscreen buffers (used as attachments in main pass)
-        self.recreate_depth_buffer(swapchain_extent)?;
-        self.recreate_gbuffer(swapchain_extent)?;
-        
-        if self.fullscreen_pass.is_some() {
-            self.initialize_hdr(swapchain_extent.width, swapchain_extent.height)?;
-        }
-        
-        self.recreate_vsr_pass(swapchain_extent)?;
-
-        // 6. Create new render pass and framebuffers (uses the new offscreen views)
-        self.create_render_pass_and_framebuffers(swapchain_extent, swapchain_format, &image_views)?;
-
-        self.recreate_frame_syncs(image_count)?;
-        self.recreate_command_buffers()?;
-        self.recreate_uniform_buffers(image_count)?;
-        
-        // CRITICAL FIX: Update Forward+ tile calculations for new screen size
-        // Without this, tile buffer remains at old size -> crash or black screen
-        if let Some(ref mut forward_plus) = self.forward_plus {
-            forward_plus.on_resize(swapchain_extent.width, swapchain_extent.height);
-            log::info!("Forward+ resized for {}x{}", swapchain_extent.width, swapchain_extent.height);
-            
-            // Sync tiling metadata to SceneLighting for shader access via BDA
-            let fp_info = forward_plus.get_lights().get_forward_plus_info();
-            self.scene_lighting.num_tiles_x = fp_info.num_tiles[0];
-            self.scene_lighting.num_tiles_y = fp_info.num_tiles[1];
-            self.scene_lighting.tile_size = fp_info.tile_size;
-        }
-        
-        self.recreate_descriptor_sets()?;
-        // 7. Recreate pipeline.
-        self.recreate_pipeline()?;
-        self.recreate_skybox_pipeline()?;
-
-        // 8. Recreate post-processing resources (Descriptors + Pipeline)
-        // HDR buffer already recreated in step 5.
-        if self.fullscreen_pass.is_some() {
-            self.create_post_descriptors()?;
-            self.recreate_post_pipeline()?;
-        }
-
-        log::info!("Swapchain recreation complete ({image_count} images)");
-        Ok(())
-    }
-
-    fn cleanup_framebuffers(&mut self) {
-        // Main pass framebuffers
-        for (framebuffer, id) in self
-            .framebuffers
-            .drain(..)
-            .zip(self.framebuffer_ids.drain(..))
-        {
-            drop(framebuffer);
-            if let Err(e) = self.resources.cleanup_resource(id) {
-                log::warn!("Failed to cleanup framebuffer {id}: {e}");
-            }
-        }
-
-        // --- Post-Processing Framebuffers (CRITICAL FIX: Prevent Resource Leak) ---
-        // These are vulkan::Framebuffer objects that need to be dropped to destroy their handles.
-        for framebuffer in self.post_framebuffers.drain(..) {
-            drop(framebuffer);
-        }
-    }
-
-    fn cleanup_render_pass(&mut self) {
-        if let Some(render_pass_id) = self.render_pass_id.take() {
-            if let Err(e) = self.resources.cleanup_resource(render_pass_id) {
-                log::warn!("Failed to cleanup render pass: {e}");
-            }
-        }
-        self.render_pass = None;
-
-        // Cleanup HDR render pass
-        if let Some(hdr_render_pass_id) = self.hdr_render_pass_id.take() {
-            if let Err(e) = self.resources.cleanup_resource(hdr_render_pass_id) {
-                log::warn!("Failed to cleanup HDR render pass: {e}");
-            }
-        }
-        self.hdr_render_pass = None;
-    }
-
-    fn cleanup_pipeline(&mut self) {
-        if let Some(pipeline_id) = self.pipeline_id.take() {
-            if let Err(e) = self.resources.cleanup_resource(pipeline_id) {
-                log::warn!("Failed to cleanup pipeline: {e}");
-            }
-        }
-        self.pipeline = None;
-    }
-
-    fn recreate_pipeline(&mut self) -> Result<()> {
+    pub(crate) fn recreate_pipeline(&mut self) -> Result<()> {
         log::info!("Recompiling pipeline due to shader change...");
         let layout = self
             .pipeline_layout
             .as_ref()
             .ok_or_else(|| AshError::VulkanError("Pipeline layout missing".to_string()))?
             .handle();
-        let render_pass = if self.hdr_framebuffer.is_some() {
+        let render_pass = if self.hdr_system.is_some() {
              self.hdr_render_pass
                 .as_ref()
                 .ok_or_else(|| AshError::VulkanError("HDR Render pass missing".to_string()))?
@@ -2261,7 +1948,7 @@ impl Renderer {
         Ok(())
     }
 
-    fn recreate_skybox_pipeline(&mut self) -> Result<()> {
+    pub(crate) fn recreate_skybox_pipeline(&mut self) -> Result<()> {
         if self.skybox_pass.is_none() {
             log::info!("Skybox pass not initialized; skipping pipeline status check.");
             return Ok(());
@@ -2278,7 +1965,7 @@ impl Renderer {
         Ok(())
     }
 
-    fn update_image_views(&mut self, image_views: &[vk::ImageView]) -> Result<()> {
+    pub(crate) fn update_image_views(&mut self, image_views: &[vk::ImageView]) -> Result<()> {
         if self.device.headless && !self.swapchain_image_view_ids.is_empty() {
              // In headless mode, we reuse the same image views. 
              // Cleaning them up would destroy the underlying Vulkan handles.
@@ -2306,7 +1993,7 @@ impl Renderer {
         Ok(())
     }
 
-    fn recreate_depth_buffer(&mut self, extent: vk::Extent2D) -> Result<()> {
+    pub(crate) fn recreate_depth_buffer(&mut self, extent: vk::Extent2D) -> Result<()> {
         if let Some(id) = self.depth_buffer_id.take() {
             if let Err(e) = self.resources.cleanup_resource(id) {
                 log::warn!("Failed to cleanup old depth buffer: {e}");
@@ -2352,7 +2039,7 @@ impl Renderer {
         Ok(())
     }
 
-    fn recreate_gbuffer(&mut self, extent: vk::Extent2D) -> Result<()> {
+    pub(crate) fn recreate_gbuffer(&mut self, extent: vk::Extent2D) -> Result<()> {
         let gbuffer = unsafe {
             GBuffer::new(
                 Arc::clone(&self.device.device),
@@ -2381,7 +2068,7 @@ impl Renderer {
     }
 
 
-    fn recreate_vsr_pass(&mut self, display_extent: vk::Extent2D) -> Result<()> {
+    pub(crate) fn recreate_vsr_pass(&mut self, extent: vk::Extent2D) -> Result<()> {
         if let Some(ref mut vsr) = self.vsr_pass {
             unsafe {
                 vsr.destroy(&self.alloc.vma);
@@ -2389,8 +2076,8 @@ impl Renderer {
                     &self.alloc.vma,
                     &self.device,
                     &mut self.assets.bindless_manager,
-                    display_extent.width,
-                    display_extent.height,
+                    extent.width,
+                    extent.height,
                     self.vsr_config.quality,
                 )
                 .map_err(|e| AshError::VulkanError(format!("VSR init failed: {e}")))?;
@@ -2399,7 +2086,7 @@ impl Renderer {
         Ok(())
     }
 
-    fn create_render_pass_and_framebuffers(
+    pub(crate) fn create_render_pass_and_framebuffers(
         &mut self,
         extent: vk::Extent2D,
         color_format: vk::Format,
@@ -2413,12 +2100,12 @@ impl Renderer {
 
         let mut builder = vulkan::RenderPass::builder(Arc::clone(&self.device.device));
 
-        let render_to_hdr = self.hdr_framebuffer.is_some();
+        let render_to_hdr = self.hdr_system.is_some();
         if render_to_hdr {
             let hdr = self
-                .hdr_framebuffer
+                .hdr_system
                 .as_ref()
-                .ok_or_else(|| AshError::VulkanError("HDR framebuffer missing".to_string()))?;
+                .ok_or_else(|| AshError::VulkanError("HDR system missing".to_string()))?;
             builder = builder
                 .with_color_attachment(hdr.format(), vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL);
         } else {
@@ -2509,9 +2196,9 @@ impl Renderer {
             // If rendering to HDR, we use a single HDR view for all framebuffers.
             // Otherwise we use the per-swapchain view.
             let color_view = if render_to_hdr {
-                self.hdr_framebuffer
+                self.hdr_system
                     .as_ref()
-                    .ok_or_else(|| AshError::VulkanError("HDR framebuffer missing".to_string()))?
+                    .ok_or_else(|| AshError::VulkanError("HDR system missing".to_string()))?
                     .view()
             } else {
                 view
@@ -2574,25 +2261,13 @@ impl Renderer {
         self.framebuffers = framebuffers;
         self.framebuffer_ids = framebuffer_ids;
 
-        // --- Post-Processing Framebuffers ---
-        if let Some(ref pass) = self.fullscreen_pass {
-            let mut post_framebuffers = Vec::with_capacity(image_views.len());
-            for &view in image_views {
-                let framebuffer = vulkan::Framebuffer::new(
-                    Arc::clone(&self.device.device),
-                    pass.render_pass(),
-                    &[view],
-                    extent,
-                )?;
-                post_framebuffers.push(framebuffer);
-            }
-            self.post_framebuffers = post_framebuffers;
-        }
+        // --- Post-Processing System Resize ---
+        self.post_process.resize(image_views, extent)?;
 
         Ok(())
     }
 
-    fn recreate_frame_syncs(&mut self, count: usize) -> Result<()> {
+    pub(crate) fn recreate_frame_syncs(&mut self, count: usize) -> Result<()> {
         for (image_available_id, render_finished_id, fence_id) in self.frame_sync_ids.drain(..) {
             if let Err(e) = self.resources.cleanup_resource(image_available_id) {
                 log::warn!("Failed to cleanup image-available semaphore: {e}");
@@ -2644,7 +2319,7 @@ impl Renderer {
         Ok(())
     }
 
-    fn recreate_command_buffers(&mut self) -> Result<()> {
+    pub(crate) fn recreate_command_buffers(&mut self) -> Result<()> {
         self.queue.cmds
             .reset_primary_pool(vk::CommandPoolResetFlags::RELEASE_RESOURCES)?;
 
@@ -2656,7 +2331,7 @@ impl Renderer {
         Ok(())
     }
 
-    fn recreate_uniform_buffers(&mut self, count: usize) -> Result<()> {
+    pub(crate) fn recreate_uniform_buffers(&mut self, count: usize) -> Result<()> {
         for ub in &mut self.uniform_buffers {
             let _ = ub.cleanup();
         }
@@ -2683,7 +2358,7 @@ impl Renderer {
         Ok(())
     }
 
-    fn recreate_descriptor_sets(&mut self) -> Result<()> {
+    pub(crate) fn recreate_descriptor_sets(&mut self) -> Result<()> {
         unsafe {
             self.device.device.device_wait_idle().map_err(|e| {
                 AshError::VulkanError(format!("Failed to wait for device idle: {e:?}"))
@@ -3030,7 +2705,12 @@ impl Renderer {
         model_matrix: Option<Mat4>,
     ) -> Result<()> {
         self.transform_system.update();
-        self.flush_old_swapchains();
+        
+        // Task 3: Simplified resize handling
+        if self.queue.is_resize_pending() {
+            crate::renderer::swapchain_manager::recreate_swapchain_resources(self)?;
+        }
+        self.queue.flush_old_swapchains(&self.device);
 
         // Phase 19: Reset Transform Arena for the new frame
         self.transform_arena_offset = 0;
@@ -3068,7 +2748,7 @@ impl Renderer {
         };
 
         if shaders_changed {
-            if let Err(e) = self.recreate_pipeline() {
+            if let Err(e) = crate::renderer::swapchain_manager::recreate_swapchain_resources(self) {
                 log::error!("Failed to recreate pipeline: {e}");
             }
         }
@@ -3080,14 +2760,7 @@ impl Renderer {
             self.queue.current_frame
         );
 
-        self.resize_if_needed()?;
-        if self.queue.resize_pending {
-            log::debug!(
-                "Frame {}: Resize pending, skipping render",
-                self.queue.current_frame
-            );
-            return Ok(());
-        }
+        // Task 3: Simplified resize handling logic moved to start of frame
 
         unsafe {
             let swapchain_extent = self
@@ -3100,7 +2773,7 @@ impl Renderer {
                 .as_ref()
                 .map(|p| p.pipeline)
                 .ok_or(AshError::VulkanError("Pipeline not available".to_string()))?;
-            let main_render_pass = if self.hdr_framebuffer.is_some() {
+            let main_render_pass = if self.hdr_system.is_some() {
                 self.hdr_render_pass
                 .as_ref()
                 .map(|p| p.handle())
@@ -3440,7 +3113,7 @@ impl Renderer {
                 }
             }
 
-            let clear_values = if self.hdr_framebuffer.is_some() {
+            let clear_values = if self.hdr_system.is_some() {
                 vec![
                     vk::ClearValue {
                         color: vk::ClearColorValue {
@@ -3646,7 +3319,25 @@ impl Renderer {
 
             // Update post-processing descriptors after VSR completes
             // This ensures we bind the current frame's output, not the previous frame's
-            self.update_post_descriptors()?;
+            if let Some(hdr) = self.hdr_system.as_ref() {
+                let input_view = if let Some(vsr) = self.vsr_pass.as_ref() {
+                     vsr.active_view()
+                } else {
+                     hdr.view()
+                };
+                
+                let bloom_view = self._black_texture.view();
+                let ssgi_view = self._black_texture.view(); // Placeholder
+                let sampler = hdr.sampler();
+                
+                self.post_process.update_descriptor_set(
+                    image_index as usize,
+                    input_view,
+                    bloom_view,
+                    ssgi_view,
+                    sampler
+                );
+            }
 
             // --- Post-Processing (Tonemapping & Resolve) ---
             // NOTE: HDR buffer is already in SHADER_READ_ONLY_OPTIMAL layout
@@ -3654,7 +3345,7 @@ impl Renderer {
 
             // Resolve HDR target to swapchain (always needed even if tonemapping is disabled)
             log::debug!("DEBUG: About to call render_post_processing");
-            self.render_post_processing(command_buffer, image_index as usize)?;
+            self.post_process.render(command_buffer, image_index as usize, swapchain_extent)?;
             log::debug!("DEBUG: render_post_processing completed successfully");
 
             cmd_ctx.end()?;
@@ -3694,12 +3385,9 @@ impl Renderer {
                     self.queue.current_frame
                 );
                 self.request_swapchain_resize(swapchain_extent);
-                return Ok(());
             }
 
-            if self.queue.swapchain_cleanup_pending {
-                self.flush_old_swapchains();
-            }
+            self.queue.flush_old_swapchains(&self.device);
 
             self.queue.advance_frame();
 
@@ -3722,49 +3410,57 @@ impl Renderer {
 
     /// Enables or disables tonemapping
 
+    /// Set the post-processing configuration
+    pub fn set_post_processing_config(
+        &mut self,
+        config: crate::renderer::systems::post_process::PostProcessConfig,
+    ) {
+        self.post_process.config = config;
+    }
+
     /// Returns whether tonemapping is enabled
     pub fn tonemapping_enabled(&self) -> bool {
-        self.tonemapping_enabled
+        self.post_process.config.tonemapping_enabled
     }
 
     /// Sets the tonemapping exposure value
     pub fn set_tonemapping_exposure(&mut self, exposure: f32) {
-        self.tonemapping_exposure = exposure.max(0.0);
+        self.post_process.config.exposure = exposure.max(0.0);
     }
 
     /// Returns the tonemapping exposure value
     pub fn tonemapping_exposure(&self) -> f32 {
-        self.tonemapping_exposure
+        self.post_process.config.exposure
     }
 
     /// Sets the tonemapping gamma value
     pub fn set_tonemapping_gamma(&mut self, gamma: f32) {
-        self.tonemapping_gamma = gamma.max(0.1);
+        self.post_process.config.gamma = gamma.max(0.1);
     }
 
     /// Returns the tonemapping gamma value
     pub fn tonemapping_gamma(&self) -> f32 {
-        self.tonemapping_gamma
+        self.post_process.config.gamma
     }
 
     /// Enables or disables bloom
     pub fn set_bloom_enabled(&mut self, enabled: bool) {
-        self.bloom_enabled = enabled;
+        self.post_process.config.bloom_enabled = enabled;
     }
 
     /// Returns whether bloom is enabled
     pub fn bloom_enabled(&self) -> bool {
-        self.bloom_enabled
+        self.post_process.config.bloom_enabled
     }
 
     /// Sets the bloom intensity
     pub fn set_bloom_intensity(&mut self, intensity: f32) {
-        self.bloom_intensity = intensity.clamp(0.0, 2.0);
+        self.post_process.config.bloom_intensity = intensity.clamp(0.0, 2.0);
     }
 
     /// Returns the bloom intensity
     pub fn bloom_intensity(&self) -> f32 {
-        self.bloom_intensity
+        self.post_process.config.bloom_intensity
     }
 
     // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -3975,9 +3671,13 @@ impl Renderer {
 
     /// Enables HDR rendering. Should be called after initialization.
     /// Allocates GPU memory for the HDR buffer.
-    pub fn initialize_hdr(&mut self, width: u32, height: u32) -> Result<()> {
+    pub(crate) fn initialize_hdr(&mut self, width: u32, height: u32) -> Result<()> {
+        // 1. Explicitly drop the old system to free VRAM immediately
+        // This prevents holding 2x HDR buffers (Old + New) simultaneously
+        self.hdr_system = None;
+
         unsafe {
-            let hdr = hdr_framebuffer::HdrFramebuffer::new(
+            let hdr = HdrSystem::new(
                 Arc::clone(&self.device.device),
                 Arc::clone(&self.alloc),
                 width,
@@ -3991,43 +3691,19 @@ impl Renderer {
                 self.assets.bindless_manager.update_sampled_image(
                     index,
                     hdr.view(),
-                    self._post_sampler,
+                    hdr.sampler(),
                 )?;
             } else {
                 // First-time registration
                 let index = self.assets.bindless_manager.add_sampled_image(
                     hdr.view(),
-                    self._post_sampler,
+                    hdr.sampler(),
                 )?;
                 self.hdr_image_index = Some(index);
             }
 
-            self.hdr_framebuffer = Some(hdr);
-            log::info!("HDR framebuffer initialized ({width}x{height}) - Bindless Index: {:?}", self.hdr_image_index);
-        }
-
-        Ok(())
-    }
-
-    /// Enables fullscreen effects. Should be called after initialization.
-    pub fn initialize_fullscreen_pass(&mut self) -> Result<()> {
-        let format = self
-            .swapchain
-            .as_ref()
-            .ok_or(AshError::VulkanError("Swapchain not available".to_string()))?
-            .format;
-
-        let final_layout = if self.device.headless {
-            vk::ImageLayout::TRANSFER_SRC_OPTIMAL
-        } else {
-            vk::ImageLayout::PRESENT_SRC_KHR
-        };
-
-        unsafe {
-            let pass =
-                fullscreen_pass::FullscreenPass::new(Arc::clone(&self.device.device), format, final_layout)?;
-            self.fullscreen_pass = Some(pass);
-            log::info!("Fullscreen pass initialized (final_layout: {:?})", final_layout);
+            self.hdr_system = Some(hdr);
+            log::info!("HDR System initialized ({width}x{height}) - Bindless Index: {:?}", self.hdr_image_index);
         }
 
         Ok(())
@@ -4044,195 +3720,28 @@ impl Renderer {
             .extent;
 
         self.initialize_hdr(extent.width, extent.height)?;
-        self.initialize_fullscreen_pass()?;
-        self.create_post_descriptors()?;
-        self.recreate_post_pipeline()?;
+        
+        // PostProcessSystem initializes its own FullscreenPass in new()
+        // and descriptors are handled by resize() and update_descriptor_sets().
+        // So we don't need manual initialization here.
 
-        self.tonemapping_enabled = true;
+        self.post_process.config.tonemapping_enabled = true;
         
         // CRITICAL: Recreate main pipeline and framebuffers to use the NEW HDR render pass format
-        self.recreate_swapchain_resources()?;
+        crate::renderer::swapchain_manager::recreate_swapchain_resources(self)?;
         
         log::info!("Post-processing pipeline enabled (HDR + Tonemapping)");
         Ok(())
     }
 
-    fn create_post_descriptors(&mut self) -> Result<()> {
-        if self.fullscreen_pass.is_none() {
-            return Ok(());
-        }
 
-        let device = &self.device.device;
-        let count = self.framebuffers.len() as u32;
-
-        // Cleanup old pool if exists
-        if self.post_descriptor_pool != vk::DescriptorPool::null() {
-            unsafe {
-                self.device.device.destroy_descriptor_pool(self.post_descriptor_pool, None);
-            }
-        }
-        let pool_sizes = [vk::DescriptorPoolSize {
-            ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-            descriptor_count: count * 3, // Sampler, HDR input, Bloom input (3 bindings total)
-        }];
-
-        let pool_info = vk::DescriptorPoolCreateInfo::default()
-            .max_sets(count)
-            .pool_sizes(&pool_sizes);
-
-        self.post_descriptor_pool = unsafe {
-            device
-                .create_descriptor_pool(&pool_info, None)
-                .map_err(|e| {
-                    AshError::VulkanError(format!("Failed to create post descriptor pool: {e}"))
-                })?
-        };
-
-        let layouts = vec![
-            self.fullscreen_pass
-                .as_ref()
-                .ok_or_else(|| AshError::RenderPassMissing("Fullscreen pass missing".to_string()))?
-                .descriptor_set_layout();
-            count as usize
-        ];
-        let alloc_info = vk::DescriptorSetAllocateInfo::default()
-            .descriptor_pool(self.post_descriptor_pool)
-            .set_layouts(&layouts);
-
-        self.post_descriptor_sets = unsafe {
-            device.allocate_descriptor_sets(&alloc_info).map_err(|e| {
-                AshError::VulkanError(format!("Failed to allocate post descriptor sets: {e}"))
-            })?
-        };
-
-        self.update_post_descriptors()?;
-
-        Ok(())
-    }
-
-    fn update_post_descriptors(&mut self) -> Result<()> {
-        if self.post_descriptor_sets.is_empty() {
-            return Ok(());
-        }
-
-        let hdr = self.hdr_framebuffer.as_ref();
-        let vsr = self.vsr_pass.as_ref();
-
-        let color_view = if let Some(vsr) = vsr {
-            vsr.active_view()
-        } else if let Some(hdr) = hdr {
-            hdr.view()
-        } else {
-            return Ok(());
-        };
-
-        let sampler = if let Some(hdr) = hdr {
-            hdr.sampler()
-        } else {
-            self._post_sampler
-        };
-
-        let layout = if vsr.is_some() {
-            vk::ImageLayout::GENERAL
-        } else {
-            vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL
-        };
-
-        
-        // --- CRITICAL FIX: Bloom Placeholder ---
-        // Binding the color view directly to bloom causes over-brightness because the tonemapping 
-        // shader adds 'bloom' to the original color. Until a real bloom pass is implemented, 
-        // we should bind a target that is logically black.
-        let bloom_view = self._black_texture.view(); 
-        
-        log::debug!("Updating post-processing descriptors (HDR: {}, Bloom: {})", 
-            hdr.is_some(), self.bloom_enabled);
-
-        for descriptor_set in &self.post_descriptor_sets {
-            let color_info = vk::DescriptorImageInfo {
-                sampler,
-                image_view: color_view,
-                image_layout: layout,
-            };
-
-            let bloom_info = vk::DescriptorImageInfo {
-                sampler,
-                image_view: bloom_view,
-                image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-            };
-
-
-            let color_infos = [color_info];
-            let bloom_infos = [bloom_info];
-
-            let descriptor_writes = [
-                vk::WriteDescriptorSet::default()
-                    .dst_set(*descriptor_set)
-                    .dst_binding(0)
-                    .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-                    .image_info(&color_infos),
-                vk::WriteDescriptorSet::default()
-                    .dst_set(*descriptor_set)
-                    .dst_binding(1)
-                    .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-                    .image_info(&bloom_infos),
-            ];
-
-            unsafe {
-                self.device
-                    .device
-                    .update_descriptor_sets(&descriptor_writes, &[]);
-            }
-        }
-
-        Ok(())
-    }
-
-    fn recreate_post_pipeline(&mut self) -> Result<()> {
-        if let Some(ref pass) = self.fullscreen_pass {
-            let mut builder = vulkan::Pipeline::builder(Arc::clone(&self.device.device))
-                .with_layout(pass.pipeline_layout())
-                .with_render_pass(pass.render_pass())
-                .with_extent(
-                    self.swapchain
-                        .as_ref()
-                        .ok_or_else(|| {
-                            AshError::SwapchainMissing("Required for post-pipeline".to_string())
-                        })?
-                        .extent,
-                )
-                .with_cull_mode(vk::CullModeFlags::NONE);
-
-            builder = builder.add_shader_from_bytes(
-                include_bytes!(concat!(env!("OUT_DIR"), "/postprocess.vert.spv")),
-                vk::ShaderStageFlags::VERTEX,
-                "main",
-            )?;
-
-            builder = builder.add_shader_from_bytes(
-                include_bytes!(concat!(env!("OUT_DIR"), "/tonemapping.frag.spv")),
-                vk::ShaderStageFlags::FRAGMENT,
-                "main",
-            )?;
-
-            let pipeline = builder.build()?;
-            self.post_pipeline = Some(pipeline);
-            // Pipeline cleanup is handled by RAII in vulkan::Pipeline wrapper.
-        }
-        Ok(())
-    }
-
-    /// Checks if HDR and fullscreen pass are initialized.
-    pub fn post_processing_ready(&self) -> bool {
-        self.hdr_framebuffer.is_some() && self.fullscreen_pass.is_some()
-    }
 
     /// Returns post-processing settings as a tuple (exposure, gamma, bloom_intensity)
     pub fn post_processing_settings(&self) -> (f32, f32, f32) {
         (
-            self.tonemapping_exposure,
-            self.tonemapping_gamma,
-            self.bloom_intensity,
+            self.post_process.config.exposure,
+            self.post_process.config.gamma,
+            self.post_process.config.bloom_intensity,
         )
     }
 
@@ -4363,6 +3872,7 @@ impl Renderer {
         self.scene_lighting.ibl_prefilter_index = prefilter_idx as i32;
         self.scene_lighting.ibl_brdf_lut_index = brdf_idx as i32;
         self.scene_lighting.ibl_intensity = 1.0;
+        self.post_process.config.bloom_enabled = self.scene_lighting.ibl_intensity > 0.0; // Assuming 'intensity' refers to ibl_intensity
         log::info!("IBL indices updated via set_ibl_indices");
     }
 }
@@ -4384,21 +3894,16 @@ impl Drop for Renderer {
             // CRITICAL FIX: Explicitly drop post-processing resources before general resource cleanup.
             // This prevents access violations during shutdown if the window/surface is destroyed.
             // ORDER MATTERS: Pipeline depends on RenderPass (in FullscreenPass), so destroy Pipeline FIRST.
-            self.post_pipeline = None;
 
-            self.fullscreen_pass = None;
-            self.hdr_framebuffer = None;
-            
-            self.cleanup_framebuffers(); // Drains post_framebuffers
-            self.cleanup_render_pass();  // Drains hdr_render_pass
-            self.cleanup_pipeline();
+            swapchain_manager::cleanup_render_pass(self);  // Drains hdr_render_pass
+            swapchain_manager::cleanup_pipeline(self);
 
             // Cleanup VSM (Explicit)
             if let Some(mut shadow_system) = self.shadow_system.take() {
                 shadow_system.destroy();
             }
 
-            self.flush_old_swapchains();
+            self.queue.flush_old_swapchains(&self.device);
 
             if let Err(e) = self.resources.cleanup() {
                 log::error!("Resource registry cleanup failed: {e}");

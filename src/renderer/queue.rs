@@ -19,7 +19,6 @@ pub struct RenderQueue {
 
     // Phase 2: Swapchain Management
     pub old_swapchain_handles: Vec<vk::SwapchainKHR>,
-    pub swapchain_cleanup_pending: bool,
     pub resize_pending: bool,
     pub pending_extent: Option<vk::Extent2D>,
 }
@@ -52,7 +51,6 @@ impl RenderQueue {
             command_buffers,
             current_frame: 0,
             old_swapchain_handles: Vec::new(),
-            swapchain_cleanup_pending: false,
             resize_pending: false,
             pending_extent: None,
         })
@@ -128,19 +126,49 @@ impl RenderQueue {
 
     /// Requests a swapchain resize.
     pub fn request_resize(&mut self, extent: vk::Extent2D) {
-        self.pending_extent = Some(extent);
-        if !self.resize_pending {
-            log::info!(
-                "Swapchain resize requested: {}x{}",
-                extent.width,
-                extent.height
-            );
-            // Synchronize with device to prevent resource conflicts during resize.
-            unsafe {
-                let _ = self.device.device_wait_idle();
-            }
-        }
         self.resize_pending = true;
+        self.pending_extent = Some(extent);
+    }
+
+    pub fn is_resize_pending(&self) -> bool {
+        self.resize_pending
+    }
+
+    /// Recreates the swapchain using the pending extent.
+    pub fn recreate_swapchain(
+        &mut self,
+        swapchain: &mut Swapchain,
+        device: &crate::vulkan::VulkanDevice,
+    ) -> Result<()> {
+        let extent = match self.pending_extent {
+            Some(e) if e.width > 0 && e.height > 0 => e,
+            _ => return Ok(()),
+        };
+
+        log::info!(
+            "Recreating swapchain at RenderQueue level: {}x{}",
+            extent.width,
+            extent.height
+        );
+
+        // Safety: ensure all GPU work is done.
+        unsafe {
+            device.device.device_wait_idle().map_err(|e| {
+                crate::AshError::VulkanError(format!("Failed to wait for device idle: {e:?}"))
+            })?;
+        }
+
+        // Recreate the swapchain. SwapchainWrapper::recreate returns the OLD handle.
+        let old_handle = unsafe { swapchain.recreate(device)? };
+
+        if old_handle != vk::SwapchainKHR::null() {
+            self.old_swapchain_handles.push(old_handle);
+        }
+
+        self.resize_pending = false;
+        self.pending_extent = None;
+
+        Ok(())
     }
 
     /// Waits for all in-flight frames to finish.
@@ -157,23 +185,21 @@ impl RenderQueue {
             return;
         }
         self.old_swapchain_handles.push(handle);
-        self.swapchain_cleanup_pending = true;
     }
 
     /// Destroys all deferred old swapchains.
-    pub fn flush_old_swapchains(&mut self, swapchain_wrapper: &Swapchain) {
+    pub fn flush_old_swapchains(&mut self, device: &crate::vulkan::VulkanDevice) {
         if self.old_swapchain_handles.is_empty() {
-            self.swapchain_cleanup_pending = false;
             return;
         }
 
+        let loader = ash::khr::swapchain::Device::new(device.instance.instance(), &device.device);
+
         for handle in self.old_swapchain_handles.drain(..) {
             unsafe {
-                swapchain_wrapper.destroy_swapchain_handle(handle);
+                loader.destroy_swapchain(handle, None);
             }
         }
-
-        self.swapchain_cleanup_pending = false;
     }
 
     /// Submit command buffers to the graphics queue

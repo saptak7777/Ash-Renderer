@@ -5,6 +5,7 @@
 use ash::vk;
 use std::sync::Arc;
 
+use crate::vulkan;
 use crate::{AshError, Result};
 
 /// Fullscreen pass for post-processing effects
@@ -146,6 +147,33 @@ impl FullscreenPass {
     /// Returns the descriptor set layout
     pub fn descriptor_set_layout(&self) -> vk::DescriptorSetLayout {
         self.descriptor_set_layout
+    }
+
+    pub fn create_pipeline(
+        &self,
+        device: &Arc<ash::Device>,
+        extent: vk::Extent2D,
+        entry_point: &str,
+    ) -> Result<vulkan::Pipeline> {
+        let mut builder = vulkan::Pipeline::builder(Arc::clone(device))
+            .with_layout(self.pipeline_layout)
+            .with_render_pass(self.render_pass)
+            .with_extent(extent)
+            .with_cull_mode(vk::CullModeFlags::NONE);
+
+        builder = builder.add_shader_from_bytes(
+            include_bytes!(concat!(env!("OUT_DIR"), "/postprocess.vert.spv")),
+            vk::ShaderStageFlags::VERTEX,
+            entry_point,
+        )?;
+
+        builder = builder.add_shader_from_bytes(
+            include_bytes!(concat!(env!("OUT_DIR"), "/tonemapping.frag.spv")),
+            vk::ShaderStageFlags::FRAGMENT,
+            entry_point,
+        )?;
+
+        builder.build()
     }
 }
 

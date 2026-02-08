@@ -82,13 +82,30 @@ impl ApplicationHandler for App {
                 // Keep buffer alive
                 *self.tint_buffer = Some(tint_buffer);
 
-                // Setup initial lighting (Void state)
+                // CRITICAL: Must call enable_post_processing() to initialize HDR/Tonemapping pipelines!
+                if let Err(e) = renderer.enable_post_processing() {
+                    log::warn!("Post-processing failed: {e}");
+                }
+
+                // Set reasonable defaults for PBR
+                renderer.set_post_processing_config(
+                    ash_renderer::renderer::systems::post_process::PostProcessConfig {
+                        exposure: 1.0,
+                        gamma: 2.2,
+                        bloom_enabled: true,
+                        bloom_intensity: 0.04,
+                        tonemapping_enabled: true,
+                        ..Default::default()
+                    },
+                );
+
+                // Setup clean lighting (Sun + Ambient)
                 let lighting = LightingBuilder::new()
                     .with_ambient_preset(AmbientPreset::OutdoorDay)
                     .with_directional(
                         Vec3::new(-0.5, -1.0, -0.5).normalize(),
-                        Vec3::splat(3.0),
-                        1.0,
+                        Vec3::new(1.0, 0.95, 0.8), // Warm sunlight
+                        5.0,                       // PBR intensity
                     )
                     .build();
                 renderer.set_lighting(&lighting);
@@ -256,17 +273,6 @@ impl ApplicationHandler for App {
                                 }
 
                                 self.loader_rx = None;
-
-                                // Setup final lighting (RAGE approach)
-                                let lighting = LightingBuilder::new()
-                                    .with_ambient_preset(AmbientPreset::OutdoorDay)
-                                    .with_directional(
-                                        Vec3::new(-0.5, -1.0, -0.5).normalize(),
-                                        Vec3::splat(3.0),
-                                        1.0,
-                                    )
-                                    .build();
-                                renderer.set_lighting(&lighting);
                                 window.set_title("ASH Renderer - Retro Muscle Car (Live)");
                                 log::info!(
                                     "✓ Car Model GPU Upload scheduled. Switching to rendering."
