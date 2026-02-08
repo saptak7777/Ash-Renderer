@@ -17,6 +17,7 @@ layout(location = 4) out vec4 fragPosLightSpace;
 layout(location = 5) out vec4 fragTangent;
 layout(location = 6) out vec2 motionVector;
 layout(location = 7) flat out uint fragInstanceIndex;
+layout(location = 8) flat out uint fragMaterialIndex;
 
 void main() {
     // Access Frame Data via BDA
@@ -29,6 +30,7 @@ void main() {
         model = mat4(1.0);
     }
     int vertex_offset = 0;
+    uint matIdx = push.material_index;
     
     // Modern BDA Instancing
     if (push.use_instancing == 1 && push.instance_ptr != 0) {
@@ -37,6 +39,7 @@ void main() {
         InstanceData instance = instance_ctx.instances[gl_InstanceIndex];
         model = instance.model;
         vertex_offset = instance.vertex_offset;
+        matIdx = instance.material_index;
     }
 
     // BDA Index Pulling: Fetch logical index from index heap
@@ -70,4 +73,5 @@ void main() {
     float w_prev = max(abs(prevClip.w), 1e-6);
     motionVector = (currentClip.xy / w_current - prevClip.xy / w_prev) * 0.5;
     fragInstanceIndex = gl_InstanceIndex;
+    fragMaterialIndex = matIdx;
 }

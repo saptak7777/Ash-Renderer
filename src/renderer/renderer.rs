@@ -2849,6 +2849,8 @@ impl Renderer {
                 // Single Source of Truth: environment map indices drive shader logic.
                 // Indices < 0 indicate no IBL/Environment map is bound.
 
+                // Sync light counts from scene to GPU-aligned lighting struct
+                scene.scene_lighting.point_light_count = scene.point_lights.len() as u32;
                 matrices.set_lighting(&scene.scene_lighting);
 
                 // Set light-space matrix for shadow mapping
@@ -3036,51 +3038,48 @@ impl Renderer {
 
             // --- Light Culling Compute Dispatch ---
             if let Some(ref mut fp_integration) = self.forward_plus {
-                // Ensure pipeline is initialized before dispatching
-                if fp_integration.is_enabled() {
-                    // Update light data from scene before uploading
-                    fp_integration.update_lights(&scene.point_lights, &scene.directional_lights, &scene.spot_lights);
+                // Update light data from scene before uploading
+                fp_integration.update_lights(&scene.point_lights, &scene.directional_lights, &scene.spot_lights);
 
-                    // Update GPU buffers and descriptors for the current frame
-                    fp_integration.upload_to_gpu(&self.alloc, &self.device.device, frame_index as usize)?;
+                // Update GPU buffers and descriptors for the current frame
+                fp_integration.upload_to_gpu(&self.alloc, &self.device.device, frame_index as usize)?;
 
-                    // Update camera buffer with current view/projection matrices
-                    // We use the NON-JITTERED projection for culling to match frustum
-                    fp_integration.update_camera(
-                        &self.alloc,
-                        frame_index as usize,
-                        &view.to_cols_array_2d(),
-                        &projection.to_cols_array_2d(),
-                        &camera_pos.extend(1.0).to_array(),
-                    )?;
+                // Update camera buffer with current view/projection matrices
+                // We use the NON-JITTERED projection for culling to match frustum
+                fp_integration.update_camera(
+                    &self.alloc,
+                    frame_index as usize,
+                    &view.to_cols_array_2d(),
+                    &projection.to_cols_array_2d(),
+                    &camera_pos.extend(1.0).to_array(),
+                )?;
 
-                    // Dispatch the compute shader
-                    fp_integration.dispatch(
-                        command_buffer,
-                        &self.device.device,
-                        frame_index as usize
-                    );
+                // Dispatch the compute shader
+                fp_integration.dispatch(
+                    command_buffer,
+                    &self.device.device,
+                    frame_index as usize
+                );
 
-                    // Barrier: Ensure light buffers are ready for the fragment shader
-                    let light_barrier = vk::BufferMemoryBarrier::default()
-                        .buffer(fp_integration.lights().get_light_buffer(frame_index as usize).unwrap_or(vk::Buffer::null()))
-                        .src_access_mask(vk::AccessFlags::SHADER_WRITE)
-                        .dst_access_mask(vk::AccessFlags::SHADER_READ)
-                        .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                        .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                        .offset(0)
-                        .size(vk::WHOLE_SIZE);
+                // Barrier: Ensure light buffers are ready for the fragment shader
+                let light_barrier = vk::BufferMemoryBarrier::default()
+                    .buffer(fp_integration.lights().get_light_buffer(frame_index as usize).unwrap_or(vk::Buffer::null()))
+                    .src_access_mask(vk::AccessFlags::SHADER_WRITE)
+                    .dst_access_mask(vk::AccessFlags::SHADER_READ)
+                    .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                    .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                    .offset(0)
+                    .size(vk::WHOLE_SIZE);
 
-                    self.device.device.cmd_pipeline_barrier(
-                        command_buffer,
-                        vk::PipelineStageFlags::COMPUTE_SHADER,
-                        vk::PipelineStageFlags::FRAGMENT_SHADER,
-                        vk::DependencyFlags::empty(),
-                        &[],
-                        &[light_barrier],
-                        &[],
-                    );
-                }
+                self.device.device.cmd_pipeline_barrier(
+                    command_buffer,
+                    vk::PipelineStageFlags::COMPUTE_SHADER,
+                    vk::PipelineStageFlags::FRAGMENT_SHADER,
+                    vk::DependencyFlags::empty(),
+                    &[],
+                    &[light_barrier],
+                    &[],
+                );
             }
 
             let clear_values = if self.hdr_system.is_some() {
