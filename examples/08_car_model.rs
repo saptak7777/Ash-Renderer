@@ -7,9 +7,9 @@ use ash_renderer::prelude::*;
 use ash_renderer::renderer::features::ambient_lighting::{AmbientPreset, LightingBuilder};
 use ash_renderer::renderer::resources::gltf_loader;
 use ash_renderer::renderer::resources::uniform::StorageBuffer;
+use ash_renderer::renderer::Scene;
 use glam::{Mat4, Vec3};
 use parking_lot::Mutex;
-use std::mem::ManuallyDrop;
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::time::Instant;
@@ -27,9 +27,9 @@ enum LoaderMessage {
 
 struct App {
     window: Option<Window>,
-    // Use ManuallyDrop to explicitly control destruction order.
-    // This MUST be dropped BEFORE renderer to avoid STATUS_ACCESS_VIOLATION on exit.
-    tint_buffer: ManuallyDrop<Option<Arc<Mutex<StorageBuffer<[f32; 4]>>>>>,
+    // DROP ORDER MATTERS: Scene and buffers must drop BEFORE Renderer (destroys Device)
+    tint_buffer: Option<Arc<Mutex<StorageBuffer<[f32; 4]>>>>,
+    scene: Option<Scene>,
     renderer: Option<Renderer>,
     start_time: Instant,
     render_commands: Vec<ash_renderer::renderer::RenderCommand>,
@@ -41,22 +41,13 @@ impl Default for App {
     fn default() -> Self {
         Self {
             window: None,
-            tint_buffer: ManuallyDrop::new(None),
+            tint_buffer: None,
+            scene: None,
             renderer: None,
             start_time: Instant::now(),
             render_commands: Vec::new(),
             upload_fence: None,
             loader_rx: None,
-        }
-    }
-}
-
-impl Drop for App {
-    fn drop(&mut self) {
-        unsafe {
-            // Manually drop the tint buffer FIRST while the renderer/device is still alive.
-            log::info!("App: Manually dropping GPU resources...");
-            ManuallyDrop::drop(&mut self.tint_buffer);
         }
     }
 }
@@ -73,6 +64,13 @@ impl ApplicationHandler for App {
 
         match Renderer::new(&surface_provider) {
             Ok(mut renderer) => {
+                // Create Scene
+                let mut scene = Scene::new(
+                    Arc::clone(&renderer.device.device),
+                    Arc::clone(&renderer.alloc),
+                    renderer.geometry_buffer(),
+                );
+
                 // Register Global Default Tint Buffer (Required by Shader)
                 let tint_data = [[1.0f32, 1.0, 1.0, 1.0]];
                 let (tint_buffer, _tint_index) = renderer
@@ -80,10 +78,10 @@ impl ApplicationHandler for App {
                     .expect("Failed to register global tint buffer");
 
                 // Keep buffer alive
-                *self.tint_buffer = Some(tint_buffer);
+                self.tint_buffer = Some(tint_buffer);
 
                 // CRITICAL: Must call enable_post_processing() to initialize HDR/Tonemapping pipelines!
-                if let Err(e) = renderer.enable_post_processing() {
+                if let Err(e) = renderer.enable_post_processing(&mut scene) {
                     log::warn!("Post-processing failed: {e}");
                 }
 
@@ -108,7 +106,7 @@ impl ApplicationHandler for App {
                         5.0,                       // PBR intensity
                     )
                     .build();
-                renderer.set_lighting(&lighting);
+                scene.set_lighting(lighting);
 
                 // Spawn Async Loader
                 let glb_path = r"C:\Users\tilok\Downloads\car retro muscle\base_basic_pbr.glb";
@@ -147,6 +145,7 @@ impl ApplicationHandler for App {
                 }
 
                 self.renderer = Some(renderer);
+                self.scene = Some(scene);
                 self.window = Some(window);
                 self.start_time = Instant::now();
             }
@@ -172,7 +171,9 @@ impl ApplicationHandler for App {
                 event_loop.exit();
             }
             WindowEvent::RedrawRequested => {
-                if let (Some(renderer), Some(window)) = (&mut self.renderer, &self.window) {
+                if let (Some(renderer), Some(scene), Some(window)) =
+                    (&mut self.renderer, &mut self.scene, &self.window)
+                {
                     // 1. ASYNC LOADING: Check if model data has arrived from background thread
                     if let Some(rx) = &self.loader_rx {
                         match rx.try_recv() {
@@ -202,7 +203,12 @@ impl ApplicationHandler for App {
                                 for (i, mesh) in meshes.into_iter().enumerate() {
                                     let name = mesh.name.clone();
                                     let mesh_handle = renderer
-                                        .upload_mesh(mesh, upload_cmd, &mut staging_resources)
+                                        .upload_mesh(
+                                            scene,
+                                            mesh,
+                                            upload_cmd,
+                                            &mut staging_resources,
+                                        )
                                         .unwrap();
                                     let material_handle = renderer.get_mesh_material(mesh_handle);
 
@@ -342,8 +348,8 @@ impl ApplicationHandler for App {
                             );
                             proj.y_axis.y *= -1.0;
 
-                            let _ = renderer.submit_render_commands(&self.render_commands);
-                            let _ = renderer.render_frame(view, proj, camera_pos, None);
+                            let _ = renderer.submit_render_commands(scene, &self.render_commands);
+                            let _ = renderer.render_frame(scene, view, proj, camera_pos, None);
                         }
                     }
                 }

@@ -108,7 +108,6 @@ impl ApplicationHandler for App {
                 // CRITICAL: Must call enable_post_processing() to initialize HDR/Tonemapping pipelines!
                 if let Err(e) = renderer.enable_post_processing() {
                     log::warn!("Post-processing failed: {e}");
-                    renderer.tonemapping_enabled = true;
                 }
 
                 self.renderer = Some(renderer);

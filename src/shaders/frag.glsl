@@ -64,7 +64,9 @@ float ShadowCalculation(vec4 fragPosLightSpace, vec3 normal, vec3 lightDir) {
     // slope-aware bias
     float bias = max(0.05 * (1.0 - dot(normal, lightDir)), 0.005);
     
-    // Keep the shadow at 0.0 when outside the far_plane region of the light's frustum.
+    // Default to 1.0 (unshadowed) if the coordinate is beyond the shadow map range
+    // but default to 0.0 if the shadow sampler is empty (not possible to check directly,
+    // so we rely on correctly cleared maps or specific checks).
     if(projCoords.z > 1.0)
         return 0.0;
     
@@ -145,7 +147,7 @@ void main() {
     vec3 ambientColor = mvp.ambient_color.xyz;
 
     vec3 viewDir = normalize(mvp.camera_pos.xyz - fragWorldPos);
-    vec3 lightDir = normalize(-mvp.light_direction.xyz);
+    vec3 L = normalize(-mvp.light_direction.xyz);
 
     // Sample base color
     // Sample base color (bindless)
@@ -199,16 +201,15 @@ void main() {
         }
     }
 
-    float NdotL = max(dot(normal, lightDir), 0.0);
 
     // Material parameters
     float metallic = material.metallic_factor;
-    float roughness = max(material.roughness_factor, 0.04); // Min roughness to prevent fireflies
+    float roughness = clamp(material.roughness_factor, 0.05, 1.0); // Min roughness to prevent black pixels
     
     if (material.metallic_roughness_texture_set >= 0) {
         vec4 mrSample = texture(textures[nonuniformEXT(material.metallic_roughness_texture_set)], fragUV);
         metallic = metallic * mrSample.b;
-        roughness = max(roughness * mrSample.g, 0.04);
+        roughness = clamp(roughness * mrSample.g, 0.05, 1.0);
     }
 
     // Ambient occlusion (bindless)
@@ -220,8 +221,9 @@ void main() {
     // PBR
     vec3 F0 = mix(vec3(0.04), baseColor, metallic);
 
-    vec3 halfDir = normalize(viewDir + lightDir);
+    vec3 halfDir = normalize(viewDir + L);
     float NdotV = max(dot(normal, viewDir), 0.001);
+    float NdotL = max(dot(normal, L), 0.0);
     float NdotH = max(dot(normal, halfDir), 0.0);
     float VdotH = max(dot(viewDir, halfDir), 0.0);
 
@@ -240,10 +242,13 @@ void main() {
     vec3 diffuse = kD * baseColor / PI;
     
     // Shadow mapping calculations using geometric normal (N) for bias to avoid self-shadowing.
-    float shadow = ShadowCalculation(fragPosLightSpace, N, lightDir);
+    float shadow = ShadowCalculation(fragPosLightSpace, N, L);
 
     // Direct lighting with shadow
     vec3 Lo = (diffuse + specular) * lightColor * NdotL * (1.0 - shadow);
+    
+    // Debug: Specular output
+    // outColor = vec4(specular * 2.0, 1.0); return;
     
     // Ambient
     vec3 ambient = ambientColor * baseColor * occlusion;

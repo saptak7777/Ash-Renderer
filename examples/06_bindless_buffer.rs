@@ -99,7 +99,6 @@ impl ApplicationHandler for App {
                 // 5. Phase 2 Settings: Proper HDR + Tonemapping
                 if let Err(e) = renderer.enable_post_processing() {
                     log::warn!("Post-processing failed: {e}");
-                    renderer.tonemapping_enabled = true;
                 }
 
                 // 6. Setup PHASE 2 Lighting: Balanced HDR (RAGE approach)
@@ -244,7 +243,6 @@ fn run_headless(max_frames: u32) -> Result<()> {
 
     if let Err(e) = renderer.enable_post_processing() {
         log::warn!("Post-processing failed: {e}");
-        renderer.tonemapping_enabled = true;
     }
 
     let lighting = LightingBuilder::new()

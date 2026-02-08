@@ -73,6 +73,7 @@ impl PostProcessSystem {
 
         // Pipeline cleanup handled by RAII in vulkan::Pipeline
         self.pipeline = None;
+
         // Framebuffers cleaned up by RAII
         self.framebuffers.clear();
 
@@ -132,57 +133,6 @@ impl PostProcessSystem {
             self.descriptor_sets = self.device.allocate_descriptor_sets(&alloc_info)?;
         }
         Ok(())
-    }
-
-    pub fn update_descriptor_sets(
-        &mut self,
-        input_views: &[vk::ImageView],
-        bloom_views: &[vk::ImageView],
-        ssgi_views: &[vk::ImageView],
-        sampler: vk::Sampler,
-    ) {
-        for i in 0..self.descriptor_sets.len() {
-            if i >= input_views.len() || i >= bloom_views.len() || i >= ssgi_views.len() {
-                break;
-            }
-
-            let input_info = vk::DescriptorImageInfo::default()
-                .image_view(input_views[i])
-                .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
-                .sampler(sampler);
-
-            let bloom_info = vk::DescriptorImageInfo::default()
-                .image_view(bloom_views[i])
-                .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
-                .sampler(sampler);
-
-            let ssgi_info = vk::DescriptorImageInfo::default()
-                .image_view(ssgi_views[i])
-                .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
-                .sampler(sampler);
-
-            let writes = [
-                vk::WriteDescriptorSet::default()
-                    .dst_set(self.descriptor_sets[i])
-                    .dst_binding(0)
-                    .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-                    .image_info(std::slice::from_ref(&input_info)),
-                vk::WriteDescriptorSet::default()
-                    .dst_set(self.descriptor_sets[i])
-                    .dst_binding(1)
-                    .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-                    .image_info(std::slice::from_ref(&bloom_info)),
-                vk::WriteDescriptorSet::default()
-                    .dst_set(self.descriptor_sets[i])
-                    .dst_binding(2)
-                    .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-                    .image_info(std::slice::from_ref(&ssgi_info)),
-            ];
-
-            unsafe {
-                self.device.update_descriptor_sets(&writes, &[]);
-            }
-        }
     }
 
     pub fn update_descriptor_set(

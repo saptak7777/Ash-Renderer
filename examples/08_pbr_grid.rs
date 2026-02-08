@@ -82,7 +82,6 @@ impl ApplicationHandler for App {
                 // Enable post-processing for HDR/Tonemapping
                 if let Err(e) = renderer.enable_post_processing() {
                     log::warn!("Post-processing failed: {e}");
-                    renderer.tonemapping_enabled = true;
                 }
 
                 // Load pre-baked IBL environment map for realistic PBR lighting

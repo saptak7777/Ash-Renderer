@@ -4,8 +4,8 @@ use crate::{
             DiagnosticsMode, DiagnosticsOverlay, DiagnosticsState, FrameProfiler, GpuProfiler,
         },
         features::{
-            AutoRotateFeature, DirectionalLight, FeatureFrameContext, FeatureManager,
-            FeatureRenderContext, PointLight, SceneLighting, SpotLight,
+            AutoRotateFeature, FeatureFrameContext, FeatureManager,
+            FeatureRenderContext,
             default_vsm_config,
         },
         types::{
@@ -24,7 +24,7 @@ use crate::{
             },
             vsr::{SharpenConfig, VsrConfig, VsrInputs, VsrPass, VsrQuality, VsrUpscaleConfig},
         },
-        vcgs::{CullBoundingBox, IndirectDrawPass, OcclusionCulling},
+        vcgs::{CullBoundingBox, IndirectDrawPass},
         instancing::{BatchKey, InstanceData, InstancingManager},
         model_renderer::{
             MaterialPushConstants, ModelRenderer,
@@ -36,7 +36,7 @@ use crate::{
             uniform::{StorageBuffer, UniformBuffer},
         },
         vram_budget, DepthBuffer, GBuffer, HdrSystem, Material, MaterialHandle, MaterialManager, Mesh,
-        PipelineCache, Texture, Transform,
+        PipelineCache, Texture, Transform, Scene,
         initialization,
         init_types::*,
         assets::AssetManager,
@@ -46,7 +46,7 @@ use crate::{
 };
 
 use ash::vk;
-use glam::{Mat4, Vec3, Vec4};
+use glam::{Mat4, Vec3};
 use rayon::prelude::*;
 use resources::BufferPool;
 use std::collections::{HashMap, HashSet};
@@ -125,7 +125,6 @@ pub struct Renderer {
     _white_texture: Texture,
     _default_skybox: Texture, // Procedural skybox fallback
     _default_cube_black: Texture, // Keep alive
-    model_renderer: ModelRenderer,
     draw_items: Vec<DrawItem>,
     pub(crate) swapchain: Option<vulkan::SwapchainWrapper>,
     pub(crate) render_pass: Option<vulkan::RenderPass>,
@@ -149,7 +148,6 @@ pub struct Renderer {
     pub(crate) framebuffer_ids: Vec<ResourceId>,
     start_time: Instant,
     mesh_data: Vec<MeshData>, // Indexed by mesh handle for O(1) access
-    material_manager: MaterialManager,
     uploaded_material_indices: HashSet<u32>, // Track which materials are GPU-resident (UE5 pattern)
     pub(crate) swapchain_image_view_ids: Vec<ResourceId>,
     pub(crate) depth_buffer_id: Option<ResourceId>,
@@ -173,7 +171,6 @@ pub struct Renderer {
     pub(crate) hiz_pass: Option<HiZPass>,
     adaptive_hiz_manager: AdaptiveHiZManager,
     pub(crate) indirect_draw_pass: Option<IndirectDrawPass>,
-    pub(crate) occlusion_culling: OcclusionCulling,
     // Temporal Super-Resolution
     pub(crate) vsr_pass: Option<VsrPass>,
     // Motion Vector Pass for VSR/TAA
@@ -183,16 +180,10 @@ pub struct Renderer {
     pub(crate) gbuffer: Option<GBuffer>,
     // Pipeline optimization
     // Lighting
-    pub(crate) scene_lighting: crate::renderer::features::SceneLighting,
-    point_lights: Vec<PointLight>,
-    directional_lights: Vec<DirectionalLight>,
-    spot_lights: Vec<SpotLight>,
     pub debug_mode: DebugMode,
     
     // Phase 7: Host-Side Cluster Integration
     global_cluster_buffer: Option<GlobalClusterBuffer>,
-
-    skybox_index: u32,
     
     // Phase 4: G-Buffer & HDR Indices
     pub(crate) gbuffer_indices: GBufferIndices,
@@ -236,6 +227,7 @@ pub struct Renderer {
     // WAIT! In Rust, fields are dropped in the order they are DECLARED.
     // So the FIRST field is dropped FIRST.
     // This means foundation should be at the BOTTOM so they are dropped LAST.
+    pub(crate) geometry_buffer: Arc<resources::DualHeapGeometryBuffer>,
     pub(crate) resources: Arc<ResourceRegistry>,
     pub alloc: Arc<vulkan::Allocator>,
     pub queue: RenderQueue,
@@ -254,6 +246,7 @@ pub struct MainPassParameters<'a> {
     pub swapchain_extent: vk::Extent2D,
     pub light_ptr: u64,
     pub tile_ptr: u64,
+    pub scene: &'a super::Scene,
 }
 
 impl Renderer {
@@ -608,7 +601,6 @@ impl Renderer {
             };
             log::info!("Skybox initialized.");
             let mesh_data: Vec<MeshData> = Vec::new();
-            let material_manager = MaterialManager::new();
             let instancing_manager = InstancingManager::new();
             let transform_system = resources::TransformSystem::new();
             let config = &renderer_config;
@@ -618,11 +610,6 @@ impl Renderer {
             let device_handle = Arc::clone(&device.device);
 
             // Missing initializations
-            let point_lights = Vec::new();
-            let directional_lights = Vec::new();
-            let spot_lights = Vec::new();
-            let scene_lighting = SceneLighting::default();
-            let occlusion_culling = OcclusionCulling::new();
 
             // Initialize GPU-driven pipeline components
             log::info!("Initializing Hi-Z Pass");
@@ -668,7 +655,6 @@ impl Renderer {
                 _white_texture: white_texture,
                 _default_skybox: default_skybox,
                 _default_cube_black: default_cube_black,
-                model_renderer,
                 draw_items: Vec::new(),
                 swapchain: Some(swapchain),
                 render_pass: Some(render_pass_wrapper),
@@ -690,11 +676,11 @@ impl Renderer {
                 descriptors: Some(descriptor_allocator),
                 framebuffers,
                 framebuffer_ids,
+                geometry_buffer,
                 start_time,
                 alloc,
                 device,
                 mesh_data,
-                material_manager,
                 uploaded_material_indices: HashSet::new(),
                 swapchain_image_view_ids,
                 depth_buffer_id: Some(depth_buffer_id),
@@ -713,18 +699,12 @@ impl Renderer {
                 hiz_pass: Some(hiz_pass),
                 adaptive_hiz_manager: AdaptiveHiZManager::new(3.0), // Target 3ms for Hi-Z
                 indirect_draw_pass: Some(indirect_draw_pass),
-                occlusion_culling,
                 vsr_pass: None,
                 motion_pass: None,
                 motion_framebuffer: None,
                 gbuffer: Some(gbuffer),
-                scene_lighting,
-                point_lights,
-                directional_lights,
-                spot_lights,
                 debug_mode: DebugMode::default(),
                 global_cluster_buffer: Some(global_cluster_buffer),
-                skybox_index,
                 gbuffer_indices: GBufferIndices::default(),
                 hdr_image_index: None,
 
@@ -1004,18 +984,6 @@ impl Renderer {
     // Legacy lighting methods removed for modern RAGE pipeline
 
 
-    /// Update a point light at the specified index.
-    pub fn update_light(&mut self, index: usize, light: PointLight) {
-        if index >= self.point_lights.len() {
-            self.point_lights.resize(index + 1, PointLight::default());
-        }
-        self.point_lights[index] = light;
-        
-        // Sync with Forward+ if available
-        if let Some(forward_plus) = &mut self.forward_plus {
-            forward_plus.update_lights(&self.point_lights, &self.directional_lights, &self.spot_lights);
-        }
-    }
 
     /// Convenience for setting view and projection at once
     pub fn set_view(&mut self, _eye: Vec3, _center: Vec3, _up: Vec3) {
@@ -1025,14 +993,6 @@ impl Renderer {
         // Wait, renderer doesn't have a view matrix field yet.
     }
 
-    /// Get a mesh handle by name.
-    pub fn get_mesh_handle(&self, name: &str) -> Option<u32> {
-        self.mesh_data
-            .iter()
-            .enumerate()
-            .find(|(_, data)| &*data.name == name)
-            .map(|(i, _)| i as u32)
-    }
 
     /// Get immutable access to consolidated mesh data.
     pub fn mesh_data(&self) -> &[MeshData] {
@@ -1044,9 +1004,14 @@ impl Renderer {
         self.mesh_data.get_mut(handle as usize)
     }
 
+    /// Returns the global geometry buffer for shared vertex/index storage.
+    pub fn geometry_buffer(&self) -> Arc<resources::DualHeapGeometryBuffer> {
+        Arc::clone(&self.geometry_buffer)
+    }
+
     /// Get mutable access to the material manager.
-    pub fn material_manager_mut(&mut self) -> &mut MaterialManager {
-        &mut self.material_manager
+    pub fn material_manager_mut<'a>(&self, scene: &'a mut Scene) -> &'a mut MaterialManager {
+        &mut scene.material_manager
     }
 
     /// Returns a one-time use command buffer for transfer operations.
@@ -1056,7 +1021,7 @@ impl Renderer {
 
     /// Uploads a single mesh to the GPU with its own transient command buffer.
     /// This is a convenience wrapper for simple cases/examples.
-    pub fn upload_mesh_single(&mut self, mesh: Mesh) -> Result<u32> {
+    pub fn upload_mesh_single(&mut self, scene: &mut Scene, mesh: Mesh) -> Result<u32> {
         let upload_cmd = self.get_transfer_command_buffer()?;
         {
             let cmd_ctx = self.queue.cmds.context(upload_cmd);
@@ -1064,7 +1029,7 @@ impl Renderer {
         }
 
         let mut staging_resources = Vec::new();
-        let handle = self.upload_mesh(mesh, upload_cmd, &mut staging_resources)?;
+        let handle = self.upload_mesh(scene, mesh, upload_cmd, &mut staging_resources)?;
 
         {
             let cmd_ctx = self.queue.cmds.context(upload_cmd);
@@ -1086,17 +1051,18 @@ impl Renderer {
     /// This is the modern replacement for `set_mesh`.
     pub fn upload_mesh(
         &mut self,
+        scene: &mut Scene,
         mut mesh: Mesh,
         upload_cmd: vk::CommandBuffer,
         staging_resources: &mut Vec<crate::renderer::resources::BufferHandle>,
     ) -> Result<u32> {
         let handle = self.mesh_data.len() as u32;
-        self.register_mesh_handle(handle, &mut mesh, upload_cmd, staging_resources)?;
+        self.register_mesh_handle(scene, handle, &mut mesh, upload_cmd, staging_resources)?;
         Ok(handle)
     }
 
     /// Registers a mesh handle with its own transient command buffer.
-    pub fn register_mesh_handle_single(&mut self, handle: u32, mesh: &mut Mesh) -> Result<()> {
+    pub fn register_mesh_handle_single(&mut self, scene: &mut Scene, handle: u32, mesh: &mut Mesh) -> Result<()> {
         let upload_cmd = self.get_transfer_command_buffer()?;
         let mut staging_resources = Vec::new();
         
@@ -1105,7 +1071,7 @@ impl Renderer {
             ctx.begin(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT)?;
         }
         
-        self.register_mesh_handle(handle, mesh, upload_cmd, &mut staging_resources)?;
+        self.register_mesh_handle(scene, handle, mesh, upload_cmd, &mut staging_resources)?;
         
         {
             let ctx = self.queue.cmds.context(upload_cmd);
@@ -1126,6 +1092,7 @@ impl Renderer {
 
     pub fn register_mesh_handle(
         &mut self,
+        scene: &mut Scene,
         handle: u32,
         mesh: &mut Mesh,
         upload_cmd: vk::CommandBuffer,
@@ -1171,14 +1138,14 @@ impl Renderer {
             )?;
 
             // 2. Ensure Model Renderer
-            self.model_renderer
+            scene.model_renderer
                 .ensure_mesh(&key, mesh, upload_pool, self.device.graphics_queue)?;
 
             // 3. Register Bindless
             register_mesh_textures(mesh, &mut self.assets.bindless_manager, &mut self.assets.texture_registry)?;
 
             // 4. Register Material
-            let mut handle_mat = self.material_manager.default_material();
+            let mut handle_mat = scene.material_manager.default_material();
             if let Some(props) = &mesh.material_properties {
                 if !self.allow_auto_material {
                     log::warn!(
@@ -1205,7 +1172,7 @@ impl Renderer {
                     };
                     
                     let material_clone = material.clone();
-                    handle_mat = self.material_manager.register_material(material);
+                    handle_mat = scene.material_manager.register_material(material);
                     
                     // CRITICAL: Auto-generated materials must be uploaded to GPU!
                     self.upload_material_to_gpu(handle_mat.index as u32, &material_clone)?;
@@ -1495,9 +1462,9 @@ impl Renderer {
     }
     
     /// Synchronizes all materials from MaterialManager to the GPU buffer.
-    pub fn sync_materials_to_gpu(&mut self) -> Result<()> {
+    pub fn sync_materials_to_gpu(&mut self, scene: &mut super::Scene) -> Result<()> {
         let sync_list: Vec<(u32, resources::Material)> = {
-            self.material_manager.iter_unsynced(&self.uploaded_material_indices)
+            scene.material_manager.iter_unsynced(&self.uploaded_material_indices)
                 .map(|(id, material)| (id, material.clone()))
                 .collect()
         };
@@ -1513,21 +1480,22 @@ impl Renderer {
     /// 
     /// This handles both registering the material with the manager and 
     /// uploading its data to the GPU in a single call.
-    pub fn register_and_upload_material(&mut self, material: Material) -> Result<MaterialHandle> {
-        let handle = self.material_manager.register_material(material.clone());
+    pub fn register_and_upload_material(&mut self, scene: &mut Scene, material: Material) -> Result<MaterialHandle> {
+        let handle = scene.material_manager.register_material(material.clone());
         self.upload_material_to_gpu(handle.index as u32, &material)?;
         Ok(handle)
     }
 
     /// Get access to the material manager (for testing)
-    pub fn material_manager(&self) -> &MaterialManager {
-        &self.material_manager
+    pub fn material_manager<'a>(&self, scene: &'a Scene) -> &'a MaterialManager {
+        &scene.material_manager
     }
 
     /// Registers mesh data described by a [`MeshDescriptor`] with the renderer and returns the
     /// internal key used for lookup.
     pub fn register_mesh_descriptor(
         &mut self,
+        scene: &mut Scene,
         handle: u32,
         descriptor: &MeshDescriptor,
         upload_cmd: vk::CommandBuffer,
@@ -1536,7 +1504,7 @@ impl Renderer {
         let mut mesh = Mesh::from_descriptor(descriptor);
         let key = Arc::clone(&mesh.name);
 
-        self.register_mesh_handle(handle, &mut mesh, upload_cmd, staging_resources)?;
+        self.register_mesh_handle(scene, handle, &mut mesh, upload_cmd, staging_resources)?;
 
         Ok(key.to_string())
     }
@@ -1589,11 +1557,12 @@ impl Renderer {
     /// Converts a material descriptor into a renderer material and registers it.
     pub fn register_material_descriptor(
         &mut self,
+        scene: &mut Scene,
         _handle: u32,
         descriptor: &MaterialDescriptor,
     ) -> MaterialHandle {
         let material = descriptor.material.clone();
-        self.material_manager.register_material(material)
+        scene.material_manager.register_material(material)
     }
 
     /// Registers a generic storage buffer with the bindless manager.
@@ -1638,7 +1607,7 @@ impl Renderer {
     ///
     /// Each `RenderCommand` specifies a mesh handle, material handle, and transform.
     /// For large command counts (>1000), uses parallel processing across all CPU cores.
-    pub fn submit_render_commands(&mut self, commands: &[RenderCommand]) -> Result<()> {
+    pub fn submit_render_commands(&mut self, scene: &mut super::Scene, commands: &[RenderCommand]) -> Result<()> {
         log::debug!("Submitting {} render commands", commands.len());
         self.draw_items.clear();
         self.instancing_manager.begin_frame();
@@ -1651,7 +1620,7 @@ impl Renderer {
 
             // Capture only thread-safe fields
             let mesh_data = &self.mesh_data;
-            let material_manager = &self.material_manager;
+            let material_manager = &scene.material_manager;
             let strict_mode = self.strict_mode;
 
             let (draw_items, instance_batches) = commands
@@ -1747,10 +1716,10 @@ impl Renderer {
                         command.material_handle
                     };
 
-                    let material = self.material_manager.get_material(material_handle);
+                    let material = scene.material_manager.get_material(material_handle);
                     
                     // Safety check: log if version mismatch (rare but possible)
-                    if !self.material_manager.is_handle_valid(material_handle) {
+                    if !scene.material_manager.is_handle_valid(material_handle) {
                         let msg = format!("Invalid material handle {material_handle:?} detected for mesh handle {}, using default", command.mesh_handle);
                         if self.strict_mode {
                             log::error!("{msg}");
@@ -1760,7 +1729,7 @@ impl Renderer {
                     }
 
                     // We must fetch the uploaded mesh to get the actual buffer offsets
-                    if let Some(uploaded) = self.model_renderer.get(&mesh_data.name) {
+                    if let Some(uploaded) = scene.model_renderer.get(&mesh_data.name) {
 
                         let key = BatchKey::new(command.mesh_handle, material_handle);
                         let item = DrawItem {
@@ -2406,12 +2375,12 @@ impl Renderer {
             // with high-fidelity clusters.
 
             // 2. Upload and Execute Culling
-            log::debug!("Occlusion culling object count: {}", self.occlusion_culling.object_count());
-            if self.occlusion_culling.object_count() > 0 {
+            log::debug!("Occlusion culling object count: {}", params.scene.occlusion_culling.object_count());
+            if params.scene.occlusion_culling.object_count() > 0 {
                 let _frame_address = self.uniform_buffers[frame_index].device_address();
                 
                 unsafe {
-                    indirect_pass.upload_objects(&self.alloc.vma, self.occlusion_culling.object_data(), 0)?;
+                    indirect_pass.upload_objects(&self.alloc.vma, params.scene.occlusion_culling.object_data(), 0)?;
                     
                     // Reset count buffer to 0 before compute pass
                     self.device.device.cmd_fill_buffer(cmd_ctx.handle(), indirect_pass.count_buffer(), 0, 4, 0);
@@ -2434,12 +2403,12 @@ impl Renderer {
 
                     indirect_pass.execute_culling(
                         cmd_ctx.handle(),
-                        &self.occlusion_culling,
+                        &params.scene.occlusion_culling,
                         projection * view,
                         extent.width,
                         extent.height,
                         0,
-                        self.occlusion_culling.object_count() as u32,
+                        params.scene.occlusion_culling.object_count() as u32,
                         0,
                         self.global_cluster_buffer.as_ref().map(|b| b.device_address()).unwrap_or(0),
                     )?;
@@ -2487,7 +2456,7 @@ impl Renderer {
             // Note: Culling and Upload (Compute) is done in cull_main_pass() BEFORE the render pass.
 
             // 3. Draw All Visible Objects in One Call
-            if self.occlusion_culling.object_count() > 0 {
+            if params.scene.occlusion_culling.object_count() > 0 {
                 let frame_address = self.uniform_buffers[frame_index].device_address();
                 let _ = frame_address; // Suppress unused warning as it is used in ctx below
 
@@ -2516,8 +2485,8 @@ impl Renderer {
 
                 // CRITICAL FIX: BDA Pointer Validation
                 // Prevent crash if buffers are not yet allocated
-                let vertex_ptr = self.model_renderer.geometry_buffer.vertex_heap_address();
-                let index_ptr = self.model_renderer.geometry_buffer.index_heap_address();
+                let vertex_ptr = params.scene.model_renderer.geometry_buffer.vertex_heap_address();
+                let index_ptr = params.scene.model_renderer.geometry_buffer.index_heap_address();
                 let instance_ptr = indirect_pass.object_buffer_address();
                 let material_ptr = self.material_heap_address;
 
@@ -2537,7 +2506,7 @@ impl Renderer {
                 // The uploaded field in DrawContext is not used for indirect drawing
                 // (all data is pulled via BDA), but the struct requires it.
                 // We use any available mesh from the cache as a placeholder.
-                let Some(uploaded) = self.model_renderer.uploaded_meshes().next().map(|(_, mesh)| mesh) else {
+                let Some(uploaded) = params.scene.model_renderer.uploaded_meshes().next().map(|(_, mesh)| mesh) else {
                     // If no meshes are uploaded yet, we can't proceed with indirect draw
                     log::warn!("No uploaded meshes available for indirect draw context");
                     return Ok(());
@@ -2561,7 +2530,7 @@ impl Renderer {
                     index_ptr,
                     light_ptr: params.light_ptr,
                     tile_ptr: params.tile_ptr,
-                    skybox_index: self.skybox_index,
+                    skybox_index: params.scene.skybox_texture_index,
                     vsm_page_index: self.shadow_system.as_ref().map(|s| s.vsm_page_index()).unwrap_or(0),
                     vsm_cache_index: self.shadow_system.as_ref().map(|s| s.vsm_cache_index()).unwrap_or(0),
                     transform_ptr: self.transform_arena_addr,
@@ -2573,12 +2542,12 @@ impl Renderer {
                     indirect_offset: 0,
                     count_buffer: indirect_pass.count_buffer(),
                     count_offset: 0,
-                    max_draw_count: self.occlusion_culling.object_count() as u32,
+                    max_draw_count: params.scene.occlusion_culling.object_count() as u32,
                     stride: std::mem::size_of::<vk::DrawIndirectCommand>() as u32,
                 };
 
                 unsafe {
-                    self.model_renderer.draw_indirect_count(&draw_ctx, &count_params);
+                    params.scene.model_renderer.draw_indirect_count(&draw_ctx, &count_params);
                 }
             }
         }
@@ -2588,7 +2557,7 @@ impl Renderer {
         // but for now we focus on opaque stability)
 
         // 4. Render Skybox (Sentinel Pattern: Only if ibl_prefilter_index is NOT MAX)
-        if self.scene_lighting.ibl_prefilter_index >= 0 {
+        if params.scene.scene_lighting.ibl_prefilter_index >= 0 {
             if let Err(e) = self.render_skybox(&cmd_ctx, frame_index, params.view, params.projection) {
                 log::warn!("Skybox render failed: {e}");
             }
@@ -2618,12 +2587,9 @@ impl Renderer {
     }
 
     /// Set scene lighting configuration (RAGE)
-    pub fn set_lighting(&mut self, lighting: &crate::renderer::features::SceneLighting) {
-        self.scene_lighting = *lighting;
-        
-        // Sync shadow direction
-        let direction = Vec4::from_array(lighting.directional.direction).truncate();
-        self.set_light_direction(direction);
+    /// Deprecated: Use scene.set_lighting() instead.
+    pub fn set_lighting(&mut self, _lighting: &crate::renderer::features::SceneLighting) {
+        log::warn!("Renderer::set_lighting is deprecated. Use scene.set_lighting() instead.");
     }
 
     pub fn set_light_direction(&mut self, _direction: Vec3) {
@@ -2699,6 +2665,7 @@ impl Renderer {
 
     pub fn render_frame(
         &mut self,
+        scene: &mut super::Scene,
         view: Mat4,
         projection: Mat4,
         camera_pos: glam::Vec3,
@@ -2708,7 +2675,7 @@ impl Renderer {
         
         // Task 3: Simplified resize handling
         if self.queue.is_resize_pending() {
-            crate::renderer::swapchain_manager::recreate_swapchain_resources(self)?;
+            crate::renderer::swapchain_manager::recreate_swapchain_resources(self, scene)?;
         }
         self.queue.flush_old_swapchains(&self.device);
 
@@ -2716,7 +2683,7 @@ impl Renderer {
         self.transform_arena_offset = 0;
 
         // Phase 20: Sync Materials to GPU
-        if let Err(e) = self.sync_materials_to_gpu() {
+        if let Err(e) = self.sync_materials_to_gpu(scene) {
             log::error!("Failed to sync materials to GPU: {e}");
         }
 
@@ -2748,7 +2715,7 @@ impl Renderer {
         };
 
         if shaders_changed {
-            if let Err(e) = crate::renderer::swapchain_manager::recreate_swapchain_resources(self) {
+            if let Err(e) = crate::renderer::swapchain_manager::recreate_swapchain_resources(self, scene) {
                 log::error!("Failed to recreate pipeline: {e}");
             }
         }
@@ -2795,9 +2762,9 @@ impl Renderer {
             // Build object registry once per frame
 
             // Prepare culling data for this frame
-            self.occlusion_culling.begin_frame();
+            scene.occlusion_culling.begin_frame();
             for (i, item) in self.draw_items.iter().enumerate() {
-                if let Some(uploaded) = self.model_renderer.get(&item.key) {
+                if let Some(uploaded) = scene.model_renderer.get(&item.key) {
                     // Use mesh clusters for fine-grained culling
                     // Fallback to mesh bounds if clusters are empty
                     let bounds = self
@@ -2808,7 +2775,7 @@ impl Renderer {
                     let material_index = item.material_handle.index as u32;
                     let vertex_offset = uploaded.vertex_offset.unwrap_or(0) as i32 / 64; // 64 bytes per vertex
                     
-                    self.occlusion_culling.push_clusters(
+                    scene.occlusion_culling.push_clusters(
                         bounds,
                         item.transform,
                         i as u32,
@@ -2882,7 +2849,7 @@ impl Renderer {
                 // Single Source of Truth: environment map indices drive shader logic.
                 // Indices < 0 indicate no IBL/Environment map is bound.
 
-                matrices.set_lighting(&self.scene_lighting);
+                matrices.set_lighting(&scene.scene_lighting);
 
                 // Set light-space matrix for shadow mapping
                 let light_space_matrix = glam::Mat4::IDENTITY; // VSM uses internal matrices
@@ -3003,15 +2970,15 @@ impl Renderer {
                         // and indices are passed via push constants in draw_context.
 
                         // VSM GPU-Driven Shadow Pass
-                        let light_dir = glam::Vec3::from_slice(&self.scene_lighting.directional.direction[0..3]);
+                        let light_dir = glam::Vec3::from_slice(&scene.scene_lighting.directional.direction[0..3]);
                         let frame_descriptor_set = vk::DescriptorSet::null();
                         let bindless_descriptor_set = self.assets.bindless_manager.descriptor_set();
 
                         let light_ptr = self.forward_plus.as_ref().map(|fp| fp.get_lights().light_ptr(frame_index)).unwrap_or(0);
                         let tile_ptr = self.forward_plus.as_ref().map(|fp| fp.get_lights().tile_ptr(frame_index)).unwrap_or(0);
 
-                        let vertex_ptr = self.model_renderer.geometry_buffer.vertex_heap_address();
-                        let index_ptr = self.model_renderer.geometry_buffer.index_heap_address();
+                        let vertex_ptr = scene.model_renderer.geometry_buffer.vertex_heap_address();
+                        let index_ptr = scene.model_renderer.geometry_buffer.index_heap_address();
 
                         if vertex_ptr == 0 || index_ptr == 0 {
                             log::warn!("Shadow pass: Invalid BDA pointers (V: {}, I: {}). Skipping.", vertex_ptr, index_ptr);
@@ -3071,6 +3038,9 @@ impl Renderer {
             if let Some(ref mut fp_integration) = self.forward_plus {
                 // Ensure pipeline is initialized before dispatching
                 if fp_integration.is_enabled() {
+                    // Update light data from scene before uploading
+                    fp_integration.update_lights(&scene.point_lights, &scene.directional_lights, &scene.spot_lights);
+
                     // Update GPU buffers and descriptors for the current frame
                     fp_integration.upload_to_gpu(&self.alloc, &self.device.device, frame_index as usize)?;
 
@@ -3191,6 +3161,7 @@ impl Renderer {
                 swapchain_extent,
                 light_ptr,
                 tile_ptr,
+                scene,
             };
 
             // CRITICAL FIX: Execute Compute Culling BEFORE Render Pass
@@ -3712,7 +3683,7 @@ impl Renderer {
     /// Enables post-processing with default settings
     ///
     /// Initializes HDR, fullscreen pass, and enables tonemapping.
-    pub fn enable_post_processing(&mut self) -> Result<()> {
+    pub fn enable_post_processing(&mut self, scene: &mut super::Scene) -> Result<()> {
         let extent = self
             .swapchain
             .as_ref()
@@ -3728,7 +3699,7 @@ impl Renderer {
         self.post_process.config.tonemapping_enabled = true;
         
         // CRITICAL: Recreate main pipeline and framebuffers to use the NEW HDR render pass format
-        crate::renderer::swapchain_manager::recreate_swapchain_resources(self)?;
+        crate::renderer::swapchain_manager::recreate_swapchain_resources(self, scene)?;
         
         log::info!("Post-processing pipeline enabled (HDR + Tonemapping)");
         Ok(())
@@ -3867,14 +3838,6 @@ impl Renderer {
         &mut self.diagnostics_overlay
     }
 
-    pub fn set_ibl_indices(&mut self, irradiance_idx: u32, prefilter_idx: u32, brdf_idx: u32) {
-        self.scene_lighting.ibl_irradiance_index = irradiance_idx as i32;
-        self.scene_lighting.ibl_prefilter_index = prefilter_idx as i32;
-        self.scene_lighting.ibl_brdf_lut_index = brdf_idx as i32;
-        self.scene_lighting.ibl_intensity = 1.0;
-        self.post_process.config.bloom_enabled = self.scene_lighting.ibl_intensity > 0.0; // Assuming 'intensity' refers to ibl_intensity
-        log::info!("IBL indices updated via set_ibl_indices");
-    }
 }
 
 impl Drop for Renderer {
@@ -3943,7 +3906,6 @@ impl Drop for Renderer {
                 let _ = buffer.cleanup();
             }
 
-            self.model_renderer.clear();
             self.draw_items.clear();
             
             // Phase 19 Transient Arena Cleanup
