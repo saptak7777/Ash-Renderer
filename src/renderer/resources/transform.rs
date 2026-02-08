@@ -351,7 +351,7 @@ pub struct TemporalCamera {
     prev_view_proj: Mat4,
 
     // Jitter state
-    halton: crate::renderer::vsr_pass::HaltonSequence,
+    halton: crate::renderer::passes::vsr::HaltonSequence,
     current_jitter: (f32, f32),
 }
 
@@ -376,7 +376,7 @@ impl TemporalCamera {
             prev_view: view,
             prev_proj: proj,
             prev_view_proj: view_proj,
-            halton: crate::renderer::vsr_pass::HaltonSequence::new(16),
+            halton: crate::renderer::passes::vsr::HaltonSequence::new(16),
             current_jitter: (0.0, 0.0),
         }
     }

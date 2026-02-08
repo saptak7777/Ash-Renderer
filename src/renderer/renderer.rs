@@ -13,24 +13,30 @@ use crate::{
             RendererConfig, SampleShadingQuality, TexturePresenceFlags,
         },
         ForwardPlusIntegration,
-        fullscreen_pass, hdr_framebuffer,
-        hiz_pass::HiZPass,
+        passes::{
+            fullscreen as fullscreen_pass,
+            hiz as hiz_pass,
+            vsr as vsr_pass,
+            hiz::{AdaptiveHiZManager, HiZPass},
+            motion::MotionVectorPass,
+            temporal_aa::{
+                detect_config_change, ConfigChangeType, ConfigMetrics, ConfigMetricsReport,
+                ConfigValidationError, SharpeningMode, TaaConfig, Validate,
+            },
+            vsr::{SharpenConfig, VsrConfig, VsrInputs, VsrPass, VsrQuality, VsrUpscaleConfig},
+        },
         vcgs::{CullBoundingBox, IndirectDrawPass, OcclusionCulling},
         instancing::{BatchKey, InstanceData, InstancingManager},
         model_renderer::{
             MaterialPushConstants, ModelRenderer,
         },
-        motion_pass::MotionVectorPass,
         passes,
         resource_registry::{ResourceId, ResourceRegistry},
         resources,
-        resources::uniform::{StorageBuffer, UniformBuffer},
-        temporal_aa::{
-            detect_config_change, ConfigChangeType, ConfigMetrics, ConfigMetricsReport,
-            ConfigValidationError, SharpeningMode, TaaConfig, Validate,
+        resources::{
+            hdr_framebuffer,
+            uniform::{StorageBuffer, UniformBuffer},
         },
-        vsr_pass::{SharpenConfig, VsrConfig, VsrInputs, VsrPass, VsrQuality, VsrUpscaleConfig},
-        hiz_pass::AdaptiveHiZManager,
         vram_budget, DepthBuffer, GBuffer, Material, MaterialHandle, MaterialManager, Mesh,
         PipelineCache, Texture, Transform,
         initialization,
@@ -1494,7 +1500,7 @@ impl Renderer {
                 ((potential_draws - actual_draws) / potential_draws.max(1.0)).clamp(0.0, 1.0)
             },
             gpu_frame_ms: self.diagnostics.gpu_timings.total_ms,
-            hiz_quality: format!("{:?}", self.hiz_pass.as_ref().map(|h| h.quality()).unwrap_or(crate::renderer::hiz_pass::HiZQuality::Balanced)),
+            hiz_quality: format!("{:?}", self.hiz_pass.as_ref().map(|h| h.quality()).unwrap_or(crate::renderer::passes::hiz::HiZQuality::Balanced)),
             frame_count: self.diagnostics.frame_stats.total_frames,
         }
     }
@@ -3270,7 +3276,8 @@ impl Renderer {
                     let timings = profiler.last_extended_timings();
                     if timings.valid {
                         let hiz_time_ms = timings.hiz_generate_ms as f64;
-                        if let Some(new_quality) = self.adaptive_hiz_manager.update(hiz.quality(), hiz_time_ms) {
+                        let new_quality: Option<hiz_pass::HiZQuality> = self.adaptive_hiz_manager.update(hiz.quality(), hiz_time_ms);
+                        if let Some(new_quality) = new_quality {
                             hiz.set_quality(new_quality);
                         }
                     }
@@ -3584,7 +3591,7 @@ impl Renderer {
                 (&mut self.vsr_pass, &mut self.gbuffer)
             {
                 // Read back metrics from previous frame (non-blocking)
-                let _ = vsr.readback_metrics(command_buffer, &self.alloc.vma);
+                let _: std::result::Result<vsr_pass::VsrMetricsReadback, vsr_pass::VsrError> = vsr.readback_metrics(command_buffer, &self.alloc.vma);
 
                 let _depth_buffer = self
                     .depth_buffer
