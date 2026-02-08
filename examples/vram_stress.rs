@@ -1,4 +1,5 @@
 #![allow(deprecated)]
+use ash_renderer::renderer::Scene;
 use ash_renderer::{
     renderer::{Mesh, Renderer},
     vulkan::WindowSurfaceProvider,
@@ -22,6 +23,11 @@ fn main() -> Result<()> {
 
     log::info!("Initializing renderer for VRAM stress test...");
     let mut renderer = Renderer::new(&surface_provider)?;
+    let mut scene = Scene::new(
+        Arc::clone(&renderer.device.device),
+        Arc::clone(&renderer.alloc),
+        renderer.geometry_buffer(),
+    );
 
     // Create a 2048x2048 synthetic texture (16MB)
     let texture_size = 2048 * 2048 * 4;
@@ -53,13 +59,12 @@ fn main() -> Result<()> {
         let mut mesh = Mesh::from_descriptor(&descriptor);
 
         log::info!("Registering mesh {i}...");
-        if let Err(e) = renderer.register_mesh_handle_single(i as u32, &mut mesh) {
+        if let Err(e) = renderer.upload_mesh_single(&mut scene, mesh) {
             log::error!("Failed to register mesh {i}: {e}");
             break;
         }
 
         // Log stats after each load
-        renderer.log_frame_stats();
     }
 
     log::info!("Stress test complete. Check logs for 'Using fallback' and VRAM percentages.");

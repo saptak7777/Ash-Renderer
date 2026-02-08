@@ -8,6 +8,7 @@ use ash_renderer::renderer::features::ambient_lighting::{AmbientPreset, Lighting
 use ash_renderer::renderer::features::PointLight;
 use ash_renderer::renderer::resources::uniform::StorageBuffer;
 use ash_renderer::renderer::DebugMode;
+use ash_renderer::renderer::Scene;
 use glam::{Mat4, Quat, Vec3, Vec4};
 use std::sync::Arc;
 use std::time::Instant;
@@ -21,6 +22,7 @@ use winit::{
 
 struct App {
     window: Option<Window>,
+    scene: Option<Scene>,
     tint_buffer: Option<Arc<parking_lot::Mutex<StorageBuffer<Vec4>>>>,
     renderer: Option<Renderer>,
     render_commands: Vec<ash_renderer::renderer::RenderCommand>,
@@ -34,6 +36,7 @@ impl Default for App {
             window: None,
             tint_buffer: None,
             renderer: None,
+            scene: None,
             render_commands: Vec::new(),
             start_time: Instant::now(),
             current_debug_mode: DebugMode::None,
@@ -52,6 +55,12 @@ impl ApplicationHandler for App {
 
         match Renderer::new(&surface_provider) {
             Ok(mut renderer) => {
+                let mut scene = Scene::new(
+                    Arc::clone(&renderer.device.device),
+                    Arc::clone(&renderer.alloc),
+                    renderer.geometry_buffer(),
+                );
+
                 // Create a cube mesh
                 let mut cube = Mesh::create_cube();
                 // Override vertex colors to WHITE so they don't affect the material color
@@ -72,11 +81,13 @@ impl ApplicationHandler for App {
                 };
 
                 // Upload mesh
-                let mesh_handle = renderer.upload_mesh_single(cube).unwrap();
+                let mesh_handle = renderer.upload_mesh_single(&mut scene, cube).unwrap();
                 log::info!("✓ Mesh uploaded to GPU");
 
                 // Register and upload material
-                let material_handle = renderer.register_and_upload_material(material).unwrap();
+                let material_handle = renderer
+                    .register_and_upload_material(&mut scene, material)
+                    .unwrap();
 
                 log::info!("✓ Uploaded red PBR material to GPU with handle {material_handle:?}");
 
@@ -99,7 +110,7 @@ impl ApplicationHandler for App {
                 }
 
                 // CRITICAL: Must call enable_post_processing() to initialize HDR/Tonemapping pipelines!
-                if let Err(e) = renderer.enable_post_processing() {
+                if let Err(e) = renderer.enable_post_processing(&mut scene) {
                     log::warn!("Post-processing failed: {e}");
                     // renderer.set_debug_mode(DebugMode::None);
                 }
@@ -115,9 +126,10 @@ impl ApplicationHandler for App {
                     )
                     .build();
 
-                renderer.set_lighting(&lighting);
+                scene.set_lighting(lighting);
 
                 self.renderer = Some(renderer);
+                self.scene = Some(scene);
                 self.window = Some(window);
                 self.start_time = Instant::now();
                 log::info!("PBR Cube renderer initialized!");
@@ -133,7 +145,9 @@ impl ApplicationHandler for App {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::RedrawRequested => {
-                if let (Some(renderer), Some(window)) = (&mut self.renderer, &self.window) {
+                if let (Some(renderer), Some(window), Some(scene)) =
+                    (&mut self.renderer, &self.window, &mut self.scene)
+                {
                     let elapsed = self.start_time.elapsed().as_secs_f32();
                     let size = window.inner_size();
                     let aspect = size.width as f32 / size.height as f32;
@@ -169,7 +183,7 @@ impl ApplicationHandler for App {
                         },
                     ];
 
-                    renderer.update_lights(&lights, &[]);
+                    scene.point_lights = lights;
 
                     // Fixed camera looking at the rotating cube
                     let camera_pos = Vec3::new(0.0, 2.0, 5.0);
@@ -192,11 +206,11 @@ impl ApplicationHandler for App {
                     proj.y_axis.y *= -1.0;
 
                     // Submit render commands
-                    if let Err(e) = renderer.submit_render_commands(&self.render_commands) {
+                    if let Err(e) = renderer.submit_render_commands(scene, &self.render_commands) {
                         log::error!("Failed to submit render commands: {e}");
                     }
 
-                    if let Err(e) = renderer.render_frame(view, proj, camera_pos, None) {
+                    if let Err(e) = renderer.render_frame(scene, view, proj, camera_pos, None) {
                         log::error!("Render error: {e}");
                     }
                 }
@@ -270,6 +284,11 @@ fn run_headless(max_frames: u32) -> Result<()> {
     let surface_provider = ash_renderer::vulkan::HeadlessSurfaceProvider::new(width, height);
 
     let mut renderer = Renderer::new(&surface_provider)?;
+    let mut scene = Scene::new(
+        Arc::clone(&renderer.device.device),
+        Arc::clone(&renderer.alloc),
+        renderer.geometry_buffer(),
+    );
 
     // --- SETUP SOURCE (Copied from resumed) ---
     let mut cube = Mesh::create_cube();
@@ -284,8 +303,10 @@ fn run_headless(max_frames: u32) -> Result<()> {
         roughness: 0.2,
         ..Default::default()
     };
-    let mesh_handle = renderer.upload_mesh_single(cube).unwrap();
-    let material_handle = renderer.register_and_upload_material(material).unwrap();
+    let mesh_handle = renderer.upload_mesh_single(&mut scene, cube).unwrap();
+    let material_handle = renderer
+        .register_and_upload_material(&mut scene, material)
+        .unwrap();
 
     let render_commands = vec![ash_renderer::renderer::RenderCommand {
         mesh_handle,
@@ -302,7 +323,7 @@ fn run_headless(max_frames: u32) -> Result<()> {
             .map(|(b, _)| b)
     };
 
-    if let Err(e) = renderer.enable_post_processing() {
+    if let Err(e) = renderer.enable_post_processing(&mut scene) {
         log::warn!("Post-processing failed: {e}");
     }
 
@@ -314,7 +335,7 @@ fn run_headless(max_frames: u32) -> Result<()> {
             1.0,
         )
         .build();
-    renderer.set_lighting(&lighting);
+    scene.set_lighting(lighting);
     // --- END SETUP ---
 
     let start_time = Instant::now();
@@ -354,15 +375,15 @@ fn run_headless(max_frames: u32) -> Result<()> {
                 radius: 10.0,
             },
         ];
-        renderer.update_lights(&lights, &[]);
+        scene.point_lights = lights;
 
         let camera_pos = Vec3::new(0.0, 2.0, 5.0);
         let view = Mat4::look_at_rh(camera_pos, Vec3::ZERO, Vec3::Y);
         let mut proj = Mat4::perspective_infinite_reverse_rh(45.0_f32.to_radians(), aspect, 0.1);
         proj.y_axis.y *= -1.0;
 
-        renderer.submit_render_commands(&frame_commands)?;
-        renderer.render_frame(view, proj, camera_pos, None)?;
+        renderer.submit_render_commands(&mut scene, &frame_commands)?;
+        renderer.render_frame(&mut scene, view, proj, camera_pos, None)?;
 
         if frame % 100 == 0 {
             log::info!("Headless frame {frame}/{max_frames}");

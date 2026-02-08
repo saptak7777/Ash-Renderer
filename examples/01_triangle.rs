@@ -3,6 +3,8 @@
 //! Demonstrates minimal renderer setup and rendering a simple triangle.
 
 use ash_renderer::prelude::*;
+use ash_renderer::renderer::Scene;
+use std::sync::Arc;
 use winit::{
     application::ApplicationHandler,
     event::WindowEvent,
@@ -13,6 +15,7 @@ use winit::{
 #[derive(Default)]
 struct App {
     window: Option<Window>,
+    scene: Option<Scene>,
     renderer: Option<Renderer>,
     render_commands: Vec<ash_renderer::renderer::RenderCommand>,
 }
@@ -27,14 +30,18 @@ impl ApplicationHandler for App {
         let surface_provider = ash_renderer::vulkan::WindowSurfaceProvider::new(&window);
         match Renderer::new(&surface_provider) {
             Ok(mut renderer) => {
+                let mut scene = Scene::new(
+                    Arc::clone(&renderer.device.device),
+                    Arc::clone(&renderer.alloc),
+                    renderer.geometry_buffer(),
+                );
+
                 // Add a default directional light so the PBR shader has something to render
-                renderer.update_directional_lights(&[
-                    ash_renderer::renderer::features::DirectionalLight {
-                        direction: glam::Vec3::new(-1.0, -1.0, -1.0),
-                        color: glam::Vec3::new(1.0, 1.0, 1.0),
-                        intensity: 2.0,
-                    },
-                ]);
+                scene.add_directional_light(ash_renderer::renderer::features::DirectionalLight {
+                    direction: glam::Vec3::new(-1.0, -1.0, -1.0),
+                    color: glam::Vec3::new(1.0, 1.0, 1.0),
+                    intensity: 2.0,
+                });
 
                 // Create a simple triangle mesh
                 let mut mesh = Mesh::default();
@@ -68,7 +75,7 @@ impl ApplicationHandler for App {
                 mesh.indices = Some(vec![0, 1, 2]);
 
                 // Upload mesh
-                let mesh_handle = renderer.upload_mesh_single(mesh).unwrap_or(0);
+                let mesh_handle = renderer.upload_mesh_single(&mut scene, mesh).unwrap_or(0);
 
                 // Create default material
                 let material = Material {
@@ -78,7 +85,9 @@ impl ApplicationHandler for App {
                     roughness: 1.0,
                     ..Default::default()
                 };
-                let material_handle = renderer.register_and_upload_material(material).unwrap();
+                let material_handle = renderer
+                    .register_and_upload_material(&mut scene, material)
+                    .unwrap();
 
                 // Setup render command
                 self.render_commands
@@ -90,6 +99,7 @@ impl ApplicationHandler for App {
                     });
 
                 self.renderer = Some(renderer);
+                self.scene = Some(scene);
                 self.window = Some(window);
                 log::info!("Renderer initialized successfully!");
             }
@@ -104,7 +114,9 @@ impl ApplicationHandler for App {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::RedrawRequested => {
-                if let (Some(renderer), Some(window)) = (&mut self.renderer, &self.window) {
+                if let (Some(renderer), Some(window), Some(scene)) =
+                    (&mut self.renderer, &self.window, &mut self.scene)
+                {
                     let size = window.inner_size();
                     let aspect = size.width as f32 / size.height.max(1) as f32;
 
@@ -120,11 +132,11 @@ impl ApplicationHandler for App {
                     proj.y_axis.y *= -1.0; // Vulkan Y-flip
 
                     // Submit commands
-                    if let Err(e) = renderer.submit_render_commands(&self.render_commands) {
+                    if let Err(e) = renderer.submit_render_commands(scene, &self.render_commands) {
                         log::error!("Failed to submit render commands: {e}");
                     }
 
-                    if let Err(e) = renderer.render_frame(view, proj, camera_pos, None) {
+                    if let Err(e) = renderer.render_frame(scene, view, proj, camera_pos, None) {
                         log::error!("Render error: {e}");
                     }
                 }

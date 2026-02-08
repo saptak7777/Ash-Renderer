@@ -22,6 +22,7 @@ pub mod renderer;
 pub mod resource_pool;
 pub mod resource_registry;
 pub mod resources;
+pub mod scene;
 pub(crate) mod swapchain_manager;
 pub mod systems;
 pub mod types;
@@ -39,6 +40,7 @@ pub use pipeline_cache::PipelineCache;
 pub use render_stats::{RenderStats, StatsCollector};
 pub use renderer::Renderer;
 pub use resource_registry::{ResourceId, ResourceRegistry};
+pub use scene::Scene;
 
 // Pass-specific re-exports (if not covered by passes::*)
 pub use passes::fullscreen::FullscreenPass;

@@ -5,7 +5,9 @@
 
 use ash::vk;
 use ash_renderer::prelude::*;
+use ash_renderer::renderer::Scene;
 use glam::{Mat4, Vec3};
+use std::sync::Arc;
 use std::time::Instant;
 use winit::{
     application::ApplicationHandler,
@@ -16,6 +18,7 @@ use winit::{
 
 struct App {
     window: Option<Window>,
+    scene: Option<Scene>,
     renderer: Option<Renderer>,
     start_time: Instant,
     demo_mesh: Option<Mesh>,
@@ -27,6 +30,7 @@ impl Default for App {
         Self {
             window: None,
             renderer: None,
+            scene: None,
             start_time: Instant::now(),
             demo_mesh: None,
             mesh_handle: None,
@@ -46,6 +50,12 @@ impl ApplicationHandler for App {
 
         match Renderer::new(&surface_provider) {
             Ok(mut renderer) => {
+                let mut scene = Scene::new(
+                    Arc::clone(&renderer.device.device),
+                    Arc::clone(&renderer.alloc),
+                    renderer.geometry_buffer(),
+                );
+
                 // Create a demo mesh with material properties (simulating GLB load)
                 let mut demo_mesh = Mesh::create_cube();
                 demo_mesh.name = "metallic_demo_cube".into();
@@ -64,33 +74,28 @@ impl ApplicationHandler for App {
                 );
 
                 // Register the mesh with the renderer (this triggers material registration)
-                let handle = 1u32;
-                if let Err(e) = renderer.register_mesh_handle_single(handle, &mut demo_mesh) {
-                    log::error!("Failed to register demo mesh: {e}");
-                } else {
+                // Register the mesh with the renderer (this triggers material registration)
+                if let Ok(handle) = renderer.upload_mesh_single(&mut scene, demo_mesh.clone()) {
+                    log::info!("✅ Demo mesh registered with handle {handle}");
+
                     log::info!("✅ Demo mesh registered with handle {handle}");
 
                     // Check if material was registered
-                    let mesh_data = renderer.mesh_data();
-                    if !mesh_data.is_empty() {
-                        let mat_handle = mesh_data[0].material_handle;
-                        if renderer.material_manager().is_handle_valid(mat_handle) {
-                            log::info!("✅ Material automatically registered for demo mesh");
+                    let mat_handle = renderer.get_mesh_material(handle);
+                    if !mat_handle.is_null() && scene.material_manager.is_handle_valid(mat_handle) {
+                        log::info!("✅ Material automatically registered for demo mesh");
 
-                            // CRITICAL FIX: Upload the automatically registered material to GPU
-                            let material =
-                                renderer.material_manager().get_material(mat_handle).clone();
-                            let _ =
-                                renderer.upload_material_to_gpu(mat_handle.index as u32, &material);
-                            log::info!("✅ Material uploaded to GPU: {mat_handle:?}");
+                        // CRITICAL FIX: Upload the automatically registered material to GPU
+                        let material = scene.material_manager.get_material(mat_handle).clone();
+                        let _ = renderer.register_and_upload_material(&mut scene, material.clone());
+                        log::info!("✅ Material uploaded to GPU: {mat_handle:?}");
 
-                            log::info!("   - Material: {}", material.name);
-                            log::info!("   - Metallic: {:.2}", material.metallic);
-                            log::info!("   - Roughness: {:.2}", material.roughness);
-                            log::info!("   - Color: {:?}", material.color);
-                        } else {
-                            log::warn!("❌ No material registered for demo mesh");
-                        }
+                        log::info!("   - Material: {}", material.name);
+                        log::info!("   - Metallic: {:.2}", material.metallic);
+                        log::info!("   - Roughness: {:.2}", material.roughness);
+                        log::info!("   - Color: {:?}", material.color);
+                    } else {
+                        log::warn!("❌ No material registered for demo mesh");
                     }
 
                     // Store for rendering
@@ -105,11 +110,12 @@ impl ApplicationHandler for App {
                     cmd.material_handle = ash_renderer::renderer::MaterialHandle::null();
                     cmd.transform = Mat4::IDENTITY;
 
-                    let _ = renderer.submit_render_commands(&[cmd]);
+                    let _ = renderer.submit_render_commands(&mut scene, &[cmd]);
                     log::info!("✅ Render command submitted with auto material selection");
                 }
 
                 self.renderer = Some(renderer);
+                self.scene = Some(scene);
                 self.window = Some(window);
                 self.start_time = Instant::now();
             }
@@ -124,7 +130,9 @@ impl ApplicationHandler for App {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::RedrawRequested => {
-                if let (Some(renderer), Some(window)) = (&mut self.renderer, &self.window) {
+                if let (Some(renderer), Some(window), Some(scene)) =
+                    (&mut self.renderer, &self.window, &mut self.scene)
+                {
                     // Animated camera
                     let elapsed = self.start_time.elapsed().as_secs_f32();
                     let size = window.inner_size();
@@ -142,7 +150,7 @@ impl ApplicationHandler for App {
                     let mut proj = Mat4::perspective_rh(45.0_f32.to_radians(), aspect, 0.5, 100.0);
                     proj.y_axis.y *= -1.0; // Vulkan Y-flip
 
-                    if let Err(e) = renderer.render_frame(view, proj, camera_pos, None) {
+                    if let Err(e) = renderer.render_frame(scene, view, proj, camera_pos, None) {
                         log::error!("Render error: {e}");
                     }
                 }

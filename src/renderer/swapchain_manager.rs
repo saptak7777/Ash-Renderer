@@ -2,7 +2,7 @@ use crate::renderer::*;
 use crate::AshError;
 use crate::Result;
 
-pub fn recreate_swapchain_resources(renderer: &mut Renderer) -> Result<()> {
+pub fn recreate_swapchain_resources(renderer: &mut Renderer, scene: &mut Scene) -> Result<()> {
     log::info!("Starting swapchain recreation...");
 
     // Delegate creation to the Queue
@@ -55,9 +55,9 @@ pub fn recreate_swapchain_resources(renderer: &mut Renderer) -> Result<()> {
     if let Some(ref mut forward_plus) = renderer.forward_plus {
         forward_plus.on_resize(swapchain_extent.width, swapchain_extent.height);
         let fp_info = forward_plus.get_lights().get_forward_plus_info();
-        renderer.scene_lighting.num_tiles_x = fp_info.num_tiles[0];
-        renderer.scene_lighting.num_tiles_y = fp_info.num_tiles[1];
-        renderer.scene_lighting.tile_size = fp_info.tile_size;
+        scene.scene_lighting.num_tiles_x = fp_info.num_tiles[0];
+        scene.scene_lighting.num_tiles_y = fp_info.num_tiles[1];
+        scene.scene_lighting.tile_size = fp_info.tile_size;
     }
 
     renderer.recreate_descriptor_sets()?;

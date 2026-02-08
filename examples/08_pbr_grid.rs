@@ -16,6 +16,7 @@ use ash_renderer::prelude::*;
 use ash_renderer::renderer::features::ambient_lighting::{AmbientPreset, LightingBuilder};
 use ash_renderer::renderer::features::PointLight;
 use ash_renderer::renderer::resources::uniform::StorageBuffer;
+use ash_renderer::renderer::Scene;
 use glam::{Mat4, Vec3, Vec4};
 use std::sync::Arc;
 use std::time::Instant;
@@ -30,6 +31,7 @@ struct App {
     window: Option<Window>,
     tint_buffer: Option<Arc<parking_lot::Mutex<StorageBuffer<Vec4>>>>,
     renderer: Option<Renderer>,
+    scene: Option<Scene>,
     render_commands: Vec<ash_renderer::renderer::RenderCommand>,
     start_time: Instant,
 }
@@ -40,6 +42,7 @@ impl Default for App {
             window: None,
             tint_buffer: None,
             renderer: None,
+            scene: None,
             render_commands: Vec::new(),
             start_time: Instant::now(),
         }
@@ -57,6 +60,12 @@ impl ApplicationHandler for App {
 
         match Renderer::new(&surface_provider) {
             Ok(mut renderer) => {
+                let mut scene = Scene::new(
+                    Arc::clone(&renderer.device.device),
+                    Arc::clone(&renderer.alloc),
+                    renderer.geometry_buffer(),
+                );
+
                 // Create a cube mesh
                 let mut cube = Mesh::create_cube();
                 // Override vertex colors to WHITE so they don't affect the material color
@@ -67,7 +76,7 @@ impl ApplicationHandler for App {
                 cube.texture_data = None;
 
                 // Upload mesh
-                let mesh_handle = renderer.upload_mesh_single(cube).unwrap_or(0);
+                let mesh_handle = renderer.upload_mesh_single(&mut scene, cube).unwrap_or(0);
                 log::info!("✓ Mesh uploaded to GPU");
 
                 // Register bindless storage buffer (prevents crash)
@@ -80,11 +89,12 @@ impl ApplicationHandler for App {
                 }
 
                 // Enable post-processing for HDR/Tonemapping
-                if let Err(e) = renderer.enable_post_processing() {
+                if let Err(e) = renderer.enable_post_processing(&mut scene) {
                     log::warn!("Post-processing failed: {e}");
                 }
 
                 // Load pre-baked IBL environment map for realistic PBR lighting
+                let mut ibl_indices = None;
                 if let Ok(asset) =
                     archetype_asset::ibl::MappedIblAsset::load("assets/textures/skybox.ibl")
                 {
@@ -108,7 +118,7 @@ impl ApplicationHandler for App {
                         params,
                     ) {
                         Ok((irradiance, prefilter, brdf)) => {
-                            renderer.set_ibl_indices(irradiance, prefilter, brdf);
+                            ibl_indices = Some((irradiance, prefilter, brdf));
                         }
                         Err(e) => {
                             log::warn!("Failed to upload IBL: {e}");
@@ -144,8 +154,9 @@ impl ApplicationHandler for App {
                             ..Default::default()
                         };
 
-                        let material_handle =
-                            renderer.register_and_upload_material(material).unwrap();
+                        let material_handle = renderer
+                            .register_and_upload_material(&mut scene, material)
+                            .unwrap();
 
                         // Position cube in grid
                         let x = (col as f32 - (grid_size - 1) as f32 / 2.0) * spacing;
@@ -172,7 +183,7 @@ impl ApplicationHandler for App {
                 );
 
                 // Set up lighting to highlight PBR properties (RAGE approach)
-                let lighting = LightingBuilder::new()
+                let mut lighting = LightingBuilder::new()
                     .with_ambient_preset(AmbientPreset::IndoorLit)
                     .with_directional(
                         Vec3::new(1.0, -1.0, -1.0).normalize(),
@@ -181,9 +192,19 @@ impl ApplicationHandler for App {
                     )
                     .build();
 
-                renderer.set_lighting(&lighting);
+                if let Some((irr, pref, brdf)) = ibl_indices {
+                    lighting.ibl_irradiance_index = irr as i32;
+                    lighting.ibl_prefilter_index = pref as i32;
+                    lighting.ibl_brdf_lut_index = brdf as i32;
+                }
+
+                scene.set_lighting(lighting);
+
+                // Initialize 4 point lights for the moving lights demo
+                scene.point_lights.resize_with(4, Default::default);
 
                 self.renderer = Some(renderer);
+                self.scene = Some(scene);
                 self.window = Some(window);
                 self.start_time = Instant::now();
                 log::info!("PBR Material Grid initialized!");
@@ -210,9 +231,11 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::RedrawRequested => {
-                if let (Some(renderer), Some(window)) =
-                    (self.renderer.as_mut(), self.window.as_ref())
-                {
+                if let (Some(renderer), Some(window), Some(scene)) = (
+                    self.renderer.as_mut(),
+                    self.window.as_ref(),
+                    self.scene.as_mut(),
+                ) {
                     // Update camera position to view the entire grid
                     let elapsed = self.start_time.elapsed().as_secs_f32();
                     let camera_radius = 15.0;
@@ -220,7 +243,7 @@ impl ApplicationHandler for App {
                     let camera_z = camera_radius * (elapsed * 0.15).sin();
                     let camera_pos = Vec3::new(camera_x, 8.0, camera_z);
 
-                    renderer.set_view(camera_pos, Vec3::ZERO, Vec3::Y);
+                    let camera_pos = Vec3::new(camera_x, 8.0, camera_z);
 
                     // Update light positions (focused around the center grid)
                     let p1 = Vec3::new(
@@ -244,42 +267,30 @@ impl ApplicationHandler for App {
                         -(elapsed * 0.7).cos() * 6.0,
                     );
 
-                    renderer.update_light(
-                        0,
-                        PointLight {
-                            position: p1,
-                            color: Vec3::new(1.0, 0.9, 0.8),
-                            intensity: 200.0,
-                            radius: 30.0,
-                        },
-                    );
-                    renderer.update_light(
-                        1,
-                        PointLight {
-                            position: p2,
-                            color: Vec3::new(0.8, 0.9, 1.0),
-                            intensity: 150.0,
-                            radius: 25.0,
-                        },
-                    );
-                    renderer.update_light(
-                        2,
-                        PointLight {
-                            position: p3,
-                            color: Vec3::new(1.0, 1.0, 1.0),
-                            intensity: 180.0,
-                            radius: 28.0,
-                        },
-                    );
-                    renderer.update_light(
-                        3,
-                        PointLight {
-                            position: p4,
-                            color: Vec3::new(1.0, 0.5, 0.5),
-                            intensity: 120.0,
-                            radius: 20.0,
-                        },
-                    );
+                    scene.point_lights[0] = PointLight {
+                        position: p1,
+                        color: Vec3::new(1.0, 0.9, 0.8),
+                        intensity: 200.0,
+                        radius: 30.0,
+                    };
+                    scene.point_lights[1] = PointLight {
+                        position: p2,
+                        color: Vec3::new(0.8, 0.9, 1.0),
+                        intensity: 150.0,
+                        radius: 25.0,
+                    };
+                    scene.point_lights[2] = PointLight {
+                        position: p3,
+                        color: Vec3::new(1.0, 1.0, 1.0),
+                        intensity: 180.0,
+                        radius: 28.0,
+                    };
+                    scene.point_lights[3] = PointLight {
+                        position: p4,
+                        color: Vec3::new(1.0, 0.5, 0.5),
+                        intensity: 120.0,
+                        radius: 20.0,
+                    };
 
                     // Calculate camera matrices
                     let size = window.inner_size();
@@ -297,11 +308,11 @@ impl ApplicationHandler for App {
                     // renderer.transform.rotation = glam::Quat::from_rotation_y(elapsed * 0.03);
 
                     // Submit draw calls (Required for Bindless-Only Renderer)
-                    if let Err(e) = renderer.submit_render_commands(&self.render_commands) {
+                    if let Err(e) = renderer.submit_render_commands(scene, &self.render_commands) {
                         log::error!("Failed to submit render commands: {e}");
                     }
 
-                    if let Err(e) = renderer.render_frame(view, proj, camera_pos, None) {
+                    if let Err(e) = renderer.render_frame(scene, view, proj, camera_pos, None) {
                         log::error!("Failed to render frame: {e}");
                     }
                 }

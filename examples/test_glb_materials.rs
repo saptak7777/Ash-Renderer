@@ -5,7 +5,9 @@
 use ash::vk;
 use ash_renderer::prelude::*;
 use ash_renderer::renderer::resources::gltf_loader;
+use ash_renderer::renderer::Scene;
 use glam::{Mat4, Vec3};
+use std::sync::Arc;
 use std::time::Instant;
 use winit::{
     application::ApplicationHandler,
@@ -16,6 +18,7 @@ use winit::{
 
 struct App {
     window: Option<Window>,
+    scene: Option<Scene>,
     renderer: Option<Renderer>,
     start_time: Instant,
 }
@@ -25,6 +28,7 @@ impl Default for App {
         Self {
             window: None,
             renderer: None,
+            scene: None,
             start_time: Instant::now(),
         }
     }
@@ -42,6 +46,12 @@ impl ApplicationHandler for App {
 
         match Renderer::new(&surface_provider) {
             Ok(mut renderer) => {
+                let mut scene = Scene::new(
+                    Arc::clone(&renderer.device.device),
+                    Arc::clone(&renderer.alloc),
+                    renderer.geometry_buffer(),
+                );
+
                 // Try to load a GLB file if it exists
                 let glb_paths = ["assets/models/test.glb", "test.glb", "assets/test.glb"];
 
@@ -55,44 +65,42 @@ impl ApplicationHandler for App {
 
                                 // Register each mesh with the renderer
                                 for (i, mut mesh) in meshes.into_iter().enumerate() {
-                                    let handle = (i + 1) as u32; // Use 1-based handles
                                     let mesh_name = mesh.name.clone();
-                                    if let Err(e) =
-                                        renderer.register_mesh_handle_single(handle, &mut mesh)
-                                    {
-                                        log::error!("Failed to register mesh {i}: {e}");
-                                    } else {
-                                        log::info!(
+                                    // Use upload_mesh_single instead of register_mesh_handle_single
+                                    match renderer.upload_mesh_single(&mut scene, mesh) {
+                                        Err(e) => {
+                                            log::error!("Failed to register mesh {i}: {e}");
+                                        }
+                                        Ok(handle) => {
+                                            log::info!(
                                             "Registered mesh '{mesh_name}' with handle {handle}"
                                         );
 
-                                        // Check if material was registered
-                                        let mesh_data = renderer.mesh_data();
-                                        if (handle as usize) < mesh_data.len() {
-                                            let mat_handle =
-                                                mesh_data[handle as usize].material_handle;
-                                            if renderer
-                                                .material_manager()
-                                                .is_handle_valid(mat_handle)
-                                            {
-                                                log::info!(
+                                            // Check if material was registered
+                                            let mat_handle = renderer.get_mesh_material(handle);
+                                            if !mat_handle.is_null() {
+                                                if scene
+                                                    .material_manager
+                                                    .is_handle_valid(mat_handle)
+                                                {
+                                                    log::info!(
                                                     "✅ Material registered for mesh '{mesh_name}' (handle {mat_handle:?})"
                                                 );
 
-                                                // Upload the automatically registered material to GPU
-                                                let material = renderer
-                                                    .material_manager()
-                                                    .get_material(mat_handle)
-                                                    .clone();
-                                                let _ = renderer.upload_material_to_gpu(
-                                                    mat_handle.index as u32,
-                                                    &material,
-                                                );
-                                                log::info!(
+                                                    // Upload the automatically registered material to GPU
+                                                    let material = scene
+                                                        .material_manager
+                                                        .get_material(mat_handle)
+                                                        .clone();
+                                                    let _ = renderer.register_and_upload_material(
+                                                        &mut scene, material,
+                                                    );
+                                                    log::info!(
                                                     "✅ Material uploaded to GPU: {mat_handle:?}"
                                                 );
-                                            } else {
-                                                log::warn!("❌ No material registered for mesh '{mesh_name}' (handle {mat_handle:?})");
+                                                } else {
+                                                    log::warn!("❌ No material registered for mesh '{mesh_name}' (handle {mat_handle:?})");
+                                                }
                                             }
                                         }
                                     }
@@ -123,33 +131,33 @@ impl ApplicationHandler for App {
                         },
                     );
 
-                    if let Err(e) = renderer.register_mesh_handle_single(1, &mut cube) {
-                        log::error!("Failed to register test cube: {e}");
-                    } else {
+                    if let Ok(handle) = renderer.upload_mesh_single(&mut scene, cube) {
                         log::info!("Test cube registered with material properties");
 
                         // Check if material was registered
-                        let mesh_data = renderer.mesh_data();
-                        if !mesh_data.is_empty() {
-                            let mat_handle = mesh_data[0].material_handle;
-                            if renderer.material_manager().is_handle_valid(mat_handle) {
+                        let mat_handle = renderer.get_mesh_material(handle);
+                        if !mat_handle.is_null() {
+                            if scene.material_manager.is_handle_valid(mat_handle) {
                                 log::info!(
                                     "✅ Material registered for test cube (handle {mat_handle:?})"
                                 );
                             }
                         }
+                    } else {
+                        log::error!("Failed to register test cube");
                     }
 
                     // Submit render command with null handle to test fallback
                     let mut cmd = ash_renderer::renderer::RenderCommand::default();
-                    cmd.mesh_handle = 1;
+                    cmd.mesh_handle = 1; // Note: This might be invalid if load failed, but it's a test
                     cmd.material_handle = ash_renderer::renderer::MaterialHandle::null();
                     cmd.transform = Mat4::IDENTITY;
 
-                    let _ = renderer.submit_render_commands(&[cmd]);
+                    let _ = renderer.submit_render_commands(&mut scene, &[cmd]);
                 }
 
                 self.renderer = Some(renderer);
+                self.scene = Some(scene);
                 self.window = Some(window);
                 self.start_time = Instant::now();
             }
@@ -164,7 +172,9 @@ impl ApplicationHandler for App {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::RedrawRequested => {
-                if let (Some(renderer), Some(window)) = (&mut self.renderer, &self.window) {
+                if let (Some(renderer), Some(window), Some(scene)) =
+                    (&mut self.renderer, &self.window, &mut self.scene)
+                {
                     let size = window.inner_size();
                     let aspect = size.width as f32 / size.height as f32;
 
@@ -176,7 +186,7 @@ impl ApplicationHandler for App {
                     let mut proj = Mat4::perspective_rh(45.0_f32.to_radians(), aspect, 0.5, 100.0);
                     proj.y_axis.y *= -1.0; // Vulkan Y-flip
 
-                    if let Err(e) = renderer.render_frame(view, proj, camera_pos, None) {
+                    if let Err(e) = renderer.render_frame(scene, view, proj, camera_pos, None) {
                         log::error!("Render error: {e}");
                     }
                 }

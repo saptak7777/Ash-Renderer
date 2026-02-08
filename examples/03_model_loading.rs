@@ -4,7 +4,9 @@
 
 use ash_renderer::prelude::*;
 use ash_renderer::renderer::resources::gltf_loader;
+use ash_renderer::renderer::Scene;
 use glam::{Mat4, Vec3};
+use std::sync::Arc;
 use std::time::Instant;
 use winit::{
     application::ApplicationHandler,
@@ -15,6 +17,7 @@ use winit::{
 
 struct App {
     window: Option<Window>,
+    scene: Option<Scene>,
     renderer: Option<Renderer>,
     mesh_handles: Vec<u32>,
     start_time: Instant,
@@ -25,6 +28,7 @@ impl Default for App {
         Self {
             window: None,
             renderer: None,
+            scene: None,
             mesh_handles: Vec::new(),
             start_time: Instant::now(),
         }
@@ -42,6 +46,12 @@ impl ApplicationHandler for App {
 
         match Renderer::new(&surface_provider) {
             Ok(mut renderer) => {
+                let mut scene = Scene::new(
+                    Arc::clone(&renderer.device.device),
+                    Arc::clone(&renderer.alloc),
+                    renderer.geometry_buffer(),
+                );
+
                 // Path to a GLB model
                 let glb_path = "assets/models/test.glb";
 
@@ -52,7 +62,7 @@ impl ApplicationHandler for App {
                             for (i, mut mesh) in meshes.into_iter().enumerate() {
                                 let handle = (i + 1) as u32;
                                 if renderer
-                                    .register_mesh_handle_single(handle, &mut mesh)
+                                    .register_mesh_handle_single(&mut scene, handle, &mut mesh)
                                     .is_ok()
                                 {
                                     self.mesh_handles.push(handle);
@@ -69,12 +79,16 @@ impl ApplicationHandler for App {
                 } else {
                     log::warn!("Model not found at {glb_path}. Using default cube.");
                     let mut cube = Mesh::create_cube();
-                    if renderer.register_mesh_handle_single(1, &mut cube).is_ok() {
+                    if renderer
+                        .register_mesh_handle_single(&mut scene, 1, &mut cube)
+                        .is_ok()
+                    {
                         self.mesh_handles.push(1);
                     }
                 }
 
                 self.renderer = Some(renderer);
+                self.scene = Some(scene);
                 self.window = Some(window);
             }
             Err(e) => {
@@ -88,7 +102,9 @@ impl ApplicationHandler for App {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::RedrawRequested => {
-                if let (Some(renderer), Some(window)) = (&mut self.renderer, &self.window) {
+                if let (Some(renderer), Some(window), Some(scene)) =
+                    (&mut self.renderer, &self.window, &mut self.scene)
+                {
                     let size = window.inner_size();
                     let aspect = size.width as f32 / size.height as f32;
                     let elapsed = self.start_time.elapsed().as_secs_f32();
@@ -111,8 +127,8 @@ impl ApplicationHandler for App {
                         });
                     }
 
-                    let _ = renderer.submit_render_commands(&commands);
-                    let _ = renderer.render_frame(view, proj, camera_pos, None);
+                    let _ = renderer.submit_render_commands(scene, &commands);
+                    let _ = renderer.render_frame(scene, view, proj, camera_pos, None);
                 }
                 if let Some(window) = &self.window {
                     window.request_redraw();

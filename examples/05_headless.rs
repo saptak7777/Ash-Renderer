@@ -4,8 +4,10 @@
 //! rendering a single frame and saving it to an image file.
 
 use ash_renderer::prelude::*;
+use ash_renderer::renderer::Scene;
 use glam::{Mat4, Vec3};
 use std::path::Path;
+use std::sync::Arc;
 
 fn main() -> Result<()> {
     env_logger::init();
@@ -19,12 +21,17 @@ fn main() -> Result<()> {
 
     // 2. Create Renderer
     let mut renderer = Renderer::new(&surface_provider)?;
-    renderer.enable_post_processing()?;
+    let mut scene = Scene::new(
+        Arc::clone(&renderer.device.device),
+        Arc::clone(&renderer.alloc),
+        renderer.geometry_buffer(),
+    );
+    renderer.enable_post_processing(&mut scene)?;
     log::info!("Renderer initialized in headless mode with HDR post-processing.");
 
     // 3. Set up scene (Cube)
     let cube = Mesh::create_cube();
-    let mesh_handle = renderer.upload_mesh_single(cube)?;
+    let mesh_handle = renderer.upload_mesh_single(&mut scene, cube)?;
 
     let material = Material {
         color: [0.2, 0.8, 0.2, 1.0], // Green cube
@@ -34,7 +41,7 @@ fn main() -> Result<()> {
     };
 
     // CRITICAL FIX: Register and upload material
-    let material_handle = renderer.register_and_upload_material(material)?;
+    let material_handle = renderer.register_and_upload_material(&mut scene, material)?;
     log::info!("✓ Registered and uploaded green material with handle {material_handle:?}");
 
     // 4. Set up Camera
@@ -49,14 +56,17 @@ fn main() -> Result<()> {
 
     // 5. Render a single frame
     log::info!("Rendering frame...");
-    renderer.submit_render_commands(&[ash_renderer::renderer::RenderCommand {
-        mesh_handle,
-        material_handle,
-        transform: Mat4::IDENTITY,
-        ..Default::default()
-    }])?;
+    renderer.submit_render_commands(
+        &mut scene,
+        &[ash_renderer::renderer::RenderCommand {
+            mesh_handle,
+            material_handle,
+            transform: Mat4::IDENTITY,
+            ..Default::default()
+        }],
+    )?;
 
-    renderer.render_frame(view, proj, camera_pos, None)?;
+    renderer.render_frame(&mut scene, view, proj, camera_pos, None)?;
 
     // 6. Read back the image data
     log::info!("Reading back image data...");

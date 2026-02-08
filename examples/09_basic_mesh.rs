@@ -6,6 +6,7 @@
 
 use ash_renderer::prelude::*;
 use ash_renderer::renderer::features::ambient_lighting::{AmbientPreset, LightingBuilder};
+use ash_renderer::renderer::Scene;
 use glam::{Mat4, Vec3};
 use std::sync::Arc;
 use winit::{
@@ -18,6 +19,7 @@ use winit::{
 #[derive(Default)]
 struct App {
     window: Option<Window>,
+    scene: Option<Scene>,
     renderer: Option<Renderer>,
     render_commands: Vec<ash_renderer::renderer::RenderCommand>,
 }
@@ -33,6 +35,12 @@ impl ApplicationHandler for App {
 
         match Renderer::new(&surface_provider) {
             Ok(mut renderer) => {
+                let mut scene = Scene::new(
+                    Arc::clone(&renderer.device.device),
+                    Arc::clone(&renderer.alloc),
+                    renderer.geometry_buffer(),
+                );
+
                 // Create simple cube
                 let mut cube = Mesh::create_cube();
 
@@ -45,7 +53,7 @@ impl ApplicationHandler for App {
                 cube.texture_data = None;
 
                 // Upload mesh
-                let mesh_handle = renderer.upload_mesh_single(cube).unwrap_or(0);
+                let mesh_handle = renderer.upload_mesh_single(&mut scene, cube).unwrap_or(0);
 
                 // Simple grey matte material
                 let material = Material {
@@ -56,7 +64,9 @@ impl ApplicationHandler for App {
                 };
 
                 // Register and upload material
-                let material_handle = renderer.register_and_upload_material(material).unwrap();
+                let material_handle = renderer
+                    .register_and_upload_material(&mut scene, material)
+                    .unwrap();
 
                 // Setup render command
                 self.render_commands
@@ -77,10 +87,11 @@ impl ApplicationHandler for App {
                     )
                     .build();
 
-                renderer.set_lighting(&lighting);
+                scene.set_lighting(lighting);
 
                 log::info!("✓ Basic mesh renderer initialized");
                 self.renderer = Some(renderer);
+                self.scene = Some(scene);
                 self.window = Some(window);
             }
             Err(e) => {
@@ -94,7 +105,7 @@ impl ApplicationHandler for App {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::RedrawRequested => {
-                if let (Some(renderer), Some(window)) = (&mut self.renderer, &self.window) {
+                if let (Some(_renderer), Some(window)) = (&mut self.renderer, &self.window) {
                     let size = window.inner_size();
                     if size.width > 0 && size.height > 0 {
                         let aspect = size.width as f32 / size.height as f32;
@@ -107,12 +118,19 @@ impl ApplicationHandler for App {
                         proj.y_axis.y *= -1.0;
 
                         // Submit commands
-                        if let Err(e) = renderer.submit_render_commands(&self.render_commands) {
-                            log::error!("Failed to submit render commands: {e}");
-                        }
+                        if let (Some(renderer), Some(scene)) = (&mut self.renderer, &mut self.scene)
+                        {
+                            if let Err(e) =
+                                renderer.submit_render_commands(scene, &self.render_commands)
+                            {
+                                log::error!("Failed to submit render commands: {e}");
+                            }
 
-                        if let Err(e) = renderer.render_frame(view, proj, camera_pos, None) {
-                            log::error!("Render error: {e}");
+                            if let Err(e) =
+                                renderer.render_frame(scene, view, proj, camera_pos, None)
+                            {
+                                log::error!("Render error: {e}");
+                            }
                         }
                     }
                 }

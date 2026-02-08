@@ -6,6 +6,7 @@
 use ash_renderer::prelude::*;
 use ash_renderer::renderer::features::ambient_lighting::{AmbientPreset, LightingBuilder};
 use ash_renderer::renderer::resources::uniform::StorageBuffer;
+use ash_renderer::renderer::Scene;
 use glam::{Mat4, Vec3, Vec4};
 use std::sync::Arc;
 use std::time::Instant;
@@ -18,6 +19,7 @@ use winit::{
 
 struct App {
     window: Option<Window>,
+    scene: Option<Scene>,
     tint_buffer: Option<Arc<parking_lot::Mutex<StorageBuffer<Vec4>>>>,
     renderer: Option<Renderer>,
     render_commands: Vec<ash_renderer::renderer::RenderCommand>,
@@ -30,6 +32,7 @@ impl Default for App {
             window: None,
             tint_buffer: None,
             renderer: None,
+            scene: None,
             render_commands: Vec::new(),
             start_time: Instant::now(),
         }
@@ -47,6 +50,12 @@ impl ApplicationHandler for App {
 
         match Renderer::new(&surface_provider) {
             Ok(mut renderer) => {
+                let mut scene = Scene::new(
+                    Arc::clone(&renderer.device.device),
+                    Arc::clone(&renderer.alloc),
+                    renderer.geometry_buffer(),
+                );
+
                 // Create a cube mesh
                 let mut cube = Mesh::create_cube();
                 // Override vertex colors to WHITE so they don't affect the material color
@@ -67,11 +76,13 @@ impl ApplicationHandler for App {
                 };
 
                 // Upload mesh
-                let mesh_handle = renderer.upload_mesh_single(cube).unwrap();
+                let mesh_handle = renderer.upload_mesh_single(&mut scene, cube).unwrap();
                 log::info!("✓ Mesh uploaded to GPU");
 
                 // Register and upload material
-                let material_handle = renderer.register_and_upload_material(material).unwrap();
+                let material_handle = renderer
+                    .register_and_upload_material(&mut scene, material)
+                    .unwrap();
 
                 log::info!("✓ Uploaded red material to GPU with handle {material_handle:?}");
 
@@ -94,7 +105,7 @@ impl ApplicationHandler for App {
                     )
                     .build();
 
-                renderer.set_lighting(&lighting);
+                scene.set_lighting(lighting);
 
                 // Register bindless storage buffer (prevents crash)
                 let tint_colors = [Vec4::new(1.0, 1.0, 1.0, 1.0)];
@@ -106,11 +117,12 @@ impl ApplicationHandler for App {
                 }
 
                 // CRITICAL: Must call enable_post_processing() to initialize HDR/Tonemapping pipelines!
-                if let Err(e) = renderer.enable_post_processing() {
+                if let Err(e) = renderer.enable_post_processing(&mut scene) {
                     log::warn!("Post-processing failed: {e}");
                 }
 
                 self.renderer = Some(renderer);
+                self.scene = Some(scene);
                 self.window = Some(window);
                 self.start_time = Instant::now();
                 log::info!("Cube renderer initialized!");
@@ -150,12 +162,16 @@ impl ApplicationHandler for App {
                     proj.y_axis.y *= -1.0; // Vulkan Y-flip
 
                     // Submit commands
-                    if let Err(e) = renderer.submit_render_commands(&self.render_commands) {
-                        log::error!("Failed to submit render commands: {e}");
-                    }
+                    if let (Some(renderer), Some(scene)) = (&mut self.renderer, &mut self.scene) {
+                        if let Err(e) =
+                            renderer.submit_render_commands(scene, &self.render_commands)
+                        {
+                            log::error!("Failed to submit render commands: {e}");
+                        }
 
-                    if let Err(e) = renderer.render_frame(view, proj, camera_pos, None) {
-                        log::error!("Render error: {e}");
+                        if let Err(e) = renderer.render_frame(scene, view, proj, camera_pos, None) {
+                            log::error!("Render error: {e}");
+                        }
                     }
                 }
                 if let Some(window) = &self.window {
