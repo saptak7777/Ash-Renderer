@@ -174,7 +174,7 @@ impl ApplicationHandler for App {
 
                                 // Prepare batched upload
                                 let upload_cmd = renderer.get_transfer_command_buffer().unwrap();
-                                let cmd_ctx = renderer.cmds.context(upload_cmd);
+                                let cmd_ctx = renderer.queue.cmds.context(upload_cmd);
                                 cmd_ctx
                                     .begin(ash::vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT)
                                     .unwrap();
@@ -211,7 +211,7 @@ impl ApplicationHandler for App {
 
                                 // Finalize batch and submit
                                 {
-                                    let cmd_ctx = renderer.cmds.context(upload_cmd);
+                                    let cmd_ctx = renderer.queue.cmds.context(upload_cmd);
                                     cmd_ctx.end().unwrap();
                                 }
                                 let cmds = [upload_cmd];

@@ -104,7 +104,7 @@ impl ApplicationHandler for App {
                     match renderer.assets.upload_ibl(
                         renderer.alloc.clone(),
                         &renderer.device,
-                        renderer.cmds.upload_command_pool_handle(),
+                        renderer.queue.cmds.upload_command_pool_handle(),
                         renderer.device.graphics_queue,
                         params,
                     ) {

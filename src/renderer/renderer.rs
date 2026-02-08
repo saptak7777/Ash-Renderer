@@ -49,7 +49,9 @@ use std::collections::{HashMap, HashSet};
 use std::ptr;
 use std::sync::Arc;
 use std::time::Instant;
+use std::thread;
 
+use crate::renderer::queue::RenderQueue;
 use crate::renderer::resources::buffer::BufferHandle;
 use crate::renderer::resources::mesh::{MaterialDescriptor, MeshDescriptor};
 use crate::renderer::resources::GlobalClusterBuffer;
@@ -112,11 +114,11 @@ pub struct Renderer {
     buffer_pool: Arc<BufferPool>,
     features: FeatureManager,
     _pipeline_cache: PipelineCache,
-    pub cmds: vulkan::CommandBufferManager,
-    worker_count: usize,
-    command_buffers: Vec<vk::CommandBuffer>,
-    frame_syncs: Vec<vulkan::FrameSync>,
-    current_frame: usize,
+    pub tonemapping_enabled: bool,
+    tonemapping_exposure: f32,
+    tonemapping_gamma: f32,
+    bloom_enabled: bool,
+    bloom_intensity: f32,
     prev_view_proj: Mat4,
     _default_texture: Texture,
     _black_texture: Texture,
@@ -160,11 +162,6 @@ pub struct Renderer {
     sample_shading: SampleShadingQuality,
     hdr_framebuffer: Option<hdr_framebuffer::HdrFramebuffer>,
     fullscreen_pass: Option<fullscreen_pass::FullscreenPass>,
-    pub tonemapping_enabled: bool,
-    tonemapping_exposure: f32,
-    tonemapping_gamma: f32,
-    bloom_enabled: bool,
-    bloom_intensity: f32,
     // Diagnostics
     diagnostics: DiagnosticsState,
     frame_profiler: FrameProfiler,
@@ -247,6 +244,7 @@ pub struct Renderer {
     // This means foundation should be at the BOTTOM so they are dropped LAST.
     resources: Arc<ResourceRegistry>,
     pub alloc: Arc<vulkan::Allocator>,
+    pub queue: RenderQueue,
     pub device: vulkan::VulkanDevice,
 }
 
@@ -352,15 +350,22 @@ impl Renderer {
                  framebuffer_ids.push(id);
             }
 
-            log::info!("Creating frame resources");
-            let frame_data = 
-                initialization::create_frame_resources(&device, framebuffers.len())?;
-            let command_buffers = frame_data.command_buffers;
-            let mut frame_syncs = frame_data.frame_syncs;
-            let command_manager = frame_data.command_manager;
+            log::info!("Creating expanded RenderQueue and frame resources");
+            let worker_count = thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(1);
+            
+            let mut queue = RenderQueue::new(
+                Arc::clone(&device.device),
+                device.graphics_queue,
+                device.present_queue,
+                device.graphics_queue_family,
+                framebuffers.len(),
+                worker_count,
+            )?;
 
-            let mut frame_sync_ids = Vec::with_capacity(frame_syncs.len());
-            for sync in &mut frame_syncs {
+            let mut frame_sync_ids = Vec::with_capacity(queue.frame_syncs.len());
+            for sync in &mut queue.frame_syncs {
                 let image_available_id = resources.register_semaphore(sync.image_available)?;
                 let render_finished_id = resources.register_semaphore(sync.render_finished)?;
                 let fence_id = resources.register_fence(sync.in_flight)?;
@@ -368,11 +373,11 @@ impl Renderer {
                 frame_sync_ids.push((image_available_id, render_finished_id, fence_id));
             }
 
-            resources.register_command_pool(command_manager.upload_command_pool_handle())?;
-            command_manager.mark_pool_managed_by_registry();
-            log::info!("Frame resources created and registered successfully");
+            resources.register_command_pool(queue.cmds.upload_command_pool_handle())?;
+            queue.cmds.mark_pool_managed_by_registry();
+            log::info!("RenderQueue expanded and resources registered successfully");
 
-            let worker_count = command_manager.worker_count();
+            let _worker_count = queue.cmds.worker_count();
 
             log::info!("Initializing GeometryBuffer and ModelRenderer");
             let geometry_buffer = Arc::new(resources::DualHeapGeometryBuffer::new(
@@ -417,7 +422,7 @@ impl Renderer {
             let mut forward_plus = ForwardPlusIntegration::new(
                 Arc::clone(&device.device),
                 &*alloc,
-                frame_syncs.len() as u32,
+                queue.frame_syncs.len() as u32,
             )?;
             forward_plus.init(&alloc);
             forward_plus.on_resize(swapchain.extent.width, swapchain.extent.height);
@@ -426,7 +431,7 @@ impl Renderer {
             let renderer_resources = initialization::init_resources(
                 &alloc,
                 &device,
-                command_manager.upload_command_pool_handle(),
+                queue.cmds.upload_command_pool_handle(),
                 framebuffers.len(),
                 aspect,
             )?;
@@ -500,10 +505,10 @@ impl Renderer {
                 Arc::clone(&device.device),
                 Arc::clone(&alloc),
                 &mut bindless_manager,
-                command_manager.upload_command_pool_handle(),
+                queue.cmds.upload_command_pool_handle(),
                 device.graphics_queue,
                 default_vsm_config(),
-                frame_syncs.len() as u32,
+                queue.frame_syncs.len() as u32,
             ) {
                 Ok(system) => {
                     log::info!("Shadow System initialized successfully.");
@@ -591,6 +596,8 @@ impl Renderer {
 
             // Create Skybox Mesh (Unit Cube)
 
+            let (_width, _height) = surface_provider.physical_size();
+            
             // Create Skybox Mesh (Unit Cube)
             let skybox_mesh = {
                 let mut mesh = crate::renderer::Mesh::create_cube();
@@ -602,7 +609,7 @@ impl Renderer {
                 }
                 model_renderer.upload_mesh_data(
                     &mesh,
-                    command_manager.upload_command_pool_handle(),
+                    queue.cmds.upload_command_pool_handle(),
                     device.graphics_queue
                 )?
             };
@@ -653,17 +660,12 @@ impl Renderer {
                 skybox_index,
             )?;
 
-            log::info!("Finalizing Renderer construction");
             let mut renderer = Self {
+                queue,
                 buffer_pool: buffer_pool,
                 resources,
                 features,
                 _pipeline_cache: pipeline_cache,
-                cmds: command_manager,
-                worker_count,
-                command_buffers,
-                frame_syncs,
-                current_frame: 0,
                 prev_view_proj: Mat4::IDENTITY,
                 _default_texture: default_texture,
                 _black_texture: black_texture,
@@ -803,7 +805,7 @@ impl Renderer {
         let src_image = swapchain.images[image_index as usize];
 
         // Create a command buffer for the copy
-        let cmd = self.cmds.get_transfer_command_buffer()?;
+        let cmd = self.queue.cmds.get_transfer_command_buffer()?;
 
         let begin_info = vk::CommandBufferBeginInfo::default()
             .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
@@ -889,7 +891,7 @@ impl Renderer {
 
             self.device
                 .device
-                .free_command_buffers(self.cmds.upload_command_pool_handle(), &[cmd]);
+                .free_command_buffers(self.queue.cmds.upload_command_pool_handle(), &[cmd]);
         }
 
         // Map memory and read
@@ -984,7 +986,7 @@ impl Renderer {
 
 
     fn worker_index_for_frame(&self, frame_index: usize) -> usize {
-        compute_worker_index(self.worker_count, frame_index)
+        compute_worker_index(self.queue.cmds.worker_count(), frame_index)
     }
 
     fn render_post_processing(
@@ -1169,7 +1171,7 @@ impl Renderer {
 
     /// Returns a one-time use command buffer for transfer operations.
     pub fn get_transfer_command_buffer(&self) -> Result<vk::CommandBuffer> {
-        self.cmds.get_transfer_command_buffer()
+        self.queue.cmds.get_transfer_command_buffer()
     }
 
     /// Uploads a single mesh to the GPU with its own transient command buffer.
@@ -1177,7 +1179,7 @@ impl Renderer {
     pub fn upload_mesh_single(&mut self, mesh: Mesh) -> Result<u32> {
         let upload_cmd = self.get_transfer_command_buffer()?;
         {
-            let cmd_ctx = self.cmds.context(upload_cmd);
+            let cmd_ctx = self.queue.cmds.context(upload_cmd);
             cmd_ctx.begin(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT)?;
         }
 
@@ -1185,12 +1187,12 @@ impl Renderer {
         let handle = self.upload_mesh(mesh, upload_cmd, &mut staging_resources)?;
 
         {
-            let cmd_ctx = self.cmds.context(upload_cmd);
+            let cmd_ctx = self.queue.cmds.context(upload_cmd);
             cmd_ctx.end()?;
         }
         let cmds = [upload_cmd];
         let submit_info = vk::SubmitInfo::default().command_buffers(&cmds);
-        self.cmds.submit(self.device.graphics_queue, &[submit_info], vk::Fence::null())?;
+        self.queue.cmds.submit(self.device.graphics_queue, &[submit_info], vk::Fence::null())?;
         
         unsafe {
             self.device.device.queue_wait_idle(self.device.graphics_queue)
@@ -1219,20 +1221,20 @@ impl Renderer {
         let mut staging_resources = Vec::new();
         
         {
-            let ctx = self.cmds.context(upload_cmd);
+            let ctx = self.queue.cmds.context(upload_cmd);
             ctx.begin(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT)?;
         }
         
         self.register_mesh_handle(handle, mesh, upload_cmd, &mut staging_resources)?;
         
         {
-            let ctx = self.cmds.context(upload_cmd);
+            let ctx = self.queue.cmds.context(upload_cmd);
             ctx.end()?;
         }
         
         let cmds = [upload_cmd];
         let submit_info = vk::SubmitInfo::default().command_buffers(&cmds);
-        self.cmds.submit(self.device.graphics_queue, &[submit_info], vk::Fence::null())?;
+        self.queue.cmds.submit(self.device.graphics_queue, &[submit_info], vk::Fence::null())?;
         
         unsafe {
             self.device.device.queue_wait_idle(self.device.graphics_queue)
@@ -1276,7 +1278,7 @@ impl Renderer {
 
         unsafe {
             key = mesh.name.clone();
-            let upload_pool = self.cmds.upload_command_pool_handle();
+            let upload_pool = self.queue.cmds.upload_command_pool_handle();
             
             // 1. Ensure Textures
             mesh.ensure_texture(
@@ -1979,7 +1981,7 @@ impl Renderer {
     }
 
     fn wait_for_inflight_frames(&self) -> Result<()> {
-        for sync in &self.frame_syncs {
+        for sync in &self.queue.frame_syncs {
             sync.wait()?;
         }
         Ok(())
@@ -2635,7 +2637,7 @@ impl Renderer {
             }
         }
 
-        self.frame_syncs.clear();
+        self.queue.frame_syncs.clear();
 
         let mut frame_syncs = unsafe {
             initialization::create_frame_syncs_internal(&self.device.device, count)?
@@ -2667,21 +2669,21 @@ impl Renderer {
             frame_sync_ids.push((image_available_id, render_finished_id, fence_id));
         }
 
-        self.frame_syncs = frame_syncs;
+        self.queue.frame_syncs = frame_syncs;
         self.frame_sync_ids = frame_sync_ids;
-        self.current_frame = 0;
+        self.queue.current_frame = 0;
 
         Ok(())
     }
 
     fn recreate_command_buffers(&mut self) -> Result<()> {
-        self.cmds
+        self.queue.cmds
             .reset_primary_pool(vk::CommandPoolResetFlags::RELEASE_RESOURCES)?;
 
-        self.command_buffers = self
-            .cmds
+        self.queue.command_buffers = self
+            .queue.cmds
             .allocate_primary_buffers(self.framebuffers.len() as u32)?;
-        self.current_frame = 0;
+        self.queue.current_frame = 0;
 
         Ok(())
     }
@@ -2721,7 +2723,7 @@ impl Renderer {
         }
 
         if let Some(_manager) = self.descriptors.as_mut() {
-            let _count = self.frame_syncs.len() as u32;
+            let _count = self.queue.frame_syncs.len() as u32;
             // Removed recreate_frame_sets lines
 
             // CRITICAL FIX: Re-bind Environment defaults removed in Phase 3
@@ -3024,7 +3026,7 @@ impl Renderer {
 
         // Track metrics
         self.taa_config_metrics
-            .record_change(self.current_frame as u64);
+            .record_change(self.queue.current_frame as u64);
 
         // Recreate resources if needed
         if change_type.needs_recreation() {
@@ -3038,7 +3040,7 @@ impl Renderer {
     fn recreate_taa_resources(&mut self) {
         log::debug!("Recreating TAA resources due to TAA config change");
         // Reset temporal accumulation to avoid ghosting after major config changes
-        self.current_frame = 0;
+        self.queue.current_frame = 0;
         log::debug!("TAA resources recreated");
     }
 
@@ -3081,7 +3083,7 @@ impl Renderer {
         const SHADER_CHECK_INTERVAL: usize = 60;
 
         // Ensure mutable borrow of pipeline scope ends prior to recreation call.
-        let shaders_changed = if self.current_frame % SHADER_CHECK_INTERVAL == 0 {
+        let shaders_changed = if self.queue.current_frame % SHADER_CHECK_INTERVAL == 0 {
             if let Some(pipeline) = &mut self.pipeline {
                 match pipeline.detect_shader_changes() {
                     Ok(changed) => changed,
@@ -3107,14 +3109,14 @@ impl Renderer {
 
         log::debug!(
             "Frame {}: Material synchronization complete",
-            self.current_frame
+            self.queue.current_frame
         );
 
         self.resize_if_needed()?;
         if self.resize_pending {
             log::debug!(
                 "Frame {}: Resize pending, skipping render",
-                self.current_frame
+                self.queue.current_frame
             );
             return Ok(());
         }
@@ -3132,37 +3134,20 @@ impl Renderer {
                 .ok_or(AshError::VulkanError("Pipeline not available".to_string()))?;
             let main_render_pass = if self.hdr_framebuffer.is_some() {
                 self.hdr_render_pass
-                    .as_ref()
-                    .map(|p| p.handle())
-                    .ok_or_else(|| AshError::VulkanError("HDR render pass not available".to_string()))?
+                .as_ref()
+                .map(|p| p.handle())
+                .ok_or_else(|| AshError::VulkanError("HDR render pass not available".to_string()))?
             } else {
                 self.render_pass
-                    .as_ref()
-                    .map(|p| p.handle())
-                    .ok_or_else(|| AshError::VulkanError("Render pass not available".to_string()))?
+                .as_ref()
+                .map(|p| p.handle())
+                .ok_or_else(|| AshError::VulkanError("Render pass not available".to_string()))?
             };
 
-            // Fence synchronization prior to uniform buffer updates.
-            // Ensure previous frame submission completes before writing to the uniform buffer.
-            // Hot Path: Use unchecked access for frame-indexed resources.
-            // SAFETY: frame_index is bounded by command_buffers.len() and frame_syncs.len()
-            // which are established at initialization and swapchain recreation.
-            let frame_index = self.current_frame;
-
-            if frame_index >= self.command_buffers.len() {
-                 log::error!("CRITICAL: frame_index {} >= command_buffers.len() {}", frame_index, self.command_buffers.len());
-                 return Ok(());
-            }
-
-            let command_buffer = *self.command_buffers.get_unchecked(frame_index);
-            let sync = &self.frame_syncs[frame_index];
-            
-            sync.wait()?;
-            sync.reset()?;
-            
-            let image_available = sync.image_available;
-            let render_finished = sync.render_finished;
-            let in_flight_fence = sync.in_flight;
+            // Phase 1: Use RenderQueue to acquire next frame and synchronization objects
+            let frame_index = self.queue.current_frame;
+            let swapchain_ref = self.swapchain.as_ref().ok_or(AshError::VulkanError("Swapchain not available".to_string()))?;
+            let (image_index, command_buffer, image_available, render_finished, in_flight_fence) = self.queue.acquire_next_frame(swapchain_ref)?;
 
 
 
@@ -3276,46 +3261,18 @@ impl Renderer {
             let cmd_ctx = CommandBufferContext::new(device_arc.as_ref(), command_buffer);
             cmd_ctx.reset()?;
 
-            let acquire_result = {
-                let swapchain_ref = self
-                    .swapchain
-                    .as_ref()
-                    .ok_or(AshError::VulkanError("Swapchain not available".to_string()))?;
-                swapchain_ref.acquire_next_image(image_available)
-            };
-            let image_index = match acquire_result {
-                Ok(index) => {
-                    log::debug!(
-                        "Frame {}: Successfully acquired image index {}",
-                        self.current_frame,
-                        index
-                    );
-                    index
-                }
-                Err(AshError::SwapchainOutOfDate(_)) => {
-                    log::warn!(
-                        "Frame {}: Swapchain out of date, requesting resize",
-                        self.current_frame
-                    );
-                    self.request_swapchain_resize(swapchain_extent);
-                    return Ok(());
-                }
-                Err(err) => {
-                    log::error!(
-                        "Frame {}: Failed to acquire next image: {}",
-                        self.current_frame,
-                        err
-                    );
-                    return Err(err);
-                }
-            };
+            log::debug!(
+                "Frame {}: Using image index {}",
+                self.queue.current_frame,
+                image_index
+            );
 
             let worker_index = self.worker_index_for_frame(frame_index);
             debug_assert!(
-                worker_index < self.worker_count.max(1),
+                worker_index < self.queue.cmds.worker_count().max(1),
                 "worker index {} out of bounds for {} workers",
                 worker_index,
-                self.worker_count
+                self.queue.cmds.worker_count()
             );
 
             cmd_ctx.begin(vk::CommandBufferUsageFlags::empty())?;
@@ -3563,7 +3520,7 @@ impl Renderer {
                 let framebuffer = self.framebuffers.get(image_index as usize).ok_or_else(|| {
                     log::error!(
                         "Frame {}: Framebuffer index {} out of range (max: {})",
-                        self.current_frame,
+                        self.queue.current_frame,
                         image_index,
                         self.framebuffers.len()
                     );
@@ -3747,54 +3704,35 @@ impl Renderer {
             let signal_semaphores = [render_finished];
             let command_buffers_submit = [command_buffer];
 
-            let submit_info = vk::SubmitInfo::default()
-                .wait_semaphores(wait_semaphores)
-                .wait_dst_stage_mask(wait_stages)
-                .command_buffers(&command_buffers_submit)
-                .signal_semaphores(&signal_semaphores);
+            self.queue.submit(
+                &command_buffers_submit,
+                wait_semaphores,
+                wait_stages,
+                &signal_semaphores,
+                in_flight_fence,
+            )?;
 
-            self.cmds
-                .submit(self.device.graphics_queue, &[submit_info], in_flight_fence)?;
-
-            let present_result = {
-                let swapchain_ref = self
-                    .swapchain
-                    .as_ref()
-                    .ok_or(AshError::VulkanError("Swapchain not available".to_string()))?;
-                swapchain_ref.present(self.device.present_queue, image_index, render_finished)
+            let resize_needed = if let Some(swapchain) = self.swapchain.as_ref() {
+                self.queue.present(swapchain, image_index, &signal_semaphores)?
+            } else {
+                false
             };
             self.last_image_index = image_index;
 
-            match present_result {
-                Ok(()) => {
-                    log::debug!(
-                        "Frame {}: Successfully presented image {}",
-                        self.current_frame,
-                        image_index
-                    );
-                    if self.swapchain_cleanup_pending {
-                        self.flush_old_swapchains();
-                    }
-                }
-                Err(AshError::SwapchainOutOfDate(_)) => {
-                    log::warn!(
-                        "Frame {}: Swapchain out of date during presentation, requesting resize",
-                        self.current_frame
-                    );
-                    self.request_swapchain_resize(swapchain_extent);
-                    return Ok(());
-                }
-                Err(err) => {
-                    log::error!(
-                        "Frame {}: Failed to present image: {}",
-                        self.current_frame,
-                        err
-                    );
-                    return Err(err);
-                }
+            if resize_needed {
+                log::warn!(
+                    "Frame {}: Swapchain out of date/suboptimal, requesting resize",
+                    self.queue.current_frame
+                );
+                self.request_swapchain_resize(swapchain_extent);
+                return Ok(());
             }
 
-            self.current_frame = (frame_index + 1) % self.command_buffers.len();
+            if self.swapchain_cleanup_pending {
+                self.flush_old_swapchains();
+            }
+
+            self.queue.advance_frame();
 
             Ok(())
         }

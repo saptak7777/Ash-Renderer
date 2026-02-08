@@ -23,6 +23,7 @@ pub mod motion_pass;
 pub mod passes;
 
 pub mod pipeline_cache;
+pub mod queue;
 pub mod render_graph;
 pub mod render_stats;
 pub mod renderer;
