@@ -154,10 +154,6 @@ pub struct Renderer {
     swapchain_image_view_ids: Vec<ResourceId>,
     depth_buffer_id: Option<ResourceId>,
     frame_sync_ids: Vec<(ResourceId, ResourceId, ResourceId)>,
-    old_swapchain_handles: Vec<vk::SwapchainKHR>,
-    swapchain_cleanup_pending: bool,
-    resize_pending: bool,
-    pending_extent: Option<vk::Extent2D>,
     // Post-processing support
     sample_shading: SampleShadingQuality,
     hdr_framebuffer: Option<hdr_framebuffer::HdrFramebuffer>,
@@ -703,10 +699,6 @@ impl Renderer {
                 swapchain_image_view_ids,
                 depth_buffer_id: Some(depth_buffer_id),
                 frame_sync_ids,
-                old_swapchain_handles: Vec::new(),
-                swapchain_cleanup_pending: false,
-                resize_pending: false,
-                pending_extent: Some(swapchain_extent),
 
                 sample_shading: pipeline_cfg.sample_shading,
                 hdr_framebuffer: None,
@@ -773,7 +765,8 @@ impl Renderer {
             // Initialize async readback manager
 
 
-            log::info!("Renderer initialization COMPLETE");
+            renderer.queue.pending_extent = Some(swapchain_extent);
+
             Ok(renderer)
         }
     }
@@ -1939,27 +1932,15 @@ impl Renderer {
 
 
     pub fn request_swapchain_resize(&mut self, new_extent: vk::Extent2D) {
-        self.pending_extent = Some(new_extent);
-        if !self.resize_pending {
-            log::info!(
-                "Swapchain resize requested: {}x{}",
-                new_extent.width,
-                new_extent.height
-            );
-            // Synchronize with device to prevent resource conflicts during resize.
-            unsafe {
-                let _ = self.device.device.device_wait_idle();
-            }
-        }
-        self.resize_pending = true;
+        self.queue.request_resize(new_extent);
     }
 
     fn resize_if_needed(&mut self) -> Result<()> {
-        if !self.resize_pending {
+        if !self.queue.resize_pending {
             return Ok(());
         }
 
-        if let Some(extent) = self.pending_extent {
+        if let Some(extent) = self.queue.pending_extent {
             if extent.width == 0 || extent.height == 0 {
                 // Window minimized; await valid swapchain extent.
                 return Ok(());
@@ -1968,50 +1949,31 @@ impl Renderer {
 
         log::info!("Recreating swapchain and dependent resources");
 
-        self.wait_for_inflight_frames()?;
+        self.queue.wait_for_inflight_frames()?;
 
         self.recreate_swapchain_resources()?;
 
-        self.resize_pending = false;
+        self.queue.resize_pending = false;
         if let Some(swapchain) = self.swapchain.as_ref() {
-            self.pending_extent = Some(swapchain.extent);
+            self.queue.pending_extent = Some(swapchain.extent);
         }
 
         Ok(())
     }
 
-    fn wait_for_inflight_frames(&self) -> Result<()> {
-        for sync in &self.queue.frame_syncs {
-            sync.wait()?;
-        }
-        Ok(())
-    }
+    // Moved to RenderQueue::wait_for_inflight_frames
 
     fn defer_old_swapchain(&mut self, handle: vk::SwapchainKHR) {
-        if handle == vk::SwapchainKHR::null() {
-            return;
-        }
-        self.old_swapchain_handles.push(handle);
-        self.swapchain_cleanup_pending = true;
+        self.queue.defer_old_swapchain(handle);
     }
 
     fn flush_old_swapchains(&mut self) {
-        if self.old_swapchain_handles.is_empty() {
-            self.swapchain_cleanup_pending = false;
-            return;
-        }
-
         if let Some(ref swapchain) = self.swapchain {
-            for handle in self.old_swapchain_handles.drain(..) {
-                unsafe {
-                    swapchain.destroy_swapchain_handle(handle);
-                }
-            }
+            self.queue.flush_old_swapchains(swapchain);
         } else {
-            self.old_swapchain_handles.clear();
+            self.queue.old_swapchain_handles.clear();
+            self.queue.swapchain_cleanup_pending = false;
         }
-
-        self.swapchain_cleanup_pending = false;
     }
 
     fn recreate_swapchain_resources(&mut self) -> Result<()> {
@@ -2027,7 +1989,7 @@ impl Renderer {
 
         // Paranoid Validation for enterprise reliability.
         // We cannot proceed with swapchain recreation if surfaces are zero-dimensioned.
-        if let Some(extent) = self.pending_extent {
+        if let Some(extent) = self.queue.pending_extent {
             if extent.width == 0 || extent.height == 0 {
                 return Err(AshError::VulkanError(
                     "Cannot recreate swapchain with zero dimensions".into(),
@@ -2039,7 +2001,7 @@ impl Renderer {
             if let Some(ref mut swapchain) = self.swapchain {
                 Some(swapchain.recreate(&self.device)?)
             } else {
-                let extent = self.pending_extent.unwrap_or(vk::Extent2D {
+                let extent = self.queue.pending_extent.unwrap_or(vk::Extent2D {
                     width: 1280,
                     height: 720,
                 });
@@ -3113,7 +3075,7 @@ impl Renderer {
         );
 
         self.resize_if_needed()?;
-        if self.resize_pending {
+        if self.queue.resize_pending {
             log::debug!(
                 "Frame {}: Resize pending, skipping render",
                 self.queue.current_frame
@@ -3728,7 +3690,7 @@ impl Renderer {
                 return Ok(());
             }
 
-            if self.swapchain_cleanup_pending {
+            if self.queue.swapchain_cleanup_pending {
                 self.flush_old_swapchains();
             }
 

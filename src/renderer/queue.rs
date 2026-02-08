@@ -16,6 +16,12 @@ pub struct RenderQueue {
     pub cmds: CommandBufferManager,
     pub command_buffers: Vec<vk::CommandBuffer>,
     pub current_frame: usize,
+
+    // Phase 2: Swapchain Management
+    pub old_swapchain_handles: Vec<vk::SwapchainKHR>,
+    pub swapchain_cleanup_pending: bool,
+    pub resize_pending: bool,
+    pub pending_extent: Option<vk::Extent2D>,
 }
 
 impl RenderQueue {
@@ -45,12 +51,26 @@ impl RenderQueue {
             cmds,
             command_buffers,
             current_frame: 0,
+            old_swapchain_handles: Vec::new(),
+            swapchain_cleanup_pending: false,
+            resize_pending: false,
+            pending_extent: None,
         })
     }
 
     /// Acquires the next frame for rendering.
-    /// Returns (image_index, command_buffer, (image_available, render_finished, in_flight_fence))
-    /// This method blocks until the fence for the current in-flight frame is signaled.
+    ///
+    /// This method:
+    /// 1. Blocks on the CPU until the GPU has finished using the command buffer for this frame slot.
+    /// 2. Resets the in-flight fence.
+    /// 3. Acquires the next available swapchain image index.
+    ///
+    /// Returns:
+    /// - `u32`: The index of the swapchain image to render into.
+    /// - `vk::CommandBuffer`: The primary command buffer for this frame slot.
+    /// - `vk::Semaphore`: Semaphore signaled when image is available for rendering.
+    /// - `vk::Semaphore`: Semaphore to be signaled when rendering is finished.
+    /// - `vk::Fence`: Fence to be signaled when the command buffer execution completes.
     pub fn acquire_next_frame(
         &mut self,
         swapchain: &Swapchain,
@@ -62,17 +82,32 @@ impl RenderQueue {
         vk::Fence,
     )> {
         let frame_index = self.current_frame;
-        let sync = &self.frame_syncs[frame_index];
 
-        // 1. Wait for and reset fence
+        // 1. Safe access to synchronization objects
+        let sync = self.frame_syncs.get(frame_index).ok_or_else(|| {
+            crate::AshError::VulkanError(format!(
+                "Frame index {} out of bounds for {} frame syncs",
+                frame_index,
+                self.frame_syncs.len()
+            ))
+        })?;
+
+        // 2. Wait for and reset fence
         sync.wait()?;
         sync.reset()?;
 
-        // 2. Acquire next swapchain image
+        // 3. Acquire next swapchain image
         let image_index = unsafe { swapchain.acquire_next_image(sync.image_available)? };
 
-        // 3. Get command buffer for this frame
-        let command_buffer = self.command_buffers[frame_index];
+        // 4. Safe access to command buffer
+        let command_buffer = *self.command_buffers.get(frame_index).ok_or_else(|| {
+            crate::AshError::VulkanError(format!(
+                "Frame index {} out of bounds for {} command buffers",
+                frame_index,
+                self.command_buffers.len()
+            ))
+        })?;
+
         let image_available = sync.image_available;
         let render_finished = sync.render_finished;
         let in_flight_fence = sync.in_flight;
@@ -89,6 +124,56 @@ impl RenderQueue {
     /// Advances to the next frame in the rotation.
     pub fn advance_frame(&mut self) {
         self.current_frame = (self.current_frame + 1) % self.frame_syncs.len();
+    }
+
+    /// Requests a swapchain resize.
+    pub fn request_resize(&mut self, extent: vk::Extent2D) {
+        self.pending_extent = Some(extent);
+        if !self.resize_pending {
+            log::info!(
+                "Swapchain resize requested: {}x{}",
+                extent.width,
+                extent.height
+            );
+            // Synchronize with device to prevent resource conflicts during resize.
+            unsafe {
+                let _ = self.device.device_wait_idle();
+            }
+        }
+        self.resize_pending = true;
+    }
+
+    /// Waits for all in-flight frames to finish.
+    pub fn wait_for_inflight_frames(&self) -> Result<()> {
+        for sync in &self.frame_syncs {
+            sync.wait()?;
+        }
+        Ok(())
+    }
+
+    /// Defers the destruction of an old swapchain handle.
+    pub fn defer_old_swapchain(&mut self, handle: vk::SwapchainKHR) {
+        if handle == vk::SwapchainKHR::null() {
+            return;
+        }
+        self.old_swapchain_handles.push(handle);
+        self.swapchain_cleanup_pending = true;
+    }
+
+    /// Destroys all deferred old swapchains.
+    pub fn flush_old_swapchains(&mut self, swapchain_wrapper: &Swapchain) {
+        if self.old_swapchain_handles.is_empty() {
+            self.swapchain_cleanup_pending = false;
+            return;
+        }
+
+        for handle in self.old_swapchain_handles.drain(..) {
+            unsafe {
+                swapchain_wrapper.destroy_swapchain_handle(handle);
+            }
+        }
+
+        self.swapchain_cleanup_pending = false;
     }
 
     /// Submit command buffers to the graphics queue
