@@ -56,7 +56,7 @@ fn main() -> Result<()> {
         };
 
         // This will call ensure_texture under the hood
-        let mut mesh = Mesh::from_descriptor(&descriptor);
+        let mesh = Mesh::from_descriptor(&descriptor);
 
         log::info!("Registering mesh {i}...");
         if let Err(e) = renderer.upload_mesh_single(&mut scene, mesh) {

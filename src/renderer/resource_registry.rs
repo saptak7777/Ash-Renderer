@@ -257,12 +257,77 @@ impl ResourceRegistry {
         }
     }
 
+    /// Register a custom resource that implements VulkanResource.
+    pub fn register_resource<T: VulkanResource + 'static>(
+        &self,
+        resource: T,
+    ) -> Result<ResourceId, ResourceError> {
+        self.add_resource(resource)
+    }
+
+    /// Register a shared resource (Arc<RwLock<T>>) for cleanup.
+    pub fn register_shared_resource<T: VulkanResource + 'static>(
+        &self,
+        resource: Arc<RwLock<T>>,
+    ) -> Result<ResourceId, ResourceError> {
+        let id = ResourceId::new();
+        self.add_shared_resource_with_id(id, resource)
+    }
+
     fn add_resource<T: VulkanResource + 'static>(
         &self,
         resource: T,
     ) -> Result<ResourceId, ResourceError> {
         let id = ResourceId::new();
         self.add_resource_with_id(id, resource)
+    }
+
+    fn add_shared_resource_with_id<T: VulkanResource + 'static>(
+        &self,
+        id: ResourceId,
+        resource: Arc<RwLock<T>>,
+    ) -> Result<ResourceId, ResourceError> {
+        if id.0.is_nil() {
+            return Err(ResourceError::InvalidResourceId(
+                "Attempted to register a resource with Nil UUID".to_string(),
+            ));
+        }
+
+        let deps = {
+            let res = resource
+                .read()
+                .map_err(|_| ResourceError::LockPoisoned("shared resource lock poisoned".into()))?;
+            res.dependencies()
+        };
+
+        if let Some(cycle) = self.detect_cycle(id, &deps) {
+            return Err(ResourceError::DependencyCycle(cycle));
+        }
+
+        let mut resources = self
+            .resources
+            .write()
+            .map_err(|_| ResourceError::LockPoisoned("resources lock poisoned".into()))?;
+        if resources.contains_key(&id) {
+            return Err(ResourceError::AlreadyExists(id));
+        }
+
+        let deps_set: HashSet<_> = deps.into_iter().collect();
+        resources.insert(id, resource);
+
+        self.dependencies
+            .write()
+            .map_err(|_| ResourceError::LockPoisoned("dependencies lock poisoned".into()))?
+            .insert(id, deps_set.clone());
+
+        let mut reverse = self.reverse_dependencies.write().map_err(|_| {
+            ResourceError::LockPoisoned("reverse_dependencies lock poisoned".into())
+        })?;
+        for dep in deps_set {
+            reverse.entry(dep).or_default().insert(id);
+        }
+
+        Ok(id)
     }
 
     fn add_resource_with_id<T: VulkanResource + 'static>(

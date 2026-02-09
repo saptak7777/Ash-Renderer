@@ -427,9 +427,6 @@ impl LightManager {
         };
 
         let lights = self.get_light_buffer_data();
-        if lights.is_empty() {
-            return Ok(());
-        }
 
         let data_size = std::mem::size_of_val(lights);
         let allocation_info = allocator.vma.get_allocation_info(&light_buffer.allocation);
@@ -489,10 +486,14 @@ impl LightManager {
     pub unsafe fn destroy_buffers(&mut self, allocator: &Allocator) {
         for frame_idx in 0..self.frame_count {
             if let Some(mut light_buffer) = self.light_buffers[frame_idx].take() {
-                allocator.vma.destroy_buffer(light_buffer.buffer, &mut light_buffer.allocation);
+                allocator
+                    .vma
+                    .destroy_buffer(light_buffer.buffer, &mut light_buffer.allocation);
             }
             if let Some(mut tile_buffer) = self.tile_buffers[frame_idx].take() {
-                allocator.vma.destroy_buffer(tile_buffer.buffer, &mut tile_buffer.allocation);
+                allocator
+                    .vma
+                    .destroy_buffer(tile_buffer.buffer, &mut tile_buffer.allocation);
             }
         }
         log::info!(

@@ -113,7 +113,7 @@ impl ApplicationHandler for App {
                     match renderer.assets.upload_ibl(
                         renderer.alloc.clone(),
                         &renderer.device,
-                        renderer.queue.cmds.upload_command_pool_handle(),
+                        renderer.cmds.upload_command_pool_handle(),
                         renderer.device.graphics_queue,
                         params,
                     ) {
@@ -241,8 +241,6 @@ impl ApplicationHandler for App {
                     let camera_radius = 15.0;
                     let camera_x = camera_radius * (elapsed * 0.15).cos();
                     let camera_z = camera_radius * (elapsed * 0.15).sin();
-                    let camera_pos = Vec3::new(camera_x, 8.0, camera_z);
-
                     let camera_pos = Vec3::new(camera_x, 8.0, camera_z);
 
                     // Update light positions (focused around the center grid)

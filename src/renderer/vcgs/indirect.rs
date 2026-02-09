@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use super::culling::{CullObjectData, CullingPushConstants, OcclusionCulling};
 use crate::vulkan::descriptor_bindless::BindlessManager;
-use crate::vulkan::VulkanDevice;
+use crate::vulkan::{Allocator, VulkanDevice};
 use crate::Result;
 
 /// Maximum objects per frame for indirect drawing
@@ -50,6 +50,8 @@ pub struct IndirectDrawPass {
 
     initialized: bool,
     destroyed: bool,
+
+    allocator: Option<Arc<Allocator>>,
 }
 
 impl IndirectDrawPass {
@@ -76,6 +78,7 @@ impl IndirectDrawPass {
             set: vk::DescriptorSet::null(),
             initialized: false,
             destroyed: false,
+            allocator: None,
         }
     }
 
@@ -85,16 +88,18 @@ impl IndirectDrawPass {
     /// The caller must ensure that the provided allocator and device are valid.
     pub unsafe fn init(
         &mut self,
-        allocator: &vk_mem::Allocator,
+        allocator: &Arc<Allocator>,
         _vulkan_device: &VulkanDevice,
         bindless_manager: &mut BindlessManager,
         max_objects: usize,
     ) -> Result<()> {
+        self.allocator = Some(Arc::clone(allocator));
+        let vma_allocator = &allocator.vma;
         if self.initialized {
             return Ok(());
         }
 
-        self.create_buffers(allocator, max_objects)?;
+        self.create_buffers(vma_allocator, max_objects)?;
 
         // Register object buffer with BindlessManager
         let index = bindless_manager.add_storage_buffer(self.object_buffer, 0, vk::WHOLE_SIZE)?;
@@ -658,7 +663,7 @@ impl IndirectDrawPass {
     ///
     /// # Safety
     /// Resources must not be in use.
-    pub unsafe fn destroy(&mut self, allocator: &vk_mem::Allocator) {
+    pub unsafe fn destroy(&mut self) {
         if self.destroyed {
             return;
         }
@@ -667,6 +672,13 @@ impl IndirectDrawPass {
         if !self.initialized {
             return;
         }
+
+        let allocator = if let Some(ref a) = self.allocator {
+            &a.vma
+        } else {
+            log::error!("IndirectDrawPass: Destroy called without allocator!");
+            return;
+        };
 
         // Destroy buffers
         if let Some(mut alloc) = self.object_allocation.take() {
@@ -702,3 +714,26 @@ impl IndirectDrawPass {
         log::info!("IndirectDrawPass: Resources destroyed");
     }
 }
+
+impl Drop for IndirectDrawPass {
+    fn drop(&mut self) {
+        unsafe {
+            self.destroy();
+        }
+    }
+}
+
+impl crate::renderer::cleanup_traits::VulkanResourceCleanup for IndirectDrawPass {
+    fn cleanup_with_device(&mut self, _device: &ash::Device) -> std::result::Result<(), String> {
+        unsafe {
+            self.destroy();
+        }
+        Ok(())
+    }
+
+    fn resource_type(&self) -> &'static str {
+        "IndirectDrawPass"
+    }
+}
+
+impl crate::renderer::resource_registry::VulkanResource for IndirectDrawPass {}

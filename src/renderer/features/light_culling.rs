@@ -317,7 +317,7 @@ impl LightCullingPass {
 
     /// Is culling enabled?
     pub fn is_enabled(&self) -> bool {
-        self.config.enabled && !self.lights.is_empty()
+        self.config.enabled
     }
 }
 

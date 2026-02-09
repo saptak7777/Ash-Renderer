@@ -52,7 +52,8 @@ pub fn recreate_swapchain_resources(renderer: &mut Renderer, scene: &mut Scene) 
     renderer.recreate_command_buffers()?;
     renderer.recreate_uniform_buffers(image_count)?;
 
-    if let Some(ref mut forward_plus) = renderer.forward_plus {
+    if let Some(ref forward_plus_arc) = renderer.forward_plus {
+        let mut forward_plus = forward_plus_arc.write().unwrap();
         forward_plus.on_resize(swapchain_extent.width, swapchain_extent.height);
         let fp_info = forward_plus.get_lights().get_forward_plus_info();
         scene.scene_lighting.num_tiles_x = fp_info.num_tiles[0];

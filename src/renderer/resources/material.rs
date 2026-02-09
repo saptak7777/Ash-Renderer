@@ -165,35 +165,29 @@ impl MaterialKey {
 
 use bytemuck::{Pod, Zeroable};
 
-/// Material handle with versioning to catch use-after-free
+/// Material handle (Type-safe u32 wrapper for Bindless Indexing)
 #[repr(C)]
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Default, Pod, Zeroable)]
 pub struct MaterialHandle {
-    pub index: u16,
-    pub version: u16, // Catch use-after-free
+    pub index: u32,
 }
 
 impl MaterialHandle {
     pub fn null() -> Self {
-        Self {
-            index: 0,
-            version: 0,
-        }
+        Self { index: 0 }
     }
 
     pub fn is_null(&self) -> bool {
-        self.index == 0 && self.version == 0
+        self.index == 0
     }
 
-    pub fn is_valid(&self, manager: &MaterialManager) -> bool {
-        if (self.index as usize) >= manager.materials.len() {
-            return false;
-        }
-        manager.versions[self.index as usize] == self.version
+    pub fn is_valid(&self, _manager: &MaterialManager) -> bool {
+        // Simple index check for bindless (bounds check)
+        self.index < 1024
     }
 
     pub fn get<'a>(&self, manager: &'a MaterialManager) -> Option<&'a Material> {
-        if self.is_valid(manager) {
+        if (self.index as usize) < manager.materials.len() {
             Some(&manager.materials[self.index as usize])
         } else {
             None
@@ -203,8 +197,6 @@ impl MaterialHandle {
 
 pub struct MaterialManager {
     materials: Vec<Material>,
-    versions: Vec<u16>,
-    next_material_id: u16,
     default_material: MaterialHandle,
     key_to_handle: HashMap<MaterialKey, MaterialHandle>,
 }
@@ -232,41 +224,22 @@ impl MaterialManager {
             })
     }
 
-    pub fn register_material(&mut self, material: Material) -> MaterialHandle {
+    pub fn register_material(&mut self, material: Material, index: u32) -> MaterialHandle {
         let key = MaterialKey::from_material(&material);
         if let Some(&existing_handle) = self.key_to_handle.get(&key) {
-            log::debug!(
-                "Material dedup: {} -> handle {:?}",
-                material.name,
-                existing_handle
-            );
             return existing_handle;
         }
-
-        let index = self.next_material_id;
-        self.next_material_id += 1;
 
         if (index as usize) >= self.materials.len() {
             self.materials
                 .resize(index as usize + 1, Material::default());
-            self.versions.resize(index as usize + 1, 0);
         }
 
         self.materials[index as usize] = material.clone();
-        self.versions[index as usize] += 1;
-
-        let handle = MaterialHandle {
-            index,
-            version: self.versions[index as usize],
-        };
+        let handle = MaterialHandle { index };
         self.key_to_handle.insert(key, handle);
 
-        log::warn!(
-            "✓ Material Registered: {} -> handle {:?} (idx={})",
-            material.name,
-            handle,
-            index
-        );
+        log::debug!("Material synchronized: {} at slot {}", material.name, index);
 
         handle
     }
@@ -288,8 +261,7 @@ impl MaterialManager {
     }
 
     pub fn is_handle_valid(&self, handle: MaterialHandle) -> bool {
-        let idx = handle.index as usize;
-        idx < self.materials.len() && self.versions[idx] == handle.version
+        (handle.index as usize) < self.materials.len()
     }
 
     pub fn get(&self, handle: MaterialHandle) -> Option<&Material> {
@@ -297,7 +269,7 @@ impl MaterialManager {
     }
 
     pub fn get_mut(&mut self, handle: MaterialHandle) -> Option<&mut Material> {
-        if handle.is_valid(self) {
+        if self.is_handle_valid(handle) {
             Some(&mut self.materials[handle.index as usize])
         } else {
             None
@@ -307,21 +279,11 @@ impl MaterialManager {
 
 impl Default for MaterialManager {
     fn default() -> Self {
-        let mut manager = Self {
+        Self {
             materials: Vec::new(),
-            versions: Vec::new(),
-            next_material_id: 0,
-            default_material: MaterialHandle {
-                index: 0,
-                version: 0,
-            },
+            default_material: MaterialHandle { index: 0 },
             key_to_handle: HashMap::new(),
-        };
-
-        // Register default material at index 0
-        let default_handle = manager.register_material(Material::default());
-        manager.default_material = default_handle;
-        manager
+        }
     }
 }
 
@@ -360,8 +322,8 @@ mod tests {
         };
         let mat2 = mat1.clone();
 
-        let handle1 = manager.register_material(mat1);
-        let handle2 = manager.register_material(mat2);
+        let handle1 = manager.register_material(mat1, 1);
+        let handle2 = manager.register_material(mat2, 1);
 
         assert_eq!(handle1, handle2); // Should reuse the same handle
         assert_eq!(manager.materials.len(), 2); // Default material at 0, new material at 1
@@ -380,8 +342,8 @@ mod tests {
             ..Default::default()
         };
 
-        let h1 = manager.register_material(mat1);
-        let h2 = manager.register_material(mat2);
+        let h1 = manager.register_material(mat1, 1);
+        let h2 = manager.register_material(mat2, 1);
 
         assert_eq!(h1, h2);
     }

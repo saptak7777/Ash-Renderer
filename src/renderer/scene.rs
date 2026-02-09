@@ -42,8 +42,13 @@ impl Scene {
     }
 
     /// Add a material to the scene and return its handle.
+    /// Note: This registers with MaterialManager for dedup but assumes upload happens elsewhere
+    /// or uses a scratch index until sync.
     pub fn add_material(&mut self, material: Material) -> MaterialHandle {
-        self.material_manager.register_material(material)
+        // Use next_material_index from model_renderer as a hint
+        let index = self.model_renderer.next_material_index;
+        self.model_renderer.next_material_index += 1;
+        self.material_manager.register_material(material, index)
     }
 
     /// Add a light to the scene.
@@ -55,8 +60,8 @@ impl Scene {
         self.directional_lights.push(light);
     }
 
-    pub fn set_skybox(&mut self, texture_index: u32) {
-        self.skybox_texture_index = texture_index;
+    pub fn add_spot_light(&mut self, light: SpotLight) {
+        self.spot_lights.push(light);
     }
 
     /// Set the lighting configuration for the scene.

@@ -1,6 +1,7 @@
 //! Test Phase 2: Multi-material foundation data structures
 
 use ash_renderer::renderer::resources::mesh::{Mesh, SubmeshDescriptor};
+use ash_renderer::renderer::MaterialHandle;
 
 #[test]
 fn test_phase2_foundation() {
@@ -39,7 +40,7 @@ fn test_phase2_foundation() {
     // Test that we can add submeshes to a mesh
     let mut test_mesh = Mesh::create_cube();
     test_mesh.submeshes.push(submesh.clone());
-    test_mesh.material_handles.push(1);
+    test_mesh.material_handles.push(MaterialHandle { index: 1 });
 
     println!("✅ Can add submeshes and material handles:");
     println!("   - submeshes count: {}", test_mesh.submeshes.len());

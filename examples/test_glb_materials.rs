@@ -64,7 +64,7 @@ impl ApplicationHandler for App {
                                 log::info!("Loaded {} meshes from GLB", meshes.len());
 
                                 // Register each mesh with the renderer
-                                for (i, mut mesh) in meshes.into_iter().enumerate() {
+                                for (i, mesh) in meshes.into_iter().enumerate() {
                                     let mesh_name = mesh.name.clone();
                                     // Use upload_mesh_single instead of register_mesh_handle_single
                                     match renderer.upload_mesh_single(&mut scene, mesh) {

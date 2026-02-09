@@ -6,7 +6,6 @@ use crate::{
         features::{
             AutoRotateFeature, FeatureFrameContext, FeatureManager,
             FeatureRenderContext,
-            default_vsm_config,
         },
         types::{
             DebugMode, DrawItem, GBufferIndices, MeshData, RenderCommand,
@@ -14,7 +13,6 @@ use crate::{
         },
         ForwardPlusIntegration,
         passes::{
-            hiz as hiz_pass,
             vsr as vsr_pass,
             hiz::{AdaptiveHiZManager, HiZPass},
             motion::MotionVectorPass,
@@ -26,9 +24,7 @@ use crate::{
         },
         vcgs::{CullBoundingBox, IndirectDrawPass},
         instancing::{BatchKey, InstanceData, InstancingManager},
-        model_renderer::{
-            MaterialPushConstants, ModelRenderer,
-        },
+        model_renderer::MaterialPushConstants,
         passes,
         resource_registry::{ResourceId, ResourceRegistry},
         resources,
@@ -38,8 +34,8 @@ use crate::{
         vram_budget, DepthBuffer, GBuffer, HdrSystem, Material, MaterialHandle, MaterialManager, Mesh,
         PipelineCache, Texture, Transform, Scene,
         initialization,
-        init_types::*,
         assets::AssetManager,
+        frame_manager,
     },
     vulkan::{self, Allocator, CommandBufferContext},
     AshError, Result,
@@ -51,9 +47,8 @@ use rayon::prelude::*;
 use resources::BufferPool;
 use std::collections::{HashMap, HashSet};
 use std::ptr;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::Instant;
-use std::thread;
 
 use crate::renderer::queue::RenderQueue;
 use super::swapchain_manager;
@@ -139,8 +134,8 @@ pub struct Renderer {
     skybox_pass: Option<passes::SkyboxPass>,
     
     pub(crate) depth_buffer: Option<DepthBuffer>,
-    pub(crate) uniform_buffers: Vec<UniformBuffer>,
-    pub(crate) material_storage_buffer: Option<StorageBuffer<resources::uniform::MaterialUniform>>,
+    pub(crate) uniform_buffers: Vec<Arc<RwLock<UniformBuffer>>>,
+    pub(crate) material_storage_buffer: Option<Arc<RwLock<StorageBuffer<resources::uniform::MaterialUniform>>>>,
     pub(crate) pipeline_layout: Option<vulkan::PipelineLayout>,
     pub(crate) pipeline_layout_id: Option<ResourceId>,
     pub(crate) descriptors: Option<vulkan::DescriptorAllocator>,
@@ -151,7 +146,9 @@ pub struct Renderer {
     uploaded_material_indices: HashSet<u32>, // Track which materials are GPU-resident (UE5 pattern)
     pub(crate) swapchain_image_view_ids: Vec<ResourceId>,
     pub(crate) depth_buffer_id: Option<ResourceId>,
-    pub(crate) frame_sync_ids: Vec<(ResourceId, ResourceId, ResourceId)>,
+    pub frame_manager: frame_manager::FrameManager,
+    pub cmds: Arc<vulkan::CommandBufferManager>,
+    
     // Post-processing support
     sample_shading: SampleShadingQuality,
     pub(crate) hdr_system: Option<HdrSystem>,
@@ -166,11 +163,11 @@ pub struct Renderer {
     // Bindless textures
     pub assets: AssetManager,
     // Forward+ lighting
-    pub(crate) forward_plus: Option<ForwardPlusIntegration>,
+    pub(crate) forward_plus: Option<Arc<RwLock<ForwardPlusIntegration>>>,
     // GPU-driven occlusion culling (Hi-Z + Indirect Draw)
-    pub(crate) hiz_pass: Option<HiZPass>,
+    pub(crate) hiz_pass: Option<Arc<RwLock<HiZPass>>>,
     adaptive_hiz_manager: AdaptiveHiZManager,
-    pub(crate) indirect_draw_pass: Option<IndirectDrawPass>,
+    pub(crate) indirect_draw_pass: Option<Arc<RwLock<IndirectDrawPass>>>,
     // Temporal Super-Resolution
     pub(crate) vsr_pass: Option<VsrPass>,
     // Motion Vector Pass for VSR/TAA
@@ -217,16 +214,9 @@ pub struct Renderer {
 
     pub vsr_config: VsrConfig,
 
-    // BDA Addresses
     pub instance_buffer_addresses: Vec<u64>,
     pub material_heap_address: u64,
 
-    // Core foundation - dropped in declaration order (Top to Bottom)
-    // So these should be at the VERY END to be dropped LAST.
-    // However, they are dropped Top to Bottom?
-    // WAIT! In Rust, fields are dropped in the order they are DECLARED.
-    // So the FIRST field is dropped FIRST.
-    // This means foundation should be at the BOTTOM so they are dropped LAST.
     pub(crate) geometry_buffer: Arc<resources::DualHeapGeometryBuffer>,
     pub(crate) resources: Arc<ResourceRegistry>,
     pub alloc: Arc<vulkan::Allocator>,
@@ -258,6 +248,12 @@ impl Renderer {
         }
     }
 
+    pub fn wait_for_idle(&self) -> Result<()> {
+        unsafe {
+            self.device.device.device_wait_idle().map_err(|e| AshError::VulkanError(e.to_string()))
+        }
+    }
+
     pub fn set_debug_mode(&mut self, mode: DebugMode) {
         self.debug_mode = mode;
         log::info!("Debug mode set to: {mode:?}");
@@ -267,294 +263,114 @@ impl Renderer {
     pub fn new<S: vulkan::SurfaceProvider>(surface_provider: &S) -> Result<Self> {
         log::info!("Renderer::new: Starting initialization");
         unsafe {
-            log::info!("Creating VulkanInstance");
+            log::info!("Creating Vulkan Foundation (Instance, Device, Allocator)");
             let instance = Arc::new(vulkan::VulkanInstance::new(
                 surface_provider,
                 cfg!(debug_assertions),
             )?);
-            log::info!("Creating VulkanDevice");
             let device =
                 vulkan::VulkanDevice::new(Arc::clone(&instance), surface_provider.is_headless())?;
-            log::info!("Creating Allocator");
             let alloc = Arc::new(vulkan::Allocator::new(&device)?);
-            log::info!("Creating ResourceRegistry");
             let resources = Arc::new(ResourceRegistry::new(Arc::clone(&device.device)));
             let dev_mem_props = device.memory_properties;
             let vram_budget = vram_budget::VramBudget::new(&dev_mem_props);
 
-            log::info!("Initializing Features");
+            log::info!("Initializing Features & Global Cache");
             let mut features = FeatureManager::new();
             features.set_device(Arc::clone(&device.device));
             features.add_feature(AutoRotateFeature::new());
 
-
-            // Initialize Pipeline Cache
-            log::info!("Creating PipelineCache");
             let pipeline_cache = PipelineCache::new(Arc::clone(&device.device))?;
             let renderer_config = RendererConfig::default();
-            let _texture_compression = renderer_config.texture_compression;
             let mut pipeline_cfg = renderer_config.pipeline.clone();
             
-            // Hardware fallback for sample shading
             if !device.sample_rate_shading_supported && pipeline_cfg.sample_shading.enabled() {
                 log::warn!("Sample rate shading requested but not supported by hardware. Falling back to disabled.");
                 pipeline_cfg.sample_shading = SampleShadingQuality::Disabled;
             }
 
-            log::info!("Creating BufferPool");
-            let buffer_pool = Arc::new(BufferPool::new(Arc::clone(&alloc)));
-            let (width, height) = surface_provider.physical_size();
-            let extent = vk::Extent2D { width, height };
-            log::info!("Creating swapchain and depth buffer for extent {}x{}", width, height);
-            
-            let swapchain_data = 
-                initialization::create_swapchain_data(&device, &alloc, extent)?;
-            let mut swapchain = swapchain_data.swapchain;
-            let render_pass_handle = swapchain_data.render_pass;
-            let mut framebuffers = swapchain_data.framebuffers;
-            let mut depth_buffer = swapchain_data.depth_buffer;
+            let swapchain_with_ids = initialization::init_swapchain(&device, &alloc, &resources, surface_provider)?;
+            let swapchain = swapchain_with_ids.data.swapchain;
+            let render_pass_handle = swapchain_with_ids.data.render_pass;
+            let framebuffers = swapchain_with_ids.data.framebuffers;
+            let depth_buffer = swapchain_with_ids.data.depth_buffer;
+            let swapchain_image_view_ids = swapchain_with_ids.swapchain_image_view_ids;
+            let depth_buffer_id = swapchain_with_ids.depth_buffer_id;
+            let render_pass_id = swapchain_with_ids.render_pass_id;
+            let framebuffer_ids = swapchain_with_ids.framebuffer_ids;
 
-            log::info!("Registering swapchain resources");
-            let mut swapchain_image_view_ids = Vec::with_capacity(swapchain.image_views.len());
-            for &view in &swapchain.image_views {
-                let id = resources.register_image_view(view)?;
-                swapchain_image_view_ids.push(id);
-            }
-            swapchain.mark_image_views_managed_by_registry();
+            let queue_data = initialization::init_render_queue(&device)?;
+            let queue = queue_data.queue;
 
-            let depth_buffer_id = depth_buffer.register_with_registry(&resources)?;
-            let render_pass_id = resources.register_render_pass(render_pass_handle)?;
-
-            let mut framebuffer_ids = Vec::with_capacity(framebuffers.len());
-            for (idx, fb) in framebuffers.iter_mut().enumerate() {
-                 let id = resources.register_framebuffer(fb.handle(), &[
-                     render_pass_id,
-                     depth_buffer_id,
-                     swapchain_image_view_ids[idx],
-                 ])?;
-                 fb.mark_managed_by_registry();
-                 framebuffer_ids.push(id);
-            }
-
-            log::info!("Creating expanded RenderQueue and frame resources");
-            let worker_count = thread::available_parallelism()
+            let worker_count = std::thread::available_parallelism()
                 .map(|n| n.get())
                 .unwrap_or(1);
-            
-            let mut queue = RenderQueue::new(
+            let cmds = Arc::new(vulkan::CommandBufferManager::new(
                 Arc::clone(&device.device),
-                device.graphics_queue,
-                device.present_queue,
                 device.graphics_queue_family,
-                framebuffers.len(),
                 worker_count,
-            )?;
-
-            let mut frame_sync_ids = Vec::with_capacity(queue.frame_syncs.len());
-            for sync in &mut queue.frame_syncs {
-                let image_available_id = resources.register_semaphore(sync.image_available)?;
-                let render_finished_id = resources.register_semaphore(sync.render_finished)?;
-                let fence_id = resources.register_fence(sync.in_flight)?;
-                sync.mark_managed_by_registry();
-                frame_sync_ids.push((image_available_id, render_finished_id, fence_id));
-            }
-
-            resources.register_command_pool(queue.cmds.upload_command_pool_handle())?;
-            queue.cmds.mark_pool_managed_by_registry();
-            log::info!("RenderQueue expanded and resources registered successfully");
-
-            let _worker_count = queue.cmds.worker_count();
-
-            log::info!("Initializing GeometryBuffer and ModelRenderer");
-            let geometry_buffer = Arc::new(resources::DualHeapGeometryBuffer::new(
-                Arc::clone(&device.device),
-                Arc::clone(&alloc),
-                256, // 256MB for vertices
-                128, // 128MB for indices
             )?);
-            
-            // Phase 7: Global Cluster Buffer (Static)
-            let global_cluster_buffer = GlobalClusterBuffer::new(
-                Arc::clone(&device.device),
-                Arc::clone(&alloc),
-                64, // 64MB capacity
-            )?;
 
-            let model_renderer =
-                ModelRenderer::new(Arc::clone(&alloc), Arc::clone(&device.device), Arc::clone(&geometry_buffer));
-
-            log::info!("Initializing DescriptorAllocator and BindlessManager");
-            let mut descriptor_allocator = vulkan::DescriptorAllocator::new(
-                Arc::clone(&device.device),
-                2048, // Equivalent to EXTRA_TEXTURE_SETS previously in DescriptorManager
-                Some(Arc::clone(&resources)),
+            let frame_manager = frame_manager::FrameManager::new(
+                &device.device,
+                cmds.upload_command_pool_handle(),
+                framebuffers.len(),
             )?;
 
             let aspect = swapchain.extent.width as f32 / swapchain.extent.height as f32;
 
-            let mut bindless_manager = crate::vulkan::BindlessManager::new(
-                instance.instance(),
-                device.physical_device,
-                Arc::clone(&device.device),
-                &mut descriptor_allocator,
-                crate::vulkan::BindlessManager::DEFAULT_MAX_TEXTURES,
-                crate::vulkan::BindlessManager::DEFAULT_MAX_PAGE_TABLES,
-                crate::vulkan::BindlessManager::DEFAULT_MAX_CUBEMAPS,
-                crate::vulkan::BindlessManager::DEFAULT_MAX_STORAGE_IMAGES,
-                crate::vulkan::BindlessManager::DEFAULT_MAX_BUFFERS,
-            )?;
-
-            log::info!("Initializing Forward+ Integration");
-            let mut forward_plus = ForwardPlusIntegration::new(
-                Arc::clone(&device.device),
-                &*alloc,
-                queue.frame_syncs.len() as u32,
-            )?;
-            forward_plus.init(&alloc);
-            forward_plus.on_resize(swapchain.extent.width, swapchain.extent.height);
-            
-            log::info!("Initializing Renderer Resources (Uniforms, Textures, Materials)");
-            let renderer_resources = initialization::init_resources(
-                &alloc,
-                &device,
-                queue.cmds.upload_command_pool_handle(),
+            // --- Modular Phase 26 Initialization ---
+            let mut core = initialization::init_core_infrastructure(
+                &device, &alloc, &instance, &resources,
+                cmds.upload_command_pool_handle(),
                 framebuffers.len(),
-                aspect,
+                aspect
             )?;
-            let RendererResources {
-                uniform_buffers,
-                default_texture,
-                black_texture,
-                white_texture,
-                default_skybox,
-                default_cube_black,
-                material_storage_buffer,
-                instance_buffers,
-                transform_arena,
-                transform_arena_alloc,
-                post_sampler: _post_sampler,
-            } = renderer_resources;
 
-            // CRITICAL: All frame data is now accessed via BDA (push.frame_ptr).
-            // Descriptor Set 0 (Frame Data) has been removed.
-            // Bindless set (formerly Set 1) is now Set 0.
-
-            // BDA Migration: No longer need to manually register buffers with bindless manager
-            let material_heap_address = material_storage_buffer.device_address();
-            log::info!("Global material heap BDA: 0x{material_heap_address:X}");
-
-            let mut instance_buffer_addresses = Vec::with_capacity(instance_buffers.len());
-            for buffer in &instance_buffers {
-                instance_buffer_addresses.push(buffer.device_address());
-            }
-
-            // Mandatory Slot 0: Register black texture as the absolute fallback (The Void).
-            let black_tex_index = bindless_manager
-                .add_sampled_image(black_texture.view(), black_texture.sampler())?;
-            log::info!("Registered black texture at bindless index {black_tex_index}");
-            if black_tex_index != 0 {
-                return Err(AshError::VulkanError(format!("Black texture fallback MUST be at index 0, but got {black_tex_index}")));
-            }
-
-            // Register default texture.
-            let default_tex_index = bindless_manager
-                .add_sampled_image(default_texture.view(), default_texture.sampler())?;
-            log::info!("Registered default white texture at bindless index {default_tex_index}");
-
-            log::info!("Configuring Pipeline Set Layouts");
-            let set_layouts = [
-                bindless_manager.descriptor_set_layout(), // Set 0: Unified Bindless
-            ];
-            
-            // DIAGNOSTIC: Log layout handles for verification
-            log::debug!("Main Pipeline Set Layouts: Unified={:?}", 
-                set_layouts[0]);
-
-            let (pipeline_layout, pipeline_layout_id, pipeline, pipeline_id) =
-                initialization::create_main_pipeline(
-                    &device,
-                    &resources,
-                    swapchain.extent,
-                    render_pass_handle,
-                    render_pass_id,
-                    &set_layouts,
-                    &pipeline_cfg,
-                    depth_buffer.format(),
-                    pipeline_cache.handle(),
-                )?;
+            let set_layouts = [core.bindless_manager.descriptor_set_layout()];
+            let pipelines = initialization::init_pipelines(
+                &device, &resources, swapchain.extent,
+                render_pass_handle, render_pass_id,
+                &set_layouts, &pipeline_cfg,
+                depth_buffer.format(), pipeline_cache.handle(),
+            )?;
 
             let mut render_pass_wrapper = vulkan::RenderPass::from_handle(Arc::clone(&device.device), render_pass_handle);
             render_pass_wrapper.mark_managed_by_registry();
 
-            log::info!("Initializing Shadow System...");
-            let shadow_system = match crate::renderer::features::ShadowSystem::new(
-                Arc::clone(&device.device),
-                Arc::clone(&alloc),
-                &mut bindless_manager,
-                queue.cmds.upload_command_pool_handle(),
-                device.graphics_queue,
-                default_vsm_config(),
-                queue.frame_syncs.len() as u32,
-            ) {
-                Ok(system) => {
-                    log::info!("Shadow System initialized successfully.");
-                    Some(system)
-                },
-                Err(e) => {
-                    log::error!("Failed to initialize Shadow System: {e}");
-                    None
-                }
-            };
-
-
-            // Mesh data already added to mesh_data Vec above
-            let start_time = Instant::now();
-
-            let swapchain_extent = swapchain.extent;
-
-            log::info!("Initializing GBuffer");
-            let gbuffer = GBuffer::new(
-                Arc::clone(&device.device),
-                Arc::clone(&alloc),
-                swapchain_extent.width,
-                swapchain_extent.height,
+            let passes = initialization::init_rendering_passes(
+                &device, &alloc, &resources, &mut core.bindless_manager, &core.renderer_resources,
+                swapchain.extent, depth_buffer.format(), depth_buffer.view(),
+                pipeline_cache.handle(), render_pass_handle,
+                pipeline_cfg.multisample_config(),
+                &set_layouts, &core.model_renderer, cmds.upload_command_pool_handle()
             )?;
 
-            forward_plus.init_pipeline(
-                Arc::clone(&device.device), 
-                black_texture.sampler(),
-                depth_buffer.view()
-            )?;
-            
-            // Phase 4: G-Buffer Registration
-            let mut gbuffer_indices = GBufferIndices::default();
-            
-            // First-time registration (G-Buffer Motion)
-            gbuffer_indices.motion_index = bindless_manager.add_sampled_image(
-                gbuffer.motion_view(),
-                default_texture.sampler(),
-            )?;
-            
-            // First-time registration (Depth Buffer)
-            gbuffer_indices.depth_index = bindless_manager.add_sampled_image(
-                depth_buffer.view(),
-                default_texture.sampler(),
+            let lighting = initialization::init_lighting_system(
+                &device, &alloc, &mut core.bindless_manager,
+                cmds.upload_command_pool_handle(),
+                framebuffers.len() as u32, swapchain.extent
             )?;
 
-            log::info!("Registered GBuffer indices: Motion={}, Depth={}", 
-                gbuffer_indices.motion_index, gbuffer_indices.depth_index);
-            
-            // HDR Framebuffer is not yet created (happens in initialize_hdr called by enable_post_processing)
-            // But we should initialize indices to 0 or safe defaults.
+            let post = initialization::init_post_processing(
+                &device.device, framebuffers.len(), swapchain.extent, swapchain.format
+            )?;
 
-            log::info!("Renderer initialization complete. Constructing struct.");
+            // Finalizing Metadata
+            let material_heap_address = core.renderer_resources.material_storage_buffer.device_address();
+            let mut instance_buffer_addresses = Vec::with_capacity(core.renderer_resources.instance_buffers.len());
+            for buffer in &core.renderer_resources.instance_buffers {
+                instance_buffer_addresses.push(buffer.device_address());
+            }
 
-            // Create readback buffer if headless
+            let transform_arena_addr = device.device.get_buffer_device_address(
+                &vk::BufferDeviceAddressInfo::default().buffer(core.renderer_resources.transform_arena)
+            );
+
             let readback_buffer = if device.headless {
-                let buffer_size = (swapchain.extent.width * swapchain.extent.height * 4) as u64; // R8G8B8A8
+                let buffer_size = (swapchain.extent.width * swapchain.extent.height * 4) as u64; 
                 Some(BufferHandle::new_with_flags(
-                    Arc::clone(&alloc),
-                    buffer_size,
+                    Arc::clone(&alloc), buffer_size,
                     vk::BufferUsageFlags::TRANSFER_DST,
                     vk_mem::MemoryUsage::Auto,
                     vk_mem::AllocationCreateFlags::HOST_ACCESS_RANDOM,
@@ -564,127 +380,51 @@ impl Renderer {
                 None
             };
 
-            // Initialize Skybox
-            log::info!("Initializing Skybox...");
-            // 1. Textures (Binding 0)
-            bindless_manager.add_sampled_image(
-                black_texture.view(),
-                black_texture.sampler(),
-            )?;
-
-            // 3. Cubemaps (Binding 2)
-            let skybox_index = bindless_manager.add_cubemap(
-                default_skybox.view(),
-                default_skybox.sampler(),
-            )?;
-
-            log::info!("Bindless Defaults registered (Skybox: {skybox_index})");
-
-            // Create Skybox Mesh (Unit Cube)
-
-            let (_width, _height) = surface_provider.physical_size();
-            
-            // Create Skybox Mesh (Unit Cube)
-            let skybox_mesh = {
-                let mut mesh = crate::renderer::Mesh::create_cube();
-                // SCALE FIX: Unit cube is 2m (-1 to 1). Scale to 1000m to avoid clipping.
-                for v in &mut mesh.vertices {
-                    v.position[0] *= 500.0;
-                    v.position[1] *= 500.0;
-                    v.position[2] *= 500.0;
-                }
-                model_renderer.upload_mesh_data(
-                    &mesh,
-                    queue.cmds.upload_command_pool_handle(),
-                    device.graphics_queue
-                )?
-            };
-            log::info!("Skybox initialized.");
-            let mesh_data: Vec<MeshData> = Vec::new();
-            let instancing_manager = InstancingManager::new();
-            let transform_system = resources::TransformSystem::new();
-            let config = &renderer_config;
-            let swapchain_extent = swapchain.extent;
-            let swapchain_format = swapchain.format;
-            let swapchain_image_count = framebuffers.len();
-            let device_handle = Arc::clone(&device.device);
-
-            // Missing initializations
-
-            // Initialize GPU-driven pipeline components
-            log::info!("Initializing Hi-Z Pass");
-            let mut hiz_pass = HiZPass::new(Arc::clone(&device.device));
-            hiz_pass.init(&alloc.vma, &device, swapchain_extent.width, swapchain_extent.height)?;
-
-            log::info!("Initializing Indirect Draw Pass");
-            let mut indirect_draw_pass = IndirectDrawPass::new(Arc::clone(&device.device));
-            indirect_draw_pass.init(
-                &alloc.vma,
-                &device,
-                &mut bindless_manager,
-                crate::renderer::vcgs::MAX_INDIRECT_OBJECTS,
-            )?;
-
-
-            let transform_arena_addr = device.device.get_buffer_device_address(&vk::BufferDeviceAddressInfo::default().buffer(transform_arena));
-
-            // Create SkyboxPass
-            log::info!("Creating SkyboxPass...");
-            let skybox_pass = passes::SkyboxPass::new(
-                &device,
-                &resources,
-                render_pass_handle,
-                swapchain.extent,
-                pipeline_cache.handle(),
-                depth_buffer.format(),
-                pipeline_cfg.multisample_config(),
-                &set_layouts,
-                skybox_mesh,
-                skybox_index,
-            )?;
+            log::info!("Renderer initialization complete. Constructing struct.");
 
             let mut renderer = Self {
                 queue,
-                buffer_pool: buffer_pool,
+                buffer_pool: core.buffer_pool,
                 resources,
                 features,
                 _pipeline_cache: pipeline_cache,
                 prev_view_proj: Mat4::IDENTITY,
-                _default_texture: default_texture,
-                _black_texture: black_texture,
-                _white_texture: white_texture,
-                _default_skybox: default_skybox,
-                _default_cube_black: default_cube_black,
+                _default_texture: core.renderer_resources.default_texture,
+                _black_texture: core.renderer_resources.black_texture,
+                _white_texture: core.renderer_resources.white_texture,
+                _default_skybox: core.renderer_resources.default_skybox,
+                _default_cube_black: core.renderer_resources.default_cube_black,
                 draw_items: Vec::new(),
                 swapchain: Some(swapchain),
                 render_pass: Some(render_pass_wrapper),
                 render_pass_id: Some(render_pass_id),
                 hdr_render_pass: None,
                 hdr_render_pass_id: None,
-                pipeline: Some(pipeline),
-                pipeline_id: Some(pipeline_id),
+                pipeline: Some(pipelines.pipeline),
+                pipeline_id: Some(pipelines.pipeline_id),
                 
-                skybox_pass: Some(skybox_pass),
+                skybox_pass: Some(passes.skybox_pass),
                 
                 depth_buffer: Some(depth_buffer),
-                uniform_buffers,
-                material_storage_buffer: Some(material_storage_buffer),
+                uniform_buffers: core.renderer_resources.uniform_buffers.into_iter().map(|ub| Arc::new(RwLock::new(ub))).collect(),
+                material_storage_buffer: Some(Arc::new(RwLock::new(core.renderer_resources.material_storage_buffer))),
                 instance_buffer_addresses,
                 material_heap_address,
-                pipeline_layout: Some(pipeline_layout),
-                pipeline_layout_id: Some(pipeline_layout_id),
-                descriptors: Some(descriptor_allocator),
+                pipeline_layout: Some(pipelines.layout),
+                pipeline_layout_id: Some(pipelines.layout_id),
+                descriptors: Some(core.descriptor_allocator),
                 framebuffers,
                 framebuffer_ids,
-                geometry_buffer,
-                start_time,
+                geometry_buffer: core.geometry_buffer,
+                start_time: Instant::now(),
                 alloc,
                 device,
-                mesh_data,
+                mesh_data: Vec::new(),
                 uploaded_material_indices: HashSet::new(),
                 swapchain_image_view_ids,
                 depth_buffer_id: Some(depth_buffer_id),
-                frame_sync_ids,
+                frame_manager,
+                cmds,
 
                 sample_shading: pipeline_cfg.sample_shading,
                 hdr_system: None,
@@ -693,40 +433,34 @@ impl Renderer {
                 frame_profiler: FrameProfiler::new(),
                 gpu_profiler: None,
                 diagnostics_overlay: DiagnosticsOverlay::new(),
-                shadow_system,
-                assets: AssetManager::new(bindless_manager),
-                forward_plus: Some(forward_plus),
-                hiz_pass: Some(hiz_pass),
-                adaptive_hiz_manager: AdaptiveHiZManager::new(3.0), // Target 3ms for Hi-Z
-                indirect_draw_pass: Some(indirect_draw_pass),
+                shadow_system: lighting.shadow_system,
+                assets: AssetManager::new(core.bindless_manager),
+                forward_plus: Some(Arc::new(RwLock::new(lighting.forward_plus))),
+                hiz_pass: Some(Arc::new(RwLock::new(passes.hiz_pass))),
+                adaptive_hiz_manager: AdaptiveHiZManager::new(3.0),
+                indirect_draw_pass: Some(Arc::new(RwLock::new(passes.indirect_draw_pass))),
                 vsr_pass: None,
                 motion_pass: None,
                 motion_framebuffer: None,
-                gbuffer: Some(gbuffer),
+                gbuffer: Some(passes.gbuffer),
                 debug_mode: DebugMode::default(),
-                global_cluster_buffer: Some(global_cluster_buffer),
-                gbuffer_indices: GBufferIndices::default(),
+                global_cluster_buffer: Some(lighting.global_cluster_buffer),
+                gbuffer_indices: passes.gbuffer_indices,
                 hdr_image_index: None,
 
                 vram_budget,
-                post_process: crate::renderer::systems::post_process::PostProcessSystem::new(
-                    device_handle,
-                    swapchain_image_count,
-                    swapchain_extent,
-                    swapchain_format,
-                )?,
+                post_process: post.post_process,
                 texture_compression: renderer_config.texture_compression,
-                instancing_manager,
-                instance_buffers: instance_buffers,
-                transform_system,
-                // Phase 19 Transient Arena
-                transform_arena,
-                transform_arena_alloc,
+                instancing_manager: InstancingManager::new(),
+                instance_buffers: core.renderer_resources.instance_buffers,
+                transform_system: resources::TransformSystem::new(),
+                transform_arena: core.renderer_resources.transform_arena,
+                transform_arena_alloc: core.renderer_resources.transform_arena_alloc,
                 transform_arena_addr,
                 transform_arena_offset: 0,
 
                 allow_auto_material: renderer_config.allow_auto_material,
-                strict_mode: config.strict_mode,
+                strict_mode: renderer_config.strict_mode,
                 readback_buffer,
                 last_image_index: 0,
                 taa_config: TaaConfig::default(),
@@ -734,18 +468,41 @@ impl Renderer {
                 vsr_config: VsrConfig::default(),
             };
 
-
-
-            // Initialize motion vector pass
+            renderer.register_tracked_subsystems()?;
             renderer.init_motion_pass()?;
-            
-            // Initialize async readback manager
-
-
-            renderer.queue.pending_extent = Some(swapchain_extent);
+            renderer.queue.pending_extent = Some(renderer.swapchain.as_ref().unwrap().extent);
 
             Ok(renderer)
         }
+    }
+
+    /// Register all major subsystems with the ResourceRegistry for automatic cleanup
+    fn register_tracked_subsystems(&mut self) -> Result<()> {
+        let registry = &self.resources;
+
+        if let Some(ref fp) = self.forward_plus {
+            registry.register_shared_resource(Arc::clone(fp)).map_err(|e| AshError::VulkanError(e.to_string()))?;
+        }
+
+        if let Some(ref hiz) = self.hiz_pass {
+            registry.register_shared_resource(Arc::clone(hiz)).map_err(|e| AshError::VulkanError(e.to_string()))?;
+        }
+
+        if let Some(ref indirect) = self.indirect_draw_pass {
+            registry.register_shared_resource(Arc::clone(indirect)).map_err(|e| AshError::VulkanError(e.to_string()))?;
+        }
+
+        // Register uniform buffers
+        for ub in &self.uniform_buffers {
+            registry.register_shared_resource(Arc::clone(ub)).map_err(|e| AshError::VulkanError(e.to_string()))?;
+        }
+
+        // Register material storage buffer
+        if let Some(ref msb) = self.material_storage_buffer {
+            registry.register_shared_resource(Arc::clone(msb)).map_err(|e| AshError::VulkanError(e.to_string()))?;
+        }
+
+        Ok(())
     }
 
     pub fn read_headless_image(&mut self) -> Result<Vec<u8>> {
@@ -775,7 +532,7 @@ impl Renderer {
         let src_image = swapchain.images[image_index as usize];
 
         // Create a command buffer for the copy
-        let cmd = self.queue.cmds.get_transfer_command_buffer()?;
+        let cmd = self.cmds.get_transfer_command_buffer()?;
 
         let begin_info = vk::CommandBufferBeginInfo::default()
             .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
@@ -861,7 +618,7 @@ impl Renderer {
 
             self.device
                 .device
-                .free_command_buffers(self.queue.cmds.upload_command_pool_handle(), &[cmd]);
+                .free_command_buffers(self.cmds.upload_command_pool_handle(), &[cmd]);
         }
 
         // Map memory and read
@@ -954,7 +711,7 @@ impl Renderer {
 
 
     fn worker_index_for_frame(&self, frame_index: usize) -> usize {
-        compute_worker_index(self.queue.cmds.worker_count(), frame_index)
+        compute_worker_index(self.cmds.worker_count(), frame_index)
     }
 
 
@@ -1016,7 +773,7 @@ impl Renderer {
 
     /// Returns a one-time use command buffer for transfer operations.
     pub fn get_transfer_command_buffer(&self) -> Result<vk::CommandBuffer> {
-        self.queue.cmds.get_transfer_command_buffer()
+        self.cmds.get_transfer_command_buffer()
     }
 
     /// Uploads a single mesh to the GPU with its own transient command buffer.
@@ -1024,7 +781,7 @@ impl Renderer {
     pub fn upload_mesh_single(&mut self, scene: &mut Scene, mesh: Mesh) -> Result<u32> {
         let upload_cmd = self.get_transfer_command_buffer()?;
         {
-            let cmd_ctx = self.queue.cmds.context(upload_cmd);
+            let cmd_ctx = self.cmds.context(upload_cmd);
             cmd_ctx.begin(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT)?;
         }
 
@@ -1032,12 +789,12 @@ impl Renderer {
         let handle = self.upload_mesh(scene, mesh, upload_cmd, &mut staging_resources)?;
 
         {
-            let cmd_ctx = self.queue.cmds.context(upload_cmd);
+            let cmd_ctx = self.cmds.context(upload_cmd);
             cmd_ctx.end()?;
         }
         let cmds = [upload_cmd];
         let submit_info = vk::SubmitInfo::default().command_buffers(&cmds);
-        self.queue.cmds.submit(self.device.graphics_queue, &[submit_info], vk::Fence::null())?;
+        self.cmds.submit(self.device.graphics_queue, &[submit_info], vk::Fence::null())?;
         
         unsafe {
             self.device.device.queue_wait_idle(self.device.graphics_queue)
@@ -1067,20 +824,20 @@ impl Renderer {
         let mut staging_resources = Vec::new();
         
         {
-            let ctx = self.queue.cmds.context(upload_cmd);
+            let ctx = self.cmds.context(upload_cmd);
             ctx.begin(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT)?;
         }
         
         self.register_mesh_handle(scene, handle, mesh, upload_cmd, &mut staging_resources)?;
         
         {
-            let ctx = self.queue.cmds.context(upload_cmd);
+            let ctx = self.cmds.context(upload_cmd);
             ctx.end()?;
         }
         
         let cmds = [upload_cmd];
         let submit_info = vk::SubmitInfo::default().command_buffers(&cmds);
-        self.queue.cmds.submit(self.device.graphics_queue, &[submit_info], vk::Fence::null())?;
+        self.cmds.submit(self.device.graphics_queue, &[submit_info], vk::Fence::null())?;
         
         unsafe {
             self.device.device.queue_wait_idle(self.device.graphics_queue)
@@ -1125,7 +882,7 @@ impl Renderer {
 
         unsafe {
             key = mesh.name.clone();
-            let upload_pool = self.queue.cmds.upload_command_pool_handle();
+            let upload_pool = self.cmds.upload_command_pool_handle();
             
             // 1. Ensure Textures
             mesh.ensure_texture(
@@ -1172,10 +929,12 @@ impl Renderer {
                     };
                     
                     let material_clone = material.clone();
-                    handle_mat = scene.material_manager.register_material(material);
+                    let buffer_arc = self.material_storage_buffer.as_ref().ok_or_else(|| AshError::VulkanError("Buffer missing".into()))?;
+                    let mut buffer = buffer_arc.write().unwrap();
+                    handle_mat = scene.model_renderer.register_material(&material, &mut *buffer)?;
                     
-                    // CRITICAL: Auto-generated materials must be uploaded to GPU!
-                    self.upload_material_to_gpu(handle_mat.index as u32, &material_clone)?;
+                    // Track it in MaterialManager too
+                    scene.material_manager.register_material(material_clone, handle_mat.index);
                     
                     log::debug!(
                         "Registered auto-material for mesh '{}': handle={:?}, metallic={:.2}, roughness={:.2}",
@@ -1187,7 +946,7 @@ impl Renderer {
             
             // FIX: Update mesh material handle so cluster packing sees it!
             if !material_handle.is_null() {
-                mesh.material_handle = Some(material_handle.index as u32);
+                mesh.material_handle = Some(material_handle);
             }
 
             flags = TexturePresenceFlags::from_mesh(mesh);
@@ -1252,7 +1011,7 @@ impl Renderer {
                         flags: 1,
                         
                         // Material from mesh (NOW HAS VALID HANDLE!)
-                        material_index: mesh.material_handle.unwrap_or(0),
+                        material_index: mesh.material_handle.map(|h| h.index).unwrap_or(0),
                         
                         ..Default::default()
                     };
@@ -1348,7 +1107,7 @@ impl Renderer {
                 ((potential_draws - actual_draws) / potential_draws.max(1.0)).clamp(0.0, 1.0)
             },
             gpu_frame_ms: self.diagnostics.gpu_timings.total_ms,
-            hiz_quality: format!("{:?}", self.hiz_pass.as_ref().map(|h| h.quality()).unwrap_or(crate::renderer::passes::hiz::HiZQuality::Balanced)),
+            hiz_quality: format!("{:?}", self.hiz_pass.as_ref().map(|h| h.read().unwrap().quality()).unwrap_or(crate::renderer::passes::hiz::HiZQuality::Balanced)),
             frame_count: self.diagnostics.frame_stats.total_frames,
         }
     }
@@ -1371,7 +1130,8 @@ impl Renderer {
     /// This follows modern game engine patterns (UE5, Unity) where material updates are streamed
     /// directly without reading back the entire buffer.
     pub fn upload_material_to_gpu(&mut self, handle: u32, material: &Material) -> Result<()> {
-        if let Some(buffer) = self.material_storage_buffer.as_mut() {
+        if let Some(buffer_arc) = self.material_storage_buffer.as_ref() {
+            let mut buffer = buffer_arc.write().unwrap();
             let capacity = buffer.capacity();
             
             // Validate handle within capacity
@@ -1443,16 +1203,14 @@ impl Renderer {
             #[cfg(debug_assertions)]
             {
                 // Verify material was uploaded correctly (Unity/UE5 pattern)
-                if let Some(buffer) = self.material_storage_buffer.as_ref() {
-                    let test_mat = unsafe { buffer.read_element_at(handle as usize) };
-                    log::debug!(
-                        "Material[{}] verification: base_color={:?}, metallic={:.2}, roughness={:.2}",
-                        handle,
-                        test_mat.base_color_factor,
-                        test_mat.parameters.x,
-                        test_mat.parameters.y
-                    );
-                }
+                let test_mat = unsafe { buffer.read_element_at(handle as usize) };
+                log::debug!(
+                    "Material[{}] verification: base_color={:?}, metallic={:.2}, roughness={:.2}",
+                    handle,
+                    test_mat.base_color_factor,
+                    test_mat.parameters.x,
+                    test_mat.parameters.y
+                );
             }
 
             Ok(())
@@ -1481,8 +1239,10 @@ impl Renderer {
     /// This handles both registering the material with the manager and 
     /// uploading its data to the GPU in a single call.
     pub fn register_and_upload_material(&mut self, scene: &mut Scene, material: Material) -> Result<MaterialHandle> {
-        let handle = scene.material_manager.register_material(material.clone());
-        self.upload_material_to_gpu(handle.index as u32, &material)?;
+        let buffer_arc = self.material_storage_buffer.as_ref().ok_or_else(|| AshError::VulkanError("Buffer missing".into()))?;
+        let mut buffer = buffer_arc.write().unwrap();
+        let handle = unsafe { scene.model_renderer.register_material(&material, &mut *buffer)? };
+        scene.material_manager.register_material(material, handle.index);
         Ok(handle)
     }
 
@@ -1560,9 +1320,8 @@ impl Renderer {
         scene: &mut Scene,
         _handle: u32,
         descriptor: &MaterialDescriptor,
-    ) -> MaterialHandle {
-        let material = descriptor.material.clone();
-        scene.material_manager.register_material(material)
+    ) -> Result<MaterialHandle> {
+        self.register_and_upload_material(scene, descriptor.material.clone())
     }
 
     /// Registers a generic storage buffer with the bindless manager.
@@ -1675,7 +1434,7 @@ impl Renderer {
                             batches
                                 .entry(key)
                                 .or_default()
-                                .push(instance);
+                                .extend(vec![instance]);
                             (items, batches)
                         } else if strict_mode {
                             log::error!("Mesh handle {} not found in registry", command.mesh_handle);
@@ -1723,6 +1482,7 @@ impl Renderer {
                         let msg = format!("Invalid material handle {material_handle:?} detected for mesh handle {}, using default", command.mesh_handle);
                         if self.strict_mode {
                             log::error!("{msg}");
+                            return Err(AshError::VulkanError(msg));
                         } else {
                             log::warn!("{msg}");
                         }
@@ -2237,72 +1997,25 @@ impl Renderer {
     }
 
     pub(crate) fn recreate_frame_syncs(&mut self, count: usize) -> Result<()> {
-        for (image_available_id, render_finished_id, fence_id) in self.frame_sync_ids.drain(..) {
-            if let Err(e) = self.resources.cleanup_resource(image_available_id) {
-                log::warn!("Failed to cleanup image-available semaphore: {e}");
-            }
-            if let Err(e) = self.resources.cleanup_resource(render_finished_id) {
-                log::warn!("Failed to cleanup render-finished semaphore: {e}");
-            }
-            if let Err(e) = self.resources.cleanup_resource(fence_id) {
-                log::warn!("Failed to cleanup in-flight fence: {e}");
-            }
-        }
-
-        self.queue.frame_syncs.clear();
-
-        let mut frame_syncs = unsafe {
-            initialization::create_frame_syncs_internal(&self.device.device, count)?
-        };
-        let mut frame_sync_ids = Vec::with_capacity(count);
-
-        for sync in &mut frame_syncs {
-            let image_available_id = self
-                .resources
-                .register_semaphore(sync.image_available)
-                .map_err(|e| {
-                    AshError::VulkanError(format!(
-                        "Failed to register image-available semaphore: {e}"
-                    ))
-                })?;
-            let render_finished_id = self
-                .resources
-                .register_semaphore(sync.render_finished)
-                .map_err(|e| {
-                    AshError::VulkanError(format!(
-                        "Failed to register render-finished semaphore: {e}"
-                    ))
-                })?;
-            let fence_id = self.resources.register_fence(sync.in_flight).map_err(|e| {
-                AshError::VulkanError(format!("Failed to register in-flight fence: {e}"))
-            })?;
-
-            sync.mark_managed_by_registry();
-            frame_sync_ids.push((image_available_id, render_finished_id, fence_id));
-        }
-
-        self.queue.frame_syncs = frame_syncs;
-        self.frame_sync_ids = frame_sync_ids;
-        self.queue.current_frame = 0;
-
+        log::info!("Recreating frame synchronization objects: Count {}", count);
+        self.frame_manager.destroy(&self.device.device);
+        self.frame_manager = frame_manager::FrameManager::new(
+            &self.device.device,
+            self.cmds.upload_command_pool_handle(),
+            count,
+        )?;
         Ok(())
     }
 
     pub(crate) fn recreate_command_buffers(&mut self) -> Result<()> {
-        self.queue.cmds
-            .reset_primary_pool(vk::CommandPoolResetFlags::RELEASE_RESOURCES)?;
-
-        self.queue.command_buffers = self
-            .queue.cmds
-            .allocate_primary_buffers(self.framebuffers.len() as u32)?;
-        self.queue.current_frame = 0;
-
+        log::info!("Resetting frame management lifecycle");
+        self.frame_manager.reset_frame();
         Ok(())
     }
 
     pub(crate) fn recreate_uniform_buffers(&mut self, count: usize) -> Result<()> {
-        for ub in &mut self.uniform_buffers {
-            let _ = ub.cleanup();
+        for ub in &self.uniform_buffers {
+            let _ = ub.write().unwrap().cleanup();
         }
         self.uniform_buffers.clear();
 
@@ -2321,7 +2034,7 @@ impl Renderer {
                     matrices.camera_pos = glam::Vec4::W; // (0,0,0,1)
                 }
                 buffer.update()?;
-                self.uniform_buffers.push(buffer);
+                self.uniform_buffers.push(Arc::new(RwLock::new(buffer)));
             }
         }
         Ok(())
@@ -2335,7 +2048,7 @@ impl Renderer {
         }
 
         if let Some(_manager) = self.descriptors.as_mut() {
-            let _count = self.queue.frame_syncs.len() as u32;
+            let _count = self.frame_manager.get_max_frames_in_flight() as u32;
             // Removed recreate_frame_sets lines
 
             // CRITICAL FIX: Re-bind Environment defaults removed in Phase 3
@@ -2370,14 +2083,15 @@ impl Renderer {
         let projection = params.projection;
 
         // Modern Phase 4: Full GPU-Driven Indirect Draw (Opaque Path)
-        if let Some(indirect_pass) = self.indirect_draw_pass.as_mut() {
+            if let Some(ref indirect_arc) = self.indirect_draw_pass {
+                let indirect_pass = indirect_arc.write().unwrap();
             // No longer populating objects here; they were already populated in render_frame
             // with high-fidelity clusters.
 
             // 2. Upload and Execute Culling
             log::debug!("Occlusion culling object count: {}", params.scene.occlusion_culling.object_count());
             if params.scene.occlusion_culling.object_count() > 0 {
-                let _frame_address = self.uniform_buffers[frame_index].device_address();
+                let _frame_address = self.uniform_buffers[frame_index].read().unwrap().device_address();
                 
                 unsafe {
                     indirect_pass.upload_objects(&self.alloc.vma, params.scene.occlusion_culling.object_data(), 0)?;
@@ -2396,7 +2110,7 @@ impl Renderer {
                         vk::DependencyFlags::empty(),
                         &[fill_barrier],
                         &[],
-                        &[],
+                        &[].as_ref(),
                     );
 
                     let extent = self.swapchain.as_ref().map_or(vk::Extent2D { width: 1, height: 1 }, |sw| sw.extent);
@@ -2424,7 +2138,7 @@ impl Renderer {
                         vk::DependencyFlags::empty(),
                         &[indirect_barrier],
                         &[],
-                        &[],
+                        &[].as_ref(),
                     );
                 }
             }
@@ -2452,36 +2166,17 @@ impl Renderer {
         };
 
         // Modern Phase 4: Full GPU-Driven Indirect Draw (Opaque Path)
-        if let Some(indirect_pass) = self.indirect_draw_pass.as_mut() {
+        if let Some(ref indirect_arc) = self.indirect_draw_pass {
+            let indirect_pass = indirect_arc.read().unwrap();
             // Note: Culling and Upload (Compute) is done in cull_main_pass() BEFORE the render pass.
 
             // 3. Draw All Visible Objects in One Call
             if params.scene.occlusion_culling.object_count() > 0 {
-                let frame_address = self.uniform_buffers[frame_index].device_address();
+                let frame_address = self.uniform_buffers[frame_index].read().unwrap().device_address();
                 let _ = frame_address; // Suppress unused warning as it is used in ctx below
 
                 cmd_ctx.bind_pipeline(vk::PipelineBindPoint::GRAPHICS, scene_pipeline);
 
-                // CRITICAL FIX: Bind Descriptor Sets
-                // Missing these was causing the "Invisible Mesh" issue (shaders had no resources)
-                let _descriptors = self.descriptors.as_ref().ok_or(AshError::VulkanError("Descriptors not initialized".into()))?;
-                
-                // Use public accessor methods instead of private fields
-                // frame_set returns Option<vk::DescriptorSet>
-                let bindless_set = self.assets.bindless_manager.descriptor_set();
-
-                let sets = [bindless_set];
-                
-                unsafe {
-                    self.device.device.cmd_bind_descriptor_sets(
-                        cmd_ctx.handle(),
-                        vk::PipelineBindPoint::GRAPHICS,
-                        pipeline_layout_handle,
-                        0,
-                        &sets,
-                        &[],
-                    );
-                }
 
                 // CRITICAL FIX: BDA Pointer Validation
                 // Prevent crash if buffers are not yet allocated
@@ -2523,7 +2218,7 @@ impl Renderer {
                     pipeline_layout: pipeline_layout_handle,
                     uploaded,
                     material: &material_push,
-                    frame_ptr: self.uniform_buffers[frame_index].device_address(),
+                    frame_ptr: self.uniform_buffers[frame_index].read().unwrap().device_address(),
                     vertex_ptr,
                     instance_ptr,
                     material_ptr,
@@ -2577,7 +2272,7 @@ impl Renderer {
     ) -> Result<()> {
         if let Some(ref skybox_pass) = self.skybox_pass {
             let bindless_set = self.assets.bindless_manager.descriptor_set();
-            let frame_ptr = self.uniform_buffers[frame_index].device_address();
+            let frame_ptr = self.uniform_buffers[frame_index].read().unwrap().device_address();
             
             unsafe {
                 skybox_pass.render(&self.device, cmd_ctx, bindless_set, frame_ptr)?;
@@ -2635,7 +2330,7 @@ impl Renderer {
 
         // Track metrics
         self.taa_config_metrics
-            .record_change(self.queue.current_frame as u64);
+            .record_change(self.frame_manager.get_current_frame_index() as u64);
 
         // Recreate resources if needed
         if change_type.needs_recreation() {
@@ -2649,7 +2344,7 @@ impl Renderer {
     fn recreate_taa_resources(&mut self) {
         log::debug!("Recreating TAA resources due to TAA config change");
         // Reset temporal accumulation to avoid ghosting after major config changes
-        self.queue.current_frame = 0;
+        self.frame_manager.reset_frame();
         log::debug!("TAA resources recreated");
     }
 
@@ -2698,7 +2393,7 @@ impl Renderer {
         const SHADER_CHECK_INTERVAL: usize = 60;
 
         // Ensure mutable borrow of pipeline scope ends prior to recreation call.
-        let shaders_changed = if self.queue.current_frame % SHADER_CHECK_INTERVAL == 0 {
+        let shaders_changed = if self.frame_manager.get_current_frame_index() % SHADER_CHECK_INTERVAL == 0 {
             if let Some(pipeline) = &mut self.pipeline {
                 match pipeline.detect_shader_changes() {
                     Ok(changed) => changed,
@@ -2724,7 +2419,7 @@ impl Renderer {
 
         log::debug!(
             "Frame {}: Material synchronization complete",
-            self.queue.current_frame
+            self.frame_manager.get_current_frame_index()
         );
 
         // Task 3: Simplified resize handling logic moved to start of frame
@@ -2753,9 +2448,13 @@ impl Renderer {
             };
 
             // Phase 1: Use RenderQueue to acquire next frame and synchronization objects
-            let frame_index = self.queue.current_frame;
-            let swapchain_ref = self.swapchain.as_ref().ok_or(AshError::VulkanError("Swapchain not available".to_string()))?;
-            let (image_index, command_buffer, image_available, render_finished, in_flight_fence) = self.queue.acquire_next_frame(swapchain_ref)?;
+            // Phase 1: Use FrameManager to acquire next frame and synchronization objects
+            self.frame_manager.next_frame(&self.device.device)?;
+            let swapchain_loader = ash::khr::swapchain::Device::new(self.device.instance.instance(), &self.device.device);
+            let swapchain_khr = self.swapchain.as_ref().unwrap().swapchain;
+            let (image_index, _suboptimal) = self.frame_manager.acquire_next_image(&swapchain_loader, swapchain_khr)?;
+            let command_buffer = self.frame_manager.begin_command_buffer(&self.device.device)?;
+            let frame_index = self.frame_manager.get_current_frame_index();
 
 
 
@@ -2831,7 +2530,8 @@ impl Renderer {
                 }
 
                 // Matrices provided via function arguments.
-                let matrices = uniform_buffer.matrices_mut();
+                let mut ub = uniform_buffer.write().unwrap();
+                let matrices = ub.matrices_mut();
                 // Use pre-calculated normal matrix for the provided model matrix
                 let model = model_matrix.unwrap_or(Mat4::IDENTITY);
                 let mut transform = resources::Transform::identity();
@@ -2849,8 +2549,14 @@ impl Renderer {
                 // Single Source of Truth: environment map indices drive shader logic.
                 // Indices < 0 indicate no IBL/Environment map is bound.
 
-                // Sync light counts from scene to GPU-aligned lighting struct
+                // Sync light counts and tile configuration from scene and forward_plus to GPU-aligned lighting struct
                 scene.scene_lighting.point_light_count = scene.point_lights.len() as u32;
+                if let Some(fp) = &self.forward_plus {
+                    let info = fp.read().unwrap().get_lights().get_forward_plus_info();
+                    scene.scene_lighting.num_tiles_x = info.num_tiles[0];
+                    scene.scene_lighting.num_tiles_y = info.num_tiles[1];
+                    scene.scene_lighting.tile_size = info.tile_size;
+                }
                 matrices.set_lighting(&scene.scene_lighting);
 
                 // Set light-space matrix for shadow mapping
@@ -2860,7 +2566,7 @@ impl Renderer {
                 // matrices.normal_matrix = matrices.model.inverse().transpose();
 
                 let view_proj = matrices.view_proj;
-                uniform_buffer.update()?;
+                ub.update()?;
                 self.prev_view_proj = view_proj;
             }
 
@@ -2873,16 +2579,16 @@ impl Renderer {
 
             log::debug!(
                 "Frame {}: Using image index {}",
-                self.queue.current_frame,
+                self.frame_manager.get_current_frame_index(),
                 image_index
             );
 
             let worker_index = self.worker_index_for_frame(frame_index);
             debug_assert!(
-                worker_index < self.queue.cmds.worker_count().max(1),
+                worker_index < self.cmds.worker_count().max(1),
                 "worker index {} out of bounds for {} workers",
                 worker_index,
-                self.queue.cmds.worker_count()
+                self.cmds.worker_count()
             );
 
             cmd_ctx.begin(vk::CommandBufferUsageFlags::empty())?;
@@ -2910,15 +2616,17 @@ impl Renderer {
                 );
 
             // Phase 10: Execute Hi-Z construction (Moved here to be inside command buffer recording)
-            if let (Some(ref mut hiz), Some(depth_buffer)) =
-                (&mut self.hiz_pass, &self.depth_buffer)
+            // Phase 10: Execute Hi-Z construction (Moved here to be inside command buffer recording)
+            if let (Some(ref hiz_arc), Some(depth_buffer)) =
+                (self.hiz_pass.as_ref(), &self.depth_buffer)
             {
+                let mut hiz = hiz_arc.write().unwrap();
                 // Update adaptive quality based on previous frame's metrics
                 if let Some(ref mut profiler) = self.gpu_profiler {
                     let timings = profiler.last_extended_timings();
                     if timings.valid {
                         let hiz_time_ms = timings.hiz_generate_ms as f64;
-                        let new_quality: Option<hiz_pass::HiZQuality> = self.adaptive_hiz_manager.update(hiz.quality(), hiz_time_ms);
+                        let new_quality: Option<crate::renderer::passes::hiz::HiZQuality> = self.adaptive_hiz_manager.update(hiz.quality(), hiz_time_ms);
                         if let Some(new_quality) = new_quality {
                             hiz.set_quality(new_quality);
                         }
@@ -2941,8 +2649,8 @@ impl Renderer {
                     self._black_texture.sampler() 
                 };
 
-                if let Some(ref mut indirect) = self.indirect_draw_pass {
-                    indirect.update_hiz_descriptor(hiz_view, hiz_sampler);
+                if let Some(ref indirect_arc) = self.indirect_draw_pass {
+                    indirect_arc.write().unwrap().update_hiz_descriptor(hiz_view, hiz_sampler);
                 }
                 
                 if let Some(ref profiler) = self.gpu_profiler {
@@ -2976,8 +2684,8 @@ impl Renderer {
                         let frame_descriptor_set = vk::DescriptorSet::null();
                         let bindless_descriptor_set = self.assets.bindless_manager.descriptor_set();
 
-                        let light_ptr = self.forward_plus.as_ref().map(|fp| fp.get_lights().light_ptr(frame_index)).unwrap_or(0);
-                        let tile_ptr = self.forward_plus.as_ref().map(|fp| fp.get_lights().tile_ptr(frame_index)).unwrap_or(0);
+                        let light_ptr = self.forward_plus.as_ref().map(|fp| fp.read().unwrap().get_lights().light_ptr(frame_index)).unwrap_or(0);
+                        let tile_ptr = self.forward_plus.as_ref().map(|fp| fp.read().unwrap().get_lights().tile_ptr(frame_index)).unwrap_or(0);
 
                         let vertex_ptr = scene.model_renderer.geometry_buffer.vertex_heap_address();
                         let index_ptr = scene.model_renderer.geometry_buffer.index_heap_address();
@@ -2992,7 +2700,7 @@ impl Renderer {
                                 frame_index,
                                 frame_descriptor_set,
                                 bindless_descriptor_set,
-                                self.uniform_buffers[frame_index].device_address(),
+                                self.uniform_buffers[frame_index].read().unwrap().device_address(),
                                 vertex_ptr,
                                 self.instance_buffer_addresses[frame_index],
                                 self.material_heap_address,
@@ -3037,16 +2745,17 @@ impl Renderer {
             }
 
             // --- Light Culling Compute Dispatch ---
-            if let Some(ref mut fp_integration) = self.forward_plus {
+            if let Some(ref fp_integration) = self.forward_plus {
+                let mut fp = fp_integration.write().unwrap();
                 // Update light data from scene before uploading
-                fp_integration.update_lights(&scene.point_lights, &scene.directional_lights, &scene.spot_lights);
+                fp.update_lights(&scene.point_lights, &scene.directional_lights, &scene.spot_lights);
 
                 // Update GPU buffers and descriptors for the current frame
-                fp_integration.upload_to_gpu(&self.alloc, &self.device.device, frame_index as usize)?;
+                fp.upload_to_gpu(&self.alloc, &self.device.device, frame_index as usize)?;
 
                 // Update camera buffer with current view/projection matrices
                 // We use the NON-JITTERED projection for culling to match frustum
-                fp_integration.update_camera(
+                fp.update_camera(
                     &self.alloc,
                     frame_index as usize,
                     &view.to_cols_array_2d(),
@@ -3055,7 +2764,7 @@ impl Renderer {
                 )?;
 
                 // Dispatch the compute shader
-                fp_integration.dispatch(
+                fp.dispatch(
                     command_buffer,
                     &self.device.device,
                     frame_index as usize
@@ -3063,7 +2772,7 @@ impl Renderer {
 
                 // Barrier: Ensure light buffers are ready for the fragment shader
                 let light_barrier = vk::BufferMemoryBarrier::default()
-                    .buffer(fp_integration.lights().get_light_buffer(frame_index as usize).unwrap_or(vk::Buffer::null()))
+                    .buffer(fp.lights().get_light_buffer(frame_index as usize).unwrap_or(vk::Buffer::null()))
                     .src_access_mask(vk::AccessFlags::SHADER_WRITE)
                     .dst_access_mask(vk::AccessFlags::SHADER_READ)
                     .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
@@ -3131,7 +2840,7 @@ impl Renderer {
                 let framebuffer = self.framebuffers.get(image_index as usize).ok_or_else(|| {
                     log::error!(
                         "Frame {}: Framebuffer index {} out of range (max: {})",
-                        self.queue.current_frame,
+                        self.frame_manager.get_current_frame_index(),
                         image_index,
                         self.framebuffers.len()
                     );
@@ -3141,8 +2850,8 @@ impl Renderer {
             };
 
             // PREPARE FOR CULLING & RENDERING (Moved out of Render Pass)
-            let light_ptr = self.forward_plus.as_ref().map(|fp| fp.get_lights().light_ptr(frame_index)).unwrap_or(0);
-            let tile_ptr = self.forward_plus.as_ref().map(|fp| fp.get_lights().tile_ptr(frame_index)).unwrap_or(0);
+            let light_ptr = self.forward_plus.as_ref().map(|fp| fp.read().unwrap().get_lights().light_ptr(frame_index)).unwrap_or(0);
+            let tile_ptr = self.forward_plus.as_ref().map(|fp| fp.read().unwrap().get_lights().tile_ptr(frame_index)).unwrap_or(0);
 
             let pipeline_layout = self.pipeline_layout.as_ref().ok_or_else(|| {
                 AshError::VulkanError("Pipeline layout not available".to_string())
@@ -3320,46 +3029,21 @@ impl Renderer {
 
             cmd_ctx.end()?;
 
-            let is_headless = self.swapchain.as_ref().map_or(false, |s| s.is_headless());
+            let _is_headless = self.swapchain.as_ref().map_or(false, |s| s.is_headless());
 
-            let wait_semaphores_all = [image_available];
-            let wait_stages_all = [vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT];
-
-            let (wait_semaphores, wait_stages) = if is_headless {
-                (&[] as &[vk::Semaphore], &[] as &[vk::PipelineStageFlags])
-            } else {
-                (&wait_semaphores_all as &[vk::Semaphore], &wait_stages_all as &[vk::PipelineStageFlags])
-            };
-
-            let signal_semaphores = [render_finished];
-            let command_buffers_submit = [command_buffer];
-
-            self.queue.submit(
-                &command_buffers_submit,
-                wait_semaphores,
-                wait_stages,
-                &signal_semaphores,
-                in_flight_fence,
+            let swapchain_loader = ash::khr::swapchain::Device::new(self.device.instance.instance(), &self.device.device);
+            let swapchain_khr = self.swapchain.as_ref().unwrap().swapchain;
+            
+            let _resize_needed = self.frame_manager.submit_and_present(
+                &self.device.device,
+                self.queue.graphics_queue,
+                self.queue.present_queue,
+                &swapchain_loader,
+                swapchain_khr,
+                image_index,
             )?;
 
-            let resize_needed = if let Some(swapchain) = self.swapchain.as_ref() {
-                self.queue.present(swapchain, image_index, &signal_semaphores)?
-            } else {
-                false
-            };
             self.last_image_index = image_index;
-
-            if resize_needed {
-                log::warn!(
-                    "Frame {}: Swapchain out of date/suboptimal, requesting resize",
-                    self.queue.current_frame
-                );
-                self.request_swapchain_resize(swapchain_extent);
-            }
-
-            self.queue.flush_old_swapchains(&self.device);
-
-            self.queue.advance_frame();
 
             Ok(())
         }
@@ -3372,9 +3056,7 @@ impl Renderer {
 
 
 
-    // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-    // Post-Processing API
-    // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
 
 
 
@@ -3433,16 +3115,13 @@ impl Renderer {
         self.post_process.config.bloom_intensity
     }
 
-    // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-    // Forward+ Lighting API
-    // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
+   
     /// Update point lights for Forward+ rendering
     ///
     /// Call this each frame to update light positions and properties.
     pub fn update_point_lights(&mut self, lights: &[crate::renderer::features::PointLight]) {
-        if let Some(ref mut forward_plus) = self.forward_plus {
-            forward_plus.update_lights(lights, &[], &[]);
+        if let Some(ref forward_plus) = self.forward_plus {
+            forward_plus.write().unwrap().update_lights(lights, &[], &[]);
         }
     }
 
@@ -3451,15 +3130,15 @@ impl Renderer {
         &mut self,
         lights: &[crate::renderer::features::DirectionalLight],
     ) {
-        if let Some(ref mut forward_plus) = self.forward_plus {
-            forward_plus.update_lights(&[], lights, &[]);
+        if let Some(ref forward_plus) = self.forward_plus {
+            forward_plus.write().unwrap().update_lights(&[], lights, &[]);
         }
     }
 
     /// Update spot lights for Forward+ rendering
     pub fn update_spot_lights(&mut self, lights: &[crate::renderer::features::SpotLight]) {
-        if let Some(ref mut forward_plus) = self.forward_plus {
-            forward_plus.update_lights(&[], &[], lights);
+        if let Some(ref forward_plus) = self.forward_plus {
+            forward_plus.write().unwrap().update_lights(&[], &[], lights);
         }
     }
 
@@ -3469,8 +3148,8 @@ impl Renderer {
         point_lights: &[crate::renderer::features::PointLight],
         directional_lights: &[crate::renderer::features::DirectionalLight],
     ) {
-        if let Some(ref mut forward_plus) = self.forward_plus {
-            forward_plus.update_lights(point_lights, directional_lights, &[]);
+        if let Some(ref forward_plus) = self.forward_plus {
+            forward_plus.write().unwrap().update_lights(point_lights, directional_lights, &[]);
         }
     }
 
@@ -3478,7 +3157,7 @@ impl Renderer {
     pub fn forward_plus_enabled(&self) -> bool {
         self.forward_plus
             .as_ref()
-            .map(|fp| fp.is_enabled())
+            .map(|fp| fp.read().unwrap().is_enabled())
             .unwrap_or(false)
     }
 
@@ -3486,14 +3165,14 @@ impl Renderer {
     pub fn forward_plus_light_count(&self) -> usize {
         self.forward_plus
             .as_ref()
-            .map(|fp| fp.light_count())
+            .map(|fp| {
+                let lights = fp.read().unwrap();
+                lights.light_count()
+            })
             .unwrap_or(0)
     }
 
-    // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-    // GPU-Driven Occlusion Culling API
-    // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
+    
     /// Enables GPU-driven occlusion culling using Hi-Z pyramid.
     ///
     /// This initializes the Hi-Z pass and indirect draw pass for GPU-based
@@ -3519,7 +3198,7 @@ impl Renderer {
         // Create Hi-Z pass
         let mut hiz = HiZPass::new(Arc::clone(&self.device.device));
         unsafe {
-            hiz.init(&self.alloc.vma, &self.device, extent.width, extent.height)?;
+            hiz.init(&self.alloc, &self.device, extent.width, extent.height)?;
         }
 
         // Create Indirect Draw pass
@@ -3533,7 +3212,7 @@ impl Renderer {
 
         unsafe {
             indirect.init(
-                &self.alloc.vma,
+                &self.alloc,
                 &self.device,
                 bindless_manager,
                 crate::renderer::vcgs::MAX_INDIRECT_OBJECTS,
@@ -3553,8 +3232,11 @@ impl Renderer {
             indirect.update_hiz_descriptor(hiz_view, hiz_sampler);
         }
 
-        self.hiz_pass = Some(hiz);
-        self.indirect_draw_pass = Some(indirect);
+        self.hiz_pass = Some(Arc::new(RwLock::new(hiz)));
+        self.indirect_draw_pass = Some(Arc::new(RwLock::new(indirect)));
+
+        // Register new subsystems with the registry (Phase 31)
+        self.register_tracked_subsystems()?;
 
         log::info!("Occlusion culling enabled (Hi-Z + Indirect Draw)");
         Ok(())
@@ -3565,9 +3247,6 @@ impl Renderer {
         self.hiz_pass.is_some() && self.indirect_draw_pass.is_some()
     }
 
-    // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-    // Temporal Super-Resolution API
-    // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     /// Enables Temporal Super-Resolution (VSR)
     ///
@@ -3775,7 +3454,7 @@ impl Renderer {
     /// Log quality reports for debug/profiling
     pub fn log_quality_reports(&self) {
         if let Some(hiz) = &self.hiz_pass {
-            log::info!("{}", hiz.quality_report());
+            log::info!("{}", hiz.read().unwrap().quality_report());
         }
 
         if let Some(vsr) = &self.vsr_pass {
@@ -3844,7 +3523,9 @@ impl Drop for Renderer {
         unsafe {
             log::info!("Shutting down Ash Renderer...");
 
-            let _ = self.device.device.device_wait_idle();
+            let _ = self.wait_for_idle();
+            
+            self.frame_manager.destroy(&self.device.device);
 
             // Phase 7: Cleanup Global Cluster Buffer (BDA)
             // CRITICAL: This BDA buffer must be destroyed explicitly while the device is still valid
@@ -3877,32 +3558,9 @@ impl Drop for Renderer {
 
             self.features.cleanup();
 
-            // Cleanup Forward+ integration (Phase 5)
-            if let Some(mut fp) = self.forward_plus.take() {
-                fp.destroy(&self.alloc, &self.device.device);
-            }
-
-            // Cleanup UE5 feature modules (Phase 5)
-            if let Some(mut hiz) = self.hiz_pass.take() {
-                hiz.destroy(&self.alloc.vma);
-            }
-            if let Some(mut indirect) = self.indirect_draw_pass.take() {
-                indirect.destroy(&self.alloc.vma);
-            }
-            if let Some(mut vsr) = self.vsr_pass.take() {
-                vsr.destroy(&self.alloc.vma);
-            }
-
-            // Cleanup async readback manager
-
-
-            for ub in &mut self.uniform_buffers {
-                let _ = ub.cleanup();
-            }
-            self.uniform_buffers.clear();
-
-            if let Some(mut buffer) = self.material_storage_buffer.take() {
-                let _ = buffer.cleanup();
+            // Cleanup all tracked resources via registry (Consolidated Phase 31)
+            if let Err(e) = self.resources.cleanup() {
+                log::error!("Resource cleanup failed: {e}");
             }
 
             self.draw_items.clear();

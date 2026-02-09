@@ -8,7 +8,7 @@
 use ash::vk;
 use std::sync::Arc;
 
-use crate::vulkan::VulkanDevice;
+use crate::vulkan::{Allocator, VulkanDevice};
 use crate::Result;
 use thiserror::Error;
 
@@ -302,6 +302,8 @@ pub struct HiZPass {
     metrics: HiZMetrics,
     destroyed: bool,
 
+    allocator: Option<Arc<Allocator>>,
+
     // Validation state (debug builds only)
     #[cfg(debug_assertions)]
     _validation: HiZValidation,
@@ -336,6 +338,7 @@ impl HiZPass {
                 _check_invalid_depth: true,
             },
             initialized: false,
+            allocator: None,
         }
     }
 
@@ -345,11 +348,13 @@ impl HiZPass {
     /// The caller must ensure that the provided allocator and device are valid.
     pub unsafe fn init(
         &mut self,
-        allocator: &vk_mem::Allocator,
+        allocator: &Arc<Allocator>,
         vulkan_device: &VulkanDevice,
         width: u32,
         height: u32,
     ) -> Result<()> {
+        self.allocator = Some(Arc::clone(allocator));
+        let allocator = &allocator.vma;
         // Adversarial Defense: Zero-Sized Resource
         // Minimizing a window on Windows often causes width/height to become 0.
         // Creating Vulkan images with 0 dimensions is invalid and will crash.
@@ -966,7 +971,7 @@ impl HiZPass {
     /// Resources must not be in use.
     pub unsafe fn resize(
         &mut self,
-        allocator: &vk_mem::Allocator,
+        allocator: &Arc<Allocator>,
         vulkan_device: &VulkanDevice,
         width: u32,
         height: u32,
@@ -980,7 +985,7 @@ impl HiZPass {
             return Ok(());
         }
 
-        self.destroy(allocator);
+        self.destroy();
         self.init(allocator, vulkan_device, width, height)?;
 
         // Final validation after resize (AAA standard)
@@ -988,11 +993,7 @@ impl HiZPass {
         Ok(())
     }
 
-    /// Destroy GPU resources
-    ///
-    /// # Safety
-    /// Resources must not be in use.
-    pub unsafe fn destroy(&mut self, allocator: &vk_mem::Allocator) {
+    pub unsafe fn destroy(&mut self) {
         if self.destroyed {
             return;
         }
@@ -1001,6 +1002,13 @@ impl HiZPass {
         if !self.initialized {
             return;
         }
+
+        let allocator = if let Some(ref a) = self.allocator {
+            &a.vma
+        } else {
+            log::error!("HiZPass: Destroy called without allocator!");
+            return;
+        };
 
         for view in self.hiz_views.drain(..) {
             self.device.destroy_image_view(view, None);
@@ -1043,3 +1051,26 @@ impl HiZPass {
         log::info!("HiZPass: Resources destroyed");
     }
 }
+
+impl Drop for HiZPass {
+    fn drop(&mut self) {
+        unsafe {
+            self.destroy();
+        }
+    }
+}
+
+impl crate::renderer::cleanup_traits::VulkanResourceCleanup for HiZPass {
+    fn cleanup_with_device(&mut self, _device: &ash::Device) -> std::result::Result<(), String> {
+        unsafe {
+            self.destroy();
+        }
+        Ok(())
+    }
+
+    fn resource_type(&self) -> &'static str {
+        "HiZPass"
+    }
+}
+
+impl crate::renderer::resource_registry::VulkanResource for HiZPass {}

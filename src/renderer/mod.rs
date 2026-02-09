@@ -9,6 +9,7 @@ pub mod command_list;
 pub mod diagnostics;
 pub mod features;
 pub mod forward_plus_integration;
+pub mod frame_manager;
 pub mod init_types;
 pub mod initialization;
 pub mod instancing;

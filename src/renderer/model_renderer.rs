@@ -4,7 +4,8 @@ use ash::{vk, Device};
 use bytemuck::{Pod, Zeroable};
 
 use crate::renderer::resources::global_geometry_buffer::DualHeapGeometryBuffer;
-use crate::renderer::{MaterialHandle, Mesh};
+use crate::renderer::resources::uniform::{MaterialUniform, StorageBuffer};
+use crate::renderer::{Material, MaterialHandle, Mesh};
 use crate::vulkan::Allocator;
 use crate::{AshError, Result};
 
@@ -81,6 +82,7 @@ pub struct ModelRenderer {
     device: Arc<Device>,
     pub geometry_buffer: Arc<DualHeapGeometryBuffer>,
     cache: HashMap<String, UploadedMesh>,
+    pub next_material_index: u32,
 }
 
 #[repr(C, align(16))]
@@ -198,6 +200,7 @@ impl ModelRenderer {
             device,
             geometry_buffer,
             cache: HashMap::new(),
+            next_material_index: 1, // Start at 1 to reserve 0 for fallback
         }
     }
 
@@ -503,5 +506,65 @@ impl ModelRenderer {
         queue: vk::Queue,
     ) -> Result<UploadedMesh> {
         self.upload_mesh(mesh, command_pool, queue)
+    }
+
+    /// Registers a new material and streams it to the GPU buffer at a unique index.
+    /// Reserves Index 0 as a global "Magenta Fallback" error material.
+    pub unsafe fn register_material(
+        &mut self,
+        material: &Material,
+        buffer: &mut StorageBuffer<MaterialUniform>,
+    ) -> Result<MaterialHandle> {
+        let id = self.next_material_index;
+        self.next_material_index += 1;
+
+        // AAA Guard: Ensure we don't overflow the fixed-size GPU storage buffer
+        if id >= 1024 {
+            return Err(AshError::VulkanError(format!(
+                "CRITICAL: Material index {} exceeds capacity (1024)! Increase MAX_MATERIALS.",
+                id
+            )));
+        }
+
+        // Convert common Material to GPU-resident MaterialUniform
+        let mut mat_uniform = MaterialUniform::default();
+        mat_uniform.set_base_color_factor(material.color.into());
+        mat_uniform.set_emissive_factor(material.emissive.into());
+        mat_uniform.parameters.x = material.metallic;
+        mat_uniform.parameters.y = material.roughness;
+        mat_uniform.parameters.z = material.occlusion_strength;
+        mat_uniform.parameters.w = material.normal_scale;
+        mat_uniform.alpha_cutoff = material.alpha_cutoff;
+
+        // Set bindless texture indices (6 arguments as per uniform.rs)
+        mat_uniform.set_texture_indices(
+            material.texture_index.map(|i| i as i32).unwrap_or(-1),
+            material
+                .normal_texture_index
+                .map(|i| i as i32)
+                .unwrap_or(-1),
+            material
+                .metallic_roughness_texture_index
+                .map(|i| i as i32)
+                .unwrap_or(-1),
+            material
+                .occlusion_texture_index
+                .map(|i| i as i32)
+                .unwrap_or(-1),
+            material
+                .emissive_texture_index
+                .map(|i| i as i32)
+                .unwrap_or(-1),
+            material.tint_index,
+        );
+
+        // AAA Pattern: Direct streaming write to GPU buffer
+        // This avoids read-modify-write stalls and ensures the material is available
+        // immediately for the next indirect draw call.
+        buffer.write_element_at(id as usize, &mat_uniform)?;
+
+        log::debug!("Material registered at slot {id}: {}", material.name);
+
+        Ok(MaterialHandle { index: id })
     }
 }

@@ -1,15 +1,25 @@
+use crate::renderer::resource_registry::ResourceId;
 use crate::renderer::resources::{
     uniform::{StorageBuffer, UniformBuffer},
     DepthBuffer, Texture,
 };
 use crate::vulkan;
 use ash::vk;
+use std::sync::Arc;
 
 pub struct SwapchainData {
     pub swapchain: vulkan::SwapchainWrapper,
     pub render_pass: vk::RenderPass,
     pub framebuffers: Vec<vulkan::Framebuffer>,
     pub depth_buffer: DepthBuffer,
+}
+
+pub struct SwapchainDataWithIds {
+    pub data: SwapchainData,
+    pub swapchain_image_view_ids: Vec<ResourceId>,
+    pub depth_buffer_id: ResourceId,
+    pub render_pass_id: ResourceId,
+    pub framebuffer_ids: Vec<ResourceId>,
 }
 
 pub struct FrameData {
@@ -31,4 +41,42 @@ pub struct RendererResources {
     pub transform_arena: vk::Buffer,
     pub transform_arena_alloc: vk_mem::Allocation,
     pub post_sampler: vk::Sampler,
+}
+
+pub struct CoreInfrastructure {
+    pub buffer_pool: Arc<crate::renderer::resources::BufferPool>,
+    pub geometry_buffer: Arc<crate::renderer::resources::DualHeapGeometryBuffer>,
+    pub model_renderer: crate::renderer::model_renderer::ModelRenderer,
+    pub bindless_manager: crate::vulkan::BindlessManager,
+    pub descriptor_allocator: vulkan::DescriptorAllocator,
+    pub renderer_resources: RendererResources,
+}
+
+pub struct PipelineData {
+    pub layout: vulkan::PipelineLayout,
+    pub layout_id: ResourceId,
+    pub pipeline: vulkan::Pipeline,
+    pub pipeline_id: ResourceId,
+}
+
+pub struct RenderingPasses {
+    pub gbuffer: crate::renderer::GBuffer,
+    pub gbuffer_indices: crate::renderer::types::GBufferIndices,
+    pub hiz_pass: crate::renderer::passes::hiz::HiZPass,
+    pub indirect_draw_pass: crate::renderer::vcgs::IndirectDrawPass,
+    pub skybox_pass: crate::renderer::passes::SkyboxPass,
+}
+
+pub struct LightingSystem {
+    pub forward_plus: crate::renderer::ForwardPlusIntegration,
+    pub shadow_system: Option<crate::renderer::features::ShadowSystem>,
+    pub global_cluster_buffer: crate::renderer::resources::GlobalClusterBuffer,
+}
+
+pub struct RenderQueueData {
+    pub queue: crate::renderer::queue::RenderQueue,
+}
+
+pub struct PostProcessingSystem {
+    pub post_process: crate::renderer::systems::post_process::PostProcessSystem,
 }

@@ -299,9 +299,20 @@ impl UniformBuffer {
 impl Drop for UniformBuffer {
     fn drop(&mut self) {
         let _ = self.cleanup();
-        log::debug!("UniformBuffer dropped");
     }
 }
+
+impl crate::renderer::cleanup_traits::VulkanResourceCleanup for UniformBuffer {
+    fn cleanup_with_device(&mut self, _device: &ash::Device) -> std::result::Result<(), String> {
+        self.cleanup().map_err(|e| e.to_string())
+    }
+
+    fn resource_type(&self) -> &'static str {
+        "UniformBuffer"
+    }
+}
+
+impl crate::renderer::resource_registry::VulkanResource for UniformBuffer {}
 
 /// GPU buffer wrapper for material parameters
 pub struct MaterialBuffer {
@@ -769,4 +780,21 @@ impl<T: Copy> Drop for StorageBuffer<T> {
     fn drop(&mut self) {
         let _ = self.cleanup();
     }
+}
+
+impl<T: Copy + Send + Sync + 'static> crate::renderer::cleanup_traits::VulkanResourceCleanup
+    for StorageBuffer<T>
+{
+    fn cleanup_with_device(&mut self, _device: &ash::Device) -> std::result::Result<(), String> {
+        self.cleanup().map_err(|e| e.to_string())
+    }
+
+    fn resource_type(&self) -> &'static str {
+        "StorageBuffer"
+    }
+}
+
+impl<T: Copy + Send + Sync + 'static> crate::renderer::resource_registry::VulkanResource
+    for StorageBuffer<T>
+{
 }

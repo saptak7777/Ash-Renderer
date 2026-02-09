@@ -2,6 +2,7 @@
 use ash::vk;
 use std::sync::Arc;
 
+use super::material::MaterialHandle;
 use super::texture::{Texture, TextureData};
 use super::texture_compressor::{CompressionFormat, TextureCompressor};
 use crate::renderer::Material;
@@ -96,9 +97,9 @@ pub struct Mesh {
     pub texture_path: Option<std::path::PathBuf>,
 
     // Phase 2: Multi-material support foundation
-    pub material_handle: Option<u32>, // Single material (Phase 1)
-    pub material_handles: Vec<u32>,   // Multiple materials (future)
-    pub submeshes: Vec<SubmeshDescriptor>, // Future submesh descriptors
+    pub material_handle: Option<MaterialHandle>, // Single material (Phase 1)
+    pub material_handles: Vec<MaterialHandle>,   // Multiple materials (future)
+    pub submeshes: Vec<SubmeshDescriptor>,       // Future submesh descriptors
 
     pub normal_texture_data: Option<TextureData>,
     pub normal_texture: Option<Arc<Texture>>,

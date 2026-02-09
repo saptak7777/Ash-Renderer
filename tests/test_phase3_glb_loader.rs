@@ -1,6 +1,7 @@
 //! Test Phase 3: GLB Loader Enhancement with submesh tracking
 
 use ash_renderer::renderer::resources::mesh::{Mesh, SubmeshDescriptor};
+use ash_renderer::renderer::MaterialHandle;
 
 #[test]
 fn test_phase3_glb_loader() {
@@ -87,7 +88,11 @@ fn test_phase3_glb_loader() {
     ];
 
     // Add corresponding material handles
-    multi_mesh.material_handles = vec![1, 2, 3];
+    multi_mesh.material_handles = vec![
+        MaterialHandle { index: 1 },
+        MaterialHandle { index: 2 },
+        MaterialHandle { index: 3 },
+    ];
 
     println!("\n✅ Multi-material mesh structure ready:");
     println!("   - Submeshes: {}", multi_mesh.submeshes.len());

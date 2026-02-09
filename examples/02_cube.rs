@@ -138,7 +138,7 @@ impl ApplicationHandler for App {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::RedrawRequested => {
-                if let (Some(renderer), Some(window)) = (&mut self.renderer, &self.window) {
+                if let (Some(_renderer), Some(window)) = (&mut self.renderer, &self.window) {
                     // Application-side camera control (instead of auto_rotate)
                     let elapsed = self.start_time.elapsed().as_secs_f32();
                     let size = window.inner_size();

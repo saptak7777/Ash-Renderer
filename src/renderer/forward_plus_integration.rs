@@ -65,6 +65,8 @@ pub struct ForwardPlusIntegration {
     cached_info: ForwardPlusInfo,
     // Whether this is the first frame (needs full descriptor update)
     // first_frame: bool,
+    allocator: Arc<Allocator>,
+    device: Arc<ash::Device>,
 }
 
 impl ForwardPlusIntegration {
@@ -78,8 +80,8 @@ impl ForwardPlusIntegration {
     /// # Safety
     /// Device and allocator must be valid.
     pub unsafe fn new(
-        _device: Arc<ash::Device>,
-        allocator: &Allocator,
+        device: Arc<ash::Device>,
+        allocator: &Arc<Allocator>,
         frame_count: u32,
     ) -> Result<Self> {
         let lights = LightManager::new(frame_count as usize);
@@ -126,6 +128,8 @@ impl ForwardPlusIntegration {
             frame_count: frame_count as usize,
             initialized: false,
             cached_info: ForwardPlusInfo::default(),
+            allocator: Arc::clone(allocator),
+            device,
         })
     }
 
@@ -497,7 +501,9 @@ impl ForwardPlusIntegration {
     /// # Safety
     /// The caller must ensure that no GPU commands using these resources are
     /// currently executing on the device.
-    pub unsafe fn destroy(&mut self, allocator: &Allocator, device: &ash::Device) {
+    pub unsafe fn destroy(&mut self) {
+        let allocator = &self.allocator;
+        let device = &self.device;
         if self.destroyed {
             return;
         }
@@ -526,10 +532,27 @@ impl ForwardPlusIntegration {
 
 impl Drop for ForwardPlusIntegration {
     fn drop(&mut self) {
-        // LightManager will be dropped automatically via its own Drop impl
-        log::debug!("ForwardPlusIntegration: Drop called (cleanup requires explicit destroy)");
+        unsafe {
+            self.destroy();
+        }
+        log::debug!("ForwardPlusIntegration: Dropped");
     }
 }
+
+impl crate::renderer::cleanup_traits::VulkanResourceCleanup for ForwardPlusIntegration {
+    fn cleanup_with_device(&mut self, _device: &ash::Device) -> std::result::Result<(), String> {
+        unsafe {
+            self.destroy();
+        }
+        Ok(())
+    }
+
+    fn resource_type(&self) -> &'static str {
+        "ForwardPlusIntegration"
+    }
+}
+
+impl crate::renderer::resource_registry::VulkanResource for ForwardPlusIntegration {}
 
 #[cfg(test)]
 mod tests {

@@ -1,13 +1,12 @@
 use crate::renderer::init_types::*;
 use crate::renderer::model_renderer::{DRAW_PUSH_FRAGMENT_BYTES, DRAW_PUSH_VERTEX_BYTES};
-use crate::renderer::resource_registry::ResourceRegistry;
+use crate::renderer::resource_registry::{ResourceId, ResourceRegistry};
 use crate::renderer::resources::{
     self,
     uniform::{StorageBuffer, UniformBuffer},
     Texture, TextureData,
 };
 use crate::renderer::types::*;
-use crate::renderer::Material;
 use crate::vulkan;
 use crate::AshError;
 use crate::Result;
@@ -64,6 +63,51 @@ pub unsafe fn create_swapchain_data(
         render_pass: render_pass.handle(),
         framebuffers,
         depth_buffer,
+    })
+}
+
+pub unsafe fn init_swapchain<S: vulkan::SurfaceProvider>(
+    device: &vulkan::VulkanDevice,
+    alloc: &Arc<vulkan::Allocator>,
+    resources: &Arc<ResourceRegistry>,
+    surface_provider: &S,
+) -> Result<SwapchainDataWithIds> {
+    let (width, height) = surface_provider.physical_size();
+    let extent = vk::Extent2D { width, height };
+
+    log::info!("Creating Swapchain & Frame Resources");
+    let mut data = create_swapchain_data(device, alloc, extent)?;
+
+    let mut swapchain_image_view_ids = Vec::with_capacity(data.swapchain.image_views.len());
+    for &view in &data.swapchain.image_views {
+        let id = resources.register_image_view(view)?;
+        swapchain_image_view_ids.push(id);
+    }
+    data.swapchain.mark_image_views_managed_by_registry();
+
+    let depth_buffer_id = data.depth_buffer.register_with_registry(resources)?;
+    let render_pass_id = resources.register_render_pass(data.render_pass)?;
+
+    let mut framebuffer_ids = Vec::with_capacity(data.framebuffers.len());
+    for (idx, fb) in data.framebuffers.iter_mut().enumerate() {
+        let id = resources.register_framebuffer(
+            fb.handle(),
+            &[
+                render_pass_id,
+                depth_buffer_id,
+                swapchain_image_view_ids[idx],
+            ],
+        )?;
+        fb.mark_managed_by_registry();
+        framebuffer_ids.push(id);
+    }
+
+    Ok(SwapchainDataWithIds {
+        data,
+        swapchain_image_view_ids,
+        depth_buffer_id,
+        render_pass_id,
+        framebuffer_ids,
     })
 }
 
@@ -175,6 +219,37 @@ pub unsafe fn create_main_pipeline(
     ))
 }
 
+pub unsafe fn init_pipelines(
+    device: &vulkan::VulkanDevice,
+    resources: &Arc<ResourceRegistry>,
+    extent: vk::Extent2D,
+    render_pass: vk::RenderPass,
+    render_pass_id: ResourceId,
+    set_layouts: &[vk::DescriptorSetLayout],
+    pipeline_cfg: &PipelineConfig,
+    depth_format: vk::Format,
+    pipeline_cache: vk::PipelineCache,
+) -> Result<PipelineData> {
+    let (layout, layout_id, pipeline, pipeline_id) = create_main_pipeline(
+        device,
+        resources,
+        extent,
+        render_pass,
+        render_pass_id,
+        set_layouts,
+        pipeline_cfg,
+        depth_format,
+        pipeline_cache,
+    )?;
+
+    Ok(PipelineData {
+        layout,
+        layout_id,
+        pipeline,
+        pipeline_id,
+    })
+}
+
 pub unsafe fn init_resources(
     alloc: &Arc<vulkan::Allocator>,
     device: &vulkan::VulkanDevice,
@@ -263,20 +338,19 @@ pub unsafe fn init_resources(
         "material_storage_buffer",
     )?;
 
-    // Populate with default material at index 0
-    let default_mat = Material::default();
-    let mut initial_materials = vec![resources::uniform::MaterialUniform::default(); max_materials];
+    // Reserve Index 0 as the "Magenta Error Material" (AAA Pattern)
+    // This ensures that any mesh missing a material index shows up bright magenta.
+    let error_mat = resources::uniform::MaterialUniform {
+        base_color_factor: glam::Vec4::new(1.0, 0.0, 1.0, 1.0), // Bright Magenta
+        emissive_factor: glam::Vec4::new(1.0, 0.0, 1.0, 1.0),   // Glowing Magenta
+        parameters: glam::Vec4::new(0.0, 1.0, 1.0, 1.0),        // metallic 0, roughness 1
+        ..resources::uniform::MaterialUniform::default()
+    };
 
-    let mut first_mat = resources::uniform::MaterialUniform::default();
-    first_mat.set_base_color_factor(glam::Vec4::from_array(default_mat.color));
-    first_mat.set_emissive_factor(glam::Vec4::from_array(default_mat.emissive));
-    first_mat.set_metallic_roughness(default_mat.metallic, default_mat.roughness);
-    first_mat.set_occlusion_strength(default_mat.occlusion_strength);
-    first_mat.set_normal_scale(default_mat.normal_scale);
-    first_mat.set_alpha_cutoff(default_mat.alpha_cutoff);
-    initial_materials[0] = first_mat;
-
-    material_storage_buffer.update(&initial_materials)?;
+    // Initialize the buffer with error material at index 0
+    unsafe {
+        material_storage_buffer.write_element_at(0, &error_mat)?;
+    }
 
     // Initialize instance buffers for GPU culling/instancing
     let mut instance_buffers = Vec::with_capacity(frame_count);
@@ -329,6 +403,218 @@ pub unsafe fn init_resources(
     })
 }
 
+pub unsafe fn init_core_infrastructure(
+    device: &vulkan::VulkanDevice,
+    alloc: &Arc<vulkan::Allocator>,
+    instance: &Arc<vulkan::VulkanInstance>,
+    resources: &Arc<ResourceRegistry>,
+    upload_command_pool: vk::CommandPool,
+    frame_count: usize,
+    aspect: f32,
+) -> Result<CoreInfrastructure> {
+    log::info!("Initializing Core Infrastructure...");
+
+    let buffer_pool = Arc::new(resources::BufferPool::new(Arc::clone(alloc)));
+
+    let geometry_buffer = Arc::new(resources::DualHeapGeometryBuffer::new(
+        Arc::clone(&device.device),
+        Arc::clone(alloc),
+        256, // 256MB for vertices
+        128, // 128MB for indices
+    )?);
+
+    let model_renderer = crate::renderer::model_renderer::ModelRenderer::new(
+        Arc::clone(alloc),
+        Arc::clone(&device.device),
+        Arc::clone(&geometry_buffer),
+    );
+
+    let mut descriptor_allocator = vulkan::DescriptorAllocator::new(
+        Arc::clone(&device.device),
+        2048,
+        Some(Arc::clone(resources)),
+    )?;
+
+    let bindless_manager = crate::vulkan::BindlessManager::new(
+        instance.instance(),
+        device.physical_device,
+        Arc::clone(&device.device),
+        &mut descriptor_allocator,
+        crate::vulkan::BindlessManager::DEFAULT_MAX_TEXTURES,
+        crate::vulkan::BindlessManager::DEFAULT_MAX_PAGE_TABLES,
+        crate::vulkan::BindlessManager::DEFAULT_MAX_CUBEMAPS,
+        crate::vulkan::BindlessManager::DEFAULT_MAX_STORAGE_IMAGES,
+        crate::vulkan::BindlessManager::DEFAULT_MAX_BUFFERS,
+    )?;
+
+    let renderer_resources =
+        init_resources(alloc, device, upload_command_pool, frame_count, aspect)?;
+
+    Ok(CoreInfrastructure {
+        buffer_pool,
+        geometry_buffer,
+        model_renderer,
+        bindless_manager,
+        descriptor_allocator,
+        renderer_resources,
+    })
+}
+
+pub unsafe fn init_rendering_passes(
+    device: &vulkan::VulkanDevice,
+    alloc: &Arc<vulkan::Allocator>,
+    resources: &Arc<ResourceRegistry>,
+    bindless_manager: &mut crate::vulkan::BindlessManager,
+    renderer_resources: &RendererResources,
+    swapchain_extent: vk::Extent2D,
+    depth_format: vk::Format,
+    depth_view: vk::ImageView,
+    pipeline_cache: vk::PipelineCache,
+    render_pass_handle: vk::RenderPass,
+    multisample_config: vulkan::MultisampleConfig,
+    set_layouts: &[vk::DescriptorSetLayout],
+    model_renderer: &crate::renderer::model_renderer::ModelRenderer,
+    upload_command_pool: vk::CommandPool,
+) -> Result<RenderingPasses> {
+    log::info!("Initializing Rendering Passes...");
+
+    let gbuffer = crate::renderer::GBuffer::new(
+        Arc::clone(&device.device),
+        Arc::clone(alloc),
+        swapchain_extent.width,
+        swapchain_extent.height,
+    )?;
+
+    let mut hiz_pass = crate::renderer::passes::hiz::HiZPass::new(Arc::clone(&device.device));
+    hiz_pass.init(
+        alloc,
+        device,
+        swapchain_extent.width,
+        swapchain_extent.height,
+    )?;
+
+    let mut indirect_draw_pass =
+        crate::renderer::vcgs::IndirectDrawPass::new(Arc::clone(&device.device));
+    indirect_draw_pass.init(
+        alloc,
+        device,
+        bindless_manager,
+        crate::renderer::vcgs::MAX_INDIRECT_OBJECTS,
+    )?;
+
+    // Register GBuffer indices
+    let mut gbuffer_indices = GBufferIndices::default();
+    gbuffer_indices.motion_index = bindless_manager.add_sampled_image(
+        gbuffer.motion_view(),
+        renderer_resources.default_texture.sampler(),
+    )?;
+
+    gbuffer_indices.depth_index = bindless_manager
+        .add_sampled_image(depth_view, renderer_resources.default_texture.sampler())?;
+
+    // Skybox Initialization
+    let skybox_index = bindless_manager.add_cubemap(
+        renderer_resources.default_skybox.view(),
+        renderer_resources.default_skybox.sampler(),
+    )?;
+
+    let skybox_mesh = {
+        let mut mesh = crate::renderer::Mesh::create_cube();
+        for v in &mut mesh.vertices {
+            v.position[0] *= 500.0;
+            v.position[1] *= 500.0;
+            v.position[2] *= 500.0;
+        }
+        model_renderer.upload_mesh_data(&mesh, upload_command_pool, device.graphics_queue)?
+    };
+
+    let skybox_pass = crate::renderer::passes::SkyboxPass::new(
+        device,
+        resources,
+        render_pass_handle,
+        swapchain_extent,
+        pipeline_cache,
+        depth_format,
+        multisample_config,
+        set_layouts,
+        skybox_mesh,
+        skybox_index,
+    )?;
+
+    Ok(RenderingPasses {
+        gbuffer,
+        gbuffer_indices,
+        hiz_pass,
+        indirect_draw_pass,
+        skybox_pass,
+    })
+}
+
+pub unsafe fn init_lighting_system(
+    device: &vulkan::VulkanDevice,
+    alloc: &Arc<vulkan::Allocator>,
+    bindless_manager: &mut crate::vulkan::BindlessManager,
+    upload_command_pool: vk::CommandPool,
+    frame_count: u32,
+    extent: vk::Extent2D,
+) -> Result<LightingSystem> {
+    log::info!("Initializing Lighting System...");
+
+    let global_cluster_buffer = crate::renderer::resources::GlobalClusterBuffer::new(
+        Arc::clone(&device.device),
+        Arc::clone(alloc),
+        64, // 64MB capacity
+    )?;
+
+    let mut forward_plus = crate::renderer::ForwardPlusIntegration::new(
+        Arc::clone(&device.device),
+        alloc,
+        frame_count,
+    )?;
+    forward_plus.init(alloc);
+    forward_plus.on_resize(extent.width, extent.height);
+
+    let shadow_system = match crate::renderer::features::ShadowSystem::new(
+        Arc::clone(&device.device),
+        Arc::clone(alloc),
+        bindless_manager,
+        upload_command_pool,
+        device.graphics_queue,
+        crate::renderer::features::default_vsm_config(),
+        frame_count,
+    ) {
+        Ok(system) => Some(system),
+        Err(e) => {
+            log::error!("Failed to initialize Shadow System: {e}");
+            None
+        }
+    };
+
+    Ok(LightingSystem {
+        forward_plus,
+        shadow_system,
+        global_cluster_buffer,
+    })
+}
+
+pub fn init_post_processing(
+    device: &Arc<ash::Device>,
+    frame_count: usize,
+    extent: vk::Extent2D,
+    format: vk::Format,
+) -> Result<PostProcessingSystem> {
+    log::info!("Initializing Post-Processing System...");
+
+    let post_process = crate::renderer::systems::post_process::PostProcessSystem::new(
+        Arc::clone(device),
+        frame_count,
+        extent,
+        format,
+    )?;
+
+    Ok(PostProcessingSystem { post_process })
+}
+
 pub unsafe fn create_frame_syncs_internal(
     device: &Arc<ash::Device>,
     count: usize,
@@ -339,4 +625,15 @@ pub unsafe fn create_frame_syncs_internal(
         frame_syncs.push(sync);
     }
     Ok(frame_syncs)
+}
+
+pub unsafe fn init_render_queue(device: &vulkan::VulkanDevice) -> Result<RenderQueueData> {
+    let queue = crate::renderer::queue::RenderQueue::new(
+        Arc::clone(&device.device),
+        device.graphics_queue,
+        device.present_queue,
+        device.graphics_queue_family,
+    )?;
+
+    Ok(RenderQueueData { queue })
 }

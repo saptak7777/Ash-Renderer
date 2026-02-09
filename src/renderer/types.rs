@@ -210,10 +210,7 @@ impl Default for MeshData {
             texture_indices: [-1, -1, -1, -1],
             emissive_index: -1,
             texture_flags: TexturePresenceFlags::default(),
-            material_handle: MaterialHandle {
-                index: 0,
-                version: 0,
-            },
+            material_handle: MaterialHandle { index: 0 },
             is_hidden: false,
             bounds: CullBoundingBox::default(),
             cluster_start_index: 0,

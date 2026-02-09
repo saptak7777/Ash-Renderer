@@ -77,8 +77,8 @@ mod tests {
     #[test]
     fn test_mesh_material_mapping() {
         // Test mesh-to-material mapping logic (Phase 4)
-        use ash_renderer::renderer::{MaterialManager, MaterialHandle};
-        
+        use ash_renderer::renderer::{MaterialHandle, MaterialManager};
+
         let mut manager = MaterialManager::new();
 
         // Simulate registering a mesh with material
@@ -90,7 +90,7 @@ mod tests {
         };
 
         // Register in manager
-        let registered_handle = manager.register_material(material);
+        let registered_handle = manager.register_material(material, 1);
 
         // Test automatic selection (null material handle)
         let material_handle = MaterialHandle::null();
@@ -163,7 +163,11 @@ mod tests {
         ];
 
         // Add corresponding material handles
-        mesh.material_handles = vec![1, 2, 3];
+        mesh.material_handles = vec![
+            MaterialHandle { index: 1 },
+            MaterialHandle { index: 2 },
+            MaterialHandle { index: 3 },
+        ];
 
         // Verify structure
         assert_eq!(mesh.submeshes.len(), 3, "Should have 3 submeshes");
@@ -426,7 +430,7 @@ mod tests {
     fn test_submesh_material_mapping_validation() {
         // Phase 5.1: test_submesh_material_mapping
         let mut mesh = Mesh::create_cube();
-        mesh.material_handles = vec![1, 2];
+        mesh.material_handles = vec![MaterialHandle { index: 1 }, MaterialHandle { index: 2 }];
         mesh.submeshes = vec![
             ash_renderer::renderer::resources::mesh::SubmeshDescriptor {
                 material_slot: 0,
@@ -459,7 +463,7 @@ mod tests {
         material_registry.insert(manual_handle, Material::default());
 
         // Old-style render command (explicit handle)
-        let cmd_material_handle = 100u32;
+        let cmd_material_handle = MaterialHandle { index: 100 };
 
         let material = material_registry.get(&cmd_material_handle);
         assert!(
