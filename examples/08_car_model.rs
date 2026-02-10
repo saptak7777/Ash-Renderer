@@ -69,7 +69,8 @@ impl ApplicationHandler for App {
                     Arc::clone(&renderer.device.device),
                     Arc::clone(&renderer.alloc),
                     renderer.geometry_buffer(),
-                );
+                )
+                .expect("Failed to create scene");
 
                 // Register Global Default Tint Buffer (Required by Shader)
                 let tint_data = [[1.0f32, 1.0, 1.0, 1.0]];
@@ -210,7 +211,8 @@ impl ApplicationHandler for App {
                                             &mut staging_resources,
                                         )
                                         .unwrap();
-                                    let material_handle = renderer.get_mesh_material(mesh_handle);
+                                    let material_handle =
+                                        renderer.get_mesh_material(scene, mesh_handle);
 
                                     log::info!(
                                         "Scheduled Mesh {}: '{}' (Handle: {:?}, Material: {:?})",

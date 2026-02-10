@@ -54,7 +54,8 @@ impl ApplicationHandler for App {
                     Arc::clone(&renderer.device.device),
                     Arc::clone(&renderer.alloc),
                     renderer.geometry_buffer(),
-                );
+                )
+                .expect("Failed to create scene");
 
                 // Create a demo mesh with material properties (simulating GLB load)
                 let mut demo_mesh = Mesh::create_cube();
@@ -81,7 +82,7 @@ impl ApplicationHandler for App {
                     log::info!("✅ Demo mesh registered with handle {handle}");
 
                     // Check if material was registered
-                    let mat_handle = renderer.get_mesh_material(handle);
+                    let mat_handle = renderer.get_mesh_material(&scene, handle);
                     if !mat_handle.is_null() && scene.material_manager.is_handle_valid(mat_handle) {
                         log::info!("✅ Material automatically registered for demo mesh");
 

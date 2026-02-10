@@ -50,7 +50,8 @@ impl ApplicationHandler for App {
                     Arc::clone(&renderer.device.device),
                     Arc::clone(&renderer.alloc),
                     renderer.geometry_buffer(),
-                );
+                )
+                .expect("Failed to create scene");
 
                 // Path to a GLB model
                 let glb_path = "assets/models/test.glb";

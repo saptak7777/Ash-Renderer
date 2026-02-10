@@ -21,8 +21,8 @@ use winit::{
 struct App {
     window: Option<Window>,
     tint_buffer: Option<Arc<parking_lot::Mutex<StorageBuffer<Vec4>>>>,
-    renderer: Option<Renderer>,
     scene: Option<Scene>,
+    renderer: Option<Renderer>,
     _start_time: Instant,
     frame_count: u32,
     render_commands: Vec<ash_renderer::renderer::RenderCommand>,
@@ -57,7 +57,8 @@ impl ApplicationHandler for App {
                     Arc::clone(&renderer.device.device),
                     Arc::clone(&renderer.alloc),
                     renderer.geometry_buffer(),
-                );
+                )
+                .expect("Failed to create scene");
 
                 // 1. Register bindless storage buffer FIRST to get the index
                 let tint_colors = [Vec4::new(1.0, 1.0, 1.0, 1.0)];
@@ -229,7 +230,7 @@ fn run_headless(max_frames: u32) -> Result<()> {
         Arc::clone(&renderer.device.device),
         Arc::clone(&renderer.alloc),
         renderer.geometry_buffer(),
-    );
+    )?;
 
     // --- SETUP SOURCE (Copied from resumed) ---
     // 1. Register bindless storage buffer FIRST to get the index

@@ -38,8 +38,6 @@ pub struct RendererResources {
     pub material_storage_buffer:
         StorageBuffer<crate::renderer::resources::uniform::MaterialUniform>,
     pub instance_buffers: Vec<crate::renderer::resources::InstanceBuffer>,
-    pub transform_arena: vk::Buffer,
-    pub transform_arena_alloc: vk_mem::Allocation,
     pub post_sampler: vk::Sampler,
 }
 

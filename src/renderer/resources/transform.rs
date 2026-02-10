@@ -1,4 +1,5 @@
 use glam::{Mat3, Mat4, Quat, Vec3};
+use std::sync::Arc;
 
 /// Transform flags for optimization
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -161,20 +162,47 @@ struct TransformStorage {
 pub struct TransformSystem {
     storage: TransformStorage,
     dirty_flags: Vec<bool>,
+    // GPU Resources
+    pub(crate) arena_buffer: ash::vk::Buffer,
+    pub(crate) arena_alloc: vk_mem::Allocation,
+    pub(crate) arena_addr: u64,
+    allocator: Arc<crate::vulkan::Allocator>,
 }
 
-impl Default for TransformSystem {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+// Default implementation removed since constructor now requires GPU resources
 
 impl TransformSystem {
-    pub fn new() -> Self {
-        Self {
+    pub fn new(
+        device: Arc<ash::Device>,
+        allocator: Arc<crate::vulkan::Allocator>,
+    ) -> crate::Result<Self> {
+        let arena_size = 1024 * 1024; // 1MB arena as per Phase 19
+        let (arena_buffer, arena_alloc) = unsafe {
+            allocator.create_buffer_with_flags_and_name(
+                arena_size,
+                ash::vk::BufferUsageFlags::STORAGE_BUFFER
+                    | ash::vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
+                vk_mem::MemoryUsage::AutoPreferHost,
+                vk_mem::AllocationCreateFlags::HOST_ACCESS_SEQUENTIAL_WRITE
+                    | vk_mem::AllocationCreateFlags::MAPPED,
+                Some("Transform Arena".to_string()),
+            )?
+        };
+
+        let arena_addr = unsafe {
+            device.get_buffer_device_address(
+                &ash::vk::BufferDeviceAddressInfo::default().buffer(arena_buffer),
+            )
+        };
+
+        Ok(Self {
             storage: TransformStorage::default(),
             dirty_flags: Vec::new(),
-        }
+            arena_buffer,
+            arena_alloc,
+            arena_addr,
+            allocator,
+        })
     }
 
     /// Create transform (returns opaque handle)
@@ -253,6 +281,29 @@ impl TransformSystem {
             model_matrix: model.to_cols_array_2d(),
             normal_matrix: normal_padded,
         }
+    }
+
+    /// Synchronize CPU data to the GPU arena buffer.
+    pub fn update_buffers(&mut self) -> crate::Result<()> {
+        let count = self.storage.model_matrices.len();
+        if count == 0 {
+            return Ok(());
+        }
+
+        let mut gpu_data = Vec::with_capacity(count);
+        for i in 0..count {
+            gpu_data.push(self.get_gpu_data(TransformHandle(i)));
+        }
+
+        unsafe {
+            let mut map = self.allocator.map_allocation_guarded(
+                &mut self.arena_alloc,
+                (count * std::mem::size_of::<GpuTransformData>()) as u64,
+            )?;
+            map.copy_from_slice(&gpu_data);
+        }
+
+        Ok(())
     }
 }
 
@@ -447,5 +498,14 @@ impl TemporalCamera {
 
     pub fn jitter(&self) -> (f32, f32) {
         self.current_jitter
+    }
+}
+
+impl Drop for TransformSystem {
+    fn drop(&mut self) {
+        unsafe {
+            self.allocator
+                .destroy_buffer(self.arena_buffer, &mut self.arena_alloc);
+        }
     }
 }

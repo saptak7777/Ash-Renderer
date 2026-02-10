@@ -59,7 +59,8 @@ impl ApplicationHandler for App {
                     Arc::clone(&renderer.device.device),
                     Arc::clone(&renderer.alloc),
                     renderer.geometry_buffer(),
-                );
+                )
+                .expect("Failed to create scene");
 
                 // Create a cube mesh
                 let mut cube = Mesh::create_cube();
@@ -288,7 +289,7 @@ fn run_headless(max_frames: u32) -> Result<()> {
         Arc::clone(&renderer.device.device),
         Arc::clone(&renderer.alloc),
         renderer.geometry_buffer(),
-    );
+    )?;
 
     // --- SETUP SOURCE (Copied from resumed) ---
     let mut cube = Mesh::create_cube();

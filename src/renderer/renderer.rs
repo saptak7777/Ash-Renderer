@@ -45,8 +45,7 @@ use ash::vk;
 use glam::{Mat4, Vec3};
 use rayon::prelude::*;
 use resources::BufferPool;
-use std::collections::{HashMap, HashSet};
-use std::ptr;
+use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use std::time::Instant;
 
@@ -142,8 +141,6 @@ pub struct Renderer {
     pub(crate) framebuffers: Vec<vulkan::Framebuffer>,
     pub(crate) framebuffer_ids: Vec<ResourceId>,
     start_time: Instant,
-    mesh_data: Vec<MeshData>, // Indexed by mesh handle for O(1) access
-    uploaded_material_indices: HashSet<u32>, // Track which materials are GPU-resident (UE5 pattern)
     pub(crate) swapchain_image_view_ids: Vec<ResourceId>,
     pub(crate) depth_buffer_id: Option<ResourceId>,
     pub frame_manager: frame_manager::FrameManager,
@@ -194,12 +191,6 @@ pub struct Renderer {
     texture_compression: bool,
     instancing_manager: InstancingManager,
     instance_buffers: Vec<resources::InstanceBuffer>,
-    transform_system: resources::TransformSystem,
-    // Transient Transform Arena (Phase 19)
-    transform_arena: vk::Buffer,
-    transform_arena_alloc: vk_mem::Allocation,
-    transform_arena_addr: u64,
-    transform_arena_offset: u32,
     // Image-Based Lighting
     allow_auto_material: bool,
     strict_mode: bool,
@@ -363,9 +354,6 @@ impl Renderer {
                 instance_buffer_addresses.push(buffer.device_address());
             }
 
-            let transform_arena_addr = device.device.get_buffer_device_address(
-                &vk::BufferDeviceAddressInfo::default().buffer(core.renderer_resources.transform_arena)
-            );
 
             let readback_buffer = if device.headless {
                 let buffer_size = (swapchain.extent.width * swapchain.extent.height * 4) as u64; 
@@ -419,8 +407,6 @@ impl Renderer {
                 start_time: Instant::now(),
                 alloc,
                 device,
-                mesh_data: Vec::new(),
-                uploaded_material_indices: HashSet::new(),
                 swapchain_image_view_ids,
                 depth_buffer_id: Some(depth_buffer_id),
                 frame_manager,
@@ -453,11 +439,6 @@ impl Renderer {
                 texture_compression: renderer_config.texture_compression,
                 instancing_manager: InstancingManager::new(),
                 instance_buffers: core.renderer_resources.instance_buffers,
-                transform_system: resources::TransformSystem::new(),
-                transform_arena: core.renderer_resources.transform_arena,
-                transform_arena_alloc: core.renderer_resources.transform_arena_alloc,
-                transform_arena_addr,
-                transform_arena_offset: 0,
 
                 allow_auto_material: renderer_config.allow_auto_material,
                 strict_mode: renderer_config.strict_mode,
@@ -730,12 +711,11 @@ impl Renderer {
         &mut self.assets.bindless_manager
     }
 
-    pub fn get_mesh_material(&self, mesh_handle: u32) -> MaterialHandle {
-        if (mesh_handle as usize) < self.mesh_data.len() {
-            self.mesh_data[mesh_handle as usize].material_handle
-        } else {
-            MaterialHandle::null()
-        }
+    pub fn get_mesh_material(&self, scene: &Scene, mesh_handle: u32) -> MaterialHandle {
+        scene.mesh_data
+            .get(mesh_handle as usize)
+            .map(|m| m.material_handle)
+            .unwrap_or_else(|| MaterialHandle::null())
     }
 
     // Legacy lighting methods removed for modern RAGE pipeline
@@ -752,13 +732,13 @@ impl Renderer {
 
 
     /// Get immutable access to consolidated mesh data.
-    pub fn mesh_data(&self) -> &[MeshData] {
-        &self.mesh_data
+    pub fn mesh_data<'a>(&self, scene: &'a Scene) -> &'a [MeshData] {
+        &scene.mesh_data
     }
 
     /// Get mutable access to mesh data by handle.
-    pub fn get_mesh_data_mut(&mut self, handle: u32) -> Option<&mut MeshData> {
-        self.mesh_data.get_mut(handle as usize)
+    pub fn get_mesh_data_mut<'a>(&self, scene: &'a mut Scene, handle: u32) -> Option<&'a mut MeshData> {
+        scene.mesh_data.get_mut(handle as usize)
     }
 
     /// Returns the global geometry buffer for shared vertex/index storage.
@@ -813,7 +793,7 @@ impl Renderer {
         upload_cmd: vk::CommandBuffer,
         staging_resources: &mut Vec<crate::renderer::resources::BufferHandle>,
     ) -> Result<u32> {
-        let handle = self.mesh_data.len() as u32;
+        let handle = scene.mesh_data.len() as u32;
         self.register_mesh_handle(scene, handle, &mut mesh, upload_cmd, staging_resources)?;
         Ok(handle)
     }
@@ -1074,23 +1054,20 @@ impl Renderer {
         // ---------------------------------------------------------
         // PART 3: MeshData Update
         // ---------------------------------------------------------
-            let mesh_data = MeshData {
-                name: Arc::clone(&key),
-                texture_indices: indices,
-                emissive_index,
-                texture_flags: flags,
-                material_handle,
-                is_hidden: false,
-                bounds,
-                cluster_start_index,
-                cluster_count,
-            };
+        // Create the MeshData entry
+        let mesh_data = MeshData {
+            name: Arc::clone(&key),
+            texture_indices: indices,
+            emissive_index,
+            texture_flags: flags,
+            material_handle,
+            is_hidden: false,
+            bounds,
+            cluster_start_index: cluster_start_index as u32,
+            cluster_count: cluster_count as u32,
+        };
 
-            if handle as usize >= self.mesh_data.len() {
-                self.mesh_data
-                    .resize(handle as usize + 1, MeshData::default());
-            }
-            self.mesh_data[handle as usize] = mesh_data;
+        scene.register_mesh_metadata(mesh_data);
 
         Ok(())
     }
@@ -1129,7 +1106,7 @@ impl Renderer {
     ///
     /// This follows modern game engine patterns (UE5, Unity) where material updates are streamed
     /// directly without reading back the entire buffer.
-    pub fn upload_material_to_gpu(&mut self, handle: u32, material: &Material) -> Result<()> {
+    pub fn upload_material_to_gpu(&mut self, scene: &mut Scene, handle: u32, material: &Material) -> Result<()> {
         if let Some(buffer_arc) = self.material_storage_buffer.as_ref() {
             let mut buffer = buffer_arc.write().unwrap();
             let capacity = buffer.capacity();
@@ -1185,7 +1162,7 @@ impl Renderer {
             }
 
             // Track material as GPU-resident (UE5 pattern)
-            self.uploaded_material_indices.insert(handle);
+            scene.uploaded_material_indices.insert(handle);
 
             // Synchronization handled by memory barrier in render_frame()
             // No need for device_wait_idle - this was a workaround
@@ -1222,13 +1199,13 @@ impl Renderer {
     /// Synchronizes all materials from MaterialManager to the GPU buffer.
     pub fn sync_materials_to_gpu(&mut self, scene: &mut super::Scene) -> Result<()> {
         let sync_list: Vec<(u32, resources::Material)> = {
-            scene.material_manager.iter_unsynced(&self.uploaded_material_indices)
+            scene.material_manager.iter_unsynced(&scene.uploaded_material_indices)
                 .map(|(id, material)| (id, material.clone()))
                 .collect()
         };
 
         for (handle, material) in sync_list {
-            self.upload_material_to_gpu(handle, &material)?;
+            self.upload_material_to_gpu(scene, handle, &material)?;
         }
 
         Ok(())
@@ -1239,10 +1216,8 @@ impl Renderer {
     /// This handles both registering the material with the manager and 
     /// uploading its data to the GPU in a single call.
     pub fn register_and_upload_material(&mut self, scene: &mut Scene, material: Material) -> Result<MaterialHandle> {
-        let buffer_arc = self.material_storage_buffer.as_ref().ok_or_else(|| AshError::VulkanError("Buffer missing".into()))?;
-        let mut buffer = buffer_arc.write().unwrap();
-        let handle = unsafe { scene.model_renderer.register_material(&material, &mut *buffer)? };
-        scene.material_manager.register_material(material, handle.index);
+        let handle = scene.add_material(material.clone());
+        self.upload_material_to_gpu(scene, handle.index as u32, &material)?;
         Ok(handle)
     }
 
@@ -1270,49 +1245,6 @@ impl Renderer {
     }
 
     /// AAA-grade transient transform upload (Phase 19).
-    /// Offloads heavy matrices to a storage buffer via BDA.
-    pub fn upload_transform(&mut self, model: Mat4) -> Result<u32> {
-        let size = std::mem::size_of::<Mat4>() as u32;
-        
-        // Ensure 64-byte alignment (standard for mat4)
-        debug_assert!(self.transform_arena_offset % 64 == 0);
-        
-        let index = self.transform_arena_offset / size;
-
-        // Check for overflow (1MB limit) - UE5/RAGE safety pattern
-        if self.transform_arena_offset + size > 1024 * 1024 {
-             log::error!("Transform arena overflow (1MB)! Skipping transform upload for this object.");
-             return Err(AshError::TransformArenaOverflow);
-        }
-
-        unsafe {
-            // AAA Pattern: Use persistent mapping (assigned during create_buffer with MAPPED flag)
-            let mapping = self.alloc.vma.get_allocation_info(&self.transform_arena_alloc);
-            let ptr = mapping.mapped_data as *mut u8;
-            
-            if !ptr.is_null() {
-                let dst = ptr.add(self.transform_arena_offset as usize);
-                
-                ptr::copy_nonoverlapping(
-                    model.as_ref().as_ptr() as *const u8,
-                    dst,
-                    size as usize
-                );
-                
-                // Flush only the modified range to ensure GPU visibility
-                let _ = self.alloc.vma.flush_allocation(
-                    &self.transform_arena_alloc,
-                    self.transform_arena_offset as u64,
-                    size as u64
-                );
-            } else {
-                log::error!("Transform arena NOT mapped! Visuals will be broken.");
-            }
-        }
-
-        self.transform_arena_offset += size;
-        Ok(index)
-    }
 
     /// Converts a material descriptor into a renderer material and registers it.
     pub fn register_material_descriptor(
@@ -1378,7 +1310,7 @@ impl Renderer {
             use std::collections::HashMap;
 
             // Capture only thread-safe fields
-            let mesh_data = &self.mesh_data;
+            let mesh_data = &scene.mesh_data;
             let material_manager = &scene.material_manager;
             let strict_mode = self.strict_mode;
 
@@ -1466,7 +1398,7 @@ impl Renderer {
         } else {
             // Sequential processing for small command counts (avoids rayon overhead)
             for command in commands {
-                if let Some(mesh_data) = self.mesh_data.get(command.mesh_handle as usize) {
+                if let Some(mesh_data) = scene.mesh_data.get(command.mesh_handle as usize) {
                     let mesh_key = &mesh_data.name;
 
                     let material_handle = if command.material_handle.is_null() {
@@ -2228,7 +2160,7 @@ impl Renderer {
                     skybox_index: params.scene.skybox_texture_index,
                     vsm_page_index: self.shadow_system.as_ref().map(|s| s.vsm_page_index()).unwrap_or(0),
                     vsm_cache_index: self.shadow_system.as_ref().map(|s| s.vsm_cache_index()).unwrap_or(0),
-                    transform_ptr: self.transform_arena_addr,
+                    transform_ptr: params.scene.transform_system.arena_addr,
                     transform_index: 0, // Using index 0 for main indirect pass
                 };
                 
@@ -2366,7 +2298,8 @@ impl Renderer {
         camera_pos: glam::Vec3,
         model_matrix: Option<Mat4>,
     ) -> Result<()> {
-        self.transform_system.update();
+        scene.transform_system.update();
+        scene.transform_system.update_buffers()?;
         
         // Task 3: Simplified resize handling
         if self.queue.is_resize_pending() {
@@ -2374,8 +2307,6 @@ impl Renderer {
         }
         self.queue.flush_old_swapchains(&self.device);
 
-        // Phase 19: Reset Transform Arena for the new frame
-        self.transform_arena_offset = 0;
 
         // Phase 20: Sync Materials to GPU
         if let Err(e) = self.sync_materials_to_gpu(scene) {
@@ -2466,7 +2397,7 @@ impl Renderer {
                 if let Some(uploaded) = scene.model_renderer.get(&item.key) {
                     // Use mesh clusters for fine-grained culling
                     // Fallback to mesh bounds if clusters are empty
-                    let bounds = self
+                    let bounds = scene
                         .mesh_data
                         .get(item.mesh_id as usize)
                         .map(|m| m.bounds)
@@ -2693,21 +2624,21 @@ impl Renderer {
                         if vertex_ptr == 0 || index_ptr == 0 {
                             log::warn!("Shadow pass: Invalid BDA pointers (V: {}, I: {}). Skipping.", vertex_ptr, index_ptr);
                         } else {
-                            shadow_system.vsm_feature_mut().render_shadows(
-                                command_buffer,
-                                light_dir,
-                                all_instances.len() as u32,
-                                frame_index,
-                                frame_descriptor_set,
-                                bindless_descriptor_set,
-                                self.uniform_buffers[frame_index].read().unwrap().device_address(),
-                                vertex_ptr,
-                                self.instance_buffer_addresses[frame_index],
-                                self.material_heap_address,
-                                index_ptr,
-                                light_ptr,
-                                tile_ptr,
-                                self.transform_arena_addr,
+                                shadow_system.vsm_feature_mut().render_shadows(
+                                    command_buffer,
+                                    light_dir,
+                                    all_instances.len() as u32,
+                                    frame_index,
+                                    frame_descriptor_set,
+                                    bindless_descriptor_set,
+                                    self.uniform_buffers[frame_index].read().unwrap().device_address(),
+                                    vertex_ptr,
+                                    self.instance_buffer_addresses[frame_index],
+                                    self.material_heap_address,
+                                    index_ptr,
+                                    light_ptr,
+                                    tile_ptr,
+                                    scene.transform_system.arena_addr,
                                 0, // Using index 0 for shadows for now + 1MB is huge anyway
                             );
                         }
@@ -3565,10 +3496,6 @@ impl Drop for Renderer {
 
             self.draw_items.clear();
             
-            // Phase 19 Transient Arena Cleanup
-            self.alloc.destroy_buffer(self.transform_arena, &mut self.transform_arena_alloc);
-
-
             self.depth_buffer = None;
             self.pipeline = None;
             self.render_pass = None;

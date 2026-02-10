@@ -377,17 +377,6 @@ pub unsafe fn init_resources(
         )
         .map_err(|e| AshError::VulkanError(format!("Failed to create post_sampler: {e}")))?;
 
-    // Phase 19: Transient Transform Arena
-    let transform_arena_size = 1024 * 1024; // 1MB
-    let (transform_arena, transform_arena_alloc) = alloc.create_buffer_with_flags_and_name(
-        transform_arena_size,
-        vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
-        vk_mem::MemoryUsage::AutoPreferHost,
-        vk_mem::AllocationCreateFlags::HOST_ACCESS_SEQUENTIAL_WRITE
-            | vk_mem::AllocationCreateFlags::MAPPED,
-        Some("Transform Arena (Phase 19)".to_string()),
-    )?;
-
     Ok(RendererResources {
         uniform_buffers,
         default_texture,
@@ -397,8 +386,6 @@ pub unsafe fn init_resources(
         default_cube_black,
         material_storage_buffer,
         instance_buffers,
-        transform_arena,
-        transform_arena_alloc,
         post_sampler,
     })
 }

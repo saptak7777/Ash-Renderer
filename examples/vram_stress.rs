@@ -27,7 +27,7 @@ fn main() -> Result<()> {
         Arc::clone(&renderer.device.device),
         Arc::clone(&renderer.alloc),
         renderer.geometry_buffer(),
-    );
+    )?;
 
     // Create a 2048x2048 synthetic texture (16MB)
     let texture_size = 2048 * 2048 * 4;

@@ -50,7 +50,8 @@ impl ApplicationHandler for App {
                     Arc::clone(&renderer.device.device),
                     Arc::clone(&renderer.alloc),
                     renderer.geometry_buffer(),
-                );
+                )
+                .expect("Failed to create scene");
 
                 // Try to load a GLB file if it exists
                 let glb_paths = ["assets/models/test.glb", "test.glb", "assets/test.glb"];
@@ -77,7 +78,8 @@ impl ApplicationHandler for App {
                                         );
 
                                             // Check if material was registered
-                                            let mat_handle = renderer.get_mesh_material(handle);
+                                            let mat_handle =
+                                                renderer.get_mesh_material(&scene, handle);
                                             if !mat_handle.is_null() {
                                                 if scene
                                                     .material_manager
@@ -135,7 +137,7 @@ impl ApplicationHandler for App {
                         log::info!("Test cube registered with material properties");
 
                         // Check if material was registered
-                        let mat_handle = renderer.get_mesh_material(handle);
+                        let mat_handle = renderer.get_mesh_material(scene, handle);
                         if !mat_handle.is_null() {
                             if scene.material_manager.is_handle_valid(mat_handle) {
                                 log::info!(

@@ -30,8 +30,8 @@ use winit::{
 struct App {
     window: Option<Window>,
     tint_buffer: Option<Arc<parking_lot::Mutex<StorageBuffer<Vec4>>>>,
-    renderer: Option<Renderer>,
     scene: Option<Scene>,
+    renderer: Option<Renderer>,
     render_commands: Vec<ash_renderer::renderer::RenderCommand>,
     start_time: Instant,
 }
@@ -64,7 +64,8 @@ impl ApplicationHandler for App {
                     Arc::clone(&renderer.device.device),
                     Arc::clone(&renderer.alloc),
                     renderer.geometry_buffer(),
-                );
+                )
+                .expect("Failed to create scene");
 
                 // Create a cube mesh
                 let mut cube = Mesh::create_cube();

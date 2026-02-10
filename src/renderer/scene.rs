@@ -1,8 +1,11 @@
 use crate::renderer::features::{DirectionalLight, PointLight, SceneLighting, SpotLight};
 use crate::renderer::resources::DualHeapGeometryBuffer;
+use crate::renderer::resources::TransformSystem;
 use crate::renderer::vcgs::OcclusionCulling;
 use crate::renderer::*;
 use crate::vulkan::Allocator;
+use crate::Result;
+use std::collections::HashSet;
 use std::sync::Arc;
 
 /// Represents a 3D scene containing models, materials, and lights.
@@ -18,6 +21,11 @@ pub struct Scene {
     pub spot_lights: Vec<SpotLight>,
     pub scene_lighting: SceneLighting, // IBL settings, etc.
     pub skybox_texture_index: u32,
+
+    // Metadata & Tracking (Moved from Renderer)
+    pub mesh_data: Vec<MeshData>,
+    pub uploaded_material_indices: HashSet<u32>,
+    pub transform_system: TransformSystem,
 }
 
 impl Scene {
@@ -25,11 +33,12 @@ impl Scene {
         device: Arc<ash::Device>,
         alloc: Arc<Allocator>,
         geometry_buffer: Arc<DualHeapGeometryBuffer>,
-    ) -> Self {
+    ) -> Result<Self> {
         let model_renderer =
             ModelRenderer::new(Arc::clone(&alloc), Arc::clone(&device), geometry_buffer);
+        let transform_system = TransformSystem::new(Arc::clone(&device), Arc::clone(&alloc))?;
 
-        Self {
+        Ok(Self {
             model_renderer,
             material_manager: MaterialManager::new(),
             occlusion_culling: OcclusionCulling::new(),
@@ -38,7 +47,15 @@ impl Scene {
             spot_lights: Vec::new(),
             scene_lighting: SceneLighting::default(),
             skybox_texture_index: 0,
-        }
+            mesh_data: Vec::new(),
+            uploaded_material_indices: HashSet::new(),
+            transform_system,
+        })
+    }
+
+    /// Register mesh metadata in the scene.
+    pub fn register_mesh_metadata(&mut self, data: MeshData) {
+        self.mesh_data.push(data);
     }
 
     /// Add a material to the scene and return its handle.

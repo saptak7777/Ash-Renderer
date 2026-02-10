@@ -34,7 +34,8 @@ impl ApplicationHandler for App {
                     Arc::clone(&renderer.device.device),
                     Arc::clone(&renderer.alloc),
                     renderer.geometry_buffer(),
-                );
+                )
+                .expect("Failed to create scene");
 
                 // Add a default directional light so the PBR shader has something to render
                 scene.add_directional_light(ash_renderer::renderer::features::DirectionalLight {
