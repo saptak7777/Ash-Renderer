@@ -1,3 +1,4 @@
+use crate::renderer::resources::uniform::MaterialUniform;
 use std::collections::{HashMap, HashSet};
 use std::default::Default;
 
@@ -64,6 +65,33 @@ impl Material {
             occlusion_texture_index: None,
             emissive_texture_index: None,
         }
+    }
+
+    /// Converts the material into its GPU-friendly uniform representation.
+    pub fn to_uniform(&self) -> MaterialUniform {
+        let mut mat_uniform = MaterialUniform::default();
+        mat_uniform.set_base_color_factor(glam::Vec4::from_array(self.color));
+        mat_uniform.set_emissive_factor(glam::Vec4::from_array(self.emissive));
+        mat_uniform.set_metallic_roughness(self.metallic, self.roughness);
+        mat_uniform.set_occlusion_strength(self.occlusion_strength);
+        mat_uniform.set_normal_scale(self.normal_scale);
+        mat_uniform.set_alpha_cutoff(self.alpha_cutoff);
+
+        let base_idx = self.texture_index.unwrap_or(u32::MAX) as i32;
+        let normal_idx = self.normal_texture_index.unwrap_or(u32::MAX) as i32;
+        let mr_idx = self.metallic_roughness_texture_index.unwrap_or(u32::MAX) as i32;
+        let occ_idx = self.occlusion_texture_index.unwrap_or(u32::MAX) as i32;
+        let emissive_idx = self.emissive_texture_index.unwrap_or(u32::MAX) as i32;
+
+        mat_uniform.set_texture_indices(
+            base_idx,
+            normal_idx,
+            mr_idx,
+            occ_idx,
+            emissive_idx,
+            self.tint_index,
+        );
+        mat_uniform
     }
 }
 
@@ -206,6 +234,18 @@ impl MaterialManager {
         Self::default()
     }
 
+    pub fn material_count(&self) -> u32 {
+        self.materials.len() as u32
+    }
+
+    pub fn get_handle_by_name(&self, name: &str) -> Option<MaterialHandle> {
+        self.materials
+            .iter()
+            .enumerate()
+            .find(|(_, m)| m.name == name)
+            .map(|(i, _)| MaterialHandle { index: i as u32 })
+    }
+
     /// Returns an iterator over materials that have not been synced to the GPU yet.
     pub fn iter_unsynced<'a>(
         &'a self,
@@ -224,22 +264,18 @@ impl MaterialManager {
             })
     }
 
-    pub fn register_material(&mut self, material: Material, index: u32) -> MaterialHandle {
-        let key = MaterialKey::from_material(&material);
+    pub fn register_material(&mut self, material: &Material) -> MaterialHandle {
+        let key = MaterialKey::from_material(material);
         if let Some(&existing_handle) = self.key_to_handle.get(&key) {
             return existing_handle;
         }
 
-        if (index as usize) >= self.materials.len() {
-            self.materials
-                .resize(index as usize + 1, Material::default());
-        }
-
-        self.materials[index as usize] = material.clone();
+        let index = self.materials.len() as u32;
+        self.materials.push(material.clone());
         let handle = MaterialHandle { index };
         self.key_to_handle.insert(key, handle);
 
-        log::debug!("Material synchronized: {} at slot {}", material.name, index);
+        log::debug!("Material registered: {} at slot {}", material.name, index);
 
         handle
     }
@@ -279,11 +315,17 @@ impl MaterialManager {
 
 impl Default for MaterialManager {
     fn default() -> Self {
-        Self {
+        let mut manager = Self {
             materials: Vec::new(),
             default_material: MaterialHandle { index: 0 },
             key_to_handle: HashMap::new(),
-        }
+        };
+
+        // Register default material at index 0
+        let default_mat = Material::default();
+        manager.register_material(&default_mat);
+
+        manager
     }
 }
 
@@ -322,11 +364,12 @@ mod tests {
         };
         let mat2 = mat1.clone();
 
-        let handle1 = manager.register_material(mat1, 1);
-        let handle2 = manager.register_material(mat2, 1);
+        let handle1 = manager.register_material(&mat1);
+        let handle2 = manager.register_material(&mat2);
 
         assert_eq!(handle1, handle2); // Should reuse the same handle
-        assert_eq!(manager.materials.len(), 2); // Default material at 0, new material at 1
+                                      // Default material at 0, unique mat1 at 1. mat2 is deduplicated to 1.
+        assert_eq!(manager.materials.len(), 2);
     }
 
     #[test]
@@ -342,8 +385,8 @@ mod tests {
             ..Default::default()
         };
 
-        let h1 = manager.register_material(mat1, 1);
-        let h2 = manager.register_material(mat2, 1);
+        let h1 = manager.register_material(&mat1);
+        let h2 = manager.register_material(&mat2);
 
         assert_eq!(h1, h2);
     }

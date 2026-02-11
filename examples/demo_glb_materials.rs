@@ -75,20 +75,59 @@ impl ApplicationHandler for App {
                 );
 
                 // Register the mesh with the renderer (this triggers material registration)
-                // Register the mesh with the renderer (this triggers material registration)
-                if let Ok(handle) = renderer.upload_mesh_single(&mut scene, demo_mesh.clone()) {
+                let upload_cmd = renderer.get_transfer_command_buffer().unwrap();
+                let cmd_context = renderer.cmds.context(upload_cmd);
+                cmd_context
+                    .begin(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT)
+                    .unwrap();
+
+                let mut staging_resources = Vec::new();
+                let upload_res = scene.upload_mesh(
+                    Arc::clone(&renderer.device.device),
+                    Arc::clone(&renderer.alloc),
+                    renderer.cmds.upload_command_pool_handle(),
+                    upload_cmd,
+                    &renderer.device.graphics_queue,
+                    &mut demo_mesh,
+                    &mut renderer.assets,
+                    &mut staging_resources,
+                );
+
+                cmd_context.end().unwrap();
+
+                // Submit and wait
+                let cmds = [upload_cmd];
+                let submit_info = vk::SubmitInfo::default().command_buffers(&cmds);
+                unsafe {
+                    renderer
+                        .device
+                        .device
+                        .queue_submit(
+                            renderer.device.graphics_queue,
+                            &[submit_info],
+                            vk::Fence::null(),
+                        )
+                        .unwrap();
+                    renderer
+                        .device
+                        .device
+                        .queue_wait_idle(renderer.device.graphics_queue)
+                        .unwrap();
+                }
+
+                if let Ok(handle) = upload_res {
                     log::info!("✅ Demo mesh registered with handle {handle}");
 
                     log::info!("✅ Demo mesh registered with handle {handle}");
 
                     // Check if material was registered
-                    let mat_handle = renderer.get_mesh_material(&scene, handle);
+                    let mat_handle = scene.mesh_data[handle as usize].material_handle;
                     if !mat_handle.is_null() && scene.material_manager.is_handle_valid(mat_handle) {
                         log::info!("✅ Material automatically registered for demo mesh");
 
                         // CRITICAL FIX: Upload the automatically registered material to GPU
                         let material = scene.material_manager.get_material(mat_handle).clone();
-                        let _ = renderer.register_and_upload_material(&mut scene, material.clone());
+                        let _ = scene.register_material(&material).unwrap();
                         log::info!("✅ Material uploaded to GPU: {mat_handle:?}");
 
                         log::info!("   - Material: {}", material.name);

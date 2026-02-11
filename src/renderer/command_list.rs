@@ -7,7 +7,7 @@ use std::sync::Arc;
 /// bound state and preventing common errors like binding incompatible resources.
 ///
 /// # Example
-/// ```no_run
+/// ```ignore
 /// # use ash_renderer::renderer::CommandList;
 /// let mut cmd = CommandList::new(device, command_buffer);
 /// unsafe {

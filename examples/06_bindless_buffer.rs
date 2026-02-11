@@ -3,7 +3,7 @@
 //! Demonstrates how to use Binding 2 (Storage Buffers) in the BindlessManager
 //! to provide per-object or per-material configuration (like tints) without
 //! using standard uniforms.
-
+use ash::vk;
 use ash_renderer::prelude::*;
 use ash_renderer::renderer::features::ambient_lighting::{AmbientPreset, LightingBuilder};
 use ash_renderer::renderer::resources::uniform::StorageBuffer;
@@ -80,9 +80,7 @@ impl ApplicationHandler for App {
                 log::info!("✓ Material set to MATTE ORANGE [Metallic 0.0, Roughness 0.7]");
 
                 // Register and upload material
-                let material_handle = renderer
-                    .register_and_upload_material(&mut scene, material)
-                    .unwrap();
+                let material_handle = scene.register_material(&material).unwrap();
                 log::info!("✓ Registered orange material with handle {material_handle:?}");
 
                 // 3. Create a cube
@@ -95,7 +93,47 @@ impl ApplicationHandler for App {
                 log::info!("✓ Cube mesh created and renamed to 'OrangeCube' for Phase 1");
 
                 // Upload mesh
-                let mesh_handle = renderer.upload_mesh_single(&mut scene, cube).unwrap_or(0);
+                let upload_cmd = renderer.get_transfer_command_buffer().unwrap();
+                let cmd_context = renderer.cmds.context(upload_cmd);
+                cmd_context
+                    .begin(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT)
+                    .unwrap();
+
+                let mut staging_resources = Vec::new();
+                let mesh_handle = scene
+                    .upload_mesh(
+                        Arc::clone(&renderer.device.device),
+                        Arc::clone(&renderer.alloc),
+                        renderer.cmds.upload_command_pool_handle(),
+                        upload_cmd,
+                        &renderer.device.graphics_queue,
+                        &mut cube,
+                        &mut renderer.assets,
+                        &mut staging_resources,
+                    )
+                    .unwrap_or(0);
+
+                cmd_context.end().unwrap();
+
+                // Submit and wait
+                let cmds = [upload_cmd];
+                let submit_info = vk::SubmitInfo::default().command_buffers(&cmds);
+                unsafe {
+                    renderer
+                        .device
+                        .device
+                        .queue_submit(
+                            renderer.device.graphics_queue,
+                            &[submit_info],
+                            vk::Fence::null(),
+                        )
+                        .unwrap();
+                    renderer
+                        .device
+                        .device
+                        .queue_wait_idle(renderer.device.graphics_queue)
+                        .unwrap();
+                }
                 log::info!("✓ Mesh uploaded to GPU");
 
                 // 4. Setup render command
@@ -250,15 +288,53 @@ fn run_headless(max_frames: u32) -> Result<()> {
         ..Default::default()
     };
 
-    let material_handle = renderer
-        .register_and_upload_material(&mut scene, material)
-        .unwrap();
+    let material_handle = scene.register_material(&material).unwrap();
     let mut cube = Mesh::create_cube();
     for v in &mut cube.vertices {
         v.color = [1.0, 1.0, 1.0];
     }
     cube.name = Arc::from("OrangeCubeHeadless");
-    let mesh_handle = renderer.upload_mesh_single(&mut scene, cube).unwrap_or(0);
+    let upload_cmd = renderer.get_transfer_command_buffer().unwrap();
+    let cmd_context = renderer.cmds.context(upload_cmd);
+    cmd_context
+        .begin(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT)
+        .unwrap();
+
+    let mut staging_resources = Vec::new();
+    let upload_res = scene.upload_mesh(
+        Arc::clone(&renderer.device.device),
+        Arc::clone(&renderer.alloc),
+        renderer.cmds.upload_command_pool_handle(),
+        upload_cmd,
+        &renderer.device.graphics_queue,
+        &mut cube,
+        &mut renderer.assets,
+        &mut staging_resources,
+    );
+
+    cmd_context.end().unwrap();
+
+    // Submit and wait
+    let cmds = [upload_cmd];
+    let submit_info = vk::SubmitInfo::default().command_buffers(&cmds);
+    unsafe {
+        renderer
+            .device
+            .device
+            .queue_submit(
+                renderer.device.graphics_queue,
+                &[submit_info],
+                vk::Fence::null(),
+            )
+            .unwrap();
+        renderer
+            .device
+            .device
+            .queue_wait_idle(renderer.device.graphics_queue)
+            .unwrap();
+    }
+
+    let mesh_handle = upload_res.unwrap_or(0);
 
     let render_commands = vec![ash_renderer::renderer::RenderCommand {
         mesh_handle,

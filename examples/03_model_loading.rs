@@ -60,12 +60,49 @@ impl ApplicationHandler for App {
                     log::info!("Loading model from: {glb_path}");
                     match gltf_loader::load_model(glb_path) {
                         Ok(meshes) => {
-                            for (i, mut mesh) in meshes.into_iter().enumerate() {
-                                let handle = (i + 1) as u32;
-                                if renderer
-                                    .register_mesh_handle_single(&mut scene, handle, &mut mesh)
-                                    .is_ok()
-                                {
+                            for (_i, mut mesh) in meshes.into_iter().enumerate() {
+                                let upload_cmd = renderer.get_transfer_command_buffer().unwrap();
+                                let cmd_context = renderer.cmds.context(upload_cmd);
+                                cmd_context
+                                    .begin(ash::vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT)
+                                    .unwrap();
+
+                                let mut staging_resources = Vec::new();
+                                let upload_res = scene.upload_mesh(
+                                    Arc::clone(&renderer.device.device),
+                                    Arc::clone(&renderer.alloc),
+                                    renderer.cmds.upload_command_pool_handle(),
+                                    upload_cmd,
+                                    &renderer.device.graphics_queue,
+                                    &mut mesh,
+                                    &mut renderer.assets,
+                                    &mut staging_resources,
+                                );
+
+                                cmd_context.end().unwrap();
+
+                                // Submit and wait
+                                let cmds = [upload_cmd];
+                                let submit_info =
+                                    ash::vk::SubmitInfo::default().command_buffers(&cmds);
+                                unsafe {
+                                    renderer
+                                        .device
+                                        .device
+                                        .queue_submit(
+                                            renderer.device.graphics_queue,
+                                            &[submit_info],
+                                            ash::vk::Fence::null(),
+                                        )
+                                        .unwrap();
+                                    renderer
+                                        .device
+                                        .device
+                                        .queue_wait_idle(renderer.device.graphics_queue)
+                                        .unwrap();
+                                }
+
+                                if let Ok(handle) = upload_res {
                                     self.mesh_handles.push(handle);
                                     log::info!(
                                         "Registered mesh {} with handle {}",
@@ -80,11 +117,49 @@ impl ApplicationHandler for App {
                 } else {
                     log::warn!("Model not found at {glb_path}. Using default cube.");
                     let mut cube = Mesh::create_cube();
-                    if renderer
-                        .register_mesh_handle_single(&mut scene, 1, &mut cube)
-                        .is_ok()
-                    {
-                        self.mesh_handles.push(1);
+                    let upload_cmd = renderer.get_transfer_command_buffer().unwrap();
+                    let cmd_context = renderer.cmds.context(upload_cmd);
+                    cmd_context
+                        .begin(ash::vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT)
+                        .unwrap();
+
+                    let mut staging_resources = Vec::new();
+                    let upload_res = scene.upload_mesh(
+                        Arc::clone(&renderer.device.device),
+                        Arc::clone(&renderer.alloc),
+                        renderer.cmds.upload_command_pool_handle(),
+                        upload_cmd,
+                        &renderer.device.graphics_queue,
+                        &mut cube,
+                        &mut renderer.assets,
+                        &mut staging_resources,
+                    );
+
+                    cmd_context.end().unwrap();
+
+                    // Submit and wait
+                    let cmds = [upload_cmd];
+                    let submit_info = ash::vk::SubmitInfo::default().command_buffers(&cmds);
+                    unsafe {
+                        renderer
+                            .device
+                            .device
+                            .queue_submit(
+                                renderer.device.graphics_queue,
+                                &[submit_info],
+                                ash::vk::Fence::null(),
+                            )
+                            .unwrap();
+                        renderer
+                            .device
+                            .device
+                            .queue_wait_idle(renderer.device.graphics_queue)
+                            .unwrap();
+                    }
+
+                    if let Ok(handle) = upload_res {
+                        self.mesh_handles.push(handle);
+                        log::info!("Registered default cube with handle {}", handle);
                     }
                 }
 

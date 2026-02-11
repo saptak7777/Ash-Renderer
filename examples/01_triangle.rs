@@ -76,7 +76,48 @@ impl ApplicationHandler for App {
                 mesh.indices = Some(vec![0, 1, 2]);
 
                 // Upload mesh
-                let mesh_handle = renderer.upload_mesh_single(&mut scene, mesh).unwrap_or(0);
+                let upload_cmd = renderer.get_transfer_command_buffer().unwrap();
+                let cmd_context = renderer.cmds.context(upload_cmd);
+                cmd_context
+                    .begin(ash::vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT)
+                    .unwrap();
+
+                let mut staging_resources = Vec::new();
+
+                let mesh_handle = scene
+                    .upload_mesh(
+                        Arc::clone(&renderer.device.device),
+                        Arc::clone(&renderer.alloc),
+                        renderer.cmds.upload_command_pool_handle(),
+                        upload_cmd,
+                        &renderer.device.graphics_queue,
+                        &mut mesh,
+                        &mut renderer.assets,
+                        &mut staging_resources,
+                    )
+                    .unwrap_or(0);
+
+                cmd_context.end().unwrap();
+
+                // Submit and wait
+                let cmds = [upload_cmd];
+                let submit_info = ash::vk::SubmitInfo::default().command_buffers(&cmds);
+                unsafe {
+                    renderer
+                        .device
+                        .device
+                        .queue_submit(
+                            renderer.device.graphics_queue,
+                            &[submit_info],
+                            ash::vk::Fence::null(),
+                        )
+                        .unwrap();
+                    renderer
+                        .device
+                        .device
+                        .queue_wait_idle(renderer.device.graphics_queue)
+                        .unwrap();
+                }
 
                 // Create default material
                 let material = Material {
@@ -86,9 +127,8 @@ impl ApplicationHandler for App {
                     roughness: 1.0,
                     ..Default::default()
                 };
-                let material_handle = renderer
-                    .register_and_upload_material(&mut scene, material)
-                    .unwrap();
+                // Register and upload material
+                let material_handle = scene.register_material(&material).unwrap();
 
                 // Setup render command
                 self.render_commands
@@ -100,6 +140,18 @@ impl ApplicationHandler for App {
                     });
 
                 self.renderer = Some(renderer);
+                scene.global_cluster_buffer = self
+                    .renderer
+                    .as_ref()
+                    .unwrap()
+                    .global_cluster_buffer
+                    .clone();
+                scene.material_storage_buffer = self
+                    .renderer
+                    .as_ref()
+                    .unwrap()
+                    .material_storage_buffer
+                    .clone();
                 self.scene = Some(scene);
                 self.window = Some(window);
                 log::info!("Renderer initialized successfully!");

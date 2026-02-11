@@ -143,7 +143,6 @@ impl PipelineConfig {
 pub struct RendererConfig {
     pub pipeline: PipelineConfig,
     pub texture_compression: bool,
-    pub allow_auto_material: bool,
     pub strict_mode: bool,
 }
 
@@ -152,7 +151,6 @@ impl Default for RendererConfig {
         Self {
             pipeline: PipelineConfig::default(),
             texture_compression: true,
-            allow_auto_material: true,
             strict_mode: false,
         }
     }
@@ -193,8 +191,8 @@ impl TexturePresenceFlags {
 #[derive(Clone, Debug)]
 pub struct MeshData {
     pub name: Arc<str>,
-    pub texture_indices: [i32; 4], // base, normal, mr, occlusion
-    pub emissive_index: i32,
+    pub texture_indices: [u32; 4], // base, normal, mr, occlusion
+    pub emissive_index: u32,
     pub texture_flags: TexturePresenceFlags,
     pub material_handle: MaterialHandle,
     pub is_hidden: bool,
@@ -207,8 +205,8 @@ impl Default for MeshData {
     fn default() -> Self {
         Self {
             name: Arc::from(""),
-            texture_indices: [-1, -1, -1, -1],
-            emissive_index: -1,
+            texture_indices: [u32::MAX; 4],
+            emissive_index: u32::MAX,
             texture_flags: TexturePresenceFlags::default(),
             material_handle: MaterialHandle { index: 0 },
             is_hidden: false,

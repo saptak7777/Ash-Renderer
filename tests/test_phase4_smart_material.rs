@@ -27,7 +27,7 @@ fn test_phase4_smart_material() {
     };
 
     // Register the material at slot 0
-    let registered_handle = manager.register_material(material, 0);
+    let registered_handle = manager.register_material(&material);
 
     println!("✅ Registered mesh with material:");
     println!("   - Material handle: {registered_handle:?}");
@@ -109,7 +109,7 @@ fn test_phase4_smart_material() {
             ..Default::default()
         };
 
-        let handle = manager.register_material(material, i);
+        let handle = manager.register_material(&material);
 
         println!(
             "   - Material {}: handle={:?}, metallic={:.1}, roughness={:.1}",

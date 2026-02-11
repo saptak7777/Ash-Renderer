@@ -1,12 +1,20 @@
 use crate::renderer::features::{DirectionalLight, PointLight, SceneLighting, SpotLight};
+use crate::renderer::resources::uniform::{MaterialUniform, StorageBuffer};
 use crate::renderer::resources::DualHeapGeometryBuffer;
 use crate::renderer::resources::TransformSystem;
+use crate::renderer::vcgs::culling::CullObjectData;
 use crate::renderer::vcgs::OcclusionCulling;
 use crate::renderer::*;
 use crate::vulkan::Allocator;
 use crate::Result;
+use ash::vk;
 use std::collections::HashSet;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock}; // Removed Mutex
+                              // Added AshError
+
+pub type BindlessDescriptorSet = crate::vulkan::BindlessManager;
+pub type CpuMesh = crate::renderer::resources::Mesh;
+pub type StandardMemoryAllocator = crate::vulkan::Allocator;
 
 /// Represents a 3D scene containing models, materials, and lights.
 /// This decouples scene data from the Renderer logic.
@@ -26,9 +34,29 @@ pub struct Scene {
     pub mesh_data: Vec<MeshData>,
     pub uploaded_material_indices: HashSet<u32>,
     pub transform_system: TransformSystem,
+
+    // Buffers moved from Renderer
+    pub global_cluster_buffer: Option<Arc<GlobalClusterBuffer>>,
+    pub material_storage_buffer: Option<Arc<RwLock<StorageBuffer<MaterialUniform>>>>,
 }
 
 impl Scene {
+    pub fn register_material(&mut self, material: &Material) -> Result<MaterialHandle> {
+        let handle = self.material_manager.register_material(material);
+
+        if !self.uploaded_material_indices.contains(&handle.index) {
+            if let Some(buffer_arc) = self.material_storage_buffer.as_ref() {
+                let mut buffer = buffer_arc.write().unwrap();
+                unsafe {
+                    buffer.write_element_at(handle.index as usize, &material.to_uniform())?;
+                }
+            }
+            self.uploaded_material_indices.insert(handle.index);
+        }
+
+        Ok(handle)
+    }
+
     pub fn new(
         device: Arc<ash::Device>,
         alloc: Arc<Allocator>,
@@ -50,39 +78,217 @@ impl Scene {
             mesh_data: Vec::new(),
             uploaded_material_indices: HashSet::new(),
             transform_system,
+            global_cluster_buffer: None,
+            material_storage_buffer: None,
         })
     }
 
     /// Register mesh metadata in the scene.
-    pub fn register_mesh_metadata(&mut self, data: MeshData) {
+    pub fn register_mesh_handle(&mut self, data: MeshData) -> u32 {
+        let handle = self.mesh_data.len() as u32;
         self.mesh_data.push(data);
+        handle
     }
 
-    /// Add a material to the scene and return its handle.
-    /// Note: This registers with MaterialManager for dedup but assumes upload happens elsewhere
-    /// or uses a scratch index until sync.
-    pub fn add_material(&mut self, material: Material) -> MaterialHandle {
-        // Use next_material_index from model_renderer as a hint
-        let index = self.model_renderer.next_material_index;
-        self.model_renderer.next_material_index += 1;
-        self.material_manager.register_material(material, index)
+    /// Uploads a mesh to the GPU and registers it with the scene.
+    pub fn upload_mesh(
+        &mut self,
+        device: Arc<ash::Device>,
+        allocator: Arc<Allocator>,
+        command_pool: vk::CommandPool,
+        command_buffer: vk::CommandBuffer,
+        queue: &vk::Queue,
+        mesh: &mut CpuMesh,
+        asset_manager: &mut AssetManager,
+        staging_resources: &mut Vec<crate::renderer::resources::BufferHandle>,
+    ) -> Result<u32> {
+        let key = mesh.name.clone();
+
+        // 1. Upload geometry to ModelRenderer
+        self.model_renderer
+            .ensure_mesh(&key, mesh, command_pool, *queue)?;
+
+        // 2. Register textures with bindless manager via AssetManager
+        asset_manager.ingest_mesh_textures(
+            device,
+            allocator.clone(),
+            &command_pool,
+            queue,
+            mesh,
+        )?;
+
+        // 3. Register Material if present
+        let mut material_handle = self.material_manager.default_material();
+        if let Some(props) = &mesh.material_properties {
+            let material = Material {
+                name: format!("{}_material", &*mesh.name),
+                color: props.base_color_factor,
+                metallic: props.metallic_factor,
+                roughness: props.roughness_factor,
+                emissive: props.emissive_factor,
+                occlusion_strength: props.occlusion_strength,
+                normal_scale: props.normal_scale,
+                alpha_cutoff: props.alpha_cutoff,
+                tint_index: -1,
+                is_transparent: props.base_color_factor[3] < 1.0,
+                texture_index: mesh.texture_index,
+                normal_texture_index: mesh.normal_texture_index,
+                metallic_roughness_texture_index: mesh.metallic_roughness_texture_index,
+                occlusion_texture_index: mesh.occlusion_texture_index,
+                emissive_texture_index: mesh.emissive_texture_index,
+            };
+
+            // Note: In Phase 2.2, direct material buffer upload moves to AssetManager.
+            // For now, we register with material manager.
+            // The renderer will sync this later in sync_materials_to_gpu.
+            material_handle = self.register_material(&material)?;
+        }
+
+        // 4. Cluster Upload
+        let mut cluster_start_index = 0;
+        if let Some(buffer) = self.global_cluster_buffer.as_ref() {
+            if !mesh.clusters.is_empty() {
+                // Convert MeshCluster to CullObjectData
+                let cull_objects: Vec<CullObjectData> = mesh
+                    .clusters
+                    .iter()
+                    .map(|c| {
+                        let identity = glam::Mat4::IDENTITY;
+                        let cols = identity.to_cols_array_2d();
+
+                        CullObjectData {
+                            model_row0: cols[0],
+                            model_row1: cols[1],
+                            model_row2: cols[2],
+                            model_row3: cols[3],
+                            bounds: crate::renderer::vcgs::CullBoundingBox {
+                                center: [
+                                    c.bounds_center[0],
+                                    c.bounds_center[1],
+                                    c.bounds_center[2],
+                                    c.bounds_radius,
+                                ],
+                                extents: [c.bounds_radius, c.bounds_radius, c.bounds_radius, 0.0],
+                            },
+                            parent_index: c.parent_index,
+                            first_index: c.first_index,
+                            index_count: c.index_count,
+                            error_metric: c.error_metric,
+                            flags: 1, // Enabled
+                            material_index: material_handle.index,
+                            ..Default::default()
+                        }
+                    })
+                    .collect();
+
+                // Create staging buffer for clusters
+                let total_size =
+                    (cull_objects.len() * std::mem::size_of::<CullObjectData>()) as u64;
+                let mut staging_buffer_handle = unsafe {
+                    crate::renderer::resources::BufferHandle::new_with_flags(
+                        Arc::clone(&allocator),
+                        total_size,
+                        vk::BufferUsageFlags::TRANSFER_SRC,
+                        vk_mem::MemoryUsage::AutoPreferHost,
+                        vk_mem::AllocationCreateFlags::MAPPED,
+                        Some("ClusterStaging".to_string()),
+                    )?
+                };
+
+                // Copy data to staged memory
+                {
+                    let allocation_info = allocator
+                        .vma
+                        .get_allocation_info(staging_buffer_handle.allocation());
+                    if !allocation_info.mapped_data.is_null() {
+                        unsafe {
+                            std::ptr::copy_nonoverlapping(
+                                cull_objects.as_ptr() as *const u8,
+                                allocation_info.mapped_data as *mut u8,
+                                total_size as usize,
+                            );
+                        }
+                    } else {
+                        // Fallback: Map it
+                        let mut guard = unsafe {
+                            allocator.map_allocation_guarded(
+                                staging_buffer_handle.allocation_mut(),
+                                total_size as u64,
+                            )?
+                        };
+                        guard.copy_from_slice(bytemuck::cast_slice::<CullObjectData, u8>(
+                            &cull_objects,
+                        ));
+                    }
+                }
+
+                // Record upload command
+                cluster_start_index = unsafe {
+                    buffer.upload_clusters(
+                        command_buffer,
+                        staging_buffer_handle.handle(),
+                        0,
+                        cull_objects.len() as u32,
+                    )?
+                };
+
+                // Safety: Push staging buffer to the list to ensure it outlives GPU execution
+                staging_resources.push(staging_buffer_handle);
+            }
+        }
+
+        // 5. Calculate bounding box from mesh vertices
+        let bounds = if !mesh.vertices.is_empty() {
+            let mut min = glam::Vec3::splat(f32::MAX);
+            let mut max = glam::Vec3::splat(f32::MIN);
+            for vertex in &mesh.vertices {
+                let pos = glam::Vec3::from(vertex.position);
+                min = min.min(pos);
+                max = max.max(pos);
+            }
+            CullBoundingBox::from_min_max(min, max)
+        } else {
+            // Fallback to unit cube if no vertices
+            CullBoundingBox::new(glam::Vec3::ZERO, glam::Vec3::ONE)
+        };
+
+        // 6. Store metadata
+        let indices = [
+            mesh.texture_index.unwrap_or(u32::MAX),
+            mesh.normal_texture_index.unwrap_or(u32::MAX),
+            mesh.metallic_roughness_texture_index.unwrap_or(u32::MAX),
+            mesh.occlusion_texture_index.unwrap_or(u32::MAX),
+        ];
+
+        let data = MeshData {
+            name: key,
+            texture_indices: indices,
+            emissive_index: mesh.emissive_texture_index.unwrap_or(u32::MAX),
+            texture_flags: TexturePresenceFlags::from_mesh(mesh),
+            material_handle,
+            is_hidden: false,
+            bounds,
+            cluster_start_index,
+            cluster_count: mesh.clusters.len() as u32,
+        };
+
+        Ok(self.register_mesh_handle(data))
     }
 
-    /// Add a light to the scene.
-    pub fn add_point_light(&mut self, light: PointLight) {
-        self.point_lights.push(light);
+    /// Set the lighting configuration for the scene.
+    pub fn set_lighting(&mut self, lighting: SceneLighting) {
+        self.scene_lighting = lighting;
     }
 
     pub fn add_directional_light(&mut self, light: DirectionalLight) {
         self.directional_lights.push(light);
     }
 
-    pub fn add_spot_light(&mut self, light: SpotLight) {
-        self.spot_lights.push(light);
+    pub fn add_point_light(&mut self, light: PointLight) {
+        self.point_lights.push(light);
     }
 
-    /// Set the lighting configuration for the scene.
-    pub fn set_lighting(&mut self, lighting: SceneLighting) {
-        self.scene_lighting = lighting;
+    pub fn add_spot_light(&mut self, light: SpotLight) {
+        self.spot_lights.push(light);
     }
 }

@@ -110,7 +110,7 @@ impl ApplicationHandler for App {
                 scene.set_lighting(lighting);
 
                 // Spawn Async Loader
-                let glb_path = r"C:\Users\tilok\Downloads\car retro muscle\base_basic_pbr.glb";
+                let glb_path = r"assets/test models/blue muscle car.glb";
                 let (tx, rx) = mpsc::channel();
                 self.loader_rx = Some(rx);
 
@@ -146,6 +146,18 @@ impl ApplicationHandler for App {
                 }
 
                 self.renderer = Some(renderer);
+                scene.global_cluster_buffer = self
+                    .renderer
+                    .as_ref()
+                    .unwrap()
+                    .global_cluster_buffer
+                    .clone();
+                scene.material_storage_buffer = self
+                    .renderer
+                    .as_ref()
+                    .unwrap()
+                    .material_storage_buffer
+                    .clone();
                 self.scene = Some(scene);
                 self.window = Some(window);
                 self.start_time = Instant::now();
@@ -201,18 +213,23 @@ impl ApplicationHandler for App {
                                 let mut staging_resources = Vec::new();
 
                                 // Upload all meshes and generate render commands
-                                for (i, mesh) in meshes.into_iter().enumerate() {
+                                for (i, mut mesh) in meshes.into_iter().enumerate() {
                                     let name = mesh.name.clone();
-                                    let mesh_handle = renderer
+                                    let mesh_handle = scene
                                         .upload_mesh(
-                                            scene,
-                                            mesh,
+                                            Arc::clone(&renderer.device.device),
+                                            Arc::clone(&renderer.alloc),
+                                            renderer.cmds.upload_command_pool_handle(),
                                             upload_cmd,
+                                            &renderer.device.graphics_queue,
+                                            &mut mesh,
+                                            &mut renderer.assets,
                                             &mut staging_resources,
                                         )
                                         .unwrap();
+
                                     let material_handle =
-                                        renderer.get_mesh_material(scene, mesh_handle);
+                                        scene.mesh_data[mesh_handle as usize].material_handle;
 
                                     log::info!(
                                         "Scheduled Mesh {}: '{}' (Handle: {:?}, Material: {:?})",

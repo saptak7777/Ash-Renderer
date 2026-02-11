@@ -32,6 +32,7 @@ pub mod vcgs;
 pub mod vram_budget;
 
 // Re-exports for public API
+pub use assets::AssetManager;
 pub use cleanup_traits::{BufferCleanup, VulkanResourceCleanup};
 pub use features::{AutoRotateFeature, FeatureManager, RenderFeature};
 pub use forward_plus_integration::ForwardPlusIntegration;

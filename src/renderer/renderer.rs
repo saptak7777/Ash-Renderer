@@ -8,8 +8,8 @@ use crate::{
             FeatureRenderContext,
         },
         types::{
-            DebugMode, DrawItem, GBufferIndices, MeshData, RenderCommand,
-            RendererConfig, SampleShadingQuality, TexturePresenceFlags,
+            DebugMode, DrawItem, RenderCommand,
+            SampleShadingQuality, GBufferIndices, MeshData, RendererConfig,
         },
         ForwardPlusIntegration,
         passes::{
@@ -31,7 +31,7 @@ use crate::{
         resources::{
             uniform::{StorageBuffer, UniformBuffer},
         },
-        vram_budget, DepthBuffer, GBuffer, HdrSystem, Material, MaterialHandle, MaterialManager, Mesh,
+        vram_budget, DepthBuffer, GBuffer, HdrSystem, MaterialHandle, MaterialManager, Mesh,
         PipelineCache, Texture, Transform, Scene,
         initialization,
         assets::AssetManager,
@@ -54,7 +54,6 @@ use super::swapchain_manager;
 use crate::renderer::resources::buffer::BufferHandle;
 use crate::renderer::resources::mesh::{MaterialDescriptor, MeshDescriptor};
 use crate::renderer::resources::GlobalClusterBuffer;
-use crate::renderer::vcgs::culling::CullObjectData;
 
 
 
@@ -89,11 +88,6 @@ mod tests {
         assert_eq!(compute_worker_index(4, 7), 3);
     }
 }
-
-
-
-
-
 
 
 /// Main rendering system.
@@ -134,7 +128,7 @@ pub struct Renderer {
     
     pub(crate) depth_buffer: Option<DepthBuffer>,
     pub(crate) uniform_buffers: Vec<Arc<RwLock<UniformBuffer>>>,
-    pub(crate) material_storage_buffer: Option<Arc<RwLock<StorageBuffer<resources::uniform::MaterialUniform>>>>,
+    pub material_storage_buffer: Option<Arc<RwLock<StorageBuffer<resources::uniform::MaterialUniform>>>>,
     pub(crate) pipeline_layout: Option<vulkan::PipelineLayout>,
     pub(crate) pipeline_layout_id: Option<ResourceId>,
     pub(crate) descriptors: Option<vulkan::DescriptorAllocator>,
@@ -173,11 +167,8 @@ pub struct Renderer {
     // G-Buffer for Normals and Motion Vectors
     pub(crate) gbuffer: Option<GBuffer>,
     // Pipeline optimization
-    // Lighting
     pub debug_mode: DebugMode,
-    
-    // Phase 7: Host-Side Cluster Integration
-    global_cluster_buffer: Option<GlobalClusterBuffer>,
+    pub global_cluster_buffer: Option<Arc<GlobalClusterBuffer>>,
     
     // Phase 4: G-Buffer & HDR Indices
     pub(crate) gbuffer_indices: GBufferIndices,
@@ -187,12 +178,9 @@ pub struct Renderer {
 
     post_process: crate::renderer::systems::post_process::PostProcessSystem,
 
-    vram_budget: vram_budget::VramBudget,
-    texture_compression: bool,
     instancing_manager: InstancingManager,
     instance_buffers: Vec<resources::InstanceBuffer>,
     // Image-Based Lighting
-    allow_auto_material: bool,
     strict_mode: bool,
     // Headless support
     readback_buffer: Option<BufferHandle>,
@@ -420,7 +408,11 @@ impl Renderer {
                 gpu_profiler: None,
                 diagnostics_overlay: DiagnosticsOverlay::new(),
                 shadow_system: lighting.shadow_system,
-                assets: AssetManager::new(core.bindless_manager),
+                assets: {
+                    let mut assets = AssetManager::new(core.bindless_manager, vram_budget);
+                    assets.texture_compression = renderer_config.texture_compression;
+                    assets
+                },
                 forward_plus: Some(Arc::new(RwLock::new(lighting.forward_plus))),
                 hiz_pass: Some(Arc::new(RwLock::new(passes.hiz_pass))),
                 adaptive_hiz_manager: AdaptiveHiZManager::new(3.0),
@@ -430,17 +422,14 @@ impl Renderer {
                 motion_framebuffer: None,
                 gbuffer: Some(passes.gbuffer),
                 debug_mode: DebugMode::default(),
-                global_cluster_buffer: Some(lighting.global_cluster_buffer),
+                global_cluster_buffer: Some(Arc::new(lighting.global_cluster_buffer)),
                 gbuffer_indices: passes.gbuffer_indices,
                 hdr_image_index: None,
 
-                vram_budget,
                 post_process: post.post_process,
-                texture_compression: renderer_config.texture_compression,
                 instancing_manager: InstancingManager::new(),
                 instance_buffers: core.renderer_resources.instance_buffers,
 
-                allow_auto_material: renderer_config.allow_auto_material,
                 strict_mode: renderer_config.strict_mode,
                 readback_buffer,
                 last_image_index: 0,
@@ -756,325 +745,10 @@ impl Renderer {
         self.cmds.get_transfer_command_buffer()
     }
 
-    /// Uploads a single mesh to the GPU with its own transient command buffer.
-    /// This is a convenience wrapper for simple cases/examples.
-    pub fn upload_mesh_single(&mut self, scene: &mut Scene, mesh: Mesh) -> Result<u32> {
-        let upload_cmd = self.get_transfer_command_buffer()?;
-        {
-            let cmd_ctx = self.cmds.context(upload_cmd);
-            cmd_ctx.begin(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT)?;
-        }
-
-        let mut staging_resources = Vec::new();
-        let handle = self.upload_mesh(scene, mesh, upload_cmd, &mut staging_resources)?;
-
-        {
-            let cmd_ctx = self.cmds.context(upload_cmd);
-            cmd_ctx.end()?;
-        }
-        let cmds = [upload_cmd];
-        let submit_info = vk::SubmitInfo::default().command_buffers(&cmds);
-        self.cmds.submit(self.device.graphics_queue, &[submit_info], vk::Fence::null())?;
-        
-        unsafe {
-            self.device.device.queue_wait_idle(self.device.graphics_queue)
-                .map_err(|e| AshError::VulkanError(format!("Queue wait: {e}")))?;
-        }
-
-        Ok(handle)
-    }
-
-    /// Uploads a mesh to the GPU and returns its handle.
-    /// This is the modern replacement for `set_mesh`.
-    pub fn upload_mesh(
-        &mut self,
-        scene: &mut Scene,
-        mut mesh: Mesh,
-        upload_cmd: vk::CommandBuffer,
-        staging_resources: &mut Vec<crate::renderer::resources::BufferHandle>,
-    ) -> Result<u32> {
-        let handle = scene.mesh_data.len() as u32;
-        self.register_mesh_handle(scene, handle, &mut mesh, upload_cmd, staging_resources)?;
-        Ok(handle)
-    }
-
-    /// Registers a mesh handle with its own transient command buffer.
-    pub fn register_mesh_handle_single(&mut self, scene: &mut Scene, handle: u32, mesh: &mut Mesh) -> Result<()> {
-        let upload_cmd = self.get_transfer_command_buffer()?;
-        let mut staging_resources = Vec::new();
-        
-        {
-            let ctx = self.cmds.context(upload_cmd);
-            ctx.begin(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT)?;
-        }
-        
-        self.register_mesh_handle(scene, handle, mesh, upload_cmd, &mut staging_resources)?;
-        
-        {
-            let ctx = self.cmds.context(upload_cmd);
-            ctx.end()?;
-        }
-        
-        let cmds = [upload_cmd];
-        let submit_info = vk::SubmitInfo::default().command_buffers(&cmds);
-        self.cmds.submit(self.device.graphics_queue, &[submit_info], vk::Fence::null())?;
-        
-        unsafe {
-            self.device.device.queue_wait_idle(self.device.graphics_queue)
-                .map_err(|e| AshError::VulkanError(format!("Queue wait: {e}")))?;
-        }
-        
-        Ok(())
-    }
-
-    pub fn register_mesh_handle(
-        &mut self,
-        scene: &mut Scene,
-        handle: u32,
-        mesh: &mut Mesh,
-        upload_cmd: vk::CommandBuffer,
-        staging_resources: &mut Vec<crate::renderer::resources::BufferHandle>,
-    ) -> Result<()> {
-        // VCGS Phase 2: Build Cluster DAG
-        // This generates the hierarchical cluster structure needed for GPU selection.
-        // crate::renderer::vcgs::build_mesh_dag(mesh); // DIAGNOSTIC: Disabled to test stability
-        
-        // Phase 7: Upload Clusters to Global Buffer
-        // Phase 7: Upload Clusters to Global Buffer
-        let mut cluster_start_index = 0;
-        let mut cluster_count = 0;
-
-        // Pre-clone shared resources to avoid self-borrow issues
-        let alloc = Arc::clone(&self.alloc);
-
-        // ---------------------------------------------------------
-        // PART 1: Texture & Material Registration (MOVED UP)
-        // ---------------------------------------------------------
-        // We must register materials FIRST so that we get a valid handle
-        // to pack into the cluster data.
-        
-        let key;
-        let flags;
-        let indices;
-        let emissive_index;
-        let bounds;
-        let material_handle;
-
-        unsafe {
-            key = mesh.name.clone();
-            let upload_pool = self.cmds.upload_command_pool_handle();
-            
-            // 1. Ensure Textures
-            mesh.ensure_texture(
-                Arc::clone(&self.alloc),
-                Arc::clone(&self.device.device),
-                upload_pool,
-                self.device.graphics_queue,
-                &mut self.vram_budget,
-                self.texture_compression,
-            )?;
-
-            // 2. Ensure Model Renderer
-            scene.model_renderer
-                .ensure_mesh(&key, mesh, upload_pool, self.device.graphics_queue)?;
-
-            // 3. Register Bindless
-            register_mesh_textures(mesh, &mut self.assets.bindless_manager, &mut self.assets.texture_registry)?;
-
-            // 4. Register Material
-            let mut handle_mat = scene.material_manager.default_material();
-            if let Some(props) = &mesh.material_properties {
-                if !self.allow_auto_material {
-                    log::warn!(
-                        "Mesh '{}' has material properties but auto-material creation is disabled.",
-                        &*mesh.name
-                    );
-                } else {
-                    let material = Material {
-                        name: format!("{}_material_{handle}", &*mesh.name),
-                        color: props.base_color_factor,
-                        metallic: props.metallic_factor,
-                        roughness: props.roughness_factor,
-                        emissive: props.emissive_factor,
-                        occlusion_strength: props.occlusion_strength,
-                        normal_scale: props.normal_scale,
-                        alpha_cutoff: props.alpha_cutoff,
-                        tint_index: -1,
-                        is_transparent: props.base_color_factor[3] < 1.0,
-                        texture_index: mesh.texture_index,
-                        normal_texture_index: mesh.normal_texture_index,
-                        metallic_roughness_texture_index: mesh.metallic_roughness_texture_index,
-                        occlusion_texture_index: mesh.occlusion_texture_index,
-                        emissive_texture_index: mesh.emissive_texture_index,
-                    };
-                    
-                    let material_clone = material.clone();
-                    let buffer_arc = self.material_storage_buffer.as_ref().ok_or_else(|| AshError::VulkanError("Buffer missing".into()))?;
-                    let mut buffer = buffer_arc.write().unwrap();
-                    handle_mat = scene.model_renderer.register_material(&material, &mut *buffer)?;
-                    
-                    // Track it in MaterialManager too
-                    scene.material_manager.register_material(material_clone, handle_mat.index);
-                    
-                    log::debug!(
-                        "Registered auto-material for mesh '{}': handle={:?}, metallic={:.2}, roughness={:.2}",
-                        &*mesh.name, handle_mat, props.metallic_factor, props.roughness_factor
-                    );
-                }
-            }
-            material_handle = handle_mat;
-            
-            // FIX: Update mesh material handle so cluster packing sees it!
-            if !material_handle.is_null() {
-                mesh.material_handle = Some(material_handle);
-            }
-
-            flags = TexturePresenceFlags::from_mesh(mesh);
-
-            indices = [
-                mesh.texture_index.map(|i| i as i32).unwrap_or(-1),
-                mesh.normal_texture_index.map(|i| i as i32).unwrap_or(-1),
-                mesh.metallic_roughness_texture_index
-                    .map(|i| i as i32)
-                    .unwrap_or(-1),
-                mesh.occlusion_texture_index.map(|i| i as i32).unwrap_or(-1),
-            ];
-            emissive_index = mesh.emissive_texture_index.map(|i| i as i32).unwrap_or(-1);
-
-            // Calculate bounding box from mesh vertices
-            bounds = if !mesh.vertices.is_empty() {
-                let mut min = Vec3::splat(f32::MAX);
-                let mut max = Vec3::splat(f32::MIN);
-                for vertex in &mesh.vertices {
-                    let pos = Vec3::from(vertex.position);
-                    min = min.min(pos);
-                    max = max.max(pos);
-                }
-                CullBoundingBox::from_min_max(min, max)
-            } else {
-                // Fallback to unit cube if no vertices
-                CullBoundingBox::new(Vec3::ZERO, Vec3::ONE)
-            };
-        }
-
-        // ---------------------------------------------------------
-        // PART 2: Cluster Upload (Including FIX: Uses valid mesh.material_handle)
-        // ---------------------------------------------------------
-        let cluster_buffer = self.global_cluster_buffer.as_ref();
-        if let Some(buffer) = cluster_buffer {
-            if !mesh.clusters.is_empty() {
-                // Convert MeshCluster to CullObjectData
-                let cull_objects: Vec<CullObjectData> = mesh.clusters.iter().map(|c| {
-                    // Start with IDENTITY matrix to prevent geometry squashing
-                    let identity = glam::Mat4::IDENTITY;
-                    let cols = identity.to_cols_array_2d();
-
-                    let data = CullObjectData {
-                        // Pack matrix rows (GPU expects column-major for mat4, which is cols[0..3] in memory)
-                        model_row0: cols[0],
-                        model_row1: cols[1],
-                        model_row2: cols[2],
-                        model_row3: cols[3],
-                        
-                        // Sphere packing: vec4(center.xyz, radius)
-                        bounds: crate::renderer::vcgs::CullBoundingBox {
-                            center: [c.bounds_center[0], c.bounds_center[1], c.bounds_center[2], c.bounds_radius],
-                            extents: [c.bounds_radius, c.bounds_radius, c.bounds_radius, 0.0],
-                        },
-                        
-                        parent_index: c.parent_index,
-                        first_index: c.first_index,
-                        index_count: c.index_count,
-                        error_metric: c.error_metric,
-                        
-                        // Set Flag 1 (Enabled)
-                        flags: 1,
-                        
-                        // Material from mesh (NOW HAS VALID HANDLE!)
-                        material_index: mesh.material_handle.map(|h| h.index).unwrap_or(0),
-                        
-                        ..Default::default()
-                    };
-                    
-                    data
-                }).collect();
-                
-                unsafe {
-                    let element_size = std::mem::size_of::<CullObjectData>();
-                    let total_size = (cull_objects.len() * element_size) as u64;
-
-                    let mut staging_buffer = crate::renderer::resources::BufferHandle::new_with_flags(
-                        Arc::clone(&alloc),
-                        total_size,
-                        vk::BufferUsageFlags::TRANSFER_SRC,
-                        vk_mem::MemoryUsage::Auto,
-                        vk_mem::AllocationCreateFlags::HOST_ACCESS_SEQUENTIAL_WRITE
-                            | vk_mem::AllocationCreateFlags::MAPPED,
-                        Some(format!("Staging_Clusters_{}", mesh.name)),
-                    )
-                    .map_err(|e| AshError::VulkanError(format!("Staging buffer alloc: {}", e)))?;
-
-                    // 2. Copy data to staged memory
-                    let total_size_val = total_size; // Avoid borrow issues
-                    {
-                        let mut guard = alloc
-                            .map_allocation_guarded(staging_buffer.allocation_mut(), total_size_val)
-                            .map_err(|e| {
-                                AshError::VulkanError(format!("Map cluster staging memory: {}", e))
-                            })?;
-                        guard.copy_from_slice(&cull_objects);
-                    }
-
-                    // 3. Record Copy Command (No submit, no wait here - we are batching!)
-                    let start_idx = buffer.upload_clusters(
-                        upload_cmd,
-                        staging_buffer.handle(),
-                        0,
-                        cull_objects.len() as u32,
-                    ).map_err(|e| AshError::VulkanError(format!("Cluster upload recording: {}", e)))?;
-
-                    // Store staging buffer to keep it alive until command buffer finishes (Move ownership)
-                    staging_resources.push(staging_buffer);
-
-                    cluster_start_index = start_idx;
-                    cluster_count = cull_objects.len() as u32;
-                    log::debug!(
-                        "Recorded {} clusters for batch upload of mesh '{}' at index {}",
-                        cluster_count,
-                        mesh.name,
-                        start_idx
-                    );
-                }
-            }
-        }
-        // Update mesh tracking
-        mesh.cluster_start_index = Some(cluster_start_index);
-        mesh.cluster_count = Some(cluster_count);
-
-        // ---------------------------------------------------------
-        // PART 3: MeshData Update
-        // ---------------------------------------------------------
-        // Create the MeshData entry
-        let mesh_data = MeshData {
-            name: Arc::clone(&key),
-            texture_indices: indices,
-            emissive_index,
-            texture_flags: flags,
-            material_handle,
-            is_hidden: false,
-            bounds,
-            cluster_start_index: cluster_start_index as u32,
-            cluster_count: cluster_count as u32,
-        };
-
-        scene.register_mesh_metadata(mesh_data);
-
-        Ok(())
-    }
 
     pub fn get_stats(&self) -> crate::renderer::diagnostics::RendererStats {
         crate::renderer::diagnostics::RendererStats {
-            vram_usage: self.vram_budget.get_stats(),
+            vram_usage: self.assets.vram_budget.get_stats(),
             draw_calls_per_frame: self.diagnostics.frame_stats.draw_calls,
             triangles_rendered: self.diagnostics.frame_stats.triangles,
             cull_efficiency: {
@@ -1106,120 +780,7 @@ impl Renderer {
     ///
     /// This follows modern game engine patterns (UE5, Unity) where material updates are streamed
     /// directly without reading back the entire buffer.
-    pub fn upload_material_to_gpu(&mut self, scene: &mut Scene, handle: u32, material: &Material) -> Result<()> {
-        if let Some(buffer_arc) = self.material_storage_buffer.as_ref() {
-            let mut buffer = buffer_arc.write().unwrap();
-            let capacity = buffer.capacity();
-            
-            // Validate handle within capacity
-            if (handle as usize) >= capacity {
-                return Err(AshError::VulkanError(format!(
-                    "Material handle {handle} exceeds buffer capacity {capacity}"
-                )));
-            }
-            
-            // Create MaterialUniform from the material
-            let mut mat_uniform = resources::uniform::MaterialUniform::default();
-            mat_uniform.set_base_color_factor(glam::Vec4::from_array(material.color));
-            mat_uniform.set_emissive_factor(glam::Vec4::from_array(material.emissive));
-            mat_uniform.set_metallic_roughness(material.metallic, material.roughness);
-            mat_uniform.set_occlusion_strength(material.occlusion_strength);
-            mat_uniform.set_normal_scale(material.normal_scale);
-            mat_uniform.set_alpha_cutoff(material.alpha_cutoff);
-            
-            // Enable texture access by mapping indices from the material
-            let base_idx = material.texture_index.unwrap_or(u32::MAX) as i32;
-            let normal_idx = material.normal_texture_index.unwrap_or(u32::MAX) as i32;
-            let mr_idx = material
-                .metallic_roughness_texture_index
-                .unwrap_or(u32::MAX) as i32;
-            let occ_idx = material.occlusion_texture_index.unwrap_or(u32::MAX) as i32;
-            let emissive_idx = material.emissive_texture_index.unwrap_or(u32::MAX) as i32;
 
-            // Validate texture indices before upload
-            let max_res = vulkan::BindlessManager::DEFAULT_MAX_TEXTURES;
-            resources::bindless_validator::BindlessValidator::validate_indices(
-                &[base_idx, normal_idx, mr_idx, occ_idx, emissive_idx],
-                max_res,
-            )?;
-
-            mat_uniform.set_texture_indices(
-                base_idx,
-                normal_idx,
-                mr_idx,
-                occ_idx,
-                emissive_idx,
-                material.tint_index,
-            );
-
-            // AAA PATTERN: Direct streaming write instead of read-modify-write
-            // This avoids:
-            // 1. GPU stalls from reading entire buffer back to CPU
-            // 2. Race conditions where GPU reads old data while CPU writes
-            // 3. Unnecessary flush of unmodified elements
-            unsafe {
-                buffer.write_element_at(handle as usize, &mat_uniform)?;
-            }
-
-            // Track material as GPU-resident (UE5 pattern)
-            scene.uploaded_material_indices.insert(handle);
-
-            // Synchronization handled by memory barrier in render_frame()
-            // No need for device_wait_idle - this was a workaround
-            // UE5/RAGE pattern: explicit barriers only, no global waits
-
-            // Log the material data we just uploaded for debugging
-            log::warn!(
-                "âœ“ Material[{}] Streamed -> color={:?}, metallic={:.2}, roughness={:.2}",
-                handle,
-                material.color,
-                material.metallic,
-                material.roughness
-            );
-
-            #[cfg(debug_assertions)]
-            {
-                // Verify material was uploaded correctly (Unity/UE5 pattern)
-                let test_mat = unsafe { buffer.read_element_at(handle as usize) };
-                log::debug!(
-                    "Material[{}] verification: base_color={:?}, metallic={:.2}, roughness={:.2}",
-                    handle,
-                    test_mat.base_color_factor,
-                    test_mat.parameters.x,
-                    test_mat.parameters.y
-                );
-            }
-
-            Ok(())
-        } else {
-            Err(AshError::VulkanError("Material storage buffer not initialized".to_string()))
-        }
-    }
-    
-    /// Synchronizes all materials from MaterialManager to the GPU buffer.
-    pub fn sync_materials_to_gpu(&mut self, scene: &mut super::Scene) -> Result<()> {
-        let sync_list: Vec<(u32, resources::Material)> = {
-            scene.material_manager.iter_unsynced(&scene.uploaded_material_indices)
-                .map(|(id, material)| (id, material.clone()))
-                .collect()
-        };
-
-        for (handle, material) in sync_list {
-            self.upload_material_to_gpu(scene, handle, &material)?;
-        }
-
-        Ok(())
-    }
-
-    /// Standardized material registration and upload helper.
-    /// 
-    /// This handles both registering the material with the manager and 
-    /// uploading its data to the GPU in a single call.
-    pub fn register_and_upload_material(&mut self, scene: &mut Scene, material: Material) -> Result<MaterialHandle> {
-        let handle = scene.add_material(material.clone());
-        self.upload_material_to_gpu(scene, handle.index as u32, &material)?;
-        Ok(handle)
-    }
 
     /// Get access to the material manager (for testing)
     pub fn material_manager<'a>(&self, scene: &'a Scene) -> &'a MaterialManager {
@@ -1231,7 +792,7 @@ impl Renderer {
     pub fn register_mesh_descriptor(
         &mut self,
         scene: &mut Scene,
-        handle: u32,
+        _handle: u32,
         descriptor: &MeshDescriptor,
         upload_cmd: vk::CommandBuffer,
         staging_resources: &mut Vec<crate::renderer::resources::BufferHandle>,
@@ -1239,7 +800,16 @@ impl Renderer {
         let mut mesh = Mesh::from_descriptor(descriptor);
         let key = Arc::clone(&mesh.name);
 
-        self.register_mesh_handle(scene, handle, &mut mesh, upload_cmd, staging_resources)?;
+        scene.upload_mesh(
+            Arc::clone(&self.device.device),
+            Arc::clone(&self.alloc),
+            self.cmds.upload_command_pool_handle(),
+            upload_cmd,
+            &self.device.graphics_queue,
+            &mut mesh,
+            &mut self.assets,
+            staging_resources,
+        )?;
 
         Ok(key.to_string())
     }
@@ -1250,10 +820,14 @@ impl Renderer {
     pub fn register_material_descriptor(
         &mut self,
         scene: &mut Scene,
-        _handle: u32,
+        handle: u32,
         descriptor: &MaterialDescriptor,
     ) -> Result<MaterialHandle> {
-        self.register_and_upload_material(scene, descriptor.material.clone())
+        let mut material = descriptor.material.clone();
+        material.name = format!("Material_{handle}");
+
+        // Consolidated Phase 2.4 register call
+        scene.register_material(&material)
     }
 
     /// Registers a generic storage buffer with the bindless manager.
@@ -2308,9 +1882,17 @@ impl Renderer {
         self.queue.flush_old_swapchains(&self.device);
 
 
-        // Phase 20: Sync Materials to GPU
-        if let Err(e) = self.sync_materials_to_gpu(scene) {
-            log::error!("Failed to sync materials to GPU: {e}");
+        // Phase 20: Sync Materials to GPU (Modularity Fix)
+        let sync_list: Vec<(u32, crate::renderer::resources::Material)> = {
+            scene.material_manager.iter_unsynced(&scene.uploaded_material_indices)
+                .map(|(id, material)| (id, material.clone()))
+                .collect()
+        };
+
+        for (handle, material) in sync_list {
+            if let Err(e) = scene.register_material(&material) {
+                log::error!("Failed to sync material {handle} to GPU: {e}");
+            }
         }
 
         // Recycle per-frame descriptor pools (static pools are unaffected)
@@ -3461,8 +3043,8 @@ impl Drop for Renderer {
             // Phase 7: Cleanup Global Cluster Buffer (BDA)
             // CRITICAL: This BDA buffer must be destroyed explicitly while the device is still valid
             // and BEFORE the allocator is dropped, as it depends on both.
-            if let Some(mut cluster_buffer) = self.global_cluster_buffer.take() {
-                cluster_buffer.destroy();
+            if let Some(_cluster_buffer) = self.global_cluster_buffer.take() {
+                // Drop will call destroy() via GlobalClusterBuffer::drop()
             }
 
             // CRITICAL FIX: Explicitly drop post-processing resources before general resource cleanup.
@@ -3507,61 +3089,3 @@ impl Drop for Renderer {
     }
 }
 
-/// Helper to register a single texture with the bindless manager.
-fn register_single_texture(
-    bindless_manager: &mut vulkan::BindlessManager,
-    registry: &mut HashMap<u32, Arc<Texture>>,
-    texture_name: &str,
-    texture: Option<Arc<Texture>>,
-) -> Result<Option<u32>> {
-    match texture {
-        Some(tex) => match bindless_manager.add_sampled_image(tex.view(), tex.sampler()) {
-            Ok(idx) => {
-                log::debug!("Registered {texture_name} texture at bindless index {idx}");
-                registry.insert(idx, tex);
-                Ok(Some(idx))
-            }
-            Err(e) => {
-                log::error!("Failed to register {texture_name} texture: {e}");
-                Err(AshError::TextureBindingFailed(format!(
-                    "{texture_name}: {e}"
-                )))
-            }
-        },
-        None => {
-            log::debug!("{texture_name} texture not provided");
-            Ok(None)
-        }
-    }
-}
-
-/// DRY helper to register all standard PBR textures for a mesh.
-fn register_mesh_textures(
-    mesh: &mut Mesh,
-    bindless_manager: &mut vulkan::BindlessManager,
-    registry: &mut HashMap<u32, Arc<Texture>>,
-) -> Result<()> {
-    mesh.texture_index =
-        register_single_texture(bindless_manager, registry, "base_color", mesh.texture.clone())?;
-    mesh.normal_texture_index =
-        register_single_texture(bindless_manager, registry, "normal", mesh.normal_texture.clone())?;
-    mesh.metallic_roughness_texture_index = register_single_texture(
-        bindless_manager,
-        registry,
-        "metallic_roughness",
-        mesh.metallic_roughness_texture.clone(),
-    )?;
-    mesh.occlusion_texture_index = register_single_texture(
-        bindless_manager,
-        registry,
-        "occlusion",
-        mesh.occlusion_texture.clone(),
-    )?;
-    mesh.emissive_texture_index = register_single_texture(
-        bindless_manager,
-        registry,
-        "emissive",
-        mesh.emissive_texture.clone(),
-    )?;
-    Ok(())
-}

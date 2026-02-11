@@ -55,11 +55,49 @@ fn main() -> Result<()> {
             material_properties: None,
         };
 
-        // This will call ensure_texture under the hood
-        let mesh = Mesh::from_descriptor(&descriptor);
-
         log::info!("Registering mesh {i}...");
-        if let Err(e) = renderer.upload_mesh_single(&mut scene, mesh) {
+        let mut mesh = Mesh::from_descriptor(&descriptor);
+        let upload_cmd = renderer.get_transfer_command_buffer().unwrap();
+        let cmd_context = renderer.cmds.context(upload_cmd);
+        cmd_context
+            .begin(ash::vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT)
+            .unwrap();
+
+        let mut staging_resources = Vec::new();
+        let upload_res = scene.upload_mesh(
+            Arc::clone(&renderer.device.device),
+            Arc::clone(&renderer.alloc),
+            renderer.cmds.upload_command_pool_handle(),
+            upload_cmd,
+            &renderer.device.graphics_queue,
+            &mut mesh,
+            &mut renderer.assets,
+            &mut staging_resources,
+        );
+
+        cmd_context.end().unwrap();
+
+        // Submit and wait
+        let cmds = [upload_cmd];
+        let submit_info = ash::vk::SubmitInfo::default().command_buffers(&cmds);
+        unsafe {
+            renderer
+                .device
+                .device
+                .queue_submit(
+                    renderer.device.graphics_queue,
+                    &[submit_info],
+                    ash::vk::Fence::null(),
+                )
+                .unwrap();
+            renderer
+                .device
+                .device
+                .queue_wait_idle(renderer.device.graphics_queue)
+                .unwrap();
+        }
+
+        if let Err(e) = upload_res {
             log::error!("Failed to register mesh {i}: {e}");
             break;
         }

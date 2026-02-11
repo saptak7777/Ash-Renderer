@@ -65,10 +65,52 @@ impl ApplicationHandler for App {
                                 log::info!("Loaded {} meshes from GLB", meshes.len());
 
                                 // Register each mesh with the renderer
-                                for (i, mesh) in meshes.into_iter().enumerate() {
+                                for (i, mut mesh) in meshes.into_iter().enumerate() {
                                     let mesh_name = mesh.name.clone();
-                                    // Use upload_mesh_single instead of register_mesh_handle_single
-                                    match renderer.upload_mesh_single(&mut scene, mesh) {
+                                    // Use Scene::upload_mesh directly
+                                    let upload_cmd =
+                                        renderer.get_transfer_command_buffer().unwrap();
+                                    let cmd_context = renderer.cmds.context(upload_cmd);
+                                    cmd_context
+                                        .begin(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT)
+                                        .unwrap();
+
+                                    let mut staging_resources = Vec::new();
+                                    let upload_res = scene.upload_mesh(
+                                        Arc::clone(&renderer.device.device),
+                                        Arc::clone(&renderer.alloc),
+                                        renderer.cmds.upload_command_pool_handle(),
+                                        upload_cmd,
+                                        &renderer.device.graphics_queue,
+                                        &mut mesh,
+                                        &mut renderer.assets,
+                                        &mut staging_resources,
+                                    );
+
+                                    cmd_context.end().unwrap();
+
+                                    // Submit and wait
+                                    let cmds = [upload_cmd];
+                                    let submit_info =
+                                        vk::SubmitInfo::default().command_buffers(&cmds);
+                                    unsafe {
+                                        renderer
+                                            .device
+                                            .device
+                                            .queue_submit(
+                                                renderer.device.graphics_queue,
+                                                &[submit_info],
+                                                vk::Fence::null(),
+                                            )
+                                            .unwrap();
+                                        renderer
+                                            .device
+                                            .device
+                                            .queue_wait_idle(renderer.device.graphics_queue)
+                                            .unwrap();
+                                    }
+
+                                    match upload_res {
                                         Err(e) => {
                                             log::error!("Failed to register mesh {i}: {e}");
                                         }
@@ -79,7 +121,7 @@ impl ApplicationHandler for App {
 
                                             // Check if material was registered
                                             let mat_handle =
-                                                renderer.get_mesh_material(&scene, handle);
+                                                scene.mesh_data[handle as usize].material_handle;
                                             if !mat_handle.is_null() {
                                                 if scene
                                                     .material_manager
@@ -88,15 +130,13 @@ impl ApplicationHandler for App {
                                                     log::info!(
                                                     "✅ Material registered for mesh '{mesh_name}' (handle {mat_handle:?})"
                                                 );
-
                                                     // Upload the automatically registered material to GPU
                                                     let material = scene
                                                         .material_manager
                                                         .get_material(mat_handle)
                                                         .clone();
-                                                    let _ = renderer.register_and_upload_material(
-                                                        &mut scene, material,
-                                                    );
+                                                    let _ =
+                                                        scene.register_material(&material).unwrap();
                                                     log::info!(
                                                     "✅ Material uploaded to GPU: {mat_handle:?}"
                                                 );
@@ -133,11 +173,51 @@ impl ApplicationHandler for App {
                         },
                     );
 
-                    if let Ok(handle) = renderer.upload_mesh_single(&mut scene, cube) {
+                    let upload_cmd = renderer.get_transfer_command_buffer().unwrap();
+                    let cmd_context = renderer.cmds.context(upload_cmd);
+                    cmd_context
+                        .begin(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT)
+                        .unwrap();
+
+                    let mut staging_resources = Vec::new();
+                    let upload_res = scene.upload_mesh(
+                        Arc::clone(&renderer.device.device),
+                        Arc::clone(&renderer.alloc),
+                        renderer.cmds.upload_command_pool_handle(),
+                        upload_cmd,
+                        &renderer.device.graphics_queue,
+                        &mut cube,
+                        &mut renderer.assets,
+                        &mut staging_resources,
+                    );
+
+                    cmd_context.end().unwrap();
+
+                    // Submit and wait
+                    let cmds = [upload_cmd];
+                    let submit_info = vk::SubmitInfo::default().command_buffers(&cmds);
+                    unsafe {
+                        renderer
+                            .device
+                            .device
+                            .queue_submit(
+                                renderer.device.graphics_queue,
+                                &[submit_info],
+                                vk::Fence::null(),
+                            )
+                            .unwrap();
+                        renderer
+                            .device
+                            .device
+                            .queue_wait_idle(renderer.device.graphics_queue)
+                            .unwrap();
+                    }
+
+                    if let Ok(handle) = upload_res {
                         log::info!("Test cube registered with material properties");
 
                         // Check if material was registered
-                        let mat_handle = renderer.get_mesh_material(scene, handle);
+                        let mat_handle = scene.mesh_data[handle as usize].material_handle;
                         if !mat_handle.is_null() {
                             if scene.material_manager.is_handle_valid(mat_handle) {
                                 log::info!(

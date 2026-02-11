@@ -1,3 +1,4 @@
+use crate::renderer::vram_budget::VramBudget;
 use crate::renderer::{resources, Texture};
 use crate::vulkan::{Allocator, BindlessManager};
 use crate::Result;
@@ -5,16 +6,24 @@ use ash::vk;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+pub type BindlessDescriptorSet = BindlessManager;
+pub type CpuMesh = resources::Mesh;
+pub type StandardMemoryAllocator = Allocator;
+
 pub struct AssetManager {
-    pub(crate) bindless_manager: BindlessManager,
-    pub(crate) texture_registry: HashMap<u32, Arc<Texture>>,
+    pub bindless_manager: BindlessManager,
+    pub texture_registry: HashMap<u32, Arc<Texture>>,
+    pub vram_budget: VramBudget,
+    pub texture_compression: bool,
 }
 
 impl AssetManager {
-    pub fn new(bindless_manager: BindlessManager) -> Self {
+    pub fn new(bindless_manager: BindlessManager, vram_budget: VramBudget) -> Self {
         Self {
             bindless_manager,
             texture_registry: HashMap::new(),
+            vram_budget,
+            texture_compression: true, // Default enabled
         }
     }
 
@@ -101,5 +110,72 @@ impl AssetManager {
         );
 
         Ok((irradiance_idx, prefilter_idx, brdf_idx))
+    }
+    pub fn ingest_mesh_textures(
+        &mut self,
+        device: Arc<ash::Device>,
+        allocator: Arc<StandardMemoryAllocator>,
+        command_pool: &vk::CommandPool,
+        queue: &vk::Queue,
+        mesh: &mut CpuMesh,
+    ) -> Result<()> {
+        // 1. Ensure textures are uploaded to GPU using VramBudget
+        unsafe {
+            mesh.ensure_texture(
+                allocator,
+                device,
+                *command_pool,
+                *queue,
+                &mut self.vram_budget,
+                self.texture_compression,
+            )?;
+        }
+
+        // 2. Register with BindlessManager and update indices in CpuMesh
+        mesh.texture_index =
+            Some(self.register_single_texture("base_color", mesh.texture.clone())?);
+        mesh.normal_texture_index =
+            Some(self.register_single_texture("normal", mesh.normal_texture.clone())?);
+        mesh.metallic_roughness_texture_index = Some(self.register_single_texture(
+            "metallic_roughness",
+            mesh.metallic_roughness_texture.clone(),
+        )?);
+        mesh.occlusion_texture_index =
+            Some(self.register_single_texture("occlusion", mesh.occlusion_texture.clone())?);
+        mesh.emissive_texture_index =
+            Some(self.register_single_texture("emissive", mesh.emissive_texture.clone())?);
+
+        Ok(())
+    }
+
+    fn register_single_texture(
+        &mut self,
+        texture_name: &str,
+        texture: Option<Arc<Texture>>,
+    ) -> Result<u32> {
+        let index = match texture {
+            Some(tex) => {
+                match self
+                    .bindless_manager
+                    .add_sampled_image(tex.view(), tex.sampler())
+                {
+                    Ok(idx) => {
+                        log::debug!("Registered {texture_name} texture at bindless index {idx}");
+                        self.texture_registry.insert(idx, tex);
+                        idx
+                    }
+                    Err(e) => {
+                        log::warn!("Failed to register {texture_name} texture: {e}");
+                        u32::MAX
+                    }
+                }
+            }
+            None => {
+                log::debug!("{texture_name} texture not provided");
+                u32::MAX
+            }
+        };
+
+        Ok(index)
     }
 }

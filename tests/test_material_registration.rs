@@ -94,7 +94,7 @@ fn test_material_registration() {
             is_transparent: props.base_color_factor[3] < 1.0,
             ..Default::default()
         };
-        registered_handle = manager.register_material(material, 1);
+        registered_handle = manager.register_material(&material);
     }
 
     // Test the fallback logic

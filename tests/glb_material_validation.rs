@@ -3,7 +3,7 @@
 #[cfg(test)]
 mod tests {
     use ash_renderer::renderer::resources::mesh::{MaterialProperties, Mesh};
-    use ash_renderer::renderer::Material;
+    use ash_renderer::renderer::{Material, MaterialHandle, MaterialManager};
     use std::collections::HashMap;
 
     #[test]
@@ -77,7 +77,6 @@ mod tests {
     #[test]
     fn test_mesh_material_mapping() {
         // Test mesh-to-material mapping logic (Phase 4)
-        use ash_renderer::renderer::{MaterialHandle, MaterialManager};
 
         let mut manager = MaterialManager::new();
 
@@ -90,7 +89,7 @@ mod tests {
         };
 
         // Register in manager
-        let registered_handle = manager.register_material(material, 1);
+        let registered_handle = manager.register_material(&material);
 
         // Test automatic selection (null material handle)
         let material_handle = MaterialHandle::null();
@@ -465,7 +464,7 @@ mod tests {
         // Old-style render command (explicit handle)
         let cmd_material_handle = MaterialHandle { index: 100 };
 
-        let material = material_registry.get(&cmd_material_handle);
+        let material = material_registry.get(&cmd_material_handle.index);
         assert!(
             material.is_some(),
             "Backward compatibility broken: manual handle not found"
