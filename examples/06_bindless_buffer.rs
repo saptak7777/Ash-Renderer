@@ -110,6 +110,7 @@ impl ApplicationHandler for App {
                         &mut cube,
                         &mut renderer.assets,
                         &mut staging_resources,
+                        None,
                     )
                     .unwrap_or(0);
 
@@ -310,6 +311,7 @@ fn run_headless(max_frames: u32) -> Result<()> {
         &mut cube,
         &mut renderer.assets,
         &mut staging_resources,
+        None,
     );
 
     cmd_context.end().unwrap();

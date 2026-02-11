@@ -77,6 +77,7 @@ impl ApplicationHandler for App {
                                     &mut mesh,
                                     &mut renderer.assets,
                                     &mut staging_resources,
+                                    None,
                                 );
 
                                 cmd_context.end().unwrap();
@@ -133,6 +134,7 @@ impl ApplicationHandler for App {
                         &mut cube,
                         &mut renderer.assets,
                         &mut staging_resources,
+                        None,
                     );
 
                     cmd_context.end().unwrap();

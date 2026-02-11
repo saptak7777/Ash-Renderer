@@ -24,7 +24,7 @@ pub struct MvpMatrices {
 
 /// Material parameters exposed to the GPU
 #[repr(C)]
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 
 pub struct MaterialUniform {
     pub base_color_factor: Vec4,

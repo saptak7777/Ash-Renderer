@@ -1,6 +1,7 @@
 use crate::renderer::init_types::*;
 use crate::renderer::model_renderer::{DRAW_PUSH_FRAGMENT_BYTES, DRAW_PUSH_VERTEX_BYTES};
 use crate::renderer::resource_registry::{ResourceId, ResourceRegistry};
+use crate::renderer::resources::material::MAX_MATERIALS;
 use crate::renderer::resources::{
     self,
     uniform::{StorageBuffer, UniformBuffer},
@@ -330,11 +331,10 @@ pub unsafe fn init_resources(
     )?;
 
     // Initialize material storage buffer (Bindless-ready)
-    let max_materials = 1024;
     let mut material_storage_buffer = StorageBuffer::<resources::uniform::MaterialUniform>::new(
         Arc::clone(alloc),
         Arc::clone(&device.device),
-        max_materials,
+        MAX_MATERIALS as usize,
         "material_storage_buffer",
     )?;
 

@@ -94,6 +94,7 @@ impl ApplicationHandler for App {
                         &mut cube,
                         &mut renderer.assets,
                         &mut staging_resources,
+                        None,
                     )
                     .unwrap();
 

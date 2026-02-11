@@ -63,6 +63,12 @@ impl ApplicationHandler for App {
                 )
                 .expect("Failed to create scene");
 
+                // CRITICAL: Must assign global buffers BEFORE uploading meshes/materials
+                println!("Initializing Scene Buffers...");
+                scene.global_cluster_buffer = renderer.global_cluster_buffer.clone();
+                scene.material_storage_buffer = renderer.material_storage_buffer.clone();
+                println!("✓ Scene buffers synchronized with renderer.");
+
                 // Create a cube mesh
                 let mut cube = Mesh::create_cube();
                 // Override vertex colors to WHITE so they don't affect the material color
@@ -82,6 +88,10 @@ impl ApplicationHandler for App {
                     ..Default::default()
                 };
 
+                // Register and upload material
+                let material_handle = scene.register_material(&material).unwrap();
+                log::info!("✓ Uploaded red PBR material to GPU with handle {material_handle:?}");
+
                 // Upload mesh
                 let upload_cmd = renderer.get_transfer_command_buffer().unwrap();
                 let cmd_context = renderer.cmds.context(upload_cmd);
@@ -100,6 +110,7 @@ impl ApplicationHandler for App {
                         &mut cube,
                         &mut renderer.assets,
                         &mut staging_resources,
+                        Some(material_handle),
                     )
                     .unwrap();
 
@@ -125,11 +136,6 @@ impl ApplicationHandler for App {
                         .unwrap();
                 }
                 log::info!("✓ Mesh uploaded to GPU");
-
-                // Register and upload material
-                let material_handle = scene.register_material(&material).unwrap();
-
-                log::info!("✓ Uploaded red PBR material to GPU with handle {material_handle:?}");
 
                 // Setup the initial render command
                 self.render_commands
@@ -169,18 +175,6 @@ impl ApplicationHandler for App {
                 scene.set_lighting(lighting);
 
                 self.renderer = Some(renderer);
-                scene.global_cluster_buffer = self
-                    .renderer
-                    .as_ref()
-                    .unwrap()
-                    .global_cluster_buffer
-                    .clone();
-                scene.material_storage_buffer = self
-                    .renderer
-                    .as_ref()
-                    .unwrap()
-                    .material_storage_buffer
-                    .clone();
                 self.scene = Some(scene);
                 self.window = Some(window);
                 self.start_time = Instant::now();
@@ -357,6 +351,7 @@ fn run_headless(max_frames: u32) -> Result<()> {
     };
     let upload_cmd = renderer.get_transfer_command_buffer().unwrap();
     let mut staging_resources = Vec::new();
+    let material_handle = scene.register_material(&material).unwrap();
     let mesh_handle = scene
         .upload_mesh(
             Arc::clone(&renderer.device.device),
@@ -367,9 +362,9 @@ fn run_headless(max_frames: u32) -> Result<()> {
             &mut cube,
             &mut renderer.assets,
             &mut staging_resources,
+            Some(material_handle),
         )
         .unwrap();
-    let material_handle = scene.register_material(&material).unwrap();
 
     let render_commands = vec![ash_renderer::renderer::RenderCommand {
         mesh_handle,

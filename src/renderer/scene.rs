@@ -6,7 +6,7 @@ use crate::renderer::vcgs::culling::CullObjectData;
 use crate::renderer::vcgs::OcclusionCulling;
 use crate::renderer::*;
 use crate::vulkan::Allocator;
-use crate::Result;
+use crate::{AshError, Result};
 use ash::vk;
 use std::collections::HashSet;
 use std::sync::{Arc, RwLock}; // Removed Mutex
@@ -42,7 +42,7 @@ pub struct Scene {
 
 impl Scene {
     pub fn register_material(&mut self, material: &Material) -> Result<MaterialHandle> {
-        let handle = self.material_manager.register_material(material);
+        let handle = self.material_manager.register_material(material)?;
 
         if !self.uploaded_material_indices.contains(&handle.index) {
             if let Some(buffer_arc) = self.material_storage_buffer.as_ref() {
@@ -101,7 +101,13 @@ impl Scene {
         mesh: &mut CpuMesh,
         asset_manager: &mut AssetManager,
         staging_resources: &mut Vec<crate::renderer::resources::BufferHandle>,
+        material_override: Option<MaterialHandle>,
     ) -> Result<u32> {
+        // 0. Strict check for cluster buffer
+        if self.global_cluster_buffer.is_none() {
+            return Err(AshError::vulkan("Critical: Global Cluster Buffer missing during mesh upload. Ensure scene.global_cluster_buffer is assigned."));
+        }
+
         let key = mesh.name.clone();
 
         // 1. Upload geometry to ModelRenderer
@@ -117,31 +123,33 @@ impl Scene {
             mesh,
         )?;
 
-        // 3. Register Material if present
-        let mut material_handle = self.material_manager.default_material();
-        if let Some(props) = &mesh.material_properties {
-            let material = Material {
-                name: format!("{}_material", &*mesh.name),
-                color: props.base_color_factor,
-                metallic: props.metallic_factor,
-                roughness: props.roughness_factor,
-                emissive: props.emissive_factor,
-                occlusion_strength: props.occlusion_strength,
-                normal_scale: props.normal_scale,
-                alpha_cutoff: props.alpha_cutoff,
-                tint_index: -1,
-                is_transparent: props.base_color_factor[3] < 1.0,
-                texture_index: mesh.texture_index,
-                normal_texture_index: mesh.normal_texture_index,
-                metallic_roughness_texture_index: mesh.metallic_roughness_texture_index,
-                occlusion_texture_index: mesh.occlusion_texture_index,
-                emissive_texture_index: mesh.emissive_texture_index,
-            };
+        // 3. Register Material
+        // Logic: Prioritize material_override > mesh.material_properties > default
+        let mut material_handle =
+            material_override.unwrap_or_else(|| self.material_manager.default_material());
 
-            // Note: In Phase 2.2, direct material buffer upload moves to AssetManager.
-            // For now, we register with material manager.
-            // The renderer will sync this later in sync_materials_to_gpu.
-            material_handle = self.register_material(&material)?;
+        if material_override.is_none() {
+            if let Some(props) = &mesh.material_properties {
+                let material = Material {
+                    name: format!("{}_material", &*mesh.name),
+                    color: props.base_color_factor,
+                    metallic: props.metallic_factor,
+                    roughness: props.roughness_factor,
+                    emissive: props.emissive_factor,
+                    occlusion_strength: props.occlusion_strength,
+                    normal_scale: props.normal_scale,
+                    alpha_cutoff: props.alpha_cutoff,
+                    tint_index: -1,
+                    is_transparent: props.base_color_factor[3] < 1.0,
+                    texture_index: mesh.texture_index,
+                    normal_texture_index: mesh.normal_texture_index,
+                    metallic_roughness_texture_index: mesh.metallic_roughness_texture_index,
+                    occlusion_texture_index: mesh.occlusion_texture_index,
+                    emissive_texture_index: mesh.emissive_texture_index,
+                };
+
+                material_handle = self.register_material(&material)?;
+            }
         }
 
         // 4. Cluster Upload
@@ -190,7 +198,8 @@ impl Scene {
                         total_size,
                         vk::BufferUsageFlags::TRANSFER_SRC,
                         vk_mem::MemoryUsage::AutoPreferHost,
-                        vk_mem::AllocationCreateFlags::MAPPED,
+                        vk_mem::AllocationCreateFlags::MAPPED
+                            | vk_mem::AllocationCreateFlags::HOST_ACCESS_SEQUENTIAL_WRITE,
                         Some("ClusterStaging".to_string()),
                     )?
                 };
@@ -207,6 +216,12 @@ impl Scene {
                                 allocation_info.mapped_data as *mut u8,
                                 total_size as usize,
                             );
+                            // CRITICAL: Flush memory to ensure GPU visibility before copy command
+                            allocator.vma.flush_allocation(
+                                staging_buffer_handle.allocation(),
+                                0,
+                                vk::WHOLE_SIZE,
+                            )?;
                         }
                     } else {
                         // Fallback: Map it

@@ -73,6 +73,7 @@ fn main() -> Result<()> {
             &mut mesh,
             &mut renderer.assets,
             &mut staging_resources,
+            None,
         );
 
         cmd_context.end().unwrap();

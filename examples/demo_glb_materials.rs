@@ -91,6 +91,7 @@ impl ApplicationHandler for App {
                     &mut demo_mesh,
                     &mut renderer.assets,
                     &mut staging_resources,
+                    None,
                 );
 
                 cmd_context.end().unwrap();

@@ -45,6 +45,7 @@ fn main() -> Result<()> {
         &mut cube,
         &mut renderer.assets,
         &mut staging_resources,
+        None,
     )?;
 
     cmd_context.end()?;

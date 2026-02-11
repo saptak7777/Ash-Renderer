@@ -8,6 +8,7 @@ use crate::vulkan::Allocator;
 pub struct DepthBuffer {
     image: vk::Image,
     view: vk::ImageView,
+    sampler: vk::Sampler,
     allocation: Option<vk_mem::Allocation>,
     allocator: Arc<Allocator>,
     device: Arc<ash::Device>,
@@ -87,11 +88,26 @@ impl DepthBuffer {
 
         let view = device.create_image_view(&view_create_info, None)?;
 
+        // Create depth sampler
+        let sampler_info = vk::SamplerCreateInfo::default()
+            .mag_filter(vk::Filter::LINEAR)
+            .min_filter(vk::Filter::LINEAR)
+            .mipmap_mode(vk::SamplerMipmapMode::LINEAR)
+            .address_mode_u(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+            .address_mode_v(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+            .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+            .min_lod(0.0)
+            .max_lod(vk::LOD_CLAMP_NONE)
+            .border_color(vk::BorderColor::FLOAT_OPAQUE_WHITE);
+
+        let sampler = device.create_sampler(&sampler_info, None)?;
+
         log::info!("Depth buffer created successfully");
 
         Ok(Self {
             image,
             view,
+            sampler,
             allocation: Some(allocation),
             allocator,
             device,
@@ -136,9 +152,14 @@ impl DepthBuffer {
         self.image
     }
 
-    /// Returns the depth format
+    /// Returns the depth image format
     pub fn format(&self) -> vk::Format {
         self.format
+    }
+
+    /// Returns the depth sampler
+    pub fn sampler(&self) -> vk::Sampler {
+        self.sampler
     }
 }
 
@@ -150,6 +171,7 @@ impl Drop for DepthBuffer {
         if let Some(mut allocation) = self.allocation.take() {
             unsafe {
                 log::debug!("Destroying depth buffer");
+                self.device.destroy_sampler(self.sampler, None);
                 self.device.destroy_image_view(self.view, None);
                 self.allocator
                     .vma

@@ -1,9 +1,13 @@
 use crate::renderer::resources::uniform::MaterialUniform;
+use crate::{AshError, Result};
 use std::collections::{HashMap, HashSet};
 use std::default::Default;
+use uuid::Uuid;
+
+pub const MAX_MATERIALS: u32 = 1024;
 
 /// Material properties supporting a PBR workflow
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Material {
     pub name: String,
     pub color: [f32; 4],
@@ -211,7 +215,7 @@ impl MaterialHandle {
 
     pub fn is_valid(&self, _manager: &MaterialManager) -> bool {
         // Simple index check for bindless (bounds check)
-        self.index < 1024
+        self.index < MAX_MATERIALS
     }
 
     pub fn get<'a>(&self, manager: &'a MaterialManager) -> Option<&'a Material> {
@@ -264,20 +268,53 @@ impl MaterialManager {
             })
     }
 
-    pub fn register_material(&mut self, material: &Material) -> MaterialHandle {
+    pub fn register_material(&mut self, material: &Material) -> Result<MaterialHandle> {
+        // 1. Check by content (Property-based deduplication)
         let key = MaterialKey::from_material(material);
         if let Some(&existing_handle) = self.key_to_handle.get(&key) {
-            return existing_handle;
+            log::trace!("Material deduplicated by properties: {}", material.name);
+            return Ok(existing_handle);
+        }
+
+        // 2. Check by name (Identity-based deduplication with collision detection)
+        let mut final_material = material.clone();
+        if let Some(existing_handle) = self.get_handle_by_name(&material.name) {
+            let existing_material = &self.materials[existing_handle.index as usize];
+            if existing_material == material {
+                log::trace!(
+                    "Material deduplicated by name: {} (properties match)",
+                    material.name
+                );
+                return Ok(existing_handle);
+            } else {
+                log::warn!(
+                    "Material name collision: '{}'. Properties differ. Creating distinct instance.",
+                    material.name
+                );
+                final_material.name = format!("{}_{}", material.name, Uuid::new_v4());
+            }
         }
 
         let index = self.materials.len() as u32;
-        self.materials.push(material.clone());
+        if index >= MAX_MATERIALS {
+            return Err(AshError::VramExhausted {
+                requested: 1,
+                available: 0,
+                recommendation: "Increase bindless material limit (MAX_MATERIALS)",
+            });
+        }
+
+        self.materials.push(final_material.clone());
         let handle = MaterialHandle { index };
         self.key_to_handle.insert(key, handle);
 
-        log::debug!("Material registered: {} at slot {}", material.name, index);
+        log::debug!(
+            "Material registered: {} at slot {}",
+            final_material.name,
+            index
+        );
 
-        handle
+        Ok(handle)
     }
 
     pub fn get_default_material(&self) -> &Material {
@@ -323,7 +360,7 @@ impl Default for MaterialManager {
 
         // Register default material at index 0
         let default_mat = Material::default();
-        manager.register_material(&default_mat);
+        manager.register_material(&default_mat).unwrap();
 
         manager
     }
@@ -364,8 +401,8 @@ mod tests {
         };
         let mat2 = mat1.clone();
 
-        let handle1 = manager.register_material(&mat1);
-        let handle2 = manager.register_material(&mat2);
+        let handle1 = manager.register_material(&mat1).unwrap();
+        let handle2 = manager.register_material(&mat2).unwrap();
 
         assert_eq!(handle1, handle2); // Should reuse the same handle
                                       // Default material at 0, unique mat1 at 1. mat2 is deduplicated to 1.
@@ -385,9 +422,36 @@ mod tests {
             ..Default::default()
         };
 
-        let h1 = manager.register_material(&mat1);
-        let h2 = manager.register_material(&mat2);
+        let h1 = manager.register_material(&mat1).unwrap();
+        let h2 = manager.register_material(&mat2).unwrap();
 
         assert_eq!(h1, h2);
+    }
+
+    #[test]
+    fn test_material_collision() {
+        let mut manager = MaterialManager::new();
+
+        // Create mat1 with name "Test" and color Red
+        let mat1 = Material::with_color("Test", [1.0, 0.0, 0.0, 1.0]);
+
+        // Create mat2 with name "Test" and color Blue
+        let mat2 = Material::with_color("Test", [0.0, 0.0, 1.0, 1.0]);
+
+        // Register mat1
+        let h1 = manager.register_material(&mat1).unwrap();
+
+        // Register mat2
+        let h2 = manager.register_material(&mat2).unwrap();
+
+        // Assert that the returned handles are different
+        assert_ne!(h1, h2);
+        assert_eq!(manager.material_count(), 3); // Default + Mat1 + Mat2
+
+        // Verify names
+        assert_eq!(manager.materials[h1.index as usize].name, "Test");
+        assert!(manager.materials[h2.index as usize]
+            .name
+            .starts_with("Test_"));
     }
 }

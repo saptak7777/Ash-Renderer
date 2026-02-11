@@ -27,7 +27,9 @@ fn test_phase4_smart_material() {
     };
 
     // Register the material at slot 0
-    let registered_handle = manager.register_material(&material);
+    let registered_handle = manager
+        .register_material(&material)
+        .expect("Failed to register material");
 
     println!("✅ Registered mesh with material:");
     println!("   - Material handle: {registered_handle:?}");
@@ -109,7 +111,9 @@ fn test_phase4_smart_material() {
             ..Default::default()
         };
 
-        let handle = manager.register_material(&material);
+        let handle = manager
+            .register_material(&material)
+            .expect("Failed to register material");
 
         println!(
             "   - Material {}: handle={:?}, metallic={:.1}, roughness={:.1}",

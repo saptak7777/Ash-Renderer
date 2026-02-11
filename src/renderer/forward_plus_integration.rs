@@ -482,6 +482,11 @@ impl ForwardPlusIntegration {
         self.lights.light_count()
     }
 
+    /// Check if the compute pipeline is initialized
+    pub fn is_compute_initialized(&self) -> bool {
+        self.compute_pipeline.is_some()
+    }
+
     /// Get dispatch dimensions for light culling compute
     pub fn get_dispatch_dimensions(&self) -> (u32, u32, u32) {
         self.lights.get_dispatch_dimensions()

@@ -94,6 +94,7 @@ impl ApplicationHandler for App {
                         &mut mesh,
                         &mut renderer.assets,
                         &mut staging_resources,
+                        None,
                     )
                     .unwrap_or(0);
 

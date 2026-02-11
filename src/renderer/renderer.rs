@@ -440,6 +440,20 @@ impl Renderer {
 
             renderer.register_tracked_subsystems()?;
             renderer.init_motion_pass()?;
+
+            // --- Phase 2.7: Pre-initialize Forward+ lighting pipeline (prevents first-frame stutter) ---
+            if let Some(ref fp_lock) = renderer.forward_plus {
+                if let (Some(db), Some(_db_ptr)) = (&renderer.depth_buffer, renderer.depth_buffer_id) {
+                    let mut fp = fp_lock.write().unwrap();
+                    fp.init_pipeline(
+                        Arc::clone(&renderer.device.device),
+                        db.sampler(),
+                        db.view(),
+                    )?;
+                    log::info!("Forward+ lighting compute pipeline pre-initialized at startup.");
+                }
+            }
+
             renderer.queue.pending_extent = Some(renderer.swapchain.as_ref().unwrap().extent);
 
             Ok(renderer)
@@ -809,6 +823,7 @@ impl Renderer {
             &mut mesh,
             &mut self.assets,
             staging_resources,
+            None, // No material override for simple descriptors
         )?;
 
         Ok(key.to_string())
@@ -1878,8 +1893,25 @@ impl Renderer {
         // Task 3: Simplified resize handling
         if self.queue.is_resize_pending() {
             crate::renderer::swapchain_manager::recreate_swapchain_resources(self, scene)?;
+            
+            // CRITICAL: Update Forward+ depth descriptor whenever swapchain/depth is resized
+            if let Some(ref fp_lock) = self.forward_plus {
+                if let (Some(db), Some(_db_ptr)) = (&self.depth_buffer, self.depth_buffer_id) {
+                    let mut fp = fp_lock.write().unwrap();
+                    unsafe {
+                        fp.update_depth_descriptor(
+                            &self.device.device,
+                            db.view(),
+                            db.sampler(),
+                        );
+                    }
+                    log::info!("Forward+ depth descriptors updated after resize.");
+                }
+            }
         }
         self.queue.flush_old_swapchains(&self.device);
+
+        // EXTRA SAFETY (Phase 2.7): Forward+ is now pre-initialized in Renderer::new
 
 
         // Phase 20: Sync Materials to GPU (Modularity Fix)
@@ -1889,9 +1921,11 @@ impl Renderer {
                 .collect()
         };
 
-        for (handle, material) in sync_list {
-            if let Err(e) = scene.register_material(&material) {
-                log::error!("Failed to sync material {handle} to GPU: {e}");
+        for (handle_index, material) in sync_list {
+            if !scene.uploaded_material_indices.contains(&handle_index) {
+                if let Err(e) = scene.register_material(&material) {
+                    log::error!("Failed to sync material {handle_index} to GPU: {e}");
+                }
             }
         }
 

@@ -89,7 +89,9 @@ mod tests {
         };
 
         // Register in manager
-        let registered_handle = manager.register_material(&material);
+        let registered_handle = manager
+            .register_material(&material)
+            .expect("Failed to register material");
 
         // Test automatic selection (null material handle)
         let material_handle = MaterialHandle::null();
