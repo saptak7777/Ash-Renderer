@@ -104,5 +104,5 @@ pub(crate) fn cleanup_pipeline(renderer: &mut Renderer) {
             log::warn!("Failed to cleanup pipeline: {e}");
         }
     }
-    renderer.pipeline = None;
+    renderer.main_graphics_pipeline = None;
 }

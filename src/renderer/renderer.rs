@@ -120,7 +120,7 @@ pub struct Renderer {
     /// Dedicated render pass for HDR rendering (ensures format compatibility)
     pub(crate) hdr_render_pass: Option<vulkan::RenderPass>,
     pub(crate) hdr_render_pass_id: Option<ResourceId>,
-    pub(crate) pipeline: Option<vulkan::Pipeline>,
+    pub(crate) main_graphics_pipeline: Option<vulkan::Pipeline>,
     pub(crate) pipeline_id: Option<ResourceId>,
     
     // Skybox Rendering (Modularized)
@@ -141,23 +141,23 @@ pub struct Renderer {
     pub cmds: Arc<vulkan::CommandBufferManager>,
     
     // Post-processing support
-    sample_shading: SampleShadingQuality,
-    pub(crate) hdr_system: Option<HdrSystem>,
+    sample_shading: crate::renderer::types::SampleShadingQuality,
+    pub(crate) hdr_system: Option<crate::renderer::HdrSystem>,
 
     // Diagnostics
     diagnostics: DiagnosticsState,
     frame_profiler: FrameProfiler,
     gpu_profiler: Option<GpuProfiler>,
     diagnostics_overlay: DiagnosticsOverlay,
-    // Shadow System
-    pub(crate) shadow_system: Option<crate::renderer::features::ShadowSystem>,
+
+    // Dedicated Render Pipeline (Chunk 3.1)
+    pub pipeline: crate::renderer::render_pipeline::RenderPipeline,
+
     // Bindless textures
     pub assets: AssetManager,
     // Forward+ lighting
     pub(crate) forward_plus: Option<Arc<RwLock<ForwardPlusIntegration>>>,
-    // GPU-driven occlusion culling (Hi-Z + Indirect Draw)
-    pub(crate) hiz_pass: Option<Arc<RwLock<HiZPass>>>,
-    adaptive_hiz_manager: AdaptiveHiZManager,
+
     pub(crate) indirect_draw_pass: Option<Arc<RwLock<IndirectDrawPass>>>,
     // Temporal Super-Resolution
     pub(crate) vsr_pass: Option<VsrPass>,
@@ -170,13 +170,8 @@ pub struct Renderer {
     pub debug_mode: DebugMode,
     pub global_cluster_buffer: Option<Arc<GlobalClusterBuffer>>,
     
-    // Phase 4: G-Buffer & HDR Indices
     pub(crate) gbuffer_indices: GBufferIndices,
     pub(crate) hdr_image_index: Option<u32>,
-
-    // Post-processing descriptors
-
-    post_process: crate::renderer::systems::post_process::PostProcessSystem,
 
     instancing_manager: InstancingManager,
     instance_buffers: Vec<resources::InstanceBuffer>,
@@ -376,7 +371,7 @@ impl Renderer {
                 render_pass_id: Some(render_pass_id),
                 hdr_render_pass: None,
                 hdr_render_pass_id: None,
-                pipeline: Some(pipelines.pipeline),
+                main_graphics_pipeline: Some(pipelines.pipeline),
                 pipeline_id: Some(pipelines.pipeline_id),
                 
                 skybox_pass: Some(passes.skybox_pass),
@@ -407,15 +402,20 @@ impl Renderer {
                 frame_profiler: FrameProfiler::new(),
                 gpu_profiler: None,
                 diagnostics_overlay: DiagnosticsOverlay::new(),
-                shadow_system: lighting.shadow_system,
+
+                pipeline: crate::renderer::render_pipeline::RenderPipeline::new(
+                    lighting.shadow_system,
+                    post.post_process,
+                    Some(Arc::new(RwLock::new(passes.hiz_pass))),
+                    AdaptiveHiZManager::new(3.0),
+                ),
+
                 assets: {
                     let mut assets = AssetManager::new(core.bindless_manager, vram_budget);
                     assets.texture_compression = renderer_config.texture_compression;
                     assets
                 },
                 forward_plus: Some(Arc::new(RwLock::new(lighting.forward_plus))),
-                hiz_pass: Some(Arc::new(RwLock::new(passes.hiz_pass))),
-                adaptive_hiz_manager: AdaptiveHiZManager::new(3.0),
                 indirect_draw_pass: Some(Arc::new(RwLock::new(passes.indirect_draw_pass))),
                 vsr_pass: None,
                 motion_pass: None,
@@ -426,7 +426,6 @@ impl Renderer {
                 gbuffer_indices: passes.gbuffer_indices,
                 hdr_image_index: None,
 
-                post_process: post.post_process,
                 instancing_manager: InstancingManager::new(),
                 instance_buffers: core.renderer_resources.instance_buffers,
 
@@ -468,7 +467,7 @@ impl Renderer {
             registry.register_shared_resource(Arc::clone(fp)).map_err(|e| AshError::VulkanError(e.to_string()))?;
         }
 
-        if let Some(ref hiz) = self.hiz_pass {
+        if let Some(ref hiz) = self.pipeline.hiz_pass {
             registry.register_shared_resource(Arc::clone(hiz)).map_err(|e| AshError::VulkanError(e.to_string()))?;
         }
 
@@ -772,7 +771,7 @@ impl Renderer {
                 ((potential_draws - actual_draws) / potential_draws.max(1.0)).clamp(0.0, 1.0)
             },
             gpu_frame_ms: self.diagnostics.gpu_timings.total_ms,
-            hiz_quality: format!("{:?}", self.hiz_pass.as_ref().map(|h| h.read().unwrap().quality()).unwrap_or(crate::renderer::passes::hiz::HiZQuality::Balanced)),
+            hiz_quality: format!("{:?}", self.pipeline.hiz_pass.as_ref().map(|h| h.read().unwrap().quality()).unwrap_or(crate::renderer::passes::hiz::HiZQuality::Balanced)),
             frame_count: self.diagnostics.frame_stats.total_frames,
         }
     }
@@ -1191,7 +1190,7 @@ impl Renderer {
             .map_err(|e| AshError::VulkanError(format!("Failed to register pipeline: {e}")))?;
 
         new_pipeline.mark_managed_by_registry();
-        self.pipeline = Some(new_pipeline);
+        self.main_graphics_pipeline = Some(new_pipeline);
         self.pipeline_id = Some(pipeline_id);
 
         log::info!("Pipeline recompiled successfully!");
@@ -1512,7 +1511,7 @@ impl Renderer {
         self.framebuffer_ids = framebuffer_ids;
 
         // --- Post-Processing System Resize ---
-        self.post_process.resize(image_views, extent)?;
+        self.pipeline.post_process_mut().resize(image_views, extent)?;
 
         Ok(())
     }
@@ -1747,8 +1746,8 @@ impl Renderer {
                     light_ptr: params.light_ptr,
                     tile_ptr: params.tile_ptr,
                     skybox_index: params.scene.skybox_texture_index,
-                    vsm_page_index: self.shadow_system.as_ref().map(|s| s.vsm_page_index()).unwrap_or(0),
-                    vsm_cache_index: self.shadow_system.as_ref().map(|s| s.vsm_cache_index()).unwrap_or(0),
+                    vsm_page_index: self.pipeline.shadow_system().map(|s| s.vsm_page_index()).unwrap_or(0),
+                    vsm_cache_index: self.pipeline.shadow_system().map(|s| s.vsm_cache_index()).unwrap_or(0),
                     transform_ptr: params.scene.transform_system.arena_addr,
                     transform_index: 0, // Using index 0 for main indirect pass
                 };
@@ -1941,7 +1940,7 @@ impl Renderer {
 
         // Ensure mutable borrow of pipeline scope ends prior to recreation call.
         let shaders_changed = if self.frame_manager.get_current_frame_index() % SHADER_CHECK_INTERVAL == 0 {
-            if let Some(pipeline) = &mut self.pipeline {
+            if let Some(pipeline) = &mut self.main_graphics_pipeline {
                 match pipeline.detect_shader_changes() {
                     Ok(changed) => changed,
                     Err(e) => {
@@ -1978,7 +1977,7 @@ impl Renderer {
                 .ok_or(AshError::VulkanError("Swapchain not available".to_string()))?
                 .extent;
             let scene_pipeline = self
-                .pipeline
+                .main_graphics_pipeline
                 .as_ref()
                 .map(|p| p.pipeline)
                 .ok_or(AshError::VulkanError("Pipeline not available".to_string()))?;
@@ -2072,7 +2071,7 @@ impl Renderer {
                 self.features.before_frame(&mut feature_ctx);
 
                 // Update VSM clipmap centers and page manager
-                if let Some(shadow_system) = &mut self.shadow_system {
+                if let Some(shadow_system) = self.pipeline.shadow_system_mut() {
                     shadow_system.vsm_feature_mut().begin_frame(frame_index as u32, camera_pos);
                 }
 
@@ -2162,47 +2161,16 @@ impl Renderer {
                     &[],
                 );
 
-            // Phase 10: Execute Hi-Z construction (Moved here to be inside command buffer recording)
-            // Phase 10: Execute Hi-Z construction (Moved here to be inside command buffer recording)
-            if let (Some(ref hiz_arc), Some(depth_buffer)) =
-                (self.hiz_pass.as_ref(), &self.depth_buffer)
-            {
-                let mut hiz = hiz_arc.write().unwrap();
-                // Update adaptive quality based on previous frame's metrics
-                if let Some(ref mut profiler) = self.gpu_profiler {
-                    let timings = profiler.last_extended_timings();
-                    if timings.valid {
-                        let hiz_time_ms = timings.hiz_generate_ms as f64;
-                        let new_quality: Option<crate::renderer::passes::hiz::HiZQuality> = self.adaptive_hiz_manager.update(hiz.quality(), hiz_time_ms);
-                        if let Some(new_quality) = new_quality {
-                            hiz.set_quality(new_quality);
-                        }
-                    }
-                }
-
-                // Hiz pyramid is built from previous frame's depth
-                hiz.build_pyramid(command_buffer, depth_buffer.image())?;
-                
-                // MODERN FIX: The "Indestructible" Descriptor Guard
-                let hiz_view = if let Some(view) = hiz.hiz_view() {
-                    view
-                } else {
-                    self._black_texture.view()
-                };
-
-                let hiz_sampler = if hiz.is_initialized() { 
-                    hiz.hiz_sampler() 
-                } else { 
-                    self._black_texture.sampler() 
-                };
-
-                if let Some(ref indirect_arc) = self.indirect_draw_pass {
-                    indirect_arc.write().unwrap().update_hiz_descriptor(hiz_view, hiz_sampler);
-                }
-                
-                if let Some(ref profiler) = self.gpu_profiler {
-                    profiler.write_timestamp(command_buffer, crate::renderer::diagnostics::TimingScope::HiZGenerateEnd);
-                }
+            // Phase 10: Execute Hi-Z construction (Modularized in Chunk 3.1)
+            if let Some(ref db) = self.depth_buffer {
+                self.pipeline.execute_hiz_pass(
+                    command_buffer,
+                    db.image(),
+                    self.gpu_profiler.as_ref(),
+                    self.indirect_draw_pass.as_ref(),
+                    self._black_texture.view(),
+                    self._black_texture.sampler(),
+                )?;
             }
 
             // --- Phase 8: Instance Data Preparation ---
@@ -2219,77 +2187,26 @@ impl Renderer {
                 self.instance_buffers[frame_index].update(&all_instances)?;
             }
 
-            if let Some(shadow_system) = &mut self.shadow_system {
-                    // ROBUST CHECK: Do not panic if pipeline failed to build.
-                    // Just skip shadows for this frame
-                    if shadow_system.vsm_feature().shadow_pipeline_layout().is_some() {
-                        // Set 2 is gone. VSM resources are now in Set 1 (Bindless)
-                        // and indices are passed via push constants in draw_context.
+            // Shadows (Modularized in Chunk 3.1)
+            let light_ptr = self.forward_plus.as_ref().map(|fp| fp.read().unwrap().get_lights().light_ptr(frame_index)).unwrap_or(0);
+            let tile_ptr = self.forward_plus.as_ref().map(|fp| fp.read().unwrap().get_lights().tile_ptr(frame_index)).unwrap_or(0);
 
-                        // VSM GPU-Driven Shadow Pass
-                        let light_dir = glam::Vec3::from_slice(&scene.scene_lighting.directional.direction[0..3]);
-                        let frame_descriptor_set = vk::DescriptorSet::null();
-                        let bindless_descriptor_set = self.assets.bindless_manager.descriptor_set();
+            let bindless_descriptor_set = self.assets.bindless_manager.descriptor_set();
+            let uniform_buffer_address = self.uniform_buffers[frame_index].read().unwrap().device_address();
 
-                        let light_ptr = self.forward_plus.as_ref().map(|fp| fp.read().unwrap().get_lights().light_ptr(frame_index)).unwrap_or(0);
-                        let tile_ptr = self.forward_plus.as_ref().map(|fp| fp.read().unwrap().get_lights().tile_ptr(frame_index)).unwrap_or(0);
-
-                        let vertex_ptr = scene.model_renderer.geometry_buffer.vertex_heap_address();
-                        let index_ptr = scene.model_renderer.geometry_buffer.index_heap_address();
-
-                        if vertex_ptr == 0 || index_ptr == 0 {
-                            log::warn!("Shadow pass: Invalid BDA pointers (V: {}, I: {}). Skipping.", vertex_ptr, index_ptr);
-                        } else {
-                                shadow_system.vsm_feature_mut().render_shadows(
-                                    command_buffer,
-                                    light_dir,
-                                    all_instances.len() as u32,
-                                    frame_index,
-                                    frame_descriptor_set,
-                                    bindless_descriptor_set,
-                                    self.uniform_buffers[frame_index].read().unwrap().device_address(),
-                                    vertex_ptr,
-                                    self.instance_buffer_addresses[frame_index],
-                                    self.material_heap_address,
-                                    index_ptr,
-                                    light_ptr,
-                                    tile_ptr,
-                                    scene.transform_system.arena_addr,
-                                0, // Using index 0 for shadows for now + 1MB is huge anyway
-                            );
-                        }
-                    } else {
-                        log::warn!("Shadow pipeline not ready, skipping shadow pass.");
-                    }
-                }
-
-            // --- VSM TO MAIN PASS SYNCHRONIZATION ---
-            // Barrier to ensure all shadow writes are visible to the main pass
-            if let Some(shadow_system) = &self.shadow_system {
-                let vsm_barrier = vk::ImageMemoryBarrier::default()
-                    .image(shadow_system.vsm_feature().resources.physical_cache)
-                    .old_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
-                    .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
-                    .src_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE)
-                    .dst_access_mask(vk::AccessFlags::SHADER_READ)
-                    .subresource_range(vk::ImageSubresourceRange {
-                        aspect_mask: vk::ImageAspectFlags::COLOR,
-                        base_mip_level: 0,
-                        level_count: 1,
-                        base_array_layer: 0,
-                        layer_count: 1,
-                    });
-
-                self.device.device.cmd_pipeline_barrier(
-                    command_buffer,
-                    vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
-                    vk::PipelineStageFlags::FRAGMENT_SHADER,
-                    vk::DependencyFlags::empty(),
-                    &[],
-                    &[],
-                    &[vsm_barrier],
-                );
-            }
+            self.pipeline.render_shadows(
+                command_buffer,
+                scene,
+                frame_index,
+                &self.device.device,
+                bindless_descriptor_set,
+                uniform_buffer_address,
+                self.instance_buffer_addresses[frame_index],
+                self.material_heap_address,
+                light_ptr,
+                tile_ptr,
+                all_instances.len(),
+            )?;
 
             // --- Light Culling Compute Dispatch ---
             if let Some(ref fp_integration) = self.forward_plus {
@@ -2543,36 +2460,16 @@ impl Renderer {
                 vsr.next_frame();
             }
 
-            // Update post-processing descriptors after VSR completes
-            // This ensures we bind the current frame's output, not the previous frame's
-            if let Some(hdr) = self.hdr_system.as_ref() {
-                let input_view = if let Some(vsr) = self.vsr_pass.as_ref() {
-                     vsr.active_view()
-                } else {
-                     hdr.view()
-                };
-                
-                let bloom_view = self._black_texture.view();
-                let ssgi_view = self._black_texture.view(); // Placeholder
-                let sampler = hdr.sampler();
-                
-                self.post_process.update_descriptor_set(
-                    image_index as usize,
-                    input_view,
-                    bloom_view,
-                    ssgi_view,
-                    sampler
-                );
-            }
+            // Post-Processing (Modularized in Chunk 3.1)
+            self.pipeline.render_post_process(
+                command_buffer,
+                image_index as usize,
+                swapchain_extent,
+                self.hdr_system.as_ref(),
+                self.vsr_pass.as_ref(),
+                self._black_texture.view(),
+            )?;
 
-            // --- Post-Processing (Tonemapping & Resolve) ---
-            // NOTE: HDR buffer is already in SHADER_READ_ONLY_OPTIMAL layout
-            // via the render pass final_layout, no manual barrier needed.
-
-            // Resolve HDR target to swapchain (always needed even if tonemapping is disabled)
-            log::debug!("DEBUG: About to call render_post_processing");
-            self.post_process.render(command_buffer, image_index as usize, swapchain_extent)?;
-            log::debug!("DEBUG: render_post_processing completed successfully");
 
             cmd_ctx.end()?;
 
@@ -2614,52 +2511,52 @@ impl Renderer {
         &mut self,
         config: crate::renderer::systems::post_process::PostProcessConfig,
     ) {
-        self.post_process.config = config;
+        self.pipeline.post_process_mut().config = config;
     }
 
     /// Returns whether tonemapping is enabled
     pub fn tonemapping_enabled(&self) -> bool {
-        self.post_process.config.tonemapping_enabled
+        self.pipeline.post_process().config.tonemapping_enabled
     }
 
     /// Sets the tonemapping exposure value
     pub fn set_tonemapping_exposure(&mut self, exposure: f32) {
-        self.post_process.config.exposure = exposure.max(0.0);
+        self.pipeline.post_process_mut().config.exposure = exposure.max(0.0);
     }
 
     /// Returns the tonemapping exposure value
     pub fn tonemapping_exposure(&self) -> f32 {
-        self.post_process.config.exposure
+        self.pipeline.post_process().config.exposure
     }
 
     /// Sets the tonemapping gamma value
     pub fn set_tonemapping_gamma(&mut self, gamma: f32) {
-        self.post_process.config.gamma = gamma.max(0.1);
+        self.pipeline.post_process_mut().config.gamma = gamma.max(0.1);
     }
 
     /// Returns the tonemapping gamma value
     pub fn tonemapping_gamma(&self) -> f32 {
-        self.post_process.config.gamma
+        self.pipeline.post_process().config.gamma
     }
 
     /// Enables or disables bloom
     pub fn set_bloom_enabled(&mut self, enabled: bool) {
-        self.post_process.config.bloom_enabled = enabled;
+        self.pipeline.post_process_mut().config.bloom_enabled = enabled;
     }
 
     /// Returns whether bloom is enabled
     pub fn bloom_enabled(&self) -> bool {
-        self.post_process.config.bloom_enabled
+        self.pipeline.post_process().config.bloom_enabled
     }
 
     /// Sets the bloom intensity
     pub fn set_bloom_intensity(&mut self, intensity: f32) {
-        self.post_process.config.bloom_intensity = intensity.clamp(0.0, 2.0);
+        self.pipeline.post_process_mut().config.bloom_intensity = intensity.clamp(0.0, 2.0);
     }
 
     /// Returns the bloom intensity
     pub fn bloom_intensity(&self) -> f32 {
-        self.post_process.config.bloom_intensity
+        self.pipeline.post_process().config.bloom_intensity
     }
 
    
@@ -2729,7 +2626,7 @@ impl Renderer {
     /// # Safety
     /// Should be called after the renderer is fully initialized.
     pub fn enable_occlusion_culling(&mut self) -> Result<()> {
-        if self.hiz_pass.is_some() {
+        if self.pipeline.hiz_pass.is_some() {
             return Ok(()); // Already enabled
         }
 
@@ -2779,7 +2676,7 @@ impl Renderer {
             indirect.update_hiz_descriptor(hiz_view, hiz_sampler);
         }
 
-        self.hiz_pass = Some(Arc::new(RwLock::new(hiz)));
+        self.pipeline.hiz_pass = Some(Arc::new(RwLock::new(hiz)));
         self.indirect_draw_pass = Some(Arc::new(RwLock::new(indirect)));
 
         // Register new subsystems with the registry (Phase 31)
@@ -2791,7 +2688,7 @@ impl Renderer {
 
     /// Returns whether GPU-driven occlusion culling is enabled
     pub fn occlusion_culling_enabled(&self) -> bool {
-        self.hiz_pass.is_some() && self.indirect_draw_pass.is_some()
+        self.pipeline.hiz_pass.is_some() && self.indirect_draw_pass.is_some()
     }
 
 
@@ -2921,7 +2818,7 @@ impl Renderer {
         // and descriptors are handled by resize() and update_descriptor_sets().
         // So we don't need manual initialization here.
 
-        self.post_process.config.tonemapping_enabled = true;
+        self.pipeline.post_process_mut().config.tonemapping_enabled = true;
         
         // CRITICAL: Recreate main pipeline and framebuffers to use the NEW HDR render pass format
         crate::renderer::swapchain_manager::recreate_swapchain_resources(self, scene)?;
@@ -2935,9 +2832,9 @@ impl Renderer {
     /// Returns post-processing settings as a tuple (exposure, gamma, bloom_intensity)
     pub fn post_processing_settings(&self) -> (f32, f32, f32) {
         (
-            self.post_process.config.exposure,
-            self.post_process.config.gamma,
-            self.post_process.config.bloom_intensity,
+            self.pipeline.post_process().config.exposure,
+            self.pipeline.post_process().config.gamma,
+            self.pipeline.post_process().config.bloom_intensity,
         )
     }
 
@@ -3000,7 +2897,7 @@ impl Renderer {
 
     /// Log quality reports for debug/profiling
     pub fn log_quality_reports(&self) {
-        if let Some(hiz) = &self.hiz_pass {
+        if let Some(hiz) = &self.pipeline.hiz_pass {
             log::info!("{}", hiz.read().unwrap().quality_report());
         }
 
@@ -3089,7 +2986,7 @@ impl Drop for Renderer {
             swapchain_manager::cleanup_pipeline(self);
 
             // Cleanup VSM (Explicit)
-            if let Some(mut shadow_system) = self.shadow_system.take() {
+            if let Some(mut shadow_system) = self.pipeline.take_shadow_system() {
                 shadow_system.destroy();
             }
 
@@ -3113,7 +3010,7 @@ impl Drop for Renderer {
             self.draw_items.clear();
             
             self.depth_buffer = None;
-            self.pipeline = None;
+            self.main_graphics_pipeline = None;
             self.render_pass = None;
             self.swapchain = None;
 
