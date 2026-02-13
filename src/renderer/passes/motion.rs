@@ -18,9 +18,6 @@ pub struct MotionVectorPass {
     pipeline: vk::Pipeline,
     pipeline_layout: vk::PipelineLayout,
 
-    // Render pass for motion output
-    render_pass: vk::RenderPass,
-
     initialized: bool,
 }
 
@@ -30,7 +27,6 @@ impl MotionVectorPass {
             device,
             pipeline: vk::Pipeline::null(),
             pipeline_layout: vk::PipelineLayout::null(),
-            render_pass: vk::RenderPass::null(),
             initialized: false,
         }
     }
@@ -48,51 +44,18 @@ impl MotionVectorPass {
             return Ok(());
         }
 
-        self.create_render_pass(motion_format)?;
-        self.create_pipeline(vulkan_device)?;
+        self.create_pipeline(vulkan_device, motion_format)?;
 
         self.initialized = true;
         log::info!("MotionVectorPass initialized");
         Ok(())
     }
 
-    unsafe fn create_render_pass(&mut self, motion_format: vk::Format) -> Result<()> {
-        let attachment = vk::AttachmentDescription::default()
-            .format(motion_format)
-            .samples(vk::SampleCountFlags::TYPE_1)
-            .load_op(vk::AttachmentLoadOp::CLEAR)
-            .store_op(vk::AttachmentStoreOp::STORE)
-            .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
-            .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
-            .initial_layout(vk::ImageLayout::UNDEFINED)
-            .final_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL);
-
-        let color_ref = vk::AttachmentReference::default()
-            .attachment(0)
-            .layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL);
-
-        let subpass = vk::SubpassDescription::default()
-            .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
-            .color_attachments(std::slice::from_ref(&color_ref));
-
-        let dependency = vk::SubpassDependency::default()
-            .src_subpass(vk::SUBPASS_EXTERNAL)
-            .dst_subpass(0)
-            .src_stage_mask(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT)
-            .dst_stage_mask(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT)
-            .src_access_mask(vk::AccessFlags::empty())
-            .dst_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE);
-
-        let create_info = vk::RenderPassCreateInfo::default()
-            .attachments(std::slice::from_ref(&attachment))
-            .subpasses(std::slice::from_ref(&subpass))
-            .dependencies(std::slice::from_ref(&dependency));
-
-        self.render_pass = self.device.create_render_pass(&create_info, None)?;
-        Ok(())
-    }
-
-    unsafe fn create_pipeline(&mut self, _vulkan_device: &VulkanDevice) -> Result<()> {
+    unsafe fn create_pipeline(
+        &mut self,
+        _vulkan_device: &VulkanDevice,
+        motion_format: vk::Format,
+    ) -> Result<()> {
         // Load shaders
         let vert_code = include_bytes!(concat!(env!("OUT_DIR"), "/motion.vert.spv"));
         let frag_code = include_bytes!(concat!(env!("OUT_DIR"), "/motion.frag.spv"));
@@ -175,9 +138,12 @@ impl MotionVectorPass {
             .multisample_state(&multisampling)
             .color_blend_state(&color_blending)
             .dynamic_state(&dynamic_state)
-            .layout(self.pipeline_layout)
-            .render_pass(self.render_pass)
-            .subpass(0);
+            .layout(self.pipeline_layout);
+
+        let mut rendering_info = vk::PipelineRenderingCreateInfo::default()
+            .color_attachment_formats(std::slice::from_ref(&motion_format));
+
+        let pipeline_info = pipeline_info.push_next(&mut rendering_info);
 
         let pipelines = self
             .device
@@ -195,10 +161,6 @@ impl MotionVectorPass {
 
         log::info!("MotionVectorPass: Pipeline created");
         Ok(())
-    }
-
-    pub fn render_pass(&self) -> vk::RenderPass {
-        self.render_pass
     }
 
     pub fn pipeline(&self) -> vk::Pipeline {
@@ -227,11 +189,6 @@ impl MotionVectorPass {
             self.device
                 .destroy_pipeline_layout(self.pipeline_layout, None);
             self.pipeline_layout = vk::PipelineLayout::null();
-        }
-
-        if self.render_pass != vk::RenderPass::null() {
-            self.device.destroy_render_pass(self.render_pass, None);
-            self.render_pass = vk::RenderPass::null();
         }
 
         self.initialized = false;

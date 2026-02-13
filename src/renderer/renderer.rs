@@ -149,7 +149,6 @@ pub struct Renderer {
     pub(crate) vsr_pass: Option<VsrPass>,
     // Motion Vector Pass for VSR/TAA
     pub(crate) motion_pass: Option<MotionVectorPass>,
-    pub(crate) motion_framebuffer: Option<vk::Framebuffer>,
     // G-Buffer for Normals and Motion Vectors
     pub(crate) gbuffer: Option<GBuffer>,
     // Pipeline optimization
@@ -302,6 +301,7 @@ impl Renderer {
 
             let passes = initialization::init_rendering_passes(
                 &device, &alloc, &resources, &mut core.bindless_manager, &core.renderer_resources,
+                swapchain.format,
                 swapchain.extent, depth_buffer.format(), depth_buffer.view(),
                 pipeline_cache.handle(),
                 pipeline_cfg.multisample_config(),
@@ -401,7 +401,6 @@ impl Renderer {
                 },
                 vsr_pass: None,
                 motion_pass: None,
-                motion_framebuffer: None,
                 gbuffer: Some(passes.gbuffer),
                 debug_mode: DebugMode::default(),
                 global_cluster_buffer: Some(Arc::new(lighting.global_cluster_buffer)),
@@ -634,49 +633,11 @@ impl Renderer {
 
         self.motion_pass = Some(motion_pass);
         
-        // Create motion framebuffer
-        let swapchain = self.swapchain.as_ref().ok_or(AshError::VulkanError(
-            "Swapchain not initialized".to_string(),
-        ))?;
-        self.create_motion_framebuffer(swapchain.extent.width, swapchain.extent.height)?;
-        
         log::info!("Motion vector pass initialized");
 
         Ok(())
     }
 
-    /// Create framebuffer for motion vector pass
-    ///
-    /// # Safety
-    /// GBuffer and motion pass must be initialized
-    unsafe fn create_motion_framebuffer(&mut self, width: u32, height: u32) -> Result<()> {
-        let gbuffer = self.gbuffer.as_ref().ok_or(AshError::VulkanError(
-            "GBuffer not initialized".to_string(),
-        ))?;
-
-        let motion_pass = self.motion_pass.as_ref().ok_or(AshError::VulkanError(
-            "Motion pass not initialized".to_string(),
-        ))?;
-
-        // Destroy old framebuffer if exists
-        if let Some(old_fb) = self.motion_framebuffer.take() {
-            self.device.device.destroy_framebuffer(old_fb, None);
-        }
-
-        let attachments = [gbuffer.motion_view()];
-        let framebuffer_info = vk::FramebufferCreateInfo::default()
-            .render_pass(motion_pass.render_pass())
-            .attachments(&attachments)
-            .width(width)
-            .height(height)
-            .layers(1);
-
-        let framebuffer = self.device.device.create_framebuffer(&framebuffer_info, None)?;
-        self.motion_framebuffer = Some(framebuffer);
-
-        log::debug!("Motion framebuffer created ({width}x{height})");
-        Ok(())
-    }
 
 
 
@@ -1545,6 +1506,7 @@ impl Renderer {
             descriptor_allocator: self.descriptors.as_ref(),
             transform: &dummy_transform,
             is_swapchain_image: self.hdr_system.is_none(),
+            depth_format: self.depth_buffer.as_ref().unwrap().format(),
         };
 
         self.pipeline.render_geometry(&geo_ctx)?;

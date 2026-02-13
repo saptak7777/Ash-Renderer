@@ -401,6 +401,7 @@ pub unsafe fn init_rendering_passes(
     resources: &Arc<ResourceRegistry>,
     bindless_manager: &mut crate::vulkan::BindlessManager,
     renderer_resources: &RendererResources,
+    swapchain_format: vk::Format,
     swapchain_extent: vk::Extent2D,
     depth_format: vk::Format,
     depth_view: vk::ImageView,
@@ -465,7 +466,7 @@ pub unsafe fn init_rendering_passes(
     let skybox_pass = crate::renderer::passes::SkyboxPass::new(
         device,
         resources,
-        vk::Format::B8G8R8A8_SRGB, // Standard swapchain format (skybox works with any format)
+        swapchain_format,
         swapchain_extent,
         pipeline_cache,
         depth_format,

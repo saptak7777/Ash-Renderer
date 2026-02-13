@@ -53,6 +53,7 @@ pub struct GeometryRenderContext<'a> {
     pub descriptor_allocator: Option<&'a crate::vulkan::DescriptorAllocator>,
     pub transform: &'a crate::renderer::Transform,
     pub is_swapchain_image: bool,
+    pub depth_format: vk::Format,
 }
 
 impl RenderPipeline {
@@ -434,6 +435,16 @@ impl RenderPipeline {
                     layer_count: 1,
                 });
 
+            // Determine depth aspect mask based on format
+            let depth_aspect = match ctx.depth_format {
+                vk::Format::D24_UNORM_S8_UINT
+                | vk::Format::D32_SFLOAT_S8_UINT
+                | vk::Format::D16_UNORM_S8_UINT => {
+                    vk::ImageAspectFlags::DEPTH | vk::ImageAspectFlags::STENCIL
+                }
+                _ => vk::ImageAspectFlags::DEPTH,
+            };
+
             // Pre-Render Barrier: Transition Depth Image to Depth Stencil Attachment Optimal
             let depth_barrier = vk::ImageMemoryBarrier::default()
                 .old_layout(vk::ImageLayout::UNDEFINED)
@@ -442,7 +453,7 @@ impl RenderPipeline {
                 .dst_access_mask(vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE)
                 .image(ctx.depth_image)
                 .subresource_range(vk::ImageSubresourceRange {
-                    aspect_mask: vk::ImageAspectFlags::DEPTH,
+                    aspect_mask: depth_aspect,
                     base_mip_level: 0,
                     level_count: 1,
                     base_array_layer: 0,
@@ -649,14 +660,47 @@ impl RenderPipeline {
                     layer_count: 1,
                 });
 
+            // Determine depth aspect mask based on format
+            let depth_aspect = match ctx.depth_format {
+                vk::Format::D24_UNORM_S8_UINT
+                | vk::Format::D32_SFLOAT_S8_UINT
+                | vk::Format::D16_UNORM_S8_UINT => {
+                    vk::ImageAspectFlags::DEPTH | vk::ImageAspectFlags::STENCIL
+                }
+                _ => vk::ImageAspectFlags::DEPTH,
+            };
+
+            // Determine precise depth layouts based on format (Vulkan 1.3+ separate layouts)
+            let depth_target_layout = match ctx.depth_format {
+                vk::Format::D24_UNORM_S8_UINT
+                | vk::Format::D32_SFLOAT_S8_UINT
+                | vk::Format::D16_UNORM_S8_UINT => vk::ImageLayout::DEPTH_STENCIL_READ_ONLY_OPTIMAL,
+                _ => vk::ImageLayout::DEPTH_READ_ONLY_OPTIMAL,
+            };
+
+            let depth_post_barrier = vk::ImageMemoryBarrier::default()
+                .old_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
+                .new_layout(depth_target_layout)
+                .src_access_mask(vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE)
+                .dst_access_mask(vk::AccessFlags::SHADER_READ)
+                .image(ctx.depth_image)
+                .subresource_range(vk::ImageSubresourceRange {
+                    aspect_mask: depth_aspect,
+                    base_mip_level: 0,
+                    level_count: 1,
+                    base_array_layer: 0,
+                    layer_count: 1,
+                });
+
             ctx.device.device.cmd_pipeline_barrier(
                 ctx.command_buffer.handle(),
-                vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
-                target_stage,
+                vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT
+                    | vk::PipelineStageFlags::LATE_FRAGMENT_TESTS,
+                target_stage | vk::PipelineStageFlags::FRAGMENT_SHADER,
                 vk::DependencyFlags::empty(),
                 &[],
                 &[],
-                &[barrier],
+                &[barrier, depth_post_barrier],
             );
         }
 
