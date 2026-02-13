@@ -436,14 +436,7 @@ impl RenderPipeline {
                 });
 
             // Determine depth aspect mask based on format
-            let depth_aspect = match ctx.depth_format {
-                vk::Format::D24_UNORM_S8_UINT
-                | vk::Format::D32_SFLOAT_S8_UINT
-                | vk::Format::D16_UNORM_S8_UINT => {
-                    vk::ImageAspectFlags::DEPTH | vk::ImageAspectFlags::STENCIL
-                }
-                _ => vk::ImageAspectFlags::DEPTH,
-            };
+            let depth_aspect = get_depth_aspect_mask(ctx.depth_format);
 
             // Pre-Render Barrier: Transition Depth Image to Depth Stencil Attachment Optimal
             let depth_barrier = vk::ImageMemoryBarrier::default()
@@ -661,14 +654,7 @@ impl RenderPipeline {
                 });
 
             // Determine depth aspect mask based on format
-            let depth_aspect = match ctx.depth_format {
-                vk::Format::D24_UNORM_S8_UINT
-                | vk::Format::D32_SFLOAT_S8_UINT
-                | vk::Format::D16_UNORM_S8_UINT => {
-                    vk::ImageAspectFlags::DEPTH | vk::ImageAspectFlags::STENCIL
-                }
-                _ => vk::ImageAspectFlags::DEPTH,
-            };
+            let depth_aspect = get_depth_aspect_mask(ctx.depth_format);
 
             // Determine precise depth layouts based on format (Vulkan 1.3+ separate layouts)
             let depth_target_layout = match ctx.depth_format {
@@ -705,5 +691,16 @@ impl RenderPipeline {
         }
 
         Ok(())
+    }
+}
+
+fn get_depth_aspect_mask(format: vk::Format) -> vk::ImageAspectFlags {
+    match format {
+        vk::Format::D24_UNORM_S8_UINT
+        | vk::Format::D32_SFLOAT_S8_UINT
+        | vk::Format::D16_UNORM_S8_UINT => {
+            vk::ImageAspectFlags::DEPTH | vk::ImageAspectFlags::STENCIL
+        }
+        _ => vk::ImageAspectFlags::DEPTH,
     }
 }

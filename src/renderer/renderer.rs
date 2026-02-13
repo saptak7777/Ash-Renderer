@@ -1474,8 +1474,8 @@ impl Renderer {
             (view, image)
         };
 
-        let (depth_view, depth_image) = self.depth_buffer.as_ref()
-            .map(|d| (d.view(), d.image()))
+        let (depth_view, depth_image, depth_format) = self.depth_buffer.as_ref()
+            .map(|d| (d.view(), d.image(), d.format()))
             .ok_or_else(|| AshError::VulkanError("Depth buffer missing".into()))?;
 
         // Create a dummy transform for feature rendering context
@@ -1506,7 +1506,7 @@ impl Renderer {
             descriptor_allocator: self.descriptors.as_ref(),
             transform: &dummy_transform,
             is_swapchain_image: self.hdr_system.is_none(),
-            depth_format: self.depth_buffer.as_ref().unwrap().format(),
+            depth_format,
         };
 
         self.pipeline.render_geometry(&geo_ctx)?;
