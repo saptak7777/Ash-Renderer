@@ -40,6 +40,7 @@ pub use forward_plus_integration::ForwardPlusIntegration;
 pub use instancing::{InstanceData, InstancingManager};
 pub use model_renderer::{MaterialPushConstants, ModelRenderer};
 pub use pipeline_cache::PipelineCache;
+pub use render_pipeline::{GeometryRenderContext, RenderPipeline};
 pub use render_stats::{RenderStats, StatsCollector};
 pub use renderer::Renderer;
 pub use resource_registry::{ResourceId, ResourceRegistry};

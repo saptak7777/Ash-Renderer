@@ -33,13 +33,13 @@ impl SkyboxPass {
     ///
     /// # Safety
     /// - `device` must be valid
-    /// - `render_pass` must be compatible with the skybox shaders
+    /// - `color_format` must match the format used in Dynamic Rendering
     /// - `set_layouts` must match the expected descriptor set layout
     #[allow(clippy::too_many_arguments)]
     pub unsafe fn new(
         device: &vulkan::VulkanDevice,
         resources: &Arc<ResourceRegistry>,
-        render_pass: vk::RenderPass,
+        color_format: vk::Format,
         extent: vk::Extent2D,
         pipeline_cache: vk::PipelineCache,
         depth_format: vk::Format,
@@ -69,10 +69,10 @@ impl SkyboxPass {
             })?;
         pipeline_layout.mark_managed_by_registry();
 
-        // Create pipeline
+        // Create pipeline with Dynamic Rendering
         let pipeline_builder = vulkan::Pipeline::builder(Arc::clone(&device.device))
             .with_layout(pipeline_layout.handle())
-            .with_render_pass(render_pass)
+            .with_dynamic_rendering(&[color_format], Some(depth_format), None)
             .with_extent(extent)
             .with_pipeline_cache(pipeline_cache)
             .with_depth_format(depth_format)

@@ -39,7 +39,6 @@ pub struct PostProcessSystem {
     descriptor_pool: vk::DescriptorPool,
     descriptor_sets: Vec<vk::DescriptorSet>,
     pipeline: Option<vulkan::Pipeline>,
-    framebuffers: Vec<vulkan::Framebuffer>,
 }
 
 impl PostProcessSystem {
@@ -51,12 +50,8 @@ impl PostProcessSystem {
     ) -> Result<Self> {
         log::info!("Initializing PostProcessSystem");
 
-        let final_layout = vk::ImageLayout::PRESENT_SRC_KHR; // Standard for swapchain output
+        let fullscreen_pass = unsafe { FullscreenPass::new(Arc::clone(&device), output_format)? };
 
-        let fullscreen_pass =
-            unsafe { FullscreenPass::new(Arc::clone(&device), output_format, final_layout)? };
-
-        // Initialize with default pool, sets, and pipeline (Step 1 placeholder)
         Ok(Self {
             device,
             fullscreen_pass,
@@ -64,18 +59,12 @@ impl PostProcessSystem {
             descriptor_pool: vk::DescriptorPool::null(),
             descriptor_sets: Vec::with_capacity(image_count),
             pipeline: None,
-            framebuffers: Vec::new(),
         })
     }
 
-    pub fn resize(&mut self, output_views: &[vk::ImageView], extent: vk::Extent2D) -> Result<()> {
-        let image_count = output_views.len();
-
+    pub fn resize(&mut self, image_count: usize, extent: vk::Extent2D) -> Result<()> {
         // Pipeline cleanup handled by RAII in vulkan::Pipeline
         self.pipeline = None;
-
-        // Framebuffers cleaned up by RAII
-        self.framebuffers.clear();
 
         let pipeline = match self
             .fullscreen_pass
@@ -88,17 +77,6 @@ impl PostProcessSystem {
             }
         };
         self.pipeline = Some(pipeline);
-
-        // Create framebuffers
-        for &view in output_views {
-            let framebuffer = vulkan::Framebuffer::new(
-                Arc::clone(&self.device),
-                self.fullscreen_pass.render_pass(),
-                &[view],
-                extent,
-            )?;
-            self.framebuffers.push(framebuffer);
-        }
 
         if self.descriptor_sets.len() != image_count {
             self.reallocate_descriptors(image_count)?;
@@ -190,11 +168,10 @@ impl PostProcessSystem {
         command_buffer: vk::CommandBuffer,
         image_index: usize,
         extent: vk::Extent2D,
+        target_image: vk::Image,
+        target_view: vk::ImageView,
     ) -> Result<()> {
-        if self.pipeline.is_none()
-            || self.descriptor_sets.is_empty()
-            || self.framebuffers.is_empty()
-        {
+        if self.pipeline.is_none() || self.descriptor_sets.is_empty() {
             return Ok(());
         }
 
@@ -202,33 +179,54 @@ impl PostProcessSystem {
         let pipeline = pipeline_wrapper.pipeline; // helper from wrapper
 
         // Handle case where image_index is out of bounds
-        if image_index >= self.descriptor_sets.len() || image_index >= self.framebuffers.len() {
+        if image_index >= self.descriptor_sets.len() {
             return Ok(());
         }
         let descriptor_set = self.descriptor_sets[image_index];
-        let framebuffer = &self.framebuffers[image_index];
-
-        let clear_values = [vk::ClearValue {
-            color: vk::ClearColorValue {
-                float32: [0.0, 0.0, 0.0, 1.0],
-            },
-        }];
-
-        let render_pass_info = vk::RenderPassBeginInfo::default()
-            .render_pass(self.fullscreen_pass.render_pass())
-            .framebuffer(framebuffer.handle())
-            .render_area(vk::Rect2D {
-                offset: vk::Offset2D { x: 0, y: 0 },
-                extent,
-            })
-            .clear_values(&clear_values);
 
         unsafe {
-            self.device.cmd_begin_render_pass(
+            // 1. Pre-Render Barrier: Transition Swapchain Image to COLOR_ATTACHMENT_OPTIMAL
+            let barrier = vk::ImageMemoryBarrier::default()
+                .old_layout(vk::ImageLayout::UNDEFINED)
+                .new_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                .src_access_mask(vk::AccessFlags::empty())
+                .dst_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE)
+                .image(target_image)
+                .subresource_range(vk::ImageSubresourceRange {
+                    aspect_mask: vk::ImageAspectFlags::COLOR,
+                    base_mip_level: 0,
+                    level_count: 1,
+                    base_array_layer: 0,
+                    layer_count: 1,
+                });
+
+            self.device.cmd_pipeline_barrier(
                 command_buffer,
-                &render_pass_info,
-                vk::SubpassContents::INLINE,
+                vk::PipelineStageFlags::TOP_OF_PIPE,
+                vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[],
+                &[barrier],
             );
+
+            // 2. Begin Rendering
+            let color_attachment = vk::RenderingAttachmentInfo::default()
+                .image_view(target_view)
+                .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                .load_op(vk::AttachmentLoadOp::DONT_CARE)
+                .store_op(vk::AttachmentStoreOp::STORE);
+
+            let rendering_info = vk::RenderingInfo::default()
+                .render_area(vk::Rect2D {
+                    offset: vk::Offset2D { x: 0, y: 0 },
+                    extent,
+                })
+                .layer_count(1)
+                .color_attachments(std::slice::from_ref(&color_attachment));
+
+            self.device
+                .cmd_begin_rendering(command_buffer, &rendering_info);
 
             self.device.cmd_bind_pipeline(
                 command_buffer,
@@ -285,7 +283,32 @@ impl PostProcessSystem {
 
             self.device.cmd_draw(command_buffer, 3, 1, 0, 0);
 
-            self.device.cmd_end_render_pass(command_buffer);
+            self.device.cmd_end_rendering(command_buffer);
+
+            // 3. Post-Render Barrier: Transition Swapchain Image to PRESENT_SRC_KHR
+            let final_barrier = vk::ImageMemoryBarrier::default()
+                .old_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                .new_layout(vk::ImageLayout::PRESENT_SRC_KHR)
+                .src_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE)
+                .dst_access_mask(vk::AccessFlags::empty())
+                .image(target_image)
+                .subresource_range(vk::ImageSubresourceRange {
+                    aspect_mask: vk::ImageAspectFlags::COLOR,
+                    base_mip_level: 0,
+                    level_count: 1,
+                    base_array_layer: 0,
+                    layer_count: 1,
+                });
+
+            self.device.cmd_pipeline_barrier(
+                command_buffer,
+                vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                vk::PipelineStageFlags::BOTTOM_OF_PIPE,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[],
+                &[final_barrier],
+            );
         }
 
         Ok(())

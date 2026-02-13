@@ -141,6 +141,10 @@ pub struct PipelineBuilder {
     depth_stencil: Option<vk::PipelineDepthStencilStateCreateInfo<'static>>,
     color_blend_attachments: Vec<vk::PipelineColorBlendAttachmentState>,
     dynamic_states: Vec<vk::DynamicState>,
+    // Dynamic Rendering support (Vulkan 1.3)
+    color_attachment_formats: Vec<vk::Format>,
+    depth_attachment_format: Option<vk::Format>,
+    stencil_attachment_format: Option<vk::Format>,
 }
 
 impl PipelineBuilder {
@@ -184,6 +188,9 @@ impl PipelineBuilder {
                 alpha_blend_op: vk::BlendOp::ADD,
             }],
             dynamic_states: vec![vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR],
+            color_attachment_formats: Vec::new(),
+            depth_attachment_format: None,
+            stencil_attachment_format: None,
         }
     }
 
@@ -194,6 +201,20 @@ impl PipelineBuilder {
 
     pub fn with_render_pass(mut self, render_pass: vk::RenderPass) -> Self {
         self.render_pass = Some(render_pass);
+        self
+    }
+
+    /// Configure for Dynamic Rendering (Vulkan 1.3) with explicit formats.
+    /// This is an alternative to `with_render_pass` for modern rendering.
+    pub fn with_dynamic_rendering(
+        mut self,
+        color_formats: &[vk::Format],
+        depth_format: Option<vk::Format>,
+        stencil_format: Option<vk::Format>,
+    ) -> Self {
+        self.color_attachment_formats = color_formats.to_vec();
+        self.depth_attachment_format = depth_format;
+        self.stencil_attachment_format = stencil_format;
         self
     }
 
@@ -428,15 +449,21 @@ impl PipelineBuilder {
     /// Builds the pipeline.
     ///
     /// # Panics
-    /// Panics if layout, render_pass, extent, or shaders are missing.
-    /// These are considered architectural invariants for a graphics pipeline.
+    /// Panics if layout, extent, or shaders are missing.
+    /// Either render_pass OR dynamic rendering formats must be provided.
     pub fn build(mut self) -> Result<Pipeline> {
         let layout = self.layout.ok_or_else(|| {
             AshError::PipelineMissing("Pipeline layout must be provided".to_string())
         })?;
-        let render_pass = self.render_pass.ok_or_else(|| {
-            AshError::RenderPassMissing("Render pass must be provided".to_string())
-        })?;
+
+        // Validate that either legacy RenderPass or Dynamic Rendering is configured
+        let use_dynamic_rendering = self.render_pass.is_none();
+        if use_dynamic_rendering && self.color_attachment_formats.is_empty() {
+            return Err(AshError::PipelineMissing(
+                "Either render_pass or dynamic rendering formats must be provided".to_string(),
+            ));
+        }
+
         let extent = self.extent.ok_or_else(|| {
             AshError::SwapchainMissing("Viewport extent must be provided".to_string())
         })?;
@@ -519,6 +546,24 @@ impl PipelineBuilder {
             .sample_shading_enable(self.multisample_cfg.enable_sample_shading)
             .min_sample_shading(self.multisample_cfg.min_sample_shading);
 
+        // Dynamic Rendering: Create VkPipelineRenderingCreateInfo if using format-based mode
+        let mut rendering_info = if use_dynamic_rendering {
+            Some(
+                vk::PipelineRenderingCreateInfo::default()
+                    .color_attachment_formats(&self.color_attachment_formats)
+                    .depth_attachment_format(
+                        self.depth_attachment_format
+                            .unwrap_or(vk::Format::UNDEFINED),
+                    )
+                    .stencil_attachment_format(
+                        self.stencil_attachment_format
+                            .unwrap_or(vk::Format::UNDEFINED),
+                    ),
+            )
+        } else {
+            None
+        };
+
         let mut pipeline_info = vk::GraphicsPipelineCreateInfo::default()
             .stages(&stage_infos)
             .vertex_input_state(&vertex_input_state)
@@ -528,10 +573,15 @@ impl PipelineBuilder {
             .multisample_state(&multisample_state)
             .color_blend_state(&color_blend_state)
             .layout(layout)
-            .render_pass(render_pass)
-            .subpass(self.subpass)
             .base_pipeline_handle(vk::Pipeline::null())
             .base_pipeline_index(-1);
+
+        // Set either legacy RenderPass or Dynamic Rendering info
+        if let Some(render_pass) = self.render_pass {
+            pipeline_info = pipeline_info.render_pass(render_pass).subpass(self.subpass);
+        } else if let Some(ref mut rendering) = rendering_info {
+            pipeline_info = pipeline_info.push_next(rendering);
+        }
 
         if let Some(ref depth_stencil) = self.depth_stencil {
             pipeline_info = pipeline_info.depth_stencil_state(depth_stencil);

@@ -5,13 +5,11 @@ use crate::{
         },
         features::{
             AutoRotateFeature, FeatureFrameContext, FeatureManager,
-            FeatureRenderContext,
         },
         types::{
             DebugMode, DrawItem, RenderCommand,
             SampleShadingQuality, GBufferIndices, MeshData, RendererConfig,
         },
-        ForwardPlusIntegration,
         passes::{
             vsr as vsr_pass,
             hiz::{AdaptiveHiZManager, HiZPass},
@@ -24,7 +22,6 @@ use crate::{
         },
         vcgs::{CullBoundingBox, IndirectDrawPass},
         instancing::{BatchKey, InstanceData, InstancingManager},
-        model_renderer::MaterialPushConstants,
         passes,
         resource_registry::{ResourceId, ResourceRegistry},
         resources,
@@ -32,7 +29,8 @@ use crate::{
             uniform::{StorageBuffer, UniformBuffer},
         },
         vram_budget, DepthBuffer, GBuffer, HdrSystem, MaterialHandle, MaterialManager, Mesh,
-        PipelineCache, Texture, Transform, Scene,
+        PipelineCache, Texture, Scene,
+        GeometryRenderContext,
         initialization,
         assets::AssetManager,
         frame_manager,
@@ -115,12 +113,6 @@ pub struct Renderer {
     _default_cube_black: Texture, // Keep alive
     draw_items: Vec<DrawItem>,
     pub(crate) swapchain: Option<vulkan::SwapchainWrapper>,
-    pub(crate) render_pass: Option<vulkan::RenderPass>,
-    pub(crate) render_pass_id: Option<ResourceId>,
-    /// Dedicated render pass for HDR rendering (ensures format compatibility)
-    pub(crate) hdr_render_pass: Option<vulkan::RenderPass>,
-    pub(crate) hdr_render_pass_id: Option<ResourceId>,
-    pub(crate) main_graphics_pipeline: Option<vulkan::Pipeline>,
     pub(crate) pipeline_id: Option<ResourceId>,
     
     // Skybox Rendering (Modularized)
@@ -129,11 +121,8 @@ pub struct Renderer {
     pub(crate) depth_buffer: Option<DepthBuffer>,
     pub(crate) uniform_buffers: Vec<Arc<RwLock<UniformBuffer>>>,
     pub material_storage_buffer: Option<Arc<RwLock<StorageBuffer<resources::uniform::MaterialUniform>>>>,
-    pub(crate) pipeline_layout: Option<vulkan::PipelineLayout>,
     pub(crate) pipeline_layout_id: Option<ResourceId>,
     pub(crate) descriptors: Option<vulkan::DescriptorAllocator>,
-    pub(crate) framebuffers: Vec<vulkan::Framebuffer>,
-    pub(crate) framebuffer_ids: Vec<ResourceId>,
     start_time: Instant,
     pub(crate) swapchain_image_view_ids: Vec<ResourceId>,
     pub(crate) depth_buffer_id: Option<ResourceId>,
@@ -156,9 +145,6 @@ pub struct Renderer {
     // Bindless textures
     pub assets: AssetManager,
     // Forward+ lighting
-    pub(crate) forward_plus: Option<Arc<RwLock<ForwardPlusIntegration>>>,
-
-    pub(crate) indirect_draw_pass: Option<Arc<RwLock<IndirectDrawPass>>>,
     // Temporal Super-Resolution
     pub(crate) vsr_pass: Option<VsrPass>,
     // Motion Vector Pass for VSR/TAA
@@ -202,6 +188,7 @@ pub struct Renderer {
 pub struct MainPassParameters<'a> {
     pub cmd_ctx: &'a CommandBufferContext<'a>,
     pub frame_index: usize,
+    pub image_index: u32,
     pub scene_pipeline: vk::Pipeline,
     pub pipeline_layout_handle: vk::PipelineLayout,
     pub batch_offsets: &'a HashMap<BatchKey, u32>,
@@ -265,13 +252,9 @@ impl Renderer {
 
             let swapchain_with_ids = initialization::init_swapchain(&device, &alloc, &resources, surface_provider)?;
             let swapchain = swapchain_with_ids.data.swapchain;
-            let render_pass_handle = swapchain_with_ids.data.render_pass;
-            let framebuffers = swapchain_with_ids.data.framebuffers;
             let depth_buffer = swapchain_with_ids.data.depth_buffer;
             let swapchain_image_view_ids = swapchain_with_ids.swapchain_image_view_ids;
             let depth_buffer_id = swapchain_with_ids.depth_buffer_id;
-            let render_pass_id = swapchain_with_ids.render_pass_id;
-            let framebuffer_ids = swapchain_with_ids.framebuffer_ids;
 
             let queue_data = initialization::init_render_queue(&device)?;
             let queue = queue_data.queue;
@@ -288,7 +271,7 @@ impl Renderer {
             let frame_manager = frame_manager::FrameManager::new(
                 &device.device,
                 cmds.upload_command_pool_handle(),
-                framebuffers.len(),
+                swapchain.image_views.len(),
             )?;
 
             let aspect = swapchain.extent.width as f32 / swapchain.extent.height as f32;
@@ -297,25 +280,30 @@ impl Renderer {
             let mut core = initialization::init_core_infrastructure(
                 &device, &alloc, &instance, &resources,
                 cmds.upload_command_pool_handle(),
-                framebuffers.len(),
+                swapchain.image_views.len(),
                 aspect
             )?;
 
             let set_layouts = [core.bindless_manager.descriptor_set_layout()];
+            
+            // Define color formats for Dynamic Rendering (Main Pass + GBuffer)
+            // Note: Since GBuffer isn't created yet, we check for its intent or future presence.
+            // For now, we follow the logic in recreate_pipeline.
+            let color_formats = vec![
+                swapchain.format,                   // Index 0: Main Color
+            ];
+
             let pipelines = initialization::init_pipelines(
                 &device, &resources, swapchain.extent,
-                render_pass_handle, render_pass_id,
+                &color_formats,
                 &set_layouts, &pipeline_cfg,
                 depth_buffer.format(), pipeline_cache.handle(),
             )?;
 
-            let mut render_pass_wrapper = vulkan::RenderPass::from_handle(Arc::clone(&device.device), render_pass_handle);
-            render_pass_wrapper.mark_managed_by_registry();
-
             let passes = initialization::init_rendering_passes(
                 &device, &alloc, &resources, &mut core.bindless_manager, &core.renderer_resources,
                 swapchain.extent, depth_buffer.format(), depth_buffer.view(),
-                pipeline_cache.handle(), render_pass_handle,
+                pipeline_cache.handle(),
                 pipeline_cfg.multisample_config(),
                 &set_layouts, &core.model_renderer, cmds.upload_command_pool_handle()
             )?;
@@ -323,11 +311,11 @@ impl Renderer {
             let lighting = initialization::init_lighting_system(
                 &device, &alloc, &mut core.bindless_manager,
                 cmds.upload_command_pool_handle(),
-                framebuffers.len() as u32, swapchain.extent
+                swapchain.image_views.len() as u32, swapchain.extent
             )?;
 
             let post = initialization::init_post_processing(
-                &device.device, framebuffers.len(), swapchain.extent, swapchain.format
+                &device.device, swapchain.image_views.len(), swapchain.extent, swapchain.format
             )?;
 
             // Finalizing Metadata
@@ -367,11 +355,6 @@ impl Renderer {
                 _default_cube_black: core.renderer_resources.default_cube_black,
                 draw_items: Vec::new(),
                 swapchain: Some(swapchain),
-                render_pass: Some(render_pass_wrapper),
-                render_pass_id: Some(render_pass_id),
-                hdr_render_pass: None,
-                hdr_render_pass_id: None,
-                main_graphics_pipeline: Some(pipelines.pipeline),
                 pipeline_id: Some(pipelines.pipeline_id),
                 
                 skybox_pass: Some(passes.skybox_pass),
@@ -381,11 +364,8 @@ impl Renderer {
                 material_storage_buffer: Some(Arc::new(RwLock::new(core.renderer_resources.material_storage_buffer))),
                 instance_buffer_addresses,
                 material_heap_address,
-                pipeline_layout: Some(pipelines.layout),
                 pipeline_layout_id: Some(pipelines.layout_id),
                 descriptors: Some(core.descriptor_allocator),
-                framebuffers,
-                framebuffer_ids,
                 geometry_buffer: core.geometry_buffer,
                 start_time: Instant::now(),
                 alloc,
@@ -408,6 +388,10 @@ impl Renderer {
                     post.post_process,
                     Some(Arc::new(RwLock::new(passes.hiz_pass))),
                     AdaptiveHiZManager::new(3.0),
+                    Some(Arc::new(RwLock::new(lighting.forward_plus))),
+                    Some(Arc::new(RwLock::new(passes.indirect_draw_pass))),
+                    Some(pipelines.pipeline),
+                    Some(pipelines.layout),
                 ),
 
                 assets: {
@@ -415,8 +399,6 @@ impl Renderer {
                     assets.texture_compression = renderer_config.texture_compression;
                     assets
                 },
-                forward_plus: Some(Arc::new(RwLock::new(lighting.forward_plus))),
-                indirect_draw_pass: Some(Arc::new(RwLock::new(passes.indirect_draw_pass))),
                 vsr_pass: None,
                 motion_pass: None,
                 motion_framebuffer: None,
@@ -437,11 +419,17 @@ impl Renderer {
                 vsr_config: VsrConfig::default(),
             };
 
+            let (image_count, extent) = {
+                let sc = renderer.swapchain.as_ref().unwrap();
+                (sc.image_views.len(), sc.extent)
+            };
+            renderer.pipeline.post_process_mut().resize(image_count, extent)?;
+            renderer.pipeline.validate()?;
             renderer.register_tracked_subsystems()?;
             renderer.init_motion_pass()?;
 
             // --- Phase 2.7: Pre-initialize Forward+ lighting pipeline (prevents first-frame stutter) ---
-            if let Some(ref fp_lock) = renderer.forward_plus {
+            if let Some(ref fp_lock) = renderer.pipeline.forward_plus {
                 if let (Some(db), Some(_db_ptr)) = (&renderer.depth_buffer, renderer.depth_buffer_id) {
                     let mut fp = fp_lock.write().unwrap();
                     fp.init_pipeline(
@@ -463,7 +451,7 @@ impl Renderer {
     fn register_tracked_subsystems(&mut self) -> Result<()> {
         let registry = &self.resources;
 
-        if let Some(ref fp) = self.forward_plus {
+        if let Some(ref fp) = self.pipeline.forward_plus {
             registry.register_shared_resource(Arc::clone(fp)).map_err(|e| AshError::VulkanError(e.to_string()))?;
         }
 
@@ -471,7 +459,7 @@ impl Renderer {
             registry.register_shared_resource(Arc::clone(hiz)).map_err(|e| AshError::VulkanError(e.to_string()))?;
         }
 
-        if let Some(ref indirect) = self.indirect_draw_pass {
+        if let Some(ref indirect) = self.pipeline.indirect_draw_pass {
             registry.register_shared_resource(Arc::clone(indirect)).map_err(|e| AshError::VulkanError(e.to_string()))?;
         }
 
@@ -1077,21 +1065,22 @@ impl Renderer {
     pub(crate) fn recreate_pipeline(&mut self) -> Result<()> {
         log::info!("Recompiling pipeline due to shader change...");
         let layout = self
+            .pipeline
             .pipeline_layout
             .as_ref()
             .ok_or_else(|| AshError::VulkanError("Pipeline layout missing".to_string()))?
             .handle();
-        let render_pass = if self.hdr_system.is_some() {
-             self.hdr_render_pass
-                .as_ref()
-                .ok_or_else(|| AshError::VulkanError("HDR Render pass missing".to_string()))?
-                .handle()
+        
+        // Determine color format (HDR or swapchain)
+        let color_format = if let Some(hdr) = &self.hdr_system {
+            hdr.format()
         } else {
-             self.render_pass
+            self.swapchain
                 .as_ref()
-                .ok_or_else(|| AshError::VulkanError("Render pass missing".to_string()))?
-                .handle()
+                .ok_or(AshError::VulkanError("Swapchain missing".into()))?
+                .format
         };
+        
         let extent = self
             .swapchain
             .as_ref()
@@ -1106,9 +1095,21 @@ impl Renderer {
 
         let multisample_config = self.sample_shading_config();
 
+        // Build color attachment formats based on GBuffer configuration
+        let color_formats = if self.gbuffer.is_some() {
+            vec![
+                color_format,                       // Index 0: Main color (HDR or swapchain)
+                vk::Format::R16G16B16A16_SFLOAT,   // Index 1: Normals
+                vk::Format::R8G8B8A8_UNORM,        // Index 2: Albedo
+                vk::Format::R16G16_SFLOAT,         // Index 3: Motion Vectors
+            ]
+        } else {
+            vec![color_format] // ONLY Main Color (for Example 07)
+        };
+
         let mut builder = vulkan::Pipeline::builder(Arc::clone(&self.device.device))
             .with_layout(layout)
-            .with_render_pass(render_pass)
+            .with_dynamic_rendering(&color_formats, Some(depth_format), None)
             .with_extent(extent)
             .with_pipeline_cache(cache)
             .with_depth_format(depth_format)
@@ -1180,20 +1181,18 @@ impl Renderer {
         let pipeline_layout_id = self.pipeline_layout_id.ok_or_else(|| {
             AshError::VulkanError("Pipeline layout ID missing during recreation".into())
         })?;
-        let render_pass_id = self.render_pass_id.ok_or_else(|| {
-            AshError::VulkanError("Render pass ID missing during recreation".into())
-        })?;
 
+        // Register pipeline with only pipeline_layout dependency (no render_pass)
         let pipeline_id = self
             .resources
-            .register_pipeline(new_pipeline.pipeline, &[pipeline_layout_id, render_pass_id])
+            .register_pipeline(new_pipeline.pipeline, &[pipeline_layout_id])
             .map_err(|e| AshError::VulkanError(format!("Failed to register pipeline: {e}")))?;
 
         new_pipeline.mark_managed_by_registry();
-        self.main_graphics_pipeline = Some(new_pipeline);
+        self.pipeline.main_graphics_pipeline = Some(new_pipeline);
         self.pipeline_id = Some(pipeline_id);
 
-        log::info!("Pipeline recompiled successfully!");
+        log::info!("Pipeline recreation complete (Dynamic Rendering mode)");
         Ok(())
     }
 
@@ -1335,187 +1334,6 @@ impl Renderer {
         Ok(())
     }
 
-    pub(crate) fn create_render_pass_and_framebuffers(
-        &mut self,
-        extent: vk::Extent2D,
-        color_format: vk::Format,
-        image_views: &[vk::ImageView],
-    ) -> Result<()> {
-        // Cleanup already done by cleanup_framebuffers() and cleanup_render_pass()
-
-        let depth_buffer = self.depth_buffer.as_ref().ok_or_else(|| {
-            AshError::VulkanError("Depth buffer missing when rebuilding framebuffers".into())
-        })?;
-
-        let mut builder = vulkan::RenderPass::builder(Arc::clone(&self.device.device));
-
-        let render_to_hdr = self.hdr_system.is_some();
-        if render_to_hdr {
-            let hdr = self
-                .hdr_system
-                .as_ref()
-                .ok_or_else(|| AshError::VulkanError("HDR system missing".to_string()))?;
-            builder = builder
-                .with_color_attachment(hdr.format(), vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL);
-        } else {
-            let final_layout = if self.device.headless {
-                vk::ImageLayout::TRANSFER_SRC_OPTIMAL
-            } else {
-                vk::ImageLayout::PRESENT_SRC_KHR
-            };
-            builder = builder.with_swapchain_color(color_format, final_layout);
-        }
-
-        if self.gbuffer.is_some() {
-            // Index 1: Normals (RGBA16F)
-            builder = builder.with_color_attachment(
-                vk::Format::R16G16B16A16_SFLOAT,
-                vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-            );
-            // Index 2: Albedo (RGBA8)
-            builder = builder.with_color_attachment(
-                vk::Format::R8G8B8A8_UNORM,
-                vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-            );
-            // Index 3: Motion Vectors (RG16F)
-            builder = builder.with_color_attachment(
-                vk::Format::R16G16_SFLOAT,
-                vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-            );
-        }
-
-        let mut render_pass = builder
-            .with_depth_attachment(
-                depth_buffer.format(),
-                vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
-            )
-            .build()?;
-
-        let render_pass_id = self
-            .resources
-            .register_render_pass(render_pass.handle())
-            .map_err(|e| AshError::VulkanError(format!("Failed to register render pass: {e}")))?;
-        render_pass.mark_managed_by_registry();
-        
-        // If we are in HDR mode, this pass is the HDR pass.
-        // If we are in Swapchain mode, it's the standard pass.
-        // To fix format mismatches, we ensure we have a valid handle in the correct field.
-        if render_to_hdr {
-            self.hdr_render_pass = Some(render_pass);
-            self.hdr_render_pass_id = Some(render_pass_id);
-            // We also need a swapchain-compatible pass for post-processing/UI, 
-            // but create_render_pass_and_framebuffers is usually called when swapchain changes.
-            // For now, if render_pass is missing, we create a default one too.
-            if self.render_pass.is_none() {
-                 let sw_builder = vulkan::RenderPass::builder(Arc::clone(&self.device.device));
-                 let final_layout = if self.device.headless {
-                     vk::ImageLayout::TRANSFER_SRC_OPTIMAL
-                 } else {
-                     vk::ImageLayout::PRESENT_SRC_KHR
-                 };
-                 let sw_pass = sw_builder.with_swapchain_color(color_format, final_layout)
-                     .with_depth_attachment(depth_buffer.format(), vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
-                     .build()?;
-                 let sw_id = self.resources.register_render_pass(sw_pass.handle())?;
-                 
-                 // CRITICAL FIX: Mark render pass as managed to prevent double-free
-                 let mut pass = sw_pass;
-                 pass.mark_managed_by_registry();
-                 
-                 self.render_pass = Some(pass);
-                 self.render_pass_id = Some(sw_id);
-            }
-        } else {
-            self.render_pass = Some(render_pass);
-            self.render_pass_id = Some(render_pass_id);
-        }
-
-        let depth_buffer_id = self.depth_buffer_id.ok_or_else(|| {
-            AshError::VulkanError("Depth buffer id missing while rebuilding framebuffers".into())
-        })?;
-
-        let mut framebuffers = Vec::with_capacity(image_views.len());
-        let mut framebuffer_ids = Vec::with_capacity(image_views.len());
-
-        let gbuffer = self.gbuffer.as_ref().ok_or_else(|| {
-            AshError::VulkanError("G-Buffer missing when rebuilding framebuffers".into())
-        })?;
-
-        for (index, &view) in image_views.iter().enumerate() {
-            // If rendering to HDR, we use a single HDR view for all framebuffers.
-            // Otherwise we use the per-swapchain view.
-            let color_view = if render_to_hdr {
-                self.hdr_system
-                    .as_ref()
-                    .ok_or_else(|| AshError::VulkanError("HDR system missing".to_string()))?
-                    .view()
-            } else {
-                view
-            };
-
-            // Order must match RenderPass: [Color, GBufferNormal, GBufferAlbedo, GBufferMotion, Depth]
-            let attachments = [
-                color_view,
-                gbuffer.normal_view(),
-                gbuffer.albedo_view(),
-                gbuffer.motion_view(),
-                depth_buffer.view(),
-            ];
-            
-            // CRITICAL FIX: Use the correct render pass for framebuffer creation.
-            // When HDR is enabled, framebuffers must be created against hdr_render_pass,
-            // not the swapchain render_pass, to ensure format compatibility.
-            let active_render_pass = if render_to_hdr {
-                self.hdr_render_pass
-                    .as_ref()
-                    .expect("HDR render pass just created")
-                    .handle()
-            } else {
-                self.render_pass
-                    .as_ref()
-                    .expect("render pass just created")
-                    .handle()
-            };
-            
-            let framebuffer = vulkan::Framebuffer::new(
-                Arc::clone(&self.device.device),
-                active_render_pass,
-                &attachments,
-                extent,
-            )?;
-
-            let deps = if render_to_hdr {
-                vec![render_pass_id, depth_buffer_id]
-            } else {
-                vec![
-                    render_pass_id,
-                    depth_buffer_id,
-                    self.swapchain_image_view_ids[index],
-                ]
-            };
-
-            let framebuffer_id = self
-                .resources
-                .register_framebuffer(framebuffer.handle(), &deps)
-                .map_err(|e| {
-                    AshError::VulkanError(format!("Failed to register framebuffer: {e}"))
-                })?;
-
-            let mut framebuffer = framebuffer;
-            framebuffer.mark_managed_by_registry();
-            framebuffers.push(framebuffer);
-            framebuffer_ids.push(framebuffer_id);
-        }
-
-        self.framebuffers = framebuffers;
-        self.framebuffer_ids = framebuffer_ids;
-
-        // --- Post-Processing System Resize ---
-        self.pipeline.post_process_mut().resize(image_views, extent)?;
-
-        Ok(())
-    }
-
     pub(crate) fn recreate_frame_syncs(&mut self, count: usize) -> Result<()> {
         log::info!("Recreating frame synchronization objects: Count {}", count);
         self.frame_manager.destroy(&self.device.device);
@@ -1603,7 +1421,7 @@ impl Renderer {
         let projection = params.projection;
 
         // Modern Phase 4: Full GPU-Driven Indirect Draw (Opaque Path)
-            if let Some(ref indirect_arc) = self.indirect_draw_pass {
+            if let Some(ref indirect_arc) = self.pipeline.indirect_draw_pass {
                 let indirect_pass = indirect_arc.write().unwrap();
             // No longer populating objects here; they were already populated in render_frame
             // with high-fidelity clusters.
@@ -1672,8 +1490,8 @@ impl Renderer {
     ) -> Result<()> {
         let cmd_ctx = params.cmd_ctx;
         let frame_index = params.frame_index;
-        let scene_pipeline = params.scene_pipeline;
-        let pipeline_layout_handle = params.pipeline_layout_handle;
+        let _scene_pipeline = params.scene_pipeline;
+        let _pipeline_layout_handle = params.pipeline_layout_handle;
         let _batch_offsets = params.batch_offsets;
         let _view = params.view;
         let _projection = params.projection;
@@ -1685,98 +1503,55 @@ impl Renderer {
             _ => true,
         };
 
-        // Modern Phase 4: Full GPU-Driven Indirect Draw (Opaque Path)
-        if let Some(ref indirect_arc) = self.indirect_draw_pass {
-            let indirect_pass = indirect_arc.read().unwrap();
-            // Note: Culling and Upload (Compute) is done in cull_main_pass() BEFORE the render pass.
+        // Context Upgrade: Retrieve views for Dynamic Rendering
+        let (color_view, color_image) = if let Some(hdr) = &self.hdr_system {
+            (hdr.view(), hdr.image())
+        } else {
+            let swapchain = self.swapchain.as_ref().ok_or_else(|| AshError::VulkanError("Swapchain missing".into()))?;
+            let view = swapchain.image_views[params.image_index as usize];
+            let image = swapchain.images[params.image_index as usize];
+            (view, image)
+        };
 
-            // 3. Draw All Visible Objects in One Call
-            if params.scene.occlusion_culling.object_count() > 0 {
-                let frame_address = self.uniform_buffers[frame_index].read().unwrap().device_address();
-                let _ = frame_address; // Suppress unused warning as it is used in ctx below
+        let (depth_view, depth_image) = self.depth_buffer.as_ref()
+            .map(|d| (d.view(), d.image()))
+            .ok_or_else(|| AshError::VulkanError("Depth buffer missing".into()))?;
 
-                cmd_ctx.bind_pipeline(vk::PipelineBindPoint::GRAPHICS, scene_pipeline);
+        // Create a dummy transform for feature rendering context
+        let dummy_transform = crate::renderer::Transform::identity();
 
+        // Phase 3.2, Part 2: Relocated Geometry Rendering
+        let geo_ctx = GeometryRenderContext {
+            device: &self.device,
+            command_buffer: cmd_ctx,
+            scene: params.scene,
+            bindless_descriptor_set: self.assets.bindless_manager.descriptor_set(),
+            swapchain_extent: params.swapchain_extent,
+            frame_ptr: self.uniform_buffers[frame_index].read().unwrap().device_address(),
+            material_ptr: self.material_heap_address,
+            light_ptr: params.light_ptr,
+            tile_ptr: params.tile_ptr,
+            debug_enabled,
+            color_image,
+            color_view,
+            depth_image,
+            depth_view,
+            normal_view: self.gbuffer.as_ref().map(|g| g.normal_view()),
+            albedo_view: self.gbuffer.as_ref().map(|g| g.albedo_view()),
+            motion_view: self.gbuffer.as_ref().map(|g| g.motion_view()),
+            skybox: self.skybox_pass.as_ref(),
+            features: Some(&self.features),
+            frame_index,
+            descriptor_allocator: self.descriptors.as_ref(),
+            transform: &dummy_transform,
+            is_swapchain_image: self.hdr_system.is_none(),
+        };
 
-                // CRITICAL FIX: BDA Pointer Validation
-                // Prevent crash if buffers are not yet allocated
-                let vertex_ptr = params.scene.model_renderer.geometry_buffer.vertex_heap_address();
-                let index_ptr = params.scene.model_renderer.geometry_buffer.index_heap_address();
-                let instance_ptr = indirect_pass.object_buffer_address();
-                let material_ptr = self.material_heap_address;
-
-                if vertex_ptr == 0 || index_ptr == 0 || instance_ptr == 0 || material_ptr == 0 {
-                    log::error!(
-                        "CRITICAL: BDA Null Pointer - Skipping Draw. Vtx: {:#X}, Idx: {:#X}, Inst: {:#X}, Mat: {:#X}", 
-                        vertex_ptr, index_ptr, instance_ptr, material_ptr
-                    );
-                    return Ok(());
-                }
-
-                let material_push = MaterialPushConstants::new(MaterialHandle::null())
-                    .with_receive_shadows(true)
-                    .with_debug_visualization(debug_enabled);
-
-                // Note: This code path uses indirect draw, not direct mesh rendering
-                // The uploaded field in DrawContext is not used for indirect drawing
-                // (all data is pulled via BDA), but the struct requires it.
-                // We use any available mesh from the cache as a placeholder.
-                let Some(uploaded) = params.scene.model_renderer.uploaded_meshes().next().map(|(_, mesh)| mesh) else {
-                    // If no meshes are uploaded yet, we can't proceed with indirect draw
-                    log::warn!("No uploaded meshes available for indirect draw context");
-                    return Ok(());
-                };
-
-                let (width, height) = match self.swapchain.as_ref() {
-                    Some(sw) => (sw.extent.width, sw.extent.height),
-                    None => (1, 1),
-                };
-                let _ = (width, height); 
-
-                let draw_ctx = crate::renderer::model_renderer::DrawContext {
-                    command_buffer: cmd_ctx.handle(),
-                    pipeline_layout: pipeline_layout_handle,
-                    uploaded,
-                    material: &material_push,
-                    frame_ptr: self.uniform_buffers[frame_index].read().unwrap().device_address(),
-                    vertex_ptr,
-                    instance_ptr,
-                    material_ptr,
-                    index_ptr,
-                    light_ptr: params.light_ptr,
-                    tile_ptr: params.tile_ptr,
-                    skybox_index: params.scene.skybox_texture_index,
-                    vsm_page_index: self.pipeline.shadow_system().map(|s| s.vsm_page_index()).unwrap_or(0),
-                    vsm_cache_index: self.pipeline.shadow_system().map(|s| s.vsm_cache_index()).unwrap_or(0),
-                    transform_ptr: params.scene.transform_system.arena_addr,
-                    transform_index: 0, // Using index 0 for main indirect pass
-                };
-                
-                let count_params = crate::renderer::model_renderer::IndirectDrawCountParams {
-                    indirect_buffer: indirect_pass.indirect_buffer(),
-                    indirect_offset: 0,
-                    count_buffer: indirect_pass.count_buffer(),
-                    count_offset: 0,
-                    max_draw_count: params.scene.occlusion_culling.object_count() as u32,
-                    stride: std::mem::size_of::<vk::DrawIndirectCommand>() as u32,
-                };
-
-                unsafe {
-                    params.scene.model_renderer.draw_indirect_count(&draw_ctx, &count_params);
-                }
-            }
-        }
+        self.pipeline.render_geometry(&geo_ctx)?;
 
         // --- PHASE 4: STRICT MODERN - Legacy paths removed ---
         // (Only skinned meshes would remain here if we hadn't moved them, 
         // but for now we focus on opaque stability)
-
-        // 4. Render Skybox (Sentinel Pattern: Only if ibl_prefilter_index is NOT MAX)
-        if params.scene.scene_lighting.ibl_prefilter_index >= 0 {
-            if let Err(e) = self.render_skybox(&cmd_ctx, frame_index, params.view, params.projection) {
-                log::warn!("Skybox render failed: {e}");
-            }
-        }
 
         Ok(())
     }
@@ -1894,7 +1669,7 @@ impl Renderer {
             crate::renderer::swapchain_manager::recreate_swapchain_resources(self, scene)?;
             
             // CRITICAL: Update Forward+ depth descriptor whenever swapchain/depth is resized
-            if let Some(ref fp_lock) = self.forward_plus {
+            if let Some(ref fp_lock) = self.pipeline.forward_plus {
                 if let (Some(db), Some(_db_ptr)) = (&self.depth_buffer, self.depth_buffer_id) {
                     let mut fp = fp_lock.write().unwrap();
                     unsafe {
@@ -1940,7 +1715,7 @@ impl Renderer {
 
         // Ensure mutable borrow of pipeline scope ends prior to recreation call.
         let shaders_changed = if self.frame_manager.get_current_frame_index() % SHADER_CHECK_INTERVAL == 0 {
-            if let Some(pipeline) = &mut self.main_graphics_pipeline {
+            if let Some(pipeline) = &mut self.pipeline.main_graphics_pipeline {
                 match pipeline.detect_shader_changes() {
                     Ok(changed) => changed,
                     Err(e) => {
@@ -1977,21 +1752,11 @@ impl Renderer {
                 .ok_or(AshError::VulkanError("Swapchain not available".to_string()))?
                 .extent;
             let scene_pipeline = self
+                .pipeline
                 .main_graphics_pipeline
                 .as_ref()
                 .map(|p| p.pipeline)
                 .ok_or(AshError::VulkanError("Pipeline not available".to_string()))?;
-            let main_render_pass = if self.hdr_system.is_some() {
-                self.hdr_render_pass
-                .as_ref()
-                .map(|p| p.handle())
-                .ok_or_else(|| AshError::VulkanError("HDR render pass not available".to_string()))?
-            } else {
-                self.render_pass
-                .as_ref()
-                .map(|p| p.handle())
-                .ok_or_else(|| AshError::VulkanError("Render pass not available".to_string()))?
-            };
 
             // Phase 1: Use RenderQueue to acquire next frame and synchronization objects
             // Phase 1: Use FrameManager to acquire next frame and synchronization objects
@@ -2097,7 +1862,7 @@ impl Renderer {
 
                 // Sync light counts and tile configuration from scene and forward_plus to GPU-aligned lighting struct
                 scene.scene_lighting.point_light_count = scene.point_lights.len() as u32;
-                if let Some(fp) = &self.forward_plus {
+                if let Some(fp) = &self.pipeline.forward_plus {
                     let info = fp.read().unwrap().get_lights().get_forward_plus_info();
                     scene.scene_lighting.num_tiles_x = info.num_tiles[0];
                     scene.scene_lighting.num_tiles_y = info.num_tiles[1];
@@ -2167,7 +1932,6 @@ impl Renderer {
                     command_buffer,
                     db.image(),
                     self.gpu_profiler.as_ref(),
-                    self.indirect_draw_pass.as_ref(),
                     self._black_texture.view(),
                     self._black_texture.sampler(),
                 )?;
@@ -2188,8 +1952,8 @@ impl Renderer {
             }
 
             // Shadows (Modularized in Chunk 3.1)
-            let light_ptr = self.forward_plus.as_ref().map(|fp| fp.read().unwrap().get_lights().light_ptr(frame_index)).unwrap_or(0);
-            let tile_ptr = self.forward_plus.as_ref().map(|fp| fp.read().unwrap().get_lights().tile_ptr(frame_index)).unwrap_or(0);
+            let light_ptr = self.pipeline.forward_plus.as_ref().map(|fp| fp.read().unwrap().get_lights().light_ptr(frame_index)).unwrap_or(0);
+            let tile_ptr = self.pipeline.forward_plus.as_ref().map(|fp| fp.read().unwrap().get_lights().tile_ptr(frame_index)).unwrap_or(0);
 
             let bindless_descriptor_set = self.assets.bindless_manager.descriptor_set();
             let uniform_buffer_address = self.uniform_buffers[frame_index].read().unwrap().device_address();
@@ -2209,7 +1973,7 @@ impl Renderer {
             )?;
 
             // --- Light Culling Compute Dispatch ---
-            if let Some(ref fp_integration) = self.forward_plus {
+            if let Some(ref fp_integration) = self.pipeline.forward_plus {
                 let mut fp = fp_integration.write().unwrap();
                 // Update light data from scene before uploading
                 fp.update_lights(&scene.point_lights, &scene.directional_lights, &scene.spot_lights);
@@ -2255,69 +2019,13 @@ impl Renderer {
                 );
             }
 
-            let clear_values = if self.hdr_system.is_some() {
-                vec![
-                    vk::ClearValue {
-                        color: vk::ClearColorValue {
-                            float32: [0.0, 0.0, 0.0, 1.0], // 0: Color - Black
-                        },
-                    },
-                    vk::ClearValue {
-                        color: vk::ClearColorValue {
-                            float32: [0.0, 0.0, 0.0, 0.0], // 1: G-Buffer Normal
-                        },
-                    },
-                    vk::ClearValue {
-                        color: vk::ClearColorValue {
-                            float32: [0.0, 0.0, 0.0, 1.0], // 2: G-Buffer Albedo (Clear to opaque black)
-                        },
-                    },
-                    vk::ClearValue {
-                        color: vk::ClearColorValue {
-                            float32: [0.0, 0.0, 0.0, 0.0], // 3: G-Buffer Motion
-                        },
-                    },
-                    vk::ClearValue {
-                        depth_stencil: vk::ClearDepthStencilValue {
-                            depth: 0.0, // REVERSE-Z FIX: 0.0 is Far/Infinity
-                            stencil: 0,
-                        },
-                    },
-                ]
-            } else {
-                vec![
-                    vk::ClearValue {
-                        color: vk::ClearColorValue {
-                            float32: [0.0, 0.0, 0.0, 1.0], // 0: Swapchain Color - Black
-                        },
-                    },
-                    vk::ClearValue {
-                        depth_stencil: vk::ClearDepthStencilValue {
-                            depth: 0.0, // REVERSE-Z FIX: 0.0 is Far/Infinity
-                            stencil: 0,
-                        },
-                    },
-                ]
-            };
 
-            let (framebuffer_handle, _hdr_attachment) = {
-                let framebuffer = self.framebuffers.get(image_index as usize).ok_or_else(|| {
-                    log::error!(
-                        "Frame {}: Framebuffer index {} out of range (max: {})",
-                        self.frame_manager.get_current_frame_index(),
-                        image_index,
-                        self.framebuffers.len()
-                    );
-                    AshError::VulkanError("Framebuffer index out of range".into())
-                })?;
-                (framebuffer.handle(), framebuffer.attachments()[0])
-            };
 
             // PREPARE FOR CULLING & RENDERING (Moved out of Render Pass)
-            let light_ptr = self.forward_plus.as_ref().map(|fp| fp.read().unwrap().get_lights().light_ptr(frame_index)).unwrap_or(0);
-            let tile_ptr = self.forward_plus.as_ref().map(|fp| fp.read().unwrap().get_lights().tile_ptr(frame_index)).unwrap_or(0);
+            let light_ptr = self.pipeline.forward_plus.as_ref().map(|fp| fp.read().unwrap().get_lights().light_ptr(frame_index)).unwrap_or(0);
+            let tile_ptr = self.pipeline.forward_plus.as_ref().map(|fp| fp.read().unwrap().get_lights().tile_ptr(frame_index)).unwrap_or(0);
 
-            let pipeline_layout = self.pipeline_layout.as_ref().ok_or_else(|| {
+            let pipeline_layout = self.pipeline.pipeline_layout.as_ref().ok_or_else(|| {
                 AshError::VulkanError("Pipeline layout not available".to_string())
             })?;
             let pipeline_layout_handle = pipeline_layout.handle();
@@ -2325,6 +2033,7 @@ impl Renderer {
             let main_pass_params = MainPassParameters {
                 cmd_ctx: &cmd_ctx,
                 frame_index,
+                image_index,
                 scene_pipeline,
                 pipeline_layout_handle,
                 batch_offsets: &batch_offsets,
@@ -2339,16 +2048,7 @@ impl Renderer {
             // CRITICAL FIX: Execute Compute Culling BEFORE Render Pass
             self.cull_main_pass(&main_pass_params)?;
 
-            let render_pass_begin = vk::RenderPassBeginInfo::default()
-                .render_pass(main_render_pass)
-                .framebuffer(framebuffer_handle)
-                .render_area(vk::Rect2D {
-                    offset: vk::Offset2D { x: 0, y: 0 },
-                    extent: swapchain_extent,
-                })
-                .clear_values(&clear_values);
-
-            cmd_ctx.begin_render_pass(&render_pass_begin, vk::SubpassContents::INLINE);
+            // Dynamic Rendering: No RenderPass needed here. Pipeline handles begin/end rendering.
             cmd_ctx.bind_pipeline(vk::PipelineBindPoint::GRAPHICS, scene_pipeline);
 
             let viewport = vk::Viewport {
@@ -2365,20 +2065,6 @@ impl Renderer {
             };
             cmd_ctx.set_viewport(0, &[viewport]);
             cmd_ctx.set_scissor(0, &[scissor]);
-
-            let dummy_render_transform = Transform::identity(); // Local dummy for render ctx
-
-            let render_ctx = FeatureRenderContext {
-                device: self.device.device.as_ref(),
-                descriptor_allocator: self.descriptors.as_ref(),
-                command_buffer,
-                transform: &dummy_render_transform,
-                frame_index,
-                screen_width: swapchain_extent.width,
-                screen_height: swapchain_extent.height,
-            };
-
-            self.features.render(&render_ctx);
 
             let _ = (|| -> Result<vk::DescriptorSet> {
                 // Bind Unified Bindless descriptor set (Set 0)
@@ -2398,8 +2084,6 @@ impl Renderer {
 
             // --- Phase 10: GPU Instancing & Culling Integration ---
             self.render_main_pass(&main_pass_params)?;
-
-            cmd_ctx.end_render_pass();
 
 
             // --- VSR (Upscaling) Pass ---
@@ -2465,6 +2149,8 @@ impl Renderer {
                 command_buffer,
                 image_index as usize,
                 swapchain_extent,
+                self.swapchain.as_ref().unwrap().images[image_index as usize],
+                self.swapchain.as_ref().unwrap().image_views[image_index as usize],
                 self.hdr_system.as_ref(),
                 self.vsr_pass.as_ref(),
                 self._black_texture.view(),
@@ -2564,7 +2250,7 @@ impl Renderer {
     ///
     /// Call this each frame to update light positions and properties.
     pub fn update_point_lights(&mut self, lights: &[crate::renderer::features::PointLight]) {
-        if let Some(ref forward_plus) = self.forward_plus {
+        if let Some(ref forward_plus) = self.pipeline.forward_plus {
             forward_plus.write().unwrap().update_lights(lights, &[], &[]);
         }
     }
@@ -2574,14 +2260,14 @@ impl Renderer {
         &mut self,
         lights: &[crate::renderer::features::DirectionalLight],
     ) {
-        if let Some(ref forward_plus) = self.forward_plus {
+        if let Some(ref forward_plus) = self.pipeline.forward_plus {
             forward_plus.write().unwrap().update_lights(&[], lights, &[]);
         }
     }
 
     /// Update spot lights for Forward+ rendering
     pub fn update_spot_lights(&mut self, lights: &[crate::renderer::features::SpotLight]) {
-        if let Some(ref forward_plus) = self.forward_plus {
+        if let Some(ref forward_plus) = self.pipeline.forward_plus {
             forward_plus.write().unwrap().update_lights(&[], &[], lights);
         }
     }
@@ -2592,14 +2278,14 @@ impl Renderer {
         point_lights: &[crate::renderer::features::PointLight],
         directional_lights: &[crate::renderer::features::DirectionalLight],
     ) {
-        if let Some(ref forward_plus) = self.forward_plus {
+        if let Some(ref forward_plus) = self.pipeline.forward_plus {
             forward_plus.write().unwrap().update_lights(point_lights, directional_lights, &[]);
         }
     }
 
     /// Returns whether Forward+ lighting is enabled
     pub fn forward_plus_enabled(&self) -> bool {
-        self.forward_plus
+        self.pipeline.forward_plus
             .as_ref()
             .map(|fp| fp.read().unwrap().is_enabled())
             .unwrap_or(false)
@@ -2607,7 +2293,7 @@ impl Renderer {
 
     /// Returns the number of active lights
     pub fn forward_plus_light_count(&self) -> usize {
-        self.forward_plus
+        self.pipeline.forward_plus
             .as_ref()
             .map(|fp| {
                 let lights = fp.read().unwrap();
@@ -2677,7 +2363,7 @@ impl Renderer {
         }
 
         self.pipeline.hiz_pass = Some(Arc::new(RwLock::new(hiz)));
-        self.indirect_draw_pass = Some(Arc::new(RwLock::new(indirect)));
+        self.pipeline.indirect_draw_pass = Some(Arc::new(RwLock::new(indirect)));
 
         // Register new subsystems with the registry (Phase 31)
         self.register_tracked_subsystems()?;
@@ -2688,7 +2374,7 @@ impl Renderer {
 
     /// Returns whether GPU-driven occlusion culling is enabled
     pub fn occlusion_culling_enabled(&self) -> bool {
-        self.pipeline.hiz_pass.is_some() && self.indirect_draw_pass.is_some()
+        self.pipeline.hiz_pass.is_some() && self.pipeline.indirect_draw_pass.is_some()
     }
 
 
@@ -2982,7 +2668,6 @@ impl Drop for Renderer {
             // This prevents access violations during shutdown if the window/surface is destroyed.
             // ORDER MATTERS: Pipeline depends on RenderPass (in FullscreenPass), so destroy Pipeline FIRST.
 
-            swapchain_manager::cleanup_render_pass(self);  // Drains hdr_render_pass
             swapchain_manager::cleanup_pipeline(self);
 
             // Cleanup VSM (Explicit)
@@ -3010,8 +2695,7 @@ impl Drop for Renderer {
             self.draw_items.clear();
             
             self.depth_buffer = None;
-            self.main_graphics_pipeline = None;
-            self.render_pass = None;
+            self.pipeline.main_graphics_pipeline = None;
             self.swapchain = None;
 
 

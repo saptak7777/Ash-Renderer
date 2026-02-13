@@ -14,9 +14,9 @@ use crate::{AshError, Result};
 /// No vertex buffer needed - vertices are generated in the shader.
 pub struct FullscreenPass {
     device: Arc<ash::Device>,
-    render_pass: vk::RenderPass,
     pipeline_layout: vk::PipelineLayout,
     descriptor_set_layout: vk::DescriptorSetLayout,
+    output_format: vk::Format,
 }
 
 impl FullscreenPass {
@@ -24,54 +24,8 @@ impl FullscreenPass {
     ///
     /// # Safety
     /// Device must remain valid for the lifetime of this pass.
-    pub unsafe fn new(
-        device: Arc<ash::Device>,
-        output_format: vk::Format,
-        final_layout: vk::ImageLayout,
-    ) -> Result<Self> {
+    pub unsafe fn new(device: Arc<ash::Device>, output_format: vk::Format) -> Result<Self> {
         log::info!("Creating fullscreen pass");
-
-        // Create render pass for fullscreen output
-        let color_attachment = vk::AttachmentDescription {
-            format: output_format,
-            samples: vk::SampleCountFlags::TYPE_1,
-            load_op: vk::AttachmentLoadOp::CLEAR,
-            store_op: vk::AttachmentStoreOp::STORE,
-            stencil_load_op: vk::AttachmentLoadOp::DONT_CARE,
-            stencil_store_op: vk::AttachmentStoreOp::DONT_CARE,
-            initial_layout: vk::ImageLayout::UNDEFINED,
-            final_layout,
-            ..Default::default()
-        };
-
-        let color_ref = vk::AttachmentReference {
-            attachment: 0,
-            layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
-        };
-
-        let subpass = vk::SubpassDescription::default()
-            .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
-            .color_attachments(std::slice::from_ref(&color_ref));
-
-        let dependency = vk::SubpassDependency {
-            src_subpass: vk::SUBPASS_EXTERNAL,
-            dst_subpass: 0,
-            src_stage_mask: vk::PipelineStageFlags::BOTTOM_OF_PIPE,
-            src_access_mask: vk::AccessFlags::MEMORY_READ,
-            dst_stage_mask: vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
-            dst_access_mask: vk::AccessFlags::COLOR_ATTACHMENT_READ
-                | vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
-            dependency_flags: vk::DependencyFlags::BY_REGION,
-        };
-
-        let render_pass_info = vk::RenderPassCreateInfo::default()
-            .attachments(std::slice::from_ref(&color_attachment))
-            .subpasses(std::slice::from_ref(&subpass))
-            .dependencies(std::slice::from_ref(&dependency));
-
-        let render_pass = device
-            .create_render_pass(&render_pass_info, None)
-            .map_err(|e| AshError::VulkanError(format!("Fullscreen render pass failed: {e}")))?;
 
         // Create descriptor set layout for input texture
         // Create descriptor set layout for input textures
@@ -128,15 +82,15 @@ impl FullscreenPass {
 
         Ok(Self {
             device,
-            render_pass,
             pipeline_layout,
             descriptor_set_layout,
+            output_format,
         })
     }
 
-    /// Returns the render pass
-    pub fn render_pass(&self) -> vk::RenderPass {
-        self.render_pass
+    /// Returns the output format
+    pub fn output_format(&self) -> vk::Format {
+        self.output_format
     }
 
     /// Returns the pipeline layout
@@ -157,7 +111,7 @@ impl FullscreenPass {
     ) -> Result<vulkan::Pipeline> {
         let mut builder = vulkan::Pipeline::builder(Arc::clone(device))
             .with_layout(self.pipeline_layout)
-            .with_render_pass(self.render_pass)
+            .with_dynamic_rendering(&[self.output_format], None, None)
             .with_extent(extent)
             .with_cull_mode(vk::CullModeFlags::NONE);
 
@@ -182,10 +136,7 @@ impl Drop for FullscreenPass {
         unsafe {
             log::debug!("Destroying fullscreen pass");
             self.device
-                .destroy_pipeline_layout(self.pipeline_layout, None);
-            self.device
                 .destroy_descriptor_set_layout(self.descriptor_set_layout, None);
-            self.device.destroy_render_pass(self.render_pass, None);
         }
     }
 }

@@ -1,6 +1,6 @@
 use crate::renderer::init_types::*;
 use crate::renderer::model_renderer::{DRAW_PUSH_FRAGMENT_BYTES, DRAW_PUSH_VERTEX_BYTES};
-use crate::renderer::resource_registry::{ResourceId, ResourceRegistry};
+use crate::renderer::resource_registry::ResourceRegistry;
 use crate::renderer::resources::material::MAX_MATERIALS;
 use crate::renderer::resources::{
     self,
@@ -30,39 +30,8 @@ pub unsafe fn create_swapchain_data(
         swapchain.extent.height,
     )?;
 
-    let mut render_pass = vulkan::RenderPass::builder(Arc::clone(&device.device))
-        .with_swapchain_color(
-            swapchain.format,
-            if device.headless {
-                vk::ImageLayout::TRANSFER_SRC_OPTIMAL
-            } else {
-                vk::ImageLayout::PRESENT_SRC_KHR
-            },
-        )
-        .with_depth_attachment(
-            depth_buffer.format(),
-            vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
-        )
-        .build()?;
-    render_pass.mark_managed_by_registry();
-
-    let mut framebuffers = Vec::new();
-    for &image_view in &swapchain.image_views {
-        let attachments = [image_view, depth_buffer.view()];
-        let mut framebuffer = vulkan::Framebuffer::new(
-            Arc::clone(&device.device),
-            render_pass.handle(),
-            &attachments,
-            swapchain.extent,
-        )?;
-        framebuffer.mark_managed_by_registry();
-        framebuffers.push(framebuffer);
-    }
-
     Ok(SwapchainData {
         swapchain,
-        render_pass: render_pass.handle(),
-        framebuffers,
         depth_buffer,
     })
 }
@@ -87,28 +56,11 @@ pub unsafe fn init_swapchain<S: vulkan::SurfaceProvider>(
     data.swapchain.mark_image_views_managed_by_registry();
 
     let depth_buffer_id = data.depth_buffer.register_with_registry(resources)?;
-    let render_pass_id = resources.register_render_pass(data.render_pass)?;
-
-    let mut framebuffer_ids = Vec::with_capacity(data.framebuffers.len());
-    for (idx, fb) in data.framebuffers.iter_mut().enumerate() {
-        let id = resources.register_framebuffer(
-            fb.handle(),
-            &[
-                render_pass_id,
-                depth_buffer_id,
-                swapchain_image_view_ids[idx],
-            ],
-        )?;
-        fb.mark_managed_by_registry();
-        framebuffer_ids.push(id);
-    }
 
     Ok(SwapchainDataWithIds {
         data,
         swapchain_image_view_ids,
         depth_buffer_id,
-        render_pass_id,
-        framebuffer_ids,
     })
 }
 
@@ -145,8 +97,7 @@ pub unsafe fn create_main_pipeline(
     device: &vulkan::VulkanDevice,
     resources: &Arc<ResourceRegistry>,
     swapchain_extent: vk::Extent2D,
-    render_pass: vk::RenderPass,
-    render_pass_id: crate::renderer::resource_registry::ResourceId,
+    color_formats: &[vk::Format],
     set_layouts: &[vk::DescriptorSetLayout],
     pipeline_cfg: &PipelineConfig,
     depth_format: vk::Format,
@@ -176,7 +127,7 @@ pub unsafe fn create_main_pipeline(
 
     let mut pipeline_builder = vulkan::Pipeline::builder(Arc::clone(&device.device))
         .with_layout(pipeline_layout_handle)
-        .with_render_pass(render_pass)
+        .with_dynamic_rendering(color_formats, Some(depth_format), None)
         .with_extent(swapchain_extent)
         .with_pipeline_cache(pipeline_cache)
         .with_depth_format(depth_format)
@@ -209,8 +160,7 @@ pub unsafe fn create_main_pipeline(
 
     // Register resources
     let pipeline_layout_id = resources.register_pipeline_layout(pipeline_layout_handle)?;
-    let pipeline_id =
-        resources.register_pipeline(pipeline_handle, &[pipeline_layout_id, render_pass_id])?;
+    let pipeline_id = resources.register_pipeline(pipeline_handle, &[pipeline_layout_id])?;
 
     Ok((
         pipeline_layout_wrapper,
@@ -224,8 +174,7 @@ pub unsafe fn init_pipelines(
     device: &vulkan::VulkanDevice,
     resources: &Arc<ResourceRegistry>,
     extent: vk::Extent2D,
-    render_pass: vk::RenderPass,
-    render_pass_id: ResourceId,
+    color_formats: &[vk::Format],
     set_layouts: &[vk::DescriptorSetLayout],
     pipeline_cfg: &PipelineConfig,
     depth_format: vk::Format,
@@ -235,8 +184,7 @@ pub unsafe fn init_pipelines(
         device,
         resources,
         extent,
-        render_pass,
-        render_pass_id,
+        color_formats,
         set_layouts,
         pipeline_cfg,
         depth_format,
@@ -457,7 +405,6 @@ pub unsafe fn init_rendering_passes(
     depth_format: vk::Format,
     depth_view: vk::ImageView,
     pipeline_cache: vk::PipelineCache,
-    render_pass_handle: vk::RenderPass,
     multisample_config: vulkan::MultisampleConfig,
     set_layouts: &[vk::DescriptorSetLayout],
     model_renderer: &crate::renderer::model_renderer::ModelRenderer,
@@ -518,7 +465,7 @@ pub unsafe fn init_rendering_passes(
     let skybox_pass = crate::renderer::passes::SkyboxPass::new(
         device,
         resources,
-        render_pass_handle,
+        vk::Format::B8G8R8A8_SRGB, // Standard swapchain format (skybox works with any format)
         swapchain_extent,
         pipeline_cache,
         depth_format,

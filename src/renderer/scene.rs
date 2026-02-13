@@ -306,4 +306,12 @@ impl Scene {
     pub fn add_spot_light(&mut self, light: SpotLight) {
         self.spot_lights.push(light);
     }
+
+    /// Helper to gather Buffer Device Addresses (BDA) for geometry logic.
+    /// Returns (vertex_ptr, index_ptr).
+    pub fn get_geometry_buffer_addresses(&self) -> (u64, u64) {
+        let vertex_ptr = self.model_renderer.geometry_buffer.vertex_heap_address();
+        let index_ptr = self.model_renderer.geometry_buffer.index_heap_address();
+        (vertex_ptr, index_ptr)
+    }
 }

@@ -9,8 +9,6 @@ use std::sync::Arc;
 
 pub struct SwapchainData {
     pub swapchain: vulkan::SwapchainWrapper,
-    pub render_pass: vk::RenderPass,
-    pub framebuffers: Vec<vulkan::Framebuffer>,
     pub depth_buffer: DepthBuffer,
 }
 
@@ -18,8 +16,6 @@ pub struct SwapchainDataWithIds {
     pub data: SwapchainData,
     pub swapchain_image_view_ids: Vec<ResourceId>,
     pub depth_buffer_id: ResourceId,
-    pub render_pass_id: ResourceId,
-    pub framebuffer_ids: Vec<ResourceId>,
 }
 
 pub struct FrameData {
