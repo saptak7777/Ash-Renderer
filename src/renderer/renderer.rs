@@ -58,34 +58,6 @@ use crate::renderer::resources::GlobalClusterBuffer;
 
 // RendererResources moved to init_types.rs
 
-fn compute_worker_index(worker_count: usize, frame_index: usize) -> usize {
-    if worker_count == 0 {
-        0
-    } else {
-        frame_index % worker_count
-    }
-}
-
-
-
-#[cfg(test)]
-mod tests {
-    use super::compute_worker_index;
-
-    #[test]
-    fn worker_index_zero_workers() {
-        assert_eq!(compute_worker_index(0, 0), 0);
-        assert_eq!(compute_worker_index(0, 5), 0);
-    }
-
-    #[test]
-    fn worker_index_wraps() {
-        assert_eq!(compute_worker_index(4, 0), 0);
-        assert_eq!(compute_worker_index(4, 3), 3);
-        assert_eq!(compute_worker_index(4, 4), 0);
-        assert_eq!(compute_worker_index(4, 7), 3);
-    }
-}
 
 
 /// Main rendering system.
@@ -642,9 +614,6 @@ impl Renderer {
 
 
 
-    fn worker_index_for_frame(&self, frame_index: usize) -> usize {
-        compute_worker_index(self.cmds.worker_count(), frame_index)
-    }
 
 
 
@@ -1615,41 +1584,7 @@ impl Renderer {
         self.taa_config_metrics.report()
     }
 
-    pub fn render_frame(
-        &mut self,
-        scene: &mut super::Scene,
-        view: Mat4,
-        projection: Mat4,
-        camera_pos: glam::Vec3,
-        model_matrix: Option<Mat4>,
-    ) -> Result<()> {
-        scene.transform_system.update();
-        scene.transform_system.update_buffers()?;
-        
-        // Task 3: Simplified resize handling
-        if self.queue.is_resize_pending() {
-            crate::renderer::swapchain_manager::recreate_swapchain_resources(self, scene)?;
-            
-            // CRITICAL: Update Forward+ depth descriptor whenever swapchain/depth is resized
-            if let Some(ref fp_lock) = self.pipeline.forward_plus {
-                if let (Some(db), Some(_db_ptr)) = (&self.depth_buffer, self.depth_buffer_id) {
-                    let mut fp = fp_lock.write().unwrap();
-                    unsafe {
-                        fp.update_depth_descriptor(
-                            &self.device.device,
-                            db.view(),
-                            db.sampler(),
-                        );
-                    }
-                    log::info!("Forward+ depth descriptors updated after resize.");
-                }
-            }
-        }
-        self.queue.flush_old_swapchains(&self.device);
-
-        // EXTRA SAFETY (Phase 2.7): Forward+ is now pre-initialized in Renderer::new
-
-
+    pub fn sync_frame_resources(&mut self, scene: &mut Scene) -> Result<()> {
         // Phase 20: Sync Materials to GPU (Modularity Fix)
         let sync_list: Vec<(u32, crate::renderer::resources::Material)> = {
             scene.material_manager.iter_unsynced(&scene.uploaded_material_indices)
@@ -1669,8 +1604,6 @@ impl Renderer {
         if let Some(dm) = self.descriptors.as_mut() {
             dm.next_frame();
         }
-
-
 
         // Hot-reload shaders if changed (throttled to every ~1 second)
         const SHADER_CHECK_INTERVAL: usize = 60;
@@ -1698,54 +1631,43 @@ impl Renderer {
             }
         }
 
+        Ok(())
+    }
 
-
-        log::debug!(
-            "Frame {}: Material synchronization complete",
-            self.frame_manager.get_current_frame_index()
-        );
-
-        // Task 3: Simplified resize handling logic moved to start of frame
-
+    pub fn prepare_frame_data(
+        &mut self,
+        scene: &mut Scene,
+        view: Mat4,
+        projection: Mat4,
+        camera_pos: glam::Vec3,
+        model_matrix: Option<Mat4>,
+    ) -> Result<(usize, u32, vk::Extent2D, Mat4, [f32; 2])> {
         unsafe {
             let swapchain_extent = self
                 .swapchain
                 .as_ref()
                 .ok_or(AshError::VulkanError("Swapchain not available".to_string()))?
                 .extent;
-            let scene_pipeline = self
-                .pipeline
-                .main_graphics_pipeline
-                .as_ref()
-                .map(|p| p.pipeline)
-                .ok_or(AshError::VulkanError("Pipeline not available".to_string()))?;
 
-            // Phase 1: Use RenderQueue to acquire next frame and synchronization objects
             // Phase 1: Use FrameManager to acquire next frame and synchronization objects
             self.frame_manager.next_frame(&self.device.device)?;
             let swapchain_loader = ash::khr::swapchain::Device::new(self.device.instance.instance(), &self.device.device);
             let swapchain_khr = self.swapchain.as_ref().unwrap().swapchain;
             let (image_index, _suboptimal) = self.frame_manager.acquire_next_image(&swapchain_loader, swapchain_khr)?;
-            let command_buffer = self.frame_manager.begin_command_buffer(&self.device.device)?;
+            
             let frame_index = self.frame_manager.get_current_frame_index();
-
-
-
-            // Build object registry once per frame
 
             // Prepare culling data for this frame
             scene.occlusion_culling.begin_frame();
             for (i, item) in self.draw_items.iter().enumerate() {
                 if let Some(uploaded) = scene.model_renderer.get(&item.key) {
-                    // Use mesh clusters for fine-grained culling
-                    // Fallback to mesh bounds if clusters are empty
                     let bounds = scene
                         .mesh_data
                         .get(item.mesh_id as usize)
                         .map(|m| m.bounds)
                         .unwrap_or_else(|| CullBoundingBox::new(Vec3::ZERO, Vec3::ONE * 100.0));
                     let material_index = item.material_handle.index as u32;
-                    let vertex_offset = uploaded.vertex_offset.unwrap_or(0) as i32 / 64; // 64 bytes per vertex
+                    let vertex_offset = uploaded.vertex_offset.unwrap_or(0) as i32 / 64; 
                     
                     scene.occlusion_culling.push_clusters(
                         bounds,
@@ -1762,13 +1684,11 @@ impl Renderer {
                 }
             }
 
-
-            // Apply sub-pixel jitter for VSR/VSR if enabled
+            // Apply sub-pixel jitter for VSR if enabled
             let mut jittered_projection = projection;
             let mut jitter_uv = [0.0f32; 2];
             if let Some(ref mut vsr) = self.vsr_pass {
                 let (jx, jy) = vsr.next_jitter();
-                // Jitter is in pixels [-0.5, 0.5], convert to NDC/UV
                 jitter_uv = [jx, jy];
                 let extent = self
                     .swapchain
@@ -1781,31 +1701,24 @@ impl Renderer {
 
             // GPU synchronization confirmed; safe to update uniform buffer.
             {
-                // SAFETY: frame_index validity verified by previous unchecked access logic.
                 let uniform_buffer = self.uniform_buffers.get_unchecked_mut(frame_index);
-
-                // Create dummy transform for legacy feature compatibility
                 let mut dummy_transform = resources::Transform::identity();
-
                 let elapsed = self.start_time.elapsed().as_secs_f32();
                 let mut feature_ctx = FeatureFrameContext {
                     device: self.device.device.as_ref(),
                     descriptor_allocator: self.descriptors.as_ref(),
-                    transform: &mut dummy_transform, // Use dummy
-                    auto_rotate: false, // Auto-rotate now handled by examples
+                    transform: &mut dummy_transform,
+                    auto_rotate: false,
                     elapsed_seconds: elapsed,
                 };
                 self.features.before_frame(&mut feature_ctx);
 
-                // Update VSM clipmap centers and page manager
                 if let Some(shadow_system) = self.pipeline.shadow_system_mut() {
                     shadow_system.vsm_feature_mut().begin_frame(frame_index as u32, camera_pos);
                 }
 
-                // Matrices provided via function arguments.
                 let mut ub = uniform_buffer.write().unwrap();
                 let matrices = ub.matrices_mut();
-                // Use pre-calculated normal matrix for the provided model matrix
                 let model = model_matrix.unwrap_or(Mat4::IDENTITY);
                 let mut transform = resources::Transform::identity();
                 transform.set_model(model);
@@ -1818,11 +1731,6 @@ impl Renderer {
                 matrices.prev_view_proj = self.prev_view_proj;
                 matrices.camera_pos = camera_pos.extend(1.0);
 
-                // Phase 2: Lean Engine "Studio Architecture" Logic
-                // Single Source of Truth: environment map indices drive shader logic.
-                // Indices < 0 indicate no IBL/Environment map is bound.
-
-                // Sync light counts and tile configuration from scene and forward_plus to GPU-aligned lighting struct
                 scene.scene_lighting.point_light_count = scene.point_lights.len() as u32;
                 if let Some(fp) = &self.pipeline.forward_plus {
                     let info = fp.read().unwrap().get_lights().get_forward_plus_info();
@@ -1831,145 +1739,111 @@ impl Renderer {
                     scene.scene_lighting.tile_size = info.tile_size;
                 }
                 matrices.set_lighting(&scene.scene_lighting);
+                matrices.set_light_space_matrix(glam::Mat4::IDENTITY);
 
-                // Set light-space matrix for shadow mapping
-                let light_space_matrix = glam::Mat4::IDENTITY; // VSM uses internal matrices
-                matrices.set_light_space_matrix(light_space_matrix);
-                // REDUNDANT OVERWRITE REMOVED: Using pre-calculated normal matrix from transform_system
-                // matrices.normal_matrix = matrices.model.inverse().transpose();
+                // Phase 2: Host-side Forward+ updates (Lights and Camera)
+                // We perform these updates during preparation to match the Uniform Buffer lifecycle
+                if let Some(ref fp_integration) = self.pipeline.forward_plus {
+                    let mut fp = fp_integration.write().unwrap();
+                    // Update light data from scene before uploading
+                    fp.update_lights(&scene.point_lights, &scene.directional_lights, &scene.spot_lights);
+
+                    // Update GPU buffers and descriptors for the current frame
+                    fp.upload_to_gpu(&self.alloc, &self.device.device, frame_index as usize)?;
+
+                    // Update camera buffer with current view/projection matrices
+                    // We use the NON-JITTERED projection for culling to match frustum
+                    fp.update_camera(
+                        &self.alloc,
+                        frame_index as usize,
+                        &view.to_cols_array_2d(),
+                        &projection.to_cols_array_2d(),
+                        &camera_pos.extend(1.0).to_array(),
+                    )?;
+                }
 
                 let view_proj = matrices.view_proj;
                 ub.update()?;
                 self.prev_view_proj = view_proj;
             }
 
-            // Matrix updates complete.
-            // Note: global_barrier moved inside command buffer recording block below for BDA/Uniform safety.
+            Ok((frame_index, image_index, swapchain_extent, jittered_projection, jitter_uv))
+        }
+    }
 
-            let device_arc = Arc::clone(&self.device.device);
-            let cmd_ctx = CommandBufferContext::new(device_arc.as_ref(), command_buffer);
-            cmd_ctx.reset()?;
+    fn execute_hiz_pass(&mut self, command_buffer: vk::CommandBuffer) -> Result<()> {
+        if let Some(ref db) = self.depth_buffer {
+            self.pipeline.execute_hiz_pass(
+                command_buffer,
+                db.image(),
+                self.gpu_profiler.as_ref(),
+                self._black_texture.view(),
+                self._black_texture.sampler(),
+            )?;
+        }
+        Ok(())
+    }
 
-            log::debug!(
-                "Frame {}: Using image index {}",
-                self.frame_manager.get_current_frame_index(),
-                image_index
-            );
-
-            let worker_index = self.worker_index_for_frame(frame_index);
-            debug_assert!(
-                worker_index < self.cmds.worker_count().max(1),
-                "worker index {} out of bounds for {} workers",
-                worker_index,
-                self.cmds.worker_count()
-            );
-
-            cmd_ctx.begin(vk::CommandBufferUsageFlags::empty())?;
-
-            // CRITICAL: Ensure all host-written buffers (including bindless storage buffers) are visible to GPU
-            // This is required because examples might update buffers directly on the host.
-            // Moved inside cmd_ctx block to fix DEVICE_LOST crash on Intel Arc/Discrete GPUs.
-            let global_barrier = vk::MemoryBarrier::default()
-                .src_access_mask(vk::AccessFlags::HOST_WRITE)
-                .dst_access_mask(
-                    vk::AccessFlags::SHADER_READ
-                    | vk::AccessFlags::UNIFORM_READ
-                    | vk::AccessFlags::INDEX_READ
-                    | vk::AccessFlags::VERTEX_ATTRIBUTE_READ
-                );
-
-                self.device.device.cmd_pipeline_barrier(
-                    command_buffer,
-                    vk::PipelineStageFlags::HOST,
-                    vk::PipelineStageFlags::ALL_GRAPHICS | vk::PipelineStageFlags::COMPUTE_SHADER,
-                    vk::DependencyFlags::empty(),
-                    &[global_barrier],
-                    &[],
-                    &[],
-                );
-
-            // Phase 10: Execute Hi-Z construction (Modularized in Chunk 3.1)
-            if let Some(ref db) = self.depth_buffer {
-                self.pipeline.execute_hiz_pass(
-                    command_buffer,
-                    db.image(),
-                    self.gpu_profiler.as_ref(),
-                    self._black_texture.view(),
-                    self._black_texture.sampler(),
-                )?;
+    fn execute_shadow_pass(
+        &mut self,
+        command_buffer: vk::CommandBuffer,
+        scene: &mut Scene,
+        frame_index: usize,
+    ) -> Result<(Vec<InstanceData>, HashMap<BatchKey, u32>)> {
+        let mut all_instances = Vec::new();
+        let mut batch_offsets = HashMap::new();
+        {
+            for batch in self.instancing_manager.batches() {
+                batch_offsets.insert(batch.key.clone(), all_instances.len() as u32);
+                all_instances.extend_from_slice(&batch.instances);
             }
-
-            // --- Phase 8: Instance Data Preparation ---
-            // 1. Prepare and upload all instances to the InstanceBuffer
-            let mut all_instances = Vec::new();
-            let mut batch_offsets = HashMap::new();
-            {
-                for batch in self.instancing_manager.batches() {
-                    batch_offsets.insert(batch.key.clone(), all_instances.len() as u32);
-                    all_instances.extend_from_slice(&batch.instances);
-                }
-            }
-            if !all_instances.is_empty() {
+        }
+        if !all_instances.is_empty() {
+            unsafe {
                 self.instance_buffers[frame_index].update(&all_instances)?;
             }
+        }
 
-            // Shadows (Modularized in Chunk 3.1)
-            let light_ptr = self.pipeline.forward_plus.as_ref().map(|fp| fp.read().unwrap().get_lights().light_ptr(frame_index)).unwrap_or(0);
-            let tile_ptr = self.pipeline.forward_plus.as_ref().map(|fp| fp.read().unwrap().get_lights().tile_ptr(frame_index)).unwrap_or(0);
+        let light_ptr = self.pipeline.forward_plus.as_ref().map(|fp| fp.read().unwrap().get_lights().light_ptr(frame_index)).unwrap_or(0);
+        let tile_ptr = self.pipeline.forward_plus.as_ref().map(|fp| fp.read().unwrap().get_lights().tile_ptr(frame_index)).unwrap_or(0);
 
-            let bindless_descriptor_set = self.assets.bindless_manager.descriptor_set();
-            let uniform_buffer_address = self.uniform_buffers[frame_index].read().unwrap().device_address();
+        let bindless_descriptor_set = self.assets.bindless_manager.descriptor_set();
+        let uniform_buffer_address = self.uniform_buffers[frame_index].read().unwrap().device_address();
 
-            self.pipeline.render_shadows(
-                command_buffer,
-                scene,
-                frame_index,
-                &self.device.device,
-                bindless_descriptor_set,
-                uniform_buffer_address,
-                self.instance_buffer_addresses[frame_index],
-                self.material_heap_address,
-                light_ptr,
-                tile_ptr,
-                all_instances.len(),
-            )?;
+        self.pipeline.render_shadows(
+            command_buffer,
+            scene,
+            frame_index,
+            &self.device.device,
+            bindless_descriptor_set,
+            uniform_buffer_address,
+            self.instance_buffer_addresses[frame_index],
+            self.material_heap_address,
+            light_ptr,
+            tile_ptr,
+            all_instances.len(),
+        )?;
+        
+        Ok((all_instances, batch_offsets))
+    }
 
-            // --- Light Culling Compute Dispatch ---
-            if let Some(ref fp_integration) = self.pipeline.forward_plus {
-                let mut fp = fp_integration.write().unwrap();
-                // Update light data from scene before uploading
-                fp.update_lights(&scene.point_lights, &scene.directional_lights, &scene.spot_lights);
+    fn dispatch_light_culling(&self, command_buffer: vk::CommandBuffer, frame_index: usize) -> Result<()> {
+        if let Some(ref fp_integration) = self.pipeline.forward_plus {
+            let fp = fp_integration.read().unwrap();
+            unsafe {
+                fp.dispatch(command_buffer, &self.device.device, frame_index as usize);
+            }
 
-                // Update GPU buffers and descriptors for the current frame
-                fp.upload_to_gpu(&self.alloc, &self.device.device, frame_index as usize)?;
+            let light_barrier = vk::BufferMemoryBarrier::default()
+                .buffer(fp.lights().get_light_buffer(frame_index as usize).unwrap_or(vk::Buffer::null()))
+                .src_access_mask(vk::AccessFlags::SHADER_WRITE)
+                .dst_access_mask(vk::AccessFlags::SHADER_READ)
+                .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .offset(0)
+                .size(vk::WHOLE_SIZE);
 
-                // Update camera buffer with current view/projection matrices
-                // We use the NON-JITTERED projection for culling to match frustum
-                fp.update_camera(
-                    &self.alloc,
-                    frame_index as usize,
-                    &view.to_cols_array_2d(),
-                    &projection.to_cols_array_2d(),
-                    &camera_pos.extend(1.0).to_array(),
-                )?;
-
-                // Dispatch the compute shader
-                fp.dispatch(
-                    command_buffer,
-                    &self.device.device,
-                    frame_index as usize
-                );
-
-                // Barrier: Ensure light buffers are ready for the fragment shader
-                let light_barrier = vk::BufferMemoryBarrier::default()
-                    .buffer(fp.lights().get_light_buffer(frame_index as usize).unwrap_or(vk::Buffer::null()))
-                    .src_access_mask(vk::AccessFlags::SHADER_WRITE)
-                    .dst_access_mask(vk::AccessFlags::SHADER_READ)
-                    .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                    .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                    .offset(0)
-                    .size(vk::WHOLE_SIZE);
-
+            unsafe {
                 self.device.device.cmd_pipeline_barrier(
                     command_buffer,
                     vk::PipelineStageFlags::COMPUTE_SHADER,
@@ -1980,153 +1854,224 @@ impl Renderer {
                     &[],
                 );
             }
+        }
+        Ok(())
+    }
 
+    fn execute_geometry_pass(
+        &mut self,
+        cmd_ctx: &CommandBufferContext,
+        frame_index: usize,
+        image_index: u32,
+        scene: &Scene,
+        view: Mat4,
+        jittered_projection: Mat4,
+        swapchain_extent: vk::Extent2D,
+        batch_offsets: &HashMap<BatchKey, u32>,
+        scene_pipeline: vk::Pipeline,
+    ) -> Result<()> {
+        let light_ptr = self.pipeline.forward_plus.as_ref().map(|fp| fp.read().unwrap().get_lights().light_ptr(frame_index)).unwrap_or(0);
+        let tile_ptr = self.pipeline.forward_plus.as_ref().map(|fp| fp.read().unwrap().get_lights().tile_ptr(frame_index)).unwrap_or(0);
 
+        let pipeline_layout = self.pipeline.pipeline_layout.as_ref().ok_or_else(|| {
+            AshError::VulkanError("Pipeline layout not available".to_string())
+        })?;
+        let pipeline_layout_handle = pipeline_layout.handle();
 
-            // PREPARE FOR CULLING & RENDERING (Moved out of Render Pass)
-            let light_ptr = self.pipeline.forward_plus.as_ref().map(|fp| fp.read().unwrap().get_lights().light_ptr(frame_index)).unwrap_or(0);
-            let tile_ptr = self.pipeline.forward_plus.as_ref().map(|fp| fp.read().unwrap().get_lights().tile_ptr(frame_index)).unwrap_or(0);
+        let main_pass_params = MainPassParameters {
+            cmd_ctx,
+            frame_index,
+            image_index,
+            scene_pipeline,
+            pipeline_layout_handle,
+            batch_offsets,
+            view,
+            projection: jittered_projection,
+            swapchain_extent,
+            light_ptr,
+            tile_ptr,
+            scene,
+        };
 
-            let pipeline_layout = self.pipeline.pipeline_layout.as_ref().ok_or_else(|| {
-                AshError::VulkanError("Pipeline layout not available".to_string())
-            })?;
-            let pipeline_layout_handle = pipeline_layout.handle();
+        self.cull_main_pass(&main_pass_params)?;
 
-            let main_pass_params = MainPassParameters {
-                cmd_ctx: &cmd_ctx,
+        cmd_ctx.bind_pipeline(vk::PipelineBindPoint::GRAPHICS, scene_pipeline);
+
+        let viewport = vk::Viewport {
+            x: 0.0,
+            y: 0.0,
+            width: swapchain_extent.width as f32,
+            height: swapchain_extent.height as f32,
+            min_depth: 0.0,
+            max_depth: 1.0,
+        };
+        let scissor = vk::Rect2D {
+            offset: vk::Offset2D { x: 0, y: 0 },
+            extent: swapchain_extent,
+        };
+        cmd_ctx.set_viewport(0, &[viewport]);
+        cmd_ctx.set_scissor(0, &[scissor]);
+
+        if self.descriptors.is_some() {
+            cmd_ctx.bind_descriptor_sets(
+                vk::PipelineBindPoint::GRAPHICS,
+                pipeline_layout_handle,
+                0, 
+                &[self.assets.bindless_manager.descriptor_set()],
+                &[],
+            );
+        }
+
+        self.render_main_pass(&main_pass_params)?;
+        Ok(())
+    }
+
+    fn execute_post_process(
+        &mut self,
+        command_buffer: vk::CommandBuffer,
+        image_index: u32,
+        swapchain_extent: vk::Extent2D,
+        jitter_uv: [f32; 2],
+    ) -> Result<()> {
+        if let (Some(ref mut vsr), Some(ref mut _gbuffer)) = (&mut self.vsr_pass, &mut self.gbuffer) {
+            let _: std::result::Result<vsr_pass::VsrMetricsReadback, vsr_pass::VsrError> = vsr.readback_metrics(command_buffer, &self.alloc.vma);
+
+            let sharpen_mode = self.taa_config.sharpening;
+            let sharpen_config = if sharpen_mode != SharpeningMode::None {
+                Some(SharpenConfig {
+                    strength: sharpen_mode.strength(),
+                    edge_threshold: 0.12,
+                    adaptive: true,
+                })
+            } else {
+                None
+            };
+
+            let vsr_config = VsrUpscaleConfig {
+                velocity_threshold: self.taa_config.velocity_threshold,
+                history_weight: self.taa_config.blend_factor,
+                clamping_gamma: self.taa_config.quality.clamping_gamma(),
+                anti_ghosting: true,
+            };
+
+            let vsr_inputs = VsrInputs {
+                color_index: self.hdr_image_index.ok_or_else(|| {
+                    AshError::VulkanError("HDR image index not initialized for VSR".to_string())
+                })?,
+                depth_index: if self.gbuffer_indices.depth_index == u32::MAX {
+                    return Err(AshError::VulkanError("Depth index not initialized for VSR".to_string()));
+                } else {
+                    self.gbuffer_indices.depth_index
+                },
+                motion_index: if self.gbuffer_indices.motion_index == u32::MAX {
+                    return Err(AshError::VulkanError("Motion index not initialized for VSR".to_string()));
+                } else {
+                    self.gbuffer_indices.motion_index
+                },
+                jitter: jitter_uv,
+            };
+
+            unsafe {
+                vsr.upscale_with_sharpening(command_buffer, vsr_inputs, &vsr_config, sharpen_config.as_ref())
+                    .map_err(|e| AshError::VulkanError(format!("VSR upscale failed: {e}")))?;
+            }
+            vsr.next_frame();
+        }
+
+        self.pipeline.render_post_process(
+            command_buffer,
+            image_index as usize,
+            swapchain_extent,
+            self.swapchain.as_ref().unwrap().images[image_index as usize],
+            self.swapchain.as_ref().unwrap().image_views[image_index as usize],
+            self.hdr_system.as_ref(),
+            self.vsr_pass.as_ref(),
+            self._black_texture.view(),
+        )?;
+
+        Ok(())
+    }
+
+    pub fn record_and_submit(
+        &mut self,
+        frame_index: usize,
+        image_index: u32,
+        scene: &mut Scene,
+        view: Mat4,
+        jittered_projection: Mat4,
+        jitter_uv: [f32; 2],
+        swapchain_extent: vk::Extent2D,
+    ) -> Result<()> {
+        unsafe {
+            let scene_pipeline = self
+                .pipeline
+                .main_graphics_pipeline
+                .as_ref()
+                .map(|p| p.pipeline)
+                .ok_or(AshError::VulkanError("Pipeline not available".to_string()))?;
+
+            let command_buffer = self.frame_manager.begin_command_buffer(&self.device.device)?;
+            let device_arc = Arc::clone(&self.device.device);
+            let cmd_ctx = CommandBufferContext::new(device_arc.as_ref(), command_buffer);
+
+            log::debug!(
+                "Frame {}: Using image index {}",
+                self.frame_manager.get_current_frame_index(),
+                image_index
+            );
+
+            // 1. Barriers: Ensure all host-written buffers are visible to GPU
+            let global_barrier = vk::MemoryBarrier::default()
+                .src_access_mask(vk::AccessFlags::HOST_WRITE)
+                .dst_access_mask(
+                    vk::AccessFlags::SHADER_READ
+                    | vk::AccessFlags::UNIFORM_READ
+                    | vk::AccessFlags::INDEX_READ
+                    | vk::AccessFlags::VERTEX_ATTRIBUTE_READ
+                );
+
+            self.device.device.cmd_pipeline_barrier(
+                command_buffer,
+                vk::PipelineStageFlags::HOST,
+                vk::PipelineStageFlags::ALL_GRAPHICS | vk::PipelineStageFlags::COMPUTE_SHADER,
+                vk::DependencyFlags::empty(),
+                &[global_barrier],
+                &[],
+                &[],
+            );
+
+            // 2. Hi-Z Pass
+            self.execute_hiz_pass(command_buffer)?;
+
+            // 3. Shadow Pass (Includes Instance Data Preparation)
+            let (_all_instances, batch_offsets) = self.execute_shadow_pass(command_buffer, scene, frame_index)?;
+
+            // 4. Light Culling Pass
+            self.dispatch_light_culling(command_buffer, frame_index)?;
+
+            // 5. Geometry Pass (Culling & Main Rendering)
+            self.execute_geometry_pass(
+                &cmd_ctx,
                 frame_index,
                 image_index,
-                scene_pipeline,
-                pipeline_layout_handle,
-                batch_offsets: &batch_offsets,
-                view,
-                projection: jittered_projection,
-                swapchain_extent,
-                light_ptr,
-                tile_ptr,
                 scene,
-            };
-
-            // CRITICAL FIX: Execute Compute Culling BEFORE Render Pass
-            self.cull_main_pass(&main_pass_params)?;
-
-            // Dynamic Rendering: No RenderPass needed here. Pipeline handles begin/end rendering.
-            cmd_ctx.bind_pipeline(vk::PipelineBindPoint::GRAPHICS, scene_pipeline);
-
-            let viewport = vk::Viewport {
-                x: 0.0,
-                y: 0.0,
-                width: swapchain_extent.width as f32,
-                height: swapchain_extent.height as f32,
-                min_depth: 0.0,
-                max_depth: 1.0,
-            };
-            let scissor = vk::Rect2D {
-                offset: vk::Offset2D { x: 0, y: 0 },
-                extent: swapchain_extent,
-            };
-            cmd_ctx.set_viewport(0, &[viewport]);
-            cmd_ctx.set_scissor(0, &[scissor]);
-
-            let _ = (|| -> Result<vk::DescriptorSet> {
-                // Bind Unified Bindless descriptor set (Set 0)
-                // We check descriptors existence to ensure renderer is initialized,
-                // but we bind strictly from bindless_manager.
-                if self.descriptors.is_some() {
-                    cmd_ctx.bind_descriptor_sets(
-                        vk::PipelineBindPoint::GRAPHICS,
-                        pipeline_layout_handle,
-                        0, // Set 0: Unified Bindless (Textures, Materials, Instances, Shadows, Storage)
-                        &[self.assets.bindless_manager.descriptor_set()],
-                        &[],
-                    );
-                }
-                Ok(vk::DescriptorSet::null())
-            })()?;
-
-            // --- Phase 10: GPU Instancing & Culling Integration ---
-            self.render_main_pass(&main_pass_params)?;
-
-
-            // --- VSR (Upscaling) Pass ---
-            if let (Some(ref mut vsr), Some(ref mut _gbuffer)) =
-                (&mut self.vsr_pass, &mut self.gbuffer)
-            {
-                // Read back metrics from previous frame (non-blocking)
-                let _: std::result::Result<vsr_pass::VsrMetricsReadback, vsr_pass::VsrError> = vsr.readback_metrics(command_buffer, &self.alloc.vma);
-
-                let _depth_buffer = self
-                    .depth_buffer
-                    .as_ref()
-                    .ok_or_else(|| AshError::VulkanError("Depth buffer missing".to_string()))?;
-                // Pass current color result (which is now correctly the HDR buffer if initialized)
-                // and upsample to VSR history.
-                let sharpen_mode = self.taa_config.sharpening;
-                let sharpen_config = if sharpen_mode != SharpeningMode::None {
-                    Some(SharpenConfig {
-                        strength: sharpen_mode.strength(),
-                        edge_threshold: 0.12,
-                        adaptive: true,
-                    })
-                } else {
-                    None
-                };
-
-                let vsr_config = VsrUpscaleConfig {
-                    velocity_threshold: self.taa_config.velocity_threshold,
-                    history_weight: self.taa_config.blend_factor,
-                    clamping_gamma: self.taa_config.quality.clamping_gamma(),
-                    anti_ghosting: true,
-                };
-
-                let vsr_inputs = VsrInputs {
-                    color_index: self.hdr_image_index.ok_or_else(|| {
-                        AshError::VulkanError("HDR image index not initialized for VSR".to_string())
-                    })?,
-                    depth_index: if self.gbuffer_indices.depth_index == u32::MAX {
-                        return Err(AshError::VulkanError("Depth index not initialized for VSR".to_string()));
-                    } else {
-                        self.gbuffer_indices.depth_index
-                    },
-                    motion_index: if self.gbuffer_indices.motion_index == u32::MAX {
-                        return Err(AshError::VulkanError("Motion index not initialized for VSR".to_string()));
-                    } else {
-                        self.gbuffer_indices.motion_index
-                    },
-                    jitter: jitter_uv,
-                };
-
-                vsr.upscale_with_sharpening(
-                    command_buffer,
-                    vsr_inputs,
-                    &vsr_config,
-                    sharpen_config.as_ref(),
-                )
-                .map_err(|e| AshError::VulkanError(format!("VSR upscale failed: {e}")))?;
-                vsr.next_frame();
-            }
-
-            // Post-Processing (Modularized in Chunk 3.1)
-            self.pipeline.render_post_process(
-                command_buffer,
-                image_index as usize,
+                view,
+                jittered_projection,
                 swapchain_extent,
-                self.swapchain.as_ref().unwrap().images[image_index as usize],
-                self.swapchain.as_ref().unwrap().image_views[image_index as usize],
-                self.hdr_system.as_ref(),
-                self.vsr_pass.as_ref(),
-                self._black_texture.view(),
+                &batch_offsets,
+                scene_pipeline,
             )?;
 
+            // 6. Post-Process Pass (Includes VSR)
+            self.execute_post_process(command_buffer, image_index, swapchain_extent, jitter_uv)?;
 
+            // 7. End and Submit
             cmd_ctx.end()?;
-
-            let _is_headless = self.swapchain.as_ref().map_or(false, |s| s.is_headless());
 
             let swapchain_loader = ash::khr::swapchain::Device::new(self.device.instance.instance(), &self.device.device);
             let swapchain_khr = self.swapchain.as_ref().unwrap().swapchain;
             
-            let _resize_needed = self.frame_manager.submit_and_present(
+            self.frame_manager.submit_and_present(
                 &self.device.device,
                 self.queue.graphics_queue,
                 self.queue.present_queue,
@@ -2135,10 +2080,39 @@ impl Renderer {
                 image_index,
             )?;
 
-            self.last_image_index = image_index;
-
             Ok(())
         }
+    }
+
+    pub fn render_frame(
+        &mut self,
+        scene: &mut Scene,
+        view: Mat4,
+        projection: Mat4,
+        camera_pos: glam::Vec3,
+        model_matrix: Option<Mat4>,
+    ) -> Result<()> {
+        scene.transform_system.update();
+        scene.transform_system.update_buffers()?;
+        
+        if self.queue.is_resize_pending() {
+            crate::renderer::swapchain_manager::recreate_swapchain_resources(self, scene)?;
+        }
+        self.queue.flush_old_swapchains(&self.device);
+
+        // 1. Sync
+        self.sync_frame_resources(scene)?;
+
+        // 2. Prepare
+        let (frame_index, image_index, extent, jitter_proj, jitter_uv) = 
+            self.prepare_frame_data(scene, view, projection, camera_pos, model_matrix)?;
+        
+        self.last_image_index = image_index;
+
+        // 3. Record & Submit
+        self.record_and_submit(frame_index, image_index, scene, view, jitter_proj, jitter_uv, extent)?;
+
+        Ok(())
     }
 
 

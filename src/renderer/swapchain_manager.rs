@@ -32,6 +32,17 @@ pub fn recreate_swapchain_resources(renderer: &mut Renderer, scene: &mut Scene) 
     renderer.update_image_views(&image_views)?;
 
     renderer.recreate_depth_buffer(swapchain_extent)?;
+
+    // Update Forward+ depth descriptor if the system is active
+    if let (Some(ref db), Some(ref fp_lock)) =
+        (&renderer.depth_buffer, &renderer.pipeline.forward_plus)
+    {
+        let mut fp = fp_lock.write().unwrap();
+        unsafe {
+            fp.update_depth_descriptor(&renderer.device.device, db.view(), db.sampler());
+        }
+        log::info!("Forward+ depth descriptors updated after resize.");
+    }
     renderer.recreate_gbuffer(swapchain_extent)?;
 
     if renderer.hdr_system.is_some() {
