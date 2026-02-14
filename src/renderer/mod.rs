@@ -6,9 +6,11 @@
 pub mod assets;
 pub mod cleanup_traits;
 pub mod command_list;
+pub mod context;
 pub mod diagnostics;
 pub mod features;
 pub mod forward_plus_integration;
+pub mod frame;
 pub mod frame_manager;
 pub mod init_types;
 pub mod initialization;

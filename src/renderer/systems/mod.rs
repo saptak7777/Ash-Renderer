@@ -1,1 +1,319 @@
 pub mod post_process;
+
+use crate::renderer::features::AutoRotateFeature;
+use crate::renderer::{
+    context::Context,
+    diagnostics::{DiagnosticsOverlay, DiagnosticsState, FrameProfiler, GpuProfiler},
+    features::FeatureManager,
+    frame::Frame,
+    passes::{
+        hiz::AdaptiveHiZManager,
+        motion::MotionVectorPass,
+        temporal_aa::{ConfigMetrics, TaaConfig},
+        vsr::{VsrConfig, VsrPass},
+        SkyboxPass,
+    },
+    render_pipeline::RenderPipeline,
+    resource_registry::ResourceId,
+    resources::Resources,
+    types::{DebugMode, RendererConfig},
+    HdrSystem, PipelineCache,
+};
+use crate::{vulkan, AshError, Result};
+use ash::vk;
+use std::sync::{Arc, RwLock};
+
+/// Systems manages high-level rendering logic and pipeline state.
+pub struct Systems {
+    pub pipeline: RenderPipeline,
+    pub skybox_pass: Option<SkyboxPass>,
+
+    // Features & Config
+    pub features: FeatureManager,
+    pub vsr_pass: Option<VsrPass>,
+    pub motion_pass: Option<MotionVectorPass>,
+    pub hdr_system: Option<HdrSystem>,
+
+    // Cache & IDs
+    pub pipeline_cache: PipelineCache,
+    pub pipeline_id: Option<ResourceId>,
+    pub pipeline_layout_id: Option<ResourceId>,
+
+    // Diagnostics & Performance
+    pub diagnostics: DiagnosticsState,
+    pub frame_profiler: FrameProfiler,
+    pub gpu_profiler: Option<GpuProfiler>,
+    pub diagnostics_overlay: DiagnosticsOverlay,
+
+    // Configuration
+    pub debug_mode: DebugMode,
+    pub strict_mode: bool,
+    pub sample_shading: crate::renderer::types::SampleShadingQuality,
+    pub taa_config: TaaConfig,
+    pub taa_config_metrics: ConfigMetrics,
+    pub vsr_config: VsrConfig,
+}
+
+impl Systems {
+    /// Initializes all high-level rendering systems.
+    pub fn new(
+        context: &Context,
+        resources: &mut Resources,
+        frame: &mut Frame,
+        pipeline_cache: PipelineCache,
+        _width: u32,
+        _height: u32,
+        config: &RendererConfig,
+    ) -> Result<Self> {
+        log::info!("Initializing Systems");
+
+        let mut features = FeatureManager::new();
+        features.set_device(Arc::clone(&context.device.device));
+        features.add_feature(AutoRotateFeature::new());
+
+        let mut lighting = resources.lighting.take().expect("Lighting not initialized");
+        let post = resources
+            .post
+            .take()
+            .expect("Post-processing not initialized");
+        let mut passes = resources.passes.take().expect("Passes not initialized");
+        let pipelines = resources
+            .pipelines
+            .take()
+            .expect("Pipelines not initialized");
+
+        let systems = Self {
+            pipeline: RenderPipeline::new(
+                lighting.shadow_system.take(),
+                post.post_process,
+                Some(Arc::new(RwLock::new(
+                    passes.hiz_pass.take().expect("HiZ Pass not found"),
+                ))),
+                AdaptiveHiZManager::new(3.0),
+                Some(Arc::new(RwLock::new(lighting.forward_plus))),
+                Some(Arc::new(RwLock::new(
+                    passes
+                        .indirect_draw_pass
+                        .take()
+                        .expect("Indirect Draw Pass not found"),
+                ))),
+                Some(pipelines.pipeline),
+                Some(pipelines.layout),
+            ),
+            skybox_pass: passes.skybox_pass.take(),
+            features,
+            vsr_pass: None,
+            motion_pass: None,
+            hdr_system: None,
+            pipeline_cache,
+            pipeline_id: Some(pipelines.pipeline_id),
+            pipeline_layout_id: Some(pipelines.layout_id),
+            diagnostics: DiagnosticsState::default(),
+            frame_profiler: FrameProfiler::new(),
+            gpu_profiler: None,
+            diagnostics_overlay: DiagnosticsOverlay::new(),
+            debug_mode: DebugMode::default(),
+            strict_mode: config.strict_mode,
+            sample_shading: config.pipeline.sample_shading,
+            taa_config: TaaConfig::default(),
+            taa_config_metrics: ConfigMetrics::default(),
+            vsr_config: VsrConfig::default(),
+        };
+
+        frame.gbuffer_indices = Some(passes.gbuffer_indices);
+
+        Ok(systems)
+    }
+
+    /// Initialize motion vector pass for VSR/TAA
+    ///
+    /// # Safety
+    /// Must be called after GBuffer is initialized
+    pub unsafe fn init_motion_pass(
+        &mut self,
+        context: &Context,
+        resources: &Resources,
+    ) -> Result<()> {
+        if self.motion_pass.is_some() {
+            return Ok(()); // Already initialized
+        }
+
+        let _gbuffer = resources.gbuffer.as_ref().ok_or(AshError::VulkanError(
+            "GBuffer must be initialized before motion pass".to_string(),
+        ))?;
+
+        let mut motion_pass = MotionVectorPass::new(Arc::clone(&context.device.device));
+
+        // Initialize with G-Buffer motion format
+        let motion_format = vk::Format::R16G16_SFLOAT;
+        motion_pass.init(&context.device, motion_format)?;
+
+        self.motion_pass = Some(motion_pass);
+
+        log::info!("Motion vector pass initialized");
+
+        Ok(())
+    }
+
+    /// Extracted resize logic for Pipelines and Passes.
+    pub fn resize(
+        &mut self,
+        context: &Context,
+        resources: &mut Resources,
+        width: u32,
+        height: u32,
+        swapchain_format: vk::Format,
+        image_count: usize,
+    ) -> Result<()> {
+        let extent = vk::Extent2D { width, height };
+
+        // --- 1. Recreate VSR Pass if enabled ---
+        if let Some(ref mut vsr) = self.vsr_pass {
+            unsafe {
+                vsr.destroy(&context.alloc.vma);
+                vsr.init(
+                    &context.alloc.vma,
+                    &context.device,
+                    &mut resources.assets.bindless_manager,
+                    width,
+                    height,
+                    self.vsr_config.quality,
+                )
+                .map_err(|e| AshError::VulkanError(format!("VSR init failed: {e}")))?;
+            }
+        }
+
+        // --- 2. Recreate Main Graphics Pipeline ---
+        log::info!("Recompiling pipeline due to resize/shader change...");
+        let layout = self
+            .pipeline
+            .pipeline_layout
+            .as_ref()
+            .ok_or_else(|| AshError::VulkanError("Pipeline layout missing".to_string()))?
+            .handle();
+
+        // Determine color format (HDR or swapchain)
+        let color_format = if let Some(hdr) = &self.hdr_system {
+            hdr.format()
+        } else {
+            swapchain_format
+        };
+
+        let cache = self.pipeline_cache.handle();
+        let depth_format = resources
+            .depth_buffer
+            .as_ref()
+            .ok_or(AshError::VulkanError("Depth buffer missing".into()))?
+            .format();
+
+        let multisample_config = vulkan::MultisampleConfig {
+            sample_count: vk::SampleCountFlags::TYPE_1,
+            enable_sample_shading: self.sample_shading.enabled(),
+            min_sample_shading: self.sample_shading.min_sample_shading(),
+        };
+
+        // Build color attachment formats based on GBuffer configuration
+        let color_formats = if resources.gbuffer.is_some() {
+            vec![
+                color_format,                    // Index 0: Main color (HDR or swapchain)
+                vk::Format::R16G16B16A16_SFLOAT, // Index 1: Normals
+                vk::Format::R8G8B8A8_UNORM,      // Index 2: Albedo
+                vk::Format::R16G16_SFLOAT,       // Index 3: Motion Vectors
+            ]
+        } else {
+            vec![color_format] // ONLY Main Color
+        };
+
+        let mut builder = vulkan::Pipeline::builder(Arc::clone(&context.device.device))
+            .with_layout(layout)
+            .with_dynamic_rendering(&color_formats, Some(depth_format), None)
+            .with_extent(extent)
+            .with_pipeline_cache(cache)
+            .with_depth_format(depth_format)
+            .with_depth_test(vk::CompareOp::GREATER_OR_EQUAL, true)
+            .with_cull_mode(vk::CullModeFlags::NONE)
+            .with_front_face(vk::FrontFace::CLOCKWISE)
+            .with_multisampling(multisample_config);
+
+        if resources.gbuffer.is_some() {
+            let blend_attachments = vec![
+                vk::PipelineColorBlendAttachmentState {
+                    color_write_mask: vk::ColorComponentFlags::R
+                        | vk::ColorComponentFlags::G
+                        | vk::ColorComponentFlags::B
+                        | vk::ColorComponentFlags::A,
+                    blend_enable: vk::TRUE,
+                    src_color_blend_factor: vk::BlendFactor::SRC_ALPHA,
+                    dst_color_blend_factor: vk::BlendFactor::ONE_MINUS_SRC_ALPHA,
+                    color_blend_op: vk::BlendOp::ADD,
+                    src_alpha_blend_factor: vk::BlendFactor::ONE,
+                    dst_alpha_blend_factor: vk::BlendFactor::ZERO,
+                    alpha_blend_op: vk::BlendOp::ADD,
+                },
+                vk::PipelineColorBlendAttachmentState {
+                    color_write_mask: vk::ColorComponentFlags::R
+                        | vk::ColorComponentFlags::G
+                        | vk::ColorComponentFlags::B
+                        | vk::ColorComponentFlags::A,
+                    blend_enable: vk::FALSE,
+                    ..Default::default()
+                },
+                vk::PipelineColorBlendAttachmentState {
+                    color_write_mask: vk::ColorComponentFlags::R
+                        | vk::ColorComponentFlags::G
+                        | vk::ColorComponentFlags::B
+                        | vk::ColorComponentFlags::A,
+                    blend_enable: vk::FALSE,
+                    ..Default::default()
+                },
+                vk::PipelineColorBlendAttachmentState {
+                    color_write_mask: vk::ColorComponentFlags::R
+                        | vk::ColorComponentFlags::G
+                        | vk::ColorComponentFlags::B
+                        | vk::ColorComponentFlags::A,
+                    blend_enable: vk::FALSE,
+                    ..Default::default()
+                },
+            ];
+            builder = builder.with_color_blend_attachments(blend_attachments);
+        }
+
+        builder = builder.add_shader_from_bytes(
+            include_bytes!(concat!(env!("OUT_DIR"), "/vert.vert.spv")),
+            vk::ShaderStageFlags::VERTEX,
+            "main",
+        )?;
+        builder = builder.add_shader_from_bytes(
+            include_bytes!(concat!(env!("OUT_DIR"), "/frag.frag.spv")),
+            vk::ShaderStageFlags::FRAGMENT,
+            "main",
+        )?;
+
+        let mut new_pipeline = builder.build()?;
+        let pipeline_layout_id = self.pipeline_layout_id.ok_or_else(|| {
+            AshError::VulkanError("Pipeline layout ID missing during recreation".into())
+        })?;
+
+        let pipeline_id = context
+            .resources
+            .register_pipeline(new_pipeline.pipeline, &[pipeline_layout_id])
+            .map_err(|e| AshError::VulkanError(format!("Failed to register pipeline: {e}")))?;
+
+        new_pipeline.mark_managed_by_registry();
+        self.pipeline.main_graphics_pipeline = Some(new_pipeline);
+        self.pipeline_id = Some(pipeline_id);
+
+        // --- 3. Skybox Pass (Check status/log) ---
+        if self.skybox_pass.is_some() {
+            log::info!("Skybox pass adapts via dynamic state; no explicit recreation needed.");
+        }
+
+        // --- 4. Post Process Resize ---
+        self.pipeline
+            .post_process_mut()
+            .resize(image_count, extent)?;
+
+        log::info!("Systems recreation complete");
+        Ok(())
+    }
+}

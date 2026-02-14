@@ -477,11 +477,11 @@ pub unsafe fn init_rendering_passes(
     )?;
 
     Ok(RenderingPasses {
-        gbuffer,
+        gbuffer: Some(gbuffer),
         gbuffer_indices,
-        hiz_pass,
-        indirect_draw_pass,
-        skybox_pass,
+        hiz_pass: Some(hiz_pass),
+        indirect_draw_pass: Some(indirect_draw_pass),
+        skybox_pass: Some(skybox_pass),
     })
 }
 
@@ -528,7 +528,7 @@ pub unsafe fn init_lighting_system(
     Ok(LightingSystem {
         forward_plus,
         shadow_system,
-        global_cluster_buffer,
+        global_cluster_buffer: Arc::new(global_cluster_buffer),
     })
 }
 

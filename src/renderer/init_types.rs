@@ -54,17 +54,17 @@ pub struct PipelineData {
 }
 
 pub struct RenderingPasses {
-    pub gbuffer: crate::renderer::GBuffer,
+    pub gbuffer: Option<crate::renderer::GBuffer>,
     pub gbuffer_indices: crate::renderer::types::GBufferIndices,
-    pub hiz_pass: crate::renderer::passes::hiz::HiZPass,
-    pub indirect_draw_pass: crate::renderer::vcgs::IndirectDrawPass,
-    pub skybox_pass: crate::renderer::passes::SkyboxPass,
+    pub hiz_pass: Option<crate::renderer::passes::hiz::HiZPass>,
+    pub indirect_draw_pass: Option<crate::renderer::vcgs::IndirectDrawPass>,
+    pub skybox_pass: Option<crate::renderer::passes::SkyboxPass>,
 }
 
 pub struct LightingSystem {
     pub forward_plus: crate::renderer::ForwardPlusIntegration,
     pub shadow_system: Option<crate::renderer::features::ShadowSystem>,
-    pub global_cluster_buffer: crate::renderer::resources::GlobalClusterBuffer,
+    pub global_cluster_buffer: Arc<crate::renderer::resources::GlobalClusterBuffer>,
 }
 
 pub struct RenderQueueData {

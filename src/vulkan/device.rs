@@ -258,13 +258,3 @@ impl VulkanDevice {
         )
     }
 }
-
-impl Drop for VulkanDevice {
-    fn drop(&mut self) {
-        unsafe {
-            let _ = self.device.device_wait_idle();
-            self.device.destroy_device(None);
-            log::info!("Vulkan device destroyed");
-        }
-    }
-}

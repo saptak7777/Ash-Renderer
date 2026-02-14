@@ -22,8 +22,8 @@ fn main() -> Result<()> {
     // 2. Create Renderer
     let mut renderer = Renderer::new(&surface_provider)?;
     let mut scene = Scene::new(
-        Arc::clone(&renderer.device.device),
-        Arc::clone(&renderer.alloc),
+        Arc::clone(&renderer.context.device.device),
+        Arc::clone(&renderer.context.alloc),
         renderer.geometry_buffer(),
     )?;
     renderer.enable_post_processing(&mut scene)?;
@@ -32,18 +32,18 @@ fn main() -> Result<()> {
     // 3. Set up scene (Cube)
     let mut cube = Mesh::create_cube();
     let upload_cmd = renderer.get_transfer_command_buffer()?;
-    let cmd_context = renderer.cmds.context(upload_cmd);
+    let cmd_context = renderer.frame.cmds.context(upload_cmd);
     cmd_context.begin(ash::vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT)?;
 
     let mut staging_resources = Vec::new();
     let mesh_handle = scene.upload_mesh(
-        Arc::clone(&renderer.device.device),
-        Arc::clone(&renderer.alloc),
-        renderer.cmds.upload_command_pool_handle(),
+        Arc::clone(&renderer.context.device.device),
+        Arc::clone(&renderer.context.alloc),
+        renderer.frame.cmds.upload_command_pool_handle(),
         upload_cmd,
-        &renderer.device.graphics_queue,
+        &renderer.context.device.graphics_queue,
         &mut cube,
-        &mut renderer.assets,
+        &mut renderer.resources.assets,
         &mut staging_resources,
         None,
     )?;
@@ -54,15 +54,16 @@ fn main() -> Result<()> {
     let cmds = [upload_cmd];
     let submit_info = ash::vk::SubmitInfo::default().command_buffers(&cmds);
     unsafe {
-        renderer.device.device.queue_submit(
-            renderer.device.graphics_queue,
+        renderer.context.device.device.queue_submit(
+            renderer.context.device.graphics_queue,
             &[submit_info],
             ash::vk::Fence::null(),
         )?;
         renderer
+            .context
             .device
             .device
-            .queue_wait_idle(renderer.device.graphics_queue)?;
+            .queue_wait_idle(renderer.context.device.graphics_queue)?;
     }
 
     let material = Material {
@@ -102,7 +103,9 @@ fn main() -> Result<()> {
 
     // 6. Read back the image data
     log::info!("Reading back image data...");
-    let image_data = renderer.read_headless_image()?;
+    let image_data = renderer
+        .resources
+        .read_headless_image(&renderer.context, &renderer.frame)?;
     log::info!("Image readback complete. Size: {} bytes", image_data.len());
 
     // 7. Save to file using the `image` crate

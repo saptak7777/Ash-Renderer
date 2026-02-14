@@ -57,16 +57,16 @@ impl ApplicationHandler for App {
         match Renderer::new(&surface_provider) {
             Ok(mut renderer) => {
                 let mut scene = Scene::new(
-                    Arc::clone(&renderer.device.device),
-                    Arc::clone(&renderer.alloc),
+                    Arc::clone(&renderer.context.device.device),
+                    Arc::clone(&renderer.context.alloc),
                     renderer.geometry_buffer(),
                 )
                 .expect("Failed to create scene");
 
                 // CRITICAL: Must assign global buffers BEFORE uploading meshes/materials
                 println!("Initializing Scene Buffers...");
-                scene.global_cluster_buffer = renderer.global_cluster_buffer.clone();
-                scene.material_storage_buffer = renderer.material_storage_buffer.clone();
+                scene.global_cluster_buffer = renderer.resources.global_cluster_buffer.clone();
+                scene.material_storage_buffer = renderer.resources.material_storage_buffer.clone();
                 println!("✓ Scene buffers synchronized with renderer.");
 
                 // Create a cube mesh
@@ -94,7 +94,7 @@ impl ApplicationHandler for App {
 
                 // Upload mesh
                 let upload_cmd = renderer.get_transfer_command_buffer().unwrap();
-                let cmd_context = renderer.cmds.context(upload_cmd);
+                let cmd_context = renderer.frame.cmds.context(upload_cmd);
                 cmd_context
                     .begin(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT)
                     .unwrap();
@@ -102,13 +102,13 @@ impl ApplicationHandler for App {
                 let mut staging_resources = Vec::new();
                 let mesh_handle = scene
                     .upload_mesh(
-                        Arc::clone(&renderer.device.device),
-                        Arc::clone(&renderer.alloc),
-                        renderer.cmds.upload_command_pool_handle(),
+                        Arc::clone(&renderer.context.device.device),
+                        Arc::clone(&renderer.context.alloc),
+                        renderer.frame.cmds.upload_command_pool_handle(),
                         upload_cmd,
-                        &renderer.device.graphics_queue,
+                        &renderer.context.device.graphics_queue,
                         &mut cube,
-                        &mut renderer.assets,
+                        &mut renderer.resources.assets,
                         &mut staging_resources,
                         Some(material_handle),
                     )
@@ -121,18 +121,20 @@ impl ApplicationHandler for App {
                 let submit_info = vk::SubmitInfo::default().command_buffers(&cmds);
                 unsafe {
                     renderer
+                        .context
                         .device
                         .device
                         .queue_submit(
-                            renderer.device.graphics_queue,
+                            renderer.context.device.graphics_queue,
                             &[submit_info],
                             vk::Fence::null(),
                         )
                         .unwrap();
                     renderer
+                        .context
                         .device
                         .device
-                        .queue_wait_idle(renderer.device.graphics_queue)
+                        .queue_wait_idle(renderer.context.device.graphics_queue)
                         .unwrap();
                 }
                 log::info!("✓ Mesh uploaded to GPU");
@@ -149,7 +151,11 @@ impl ApplicationHandler for App {
                 // Register bindless storage buffer (prevents crash)
                 let tint_colors = [Vec4::new(1.0, 1.0, 1.0, 1.0)];
                 if let Ok((tint_buffer, _tint_index)) =
-                    renderer.register_bindless_storage_buffer(&tint_colors, "DefaultTint")
+                    renderer.resources.register_bindless_storage_buffer(
+                        &renderer.context,
+                        &tint_colors,
+                        "DefaultTint",
+                    )
                 {
                     self.tint_buffer = Some(tint_buffer);
                     log::info!("✓ Registered default tint buffer");
@@ -331,8 +337,8 @@ fn run_headless(max_frames: u32) -> Result<()> {
 
     let mut renderer = Renderer::new(&surface_provider)?;
     let mut scene = Scene::new(
-        Arc::clone(&renderer.device.device),
-        Arc::clone(&renderer.alloc),
+        Arc::clone(&renderer.context.device.device),
+        Arc::clone(&renderer.context.alloc),
         renderer.geometry_buffer(),
     )?;
 
@@ -354,13 +360,13 @@ fn run_headless(max_frames: u32) -> Result<()> {
     let material_handle = scene.register_material(&material).unwrap();
     let mesh_handle = scene
         .upload_mesh(
-            Arc::clone(&renderer.device.device),
-            Arc::clone(&renderer.alloc),
-            renderer.cmds.upload_command_pool_handle(),
+            Arc::clone(&renderer.context.device.device),
+            Arc::clone(&renderer.context.alloc),
+            renderer.frame.cmds.upload_command_pool_handle(),
             upload_cmd,
-            &renderer.device.graphics_queue,
+            &renderer.context.device.graphics_queue,
             &mut cube,
-            &mut renderer.assets,
+            &mut renderer.resources.assets,
             &mut staging_resources,
             Some(material_handle),
         )
@@ -376,7 +382,12 @@ fn run_headless(max_frames: u32) -> Result<()> {
     let _tint_buffer = {
         let tint_colors = [Vec4::new(1.0, 1.0, 1.0, 1.0)];
         renderer
-            .register_bindless_storage_buffer(&tint_colors, "DefaultTintHeadless")
+            .resources
+            .register_bindless_storage_buffer(
+                &renderer.context,
+                &tint_colors,
+                "DefaultTintHeadless",
+            )
             .ok()
             .map(|(b, _)| b)
     };

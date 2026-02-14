@@ -66,8 +66,8 @@ impl ApplicationHandler for App {
             Ok(mut renderer) => {
                 // Create Scene
                 let mut scene = Scene::new(
-                    Arc::clone(&renderer.device.device),
-                    Arc::clone(&renderer.alloc),
+                    Arc::clone(&renderer.context.device.device),
+                    Arc::clone(&renderer.context.alloc),
                     renderer.geometry_buffer(),
                 )
                 .expect("Failed to create scene");
@@ -75,7 +75,8 @@ impl ApplicationHandler for App {
                 // Register Global Default Tint Buffer (Required by Shader)
                 let tint_data = [[1.0f32, 1.0, 1.0, 1.0]];
                 let (tint_buffer, _tint_index) = renderer
-                    .register_bindless_storage_buffer(&tint_data, "GlobalTint")
+                    .resources
+                    .register_bindless_storage_buffer(&renderer.context, &tint_data, "GlobalTint")
                     .expect("Failed to register global tint buffer");
 
                 // Keep buffer alive
@@ -150,12 +151,14 @@ impl ApplicationHandler for App {
                     .renderer
                     .as_ref()
                     .unwrap()
+                    .resources
                     .global_cluster_buffer
                     .clone();
                 scene.material_storage_buffer = self
                     .renderer
                     .as_ref()
                     .unwrap()
+                    .resources
                     .material_storage_buffer
                     .clone();
                 self.scene = Some(scene);
@@ -176,7 +179,7 @@ impl ApplicationHandler for App {
                 if let Some(fence) = self.upload_fence {
                     unsafe {
                         if let Some(renderer) = &self.renderer {
-                            renderer.device.device.destroy_fence(fence, None);
+                            renderer.context.device.device.destroy_fence(fence, None);
                         }
                     }
                     self.upload_fence = None;
@@ -205,7 +208,7 @@ impl ApplicationHandler for App {
 
                                 // Prepare batched upload
                                 let upload_cmd = renderer.get_transfer_command_buffer().unwrap();
-                                let cmd_ctx = renderer.cmds.context(upload_cmd);
+                                let cmd_ctx = renderer.frame.cmds.context(upload_cmd);
                                 cmd_ctx
                                     .begin(ash::vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT)
                                     .unwrap();
@@ -217,13 +220,13 @@ impl ApplicationHandler for App {
                                     let name = mesh.name.clone();
                                     let mesh_handle = scene
                                         .upload_mesh(
-                                            Arc::clone(&renderer.device.device),
-                                            Arc::clone(&renderer.alloc),
-                                            renderer.cmds.upload_command_pool_handle(),
+                                            Arc::clone(&renderer.context.device.device),
+                                            Arc::clone(&renderer.context.alloc),
+                                            renderer.frame.cmds.upload_command_pool_handle(),
                                             upload_cmd,
-                                            &renderer.device.graphics_queue,
+                                            &renderer.context.device.graphics_queue,
                                             &mut mesh,
-                                            &mut renderer.assets,
+                                            &mut renderer.resources.assets,
                                             &mut staging_resources,
                                             None,
                                         )
@@ -254,7 +257,7 @@ impl ApplicationHandler for App {
 
                                 // Finalize batch and submit
                                 {
-                                    let cmd_ctx = renderer.cmds.context(upload_cmd);
+                                    let cmd_ctx = renderer.frame.cmds.context(upload_cmd);
                                     cmd_ctx.end().unwrap();
                                 }
                                 let cmds = [upload_cmd];
@@ -263,6 +266,7 @@ impl ApplicationHandler for App {
 
                                 let upload_fence_result = unsafe {
                                     renderer
+                                        .context
                                         .device
                                         .device
                                         .create_fence(&ash::vk::FenceCreateInfo::default(), None)
@@ -280,8 +284,8 @@ impl ApplicationHandler for App {
                                 };
 
                                 let submit_result = unsafe {
-                                    renderer.device.device.queue_submit(
-                                        renderer.device.graphics_queue,
+                                    renderer.context.device.device.queue_submit(
+                                        renderer.context.device.graphics_queue,
                                         &[submit_info],
                                         upload_fence,
                                     )
@@ -290,7 +294,11 @@ impl ApplicationHandler for App {
                                 if let Err(e) = submit_result {
                                     log::error!("Async Loader: GPU submit failed: {e}");
                                     unsafe {
-                                        renderer.device.device.destroy_fence(upload_fence, None);
+                                        renderer
+                                            .context
+                                            .device
+                                            .device
+                                            .destroy_fence(upload_fence, None);
                                     }
                                     self.upload_fence = None;
                                 } else {
@@ -324,11 +332,11 @@ impl ApplicationHandler for App {
                     // Non-blocking check for upload completion
                     if let Some(fence) = self.upload_fence {
                         unsafe {
-                            let status = renderer.device.device.get_fence_status(fence);
+                            let status = renderer.context.device.device.get_fence_status(fence);
                             match status {
                                 Ok(true) => {
                                     // Upload complete! Destroy fence and proceed.
-                                    renderer.device.device.destroy_fence(fence, None);
+                                    renderer.context.device.device.destroy_fence(fence, None);
                                     self.upload_fence = None;
                                     log::info!("GPU Upload Complete. Starting Render Loop.");
                                 }
@@ -340,7 +348,7 @@ impl ApplicationHandler for App {
                                     log::error!(
                                         "Failed to check fence status: {e}, destroying fence"
                                     );
-                                    renderer.device.device.destroy_fence(fence, None);
+                                    renderer.context.device.device.destroy_fence(fence, None);
                                     self.upload_fence = None;
                                     ready_to_draw = false;
                                 }

@@ -7,16 +7,17 @@ pub fn recreate_swapchain_resources(renderer: &mut Renderer, scene: &mut Scene) 
 
     // Delegate creation to the Queue
     {
-        let queue = &mut renderer.queue;
+        let queue = &mut renderer.context.queue;
         let swapchain = renderer
+            .frame
             .swapchain
             .as_mut()
             .ok_or(AshError::VulkanError("Swapchain not available".into()))?;
-        queue.recreate_swapchain(swapchain, &renderer.device)?;
+        queue.recreate_swapchain(swapchain, &renderer.context.device)?;
     }
 
     let (swapchain_extent, image_views, image_count) = {
-        let swapchain = renderer.swapchain.as_ref().ok_or_else(|| {
+        let swapchain = renderer.frame.swapchain.as_ref().ok_or_else(|| {
             AshError::VulkanError("Swapchain unavailable after recreation".into())
         })?;
         (
@@ -31,31 +32,36 @@ pub fn recreate_swapchain_resources(renderer: &mut Renderer, scene: &mut Scene) 
 
     renderer.update_image_views(&image_views)?;
 
-    renderer.recreate_depth_buffer(swapchain_extent)?;
+    {
+        let gbuffer_indices = renderer.frame.gbuffer_indices.as_mut().unwrap();
+        renderer.resources.resize(
+            &renderer.context,
+            gbuffer_indices,
+            swapchain_extent,
+            image_count,
+        )?;
+    }
 
     // Update Forward+ depth descriptor if the system is active
-    if let (Some(ref db), Some(ref fp_lock)) =
-        (&renderer.depth_buffer, &renderer.pipeline.forward_plus)
-    {
+    if let (Some(ref db), Some(ref fp_lock)) = (
+        &renderer.resources.depth_buffer,
+        &renderer.systems.pipeline.forward_plus,
+    ) {
         let mut fp = fp_lock.write().unwrap();
         unsafe {
-            fp.update_depth_descriptor(&renderer.device.device, db.view(), db.sampler());
+            fp.update_depth_descriptor(&renderer.context.device.device, db.view(), db.sampler());
         }
         log::info!("Forward+ depth descriptors updated after resize.");
     }
-    renderer.recreate_gbuffer(swapchain_extent)?;
 
-    if renderer.hdr_system.is_some() {
+    if renderer.systems.hdr_system.is_some() {
         renderer.initialize_hdr(swapchain_extent.width, swapchain_extent.height)?;
     }
 
-    renderer.recreate_vsr_pass(swapchain_extent)?;
-
     renderer.recreate_frame_syncs(image_count)?;
     renderer.recreate_command_buffers()?;
-    renderer.recreate_uniform_buffers(image_count)?;
 
-    if let Some(ref forward_plus_arc) = renderer.pipeline.forward_plus {
+    if let Some(ref forward_plus_arc) = renderer.systems.pipeline.forward_plus {
         let mut forward_plus = forward_plus_arc.write().unwrap();
         forward_plus.on_resize(swapchain_extent.width, swapchain_extent.height);
         let fp_info = forward_plus.get_lights().get_forward_plus_info();
@@ -65,22 +71,26 @@ pub fn recreate_swapchain_resources(renderer: &mut Renderer, scene: &mut Scene) 
     }
 
     renderer.recreate_descriptor_sets()?;
-    renderer.recreate_pipeline()?;
-    renderer.recreate_skybox_pipeline()?;
-    renderer
-        .pipeline
-        .post_process_mut()
-        .resize(image_count, swapchain_extent)?;
+
+    // Push systems logic down
+    renderer.systems.resize(
+        &renderer.context,
+        &mut renderer.resources,
+        swapchain_extent.width,
+        swapchain_extent.height,
+        renderer.frame.swapchain.as_ref().unwrap().format,
+        image_count,
+    )?;
 
     log::info!("Swapchain recreation complete ({image_count} images)");
     Ok(())
 }
 
 pub(crate) fn cleanup_pipeline(renderer: &mut Renderer) {
-    if let Some(pipeline_id) = renderer.pipeline_id.take() {
-        if let Err(e) = renderer.resources.cleanup_resource(pipeline_id) {
+    if let Some(pipeline_id) = renderer.systems.pipeline_id.take() {
+        if let Err(e) = renderer.context.resources.cleanup_resource(pipeline_id) {
             log::warn!("Failed to cleanup pipeline: {e}");
         }
     }
-    renderer.pipeline.main_graphics_pipeline = None;
+    renderer.systems.pipeline.main_graphics_pipeline = None;
 }
