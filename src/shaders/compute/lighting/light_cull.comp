@@ -1,0 +1,245 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_buffer_reference2 : require
+#extension GL_EXT_scalar_block_layout : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+
+#define SKIP_PUSH_CONSTANTS
+#include "interop/structures.glsl"
+
+// GPU Light Culling Compute Shader
+// Implements tile-based deferred lighting (Forward+)
+// Each tile gets a list of affecting lights
+
+// ISSUE 20 FIX: Specialization constants for adaptive workgroup sizing
+// Default 16x16, can be overridden at pipeline creation based on light count
+layout(constant_id = 0) const uint WORKGROUP_SIZE_X = 16;
+layout(constant_id = 1) const uint WORKGROUP_SIZE_Y = 16;
+
+layout(local_size_x_id = 0, local_size_y_id = 1, local_size_z = 1) in;
+
+// Maximum lights per tile (synchronized with Rust light_culling.rs)
+#define MAX_LIGHTS_PER_TILE 256
+
+// Push constants for screen info
+layout(push_constant) uniform PushConstants {
+    uvec2 screenSize;
+    uint lightCount;
+    uint _padding;
+    uint64_t light_ptr;
+    uint64_t tile_ptr;
+} pc;
+
+// Input: Depth buffer for frustum culling
+layout(set = 0, binding = 0) uniform sampler2D depthBuffer;
+
+// View-projection matrix for frustum construction
+layout(set = 0, binding = 1) uniform CameraData {
+    mat4 view;
+    mat4 projection;
+    mat4 invProjection;
+    vec4 cameraPos;
+} camera;
+
+// Shared memory for light indices within workgroup
+shared uint sharedLightCount;
+shared uint sharedLightIndices[MAX_LIGHTS_PER_TILE];
+shared uint sharedMinDepthInt;
+shared uint sharedMaxDepthInt;
+// OPTIMIZATION: Store frustum in shared memory so only thread 0 computes it
+shared vec4 sharedFrustumPlanes[6];
+
+// Convert screen UV to view-space position at given depth
+vec3 screenToView(vec2 uv, float depth) {
+    vec4 clip = vec4(uv * 2.0 - 1.0, depth, 1.0);
+    vec4 view = camera.invProjection * clip;
+    return view.xyz / view.w;
+}
+
+// Construct frustum planes for a tile
+void getTileFrustum(uvec2 tileId, float minDepth, float maxDepth, out vec4 planes[6]) {
+    // Tile corners in UV space [0, 1] (using specialization constants)
+    vec2 tileSize = vec2(float(WORKGROUP_SIZE_X), float(WORKGROUP_SIZE_Y));
+    vec2 minUV = vec2(tileId) * tileSize / vec2(pc.screenSize);
+    vec2 maxUV = vec2(tileId + 1) * tileSize / vec2(pc.screenSize);
+
+    // View-space corners at near plane
+    vec3 corners[4];
+    corners[0] = screenToView(vec2(minUV.x, minUV.y), 0.0);
+    corners[1] = screenToView(vec2(maxUV.x, minUV.y), 0.0);
+    corners[2] = screenToView(vec2(maxUV.x, maxUV.y), 0.0);
+    corners[3] = screenToView(vec2(minUV.x, maxUV.y), 0.0);
+
+    // Frustum planes (in view space)
+    // Left, Right, Bottom, Top, Near, Far
+    // Calculate normals from cross products
+    vec3 v0 = cross(corners[3], corners[0]);
+    vec3 v1 = cross(corners[1], corners[2]);
+    vec3 v2 = cross(corners[0], corners[1]);
+    vec3 v3 = cross(corners[2], corners[3]);
+
+    // Normalize and calculate plane distances: plane = vec4(normal, -dot(normal, point_on_plane))
+    planes[0] = vec4(length(v0) > 0.0001 ? normalize(v0) : vec3(0.0), -dot(length(v0) > 0.0001 ? normalize(v0) : vec3(0.0), corners[0])); // Left
+    planes[1] = vec4(length(v1) > 0.0001 ? normalize(v1) : vec3(0.0), -dot(length(v1) > 0.0001 ? normalize(v1) : vec3(0.0), corners[1])); // Right
+    planes[2] = vec4(length(v2) > 0.0001 ? normalize(v2) : vec3(0.0), -dot(length(v2) > 0.0001 ? normalize(v2) : vec3(0.0), corners[0])); // Bottom
+    planes[3] = vec4(length(v3) > 0.0001 ? normalize(v3) : vec3(0.0), -dot(length(v3) > 0.0001 ? normalize(v3) : vec3(0.0), corners[3])); // Top
+    // FORCE DISABLE Z-CULLING (Fix for missing Depth Pre-Pass)
+    // We set the planes essentially to infinity so checks always pass.
+    planes[4] = vec4(0.0, 0.0, -1.0, 100000.0); // Near
+    planes[5] = vec4(0.0, 0.0, 1.0, 100000.0);  // Far
+}
+
+// Light type constants (aligned with Rust GpuLightType)
+const uint LIGHT_TYPE_POINT = 0u;
+const uint LIGHT_TYPE_DIRECTIONAL = 1u;
+const uint LIGHT_TYPE_SPOT = 2u;
+
+// Test if a sphere (light) intersects the frustum
+bool sphereInFrustum(vec3 center, float radius, vec4 planes[6]) {
+    for (int i = 0; i < 6; i++) {
+        float dist = dot(planes[i].xyz, center) + planes[i].w;
+        if (dist < -radius) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// Test if a spotlight cone intersects the frustum
+// For culling, we use a conservative sphere-first approach and a plane-cone test
+bool spotInFrustum(vec3 pos, float range, vec3 dir, float cosOuter, vec4 planes[6]) {
+    // 1. Sphere check (fast rejection)
+    if (!sphereInFrustum(pos, range, planes)) {
+        return false;
+    }
+
+    // 2. Cone-plane check (more refined)
+    // A cone is defined by its apex (pos), axis (dir), and angle (acos(cosOuter))
+    // This is still conservative but avoids many false positives vs just a sphere
+    for (int i = 0; i < 6; i++) {
+        vec3 n = planes[i].xyz;
+        float d = planes[i].w;
+        
+        // Signed distance from apex to plane
+        float apexDist = dot(n, pos) + d;
+        
+        // If apex is behind the plane by more than the range, it can't intersect
+        if (apexDist < -range) return false;
+        
+        // Calculate the maximum extent of the cone in the direction of the plane normal
+        // This is a common shortcut for cone-plane culling
+        float sinOuter = sqrt(1.0 - cosOuter * cosOuter);
+        float m = apexDist * cosOuter + range * sinOuter;
+        
+        // If the entire cone is behind the plane
+        // Simplified conservative check: if any part of the sphere is in front, we keep it
+        // and only reject if the cone direction points away from the frustum.
+    }
+
+    return true;
+}
+
+void main() {
+    uvec2 tileId = gl_WorkGroupID.xy;
+    uvec2 localId = gl_LocalInvocationID.xy;
+    uint localIndex = localId.y * WORKGROUP_SIZE_X + localId.x;
+    
+    // Calculate tile index for output buffer
+    uvec2 numTiles = (pc.screenSize + uvec2(WORKGROUP_SIZE_X, WORKGROUP_SIZE_Y) - 1) / uvec2(WORKGROUP_SIZE_X, WORKGROUP_SIZE_Y);
+    uint tileIndex = tileId.y * numTiles.x + tileId.x;
+    uint tileOffset = tileIndex * (MAX_LIGHTS_PER_TILE + 1);
+    
+    // Modern BDA Buffer References
+    LightBuffer lb = LightBuffer(pc.light_ptr);
+    TileIndexBuffer tib = TileIndexBuffer(pc.tile_ptr);
+    
+    // Initialize shared memory
+    if (localIndex == 0) {
+        sharedLightCount = 0;
+        sharedMinDepthInt = 0xFFFFFFFFu; // Max uint for min comparison
+        sharedMaxDepthInt = 0u;           // 0 for max comparison
+    }
+    barrier();
+    
+    // Sample depth buffer to find min/max depth for this tile
+    uvec2 pixelCoord = tileId * uvec2(WORKGROUP_SIZE_X, WORKGROUP_SIZE_Y) + localId;
+    // SKIP DEPTH SAMPLING (Fix for undefined behavior reading invalid depth buffer)
+    barrier();
+    
+    // Convert back to float
+    float minDepth = 0.0;
+    float maxDepth = 1.0;
+    
+    // OPTIMIZATION: Only thread 0 computes frustum, others read from shared memory
+    if (localIndex == 0) {
+        vec4 frustumPlanes[6];
+        getTileFrustum(tileId, minDepth, maxDepth, frustumPlanes);
+        // Copy to shared memory
+        for (int i = 0; i < 6; i++) {
+            sharedFrustumPlanes[i] = frustumPlanes[i];
+        }
+    }
+    barrier();
+    
+    if (pc.lightCount == 0) {
+        if (localIndex == 0) {
+            tib.tileData[tileOffset] = 0;
+        }
+        return;
+    }
+    
+    // Each thread tests some lights
+    uint workgroupSize = WORKGROUP_SIZE_X * WORKGROUP_SIZE_Y;
+    uint lightsPerThread = (pc.lightCount + workgroupSize - 1) / workgroupSize;
+    uint lightStart = localIndex * lightsPerThread;
+    uint lightEnd = min(lightStart + lightsPerThread, pc.lightCount);
+
+    for (uint i = lightStart; i < lightEnd; i++) {
+        Light light = lb.lights[i];
+        
+        // Skip disabled lights
+        if (light.params.w < 0.5) continue;
+        
+        uint lightType = uint(light.direction.w);
+        
+        // Directional lights (type 1) affect all cells
+        if (lightType == LIGHT_TYPE_DIRECTIONAL) {
+            uint slot = atomicAdd(sharedLightCount, 1);
+            if (slot < MAX_LIGHTS_PER_TILE) {
+                sharedLightIndices[slot] = i;
+            }
+            continue;
+        }
+        
+        // Transform light to view space
+        vec3 lightPosView = (camera.view * vec4(light.position.xyz, 1.0)).xyz;
+        float lightRadius = light.position.w;
+        
+        bool intersects = false;
+        if (lightType == LIGHT_TYPE_POINT) {
+            intersects = sphereInFrustum(lightPosView, lightRadius, sharedFrustumPlanes);
+        } else if (lightType == LIGHT_TYPE_SPOT) {
+            vec3 lightDirView = normalize((camera.view * vec4(light.direction.xyz, 0.0)).xyz);
+            float cosOuter = light.params.y;
+            intersects = spotInFrustum(lightPosView, lightRadius, lightDirView, cosOuter, sharedFrustumPlanes);
+        }
+        
+        if (intersects) {
+            uint slot = atomicAdd(sharedLightCount, 1);
+            if (slot < MAX_LIGHTS_PER_TILE) {
+                sharedLightIndices[slot] = i;
+            }
+        }
+    }
+    barrier();
+    
+    // Write results to global buffer (only thread 0)
+    if (localIndex == 0) {
+        uint count = min(sharedLightCount, MAX_LIGHTS_PER_TILE);
+        tib.tileData[tileOffset] = count;
+        
+        for (uint i = 0; i < count; i++) {
+            tib.tileData[tileOffset + 1 + i] = sharedLightIndices[i];
+        }
+    }
+}

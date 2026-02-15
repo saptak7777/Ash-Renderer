@@ -138,12 +138,12 @@ pub unsafe fn create_main_pipeline(
         .with_front_face(vk::FrontFace::CLOCKWISE)
         .with_multisampling(pipeline_cfg.multisample_config())
         .add_shader_from_bytes(
-            include_bytes!(concat!(env!("OUT_DIR"), "/vert.vert.spv")),
+            include_bytes!(concat!(env!("OUT_DIR"), "/forward.vert.spv")),
             vk::ShaderStageFlags::VERTEX,
             "main",
         )?
         .add_shader_from_bytes(
-            include_bytes!(concat!(env!("OUT_DIR"), "/frag.frag.spv")),
+            include_bytes!(concat!(env!("OUT_DIR"), "/forward.frag.spv")),
             vk::ShaderStageFlags::FRAGMENT,
             "main",
         )?;

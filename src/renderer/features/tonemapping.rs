@@ -114,8 +114,8 @@ impl TonemappingFeature {
     /// Device must be valid and remain valid for pipeline lifetime.
     unsafe fn create_pipeline(&mut self, device: &Device) -> crate::Result<()> {
         // Load shaders
-        let vert_code = include_bytes!("../../../shaders/postprocess.vert.spv");
-        let frag_code = include_bytes!("../../../shaders/tonemapping.frag.spv");
+        let vert_code = include_bytes!(concat!(env!("OUT_DIR"), "/postprocess.vert.spv"));
+        let frag_code = include_bytes!(concat!(env!("OUT_DIR"), "/tonemapping.frag.spv"));
 
         // Use ash::util::read_spv to ensure proper alignment
         let vert_spv = ash::util::read_spv(&mut std::io::Cursor::new(vert_code))

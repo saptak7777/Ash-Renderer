@@ -279,10 +279,13 @@ impl BloomFeature {
     /// Device must be valid and remain valid for pipeline lifetime.
     unsafe fn create_pipelines(&mut self, device: &Device) -> crate::Result<()> {
         // Load shaders
-        let vert_code = include_bytes!("../../../shaders/postprocess.vert.spv");
-        let prefilter_frag_code = include_bytes!("../../../shaders/bloom_prefilter.frag.spv");
-        let downsample_frag_code = include_bytes!("../../../shaders/bloom_downsample.frag.spv");
-        let upsample_frag_code = include_bytes!("../../../shaders/bloom_upsample.frag.spv");
+        let vert_code = include_bytes!(concat!(env!("OUT_DIR"), "/postprocess.vert.spv"));
+        let prefilter_frag_code =
+            include_bytes!(concat!(env!("OUT_DIR"), "/bloom_prefilter.frag.spv"));
+        let downsample_frag_code =
+            include_bytes!(concat!(env!("OUT_DIR"), "/bloom_downsample.frag.spv"));
+        let upsample_frag_code =
+            include_bytes!(concat!(env!("OUT_DIR"), "/bloom_upsample.frag.spv"));
 
         // Use ash::util::read_spv to ensure proper alignment
         let vert_spv = ash::util::read_spv(&mut std::io::Cursor::new(vert_code)).map_err(|e| {

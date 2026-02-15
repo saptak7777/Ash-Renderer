@@ -147,7 +147,7 @@ impl ForwardPlusIntegration {
         depth_image_view: vk::ImageView,
     ) -> Result<()> {
         // Load shader
-        let code = include_bytes!(concat!(env!("OUT_DIR"), "/light_culling.comp.spv"));
+        let code = include_bytes!(concat!(env!("OUT_DIR"), "/light_cull.comp.spv"));
         let shader_module =
             ShaderModule::load_from_bytes(&device, code, vk::ShaderStageFlags::COMPUTE)?;
 
