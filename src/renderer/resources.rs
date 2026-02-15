@@ -1,12 +1,15 @@
-use crate::error::Result;
 use crate::renderer::{
-    assets::AssetManager, context::Context, initialization, instancing::InstancingManager,
-    resource_registry::ResourceId, vram_budget, DepthBuffer as DepthBufferType, RendererConfig,
-    Texture as TextureType,
+    assets::AssetManager,
+    context::Context,
+    initialization,
+    instancing::{BatchKey, InstancingManager},
+    resource_registry::ResourceId,
+    vram_budget, DepthBuffer as DepthBufferType, RendererConfig, Texture as TextureType,
 };
 use crate::{vulkan, AshError};
 use ash::vk;
 use glam::Mat4;
+use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
 // --- Submodules (New Style: Entry point in resources.rs) ---
@@ -86,7 +89,10 @@ pub struct Resources {
     pub instancing_manager: InstancingManager,
     pub instance_buffers: Vec<InstanceBuffer>,
     pub instance_buffer_addresses: Vec<u64>,
+    pub batch_offsets: HashMap<BatchKey, u32>,
     pub material_heap_address: u64,
+    pub swapchain_extent: vk::Extent2D,
+    pub current_view_proj: Mat4,
 
     // Render Targets & Debug
     pub readback_buffer: Option<BufferHandle>,
@@ -102,11 +108,12 @@ pub struct Resources {
     pub default_cube_black: TextureType,
 
     // --- Temporary Internal Items (Moved out in Phase 5.4) ---
-    pub(crate) _model_renderer: Option<crate::renderer::model_renderer::ModelRenderer>,
     pub(crate) pipelines: Option<crate::renderer::init_types::PipelineData>,
     pub(crate) passes: Option<crate::renderer::init_types::RenderingPasses>,
     pub(crate) lighting: Option<crate::renderer::init_types::LightingSystem>,
     pub(crate) post: Option<crate::renderer::init_types::PostProcessingSystem>,
+    pub total_instance_count: u32,
+    pub indirect_draw_enabled: bool,
 }
 
 impl Resources {
@@ -120,7 +127,7 @@ impl Resources {
         pipeline_cache: &crate::renderer::pipeline_cache::PipelineCache,
         swapchain: &vulkan::SwapchainWrapper,
         cmds: &vulkan::CommandBufferManager,
-    ) -> Result<Self> {
+    ) -> crate::Result<Self> {
         unsafe {
             let dev_mem_props = context.device.memory_properties;
             let vram_budget = vram_budget::VramBudget::new(&dev_mem_props);
@@ -193,6 +200,7 @@ impl Resources {
                 cmds.upload_command_pool_handle(),
                 swapchain.image_views.len() as u32,
                 swapchain.extent,
+                config.shadow_resolution,
             )?;
 
             let post = initialization::init_post_processing(
@@ -249,7 +257,10 @@ impl Resources {
                 instancing_manager: InstancingManager::new(),
                 instance_buffers: core.renderer_resources.instance_buffers,
                 instance_buffer_addresses,
+                batch_offsets: HashMap::new(),
                 material_heap_address,
+                swapchain_extent: swapchain.extent,
+                current_view_proj: Mat4::IDENTITY,
                 readback_buffer,
                 gbuffer: passes.gbuffer.take(),
                 depth_buffer: Some(depth_buffer),
@@ -259,11 +270,12 @@ impl Resources {
                 white_texture: core.renderer_resources.white_texture,
                 default_skybox: core.renderer_resources.default_skybox,
                 default_cube_black: core.renderer_resources.default_cube_black,
-                _model_renderer: Some(core.model_renderer),
                 pipelines: Some(pipelines),
                 passes: Some(passes),
                 lighting: Some(lighting),
                 post: Some(post),
+                total_instance_count: 0,
+                indirect_draw_enabled: true, // Enabled by default for Phase 7.3
             })
         }
     }
@@ -275,7 +287,7 @@ impl Resources {
         context: &Context,
         data: &[T],
         name: &str,
-    ) -> Result<(
+    ) -> crate::Result<(
         Arc<parking_lot::Mutex<crate::renderer::resources::uniform::StorageBuffer<T>>>,
         u32,
     )> {
@@ -307,7 +319,7 @@ impl Resources {
         &mut self,
         context: &Context,
         frame: &crate::renderer::frame::Frame,
-    ) -> Result<Vec<u8>> {
+    ) -> crate::Result<Vec<u8>> {
         if !context.device.headless {
             return Err(AshError::VulkanError("Not in headless mode".to_string()));
         }
@@ -457,7 +469,7 @@ impl Resources {
         gbuffer_indices: &mut crate::renderer::GBufferIndices,
         extent: vk::Extent2D,
         image_count: usize,
-    ) -> Result<()> {
+    ) -> crate::Result<()> {
         // --- 1. Recreate Depth Buffer ---
         if let Some(id) = self.depth_buffer_id.take() {
             if let Err(e) = context.resources.cleanup_resource(id) {
@@ -480,6 +492,7 @@ impl Resources {
 
         self.depth_buffer = Some(depth_buffer);
         self.depth_buffer_id = Some(depth_buffer_id);
+        self.swapchain_extent = extent;
 
         if gbuffer_indices.depth_index == u32::MAX {
             gbuffer_indices.depth_index = self.assets.bindless_manager.add_sampled_image(
@@ -559,7 +572,7 @@ impl Resources {
         projection: Mat4,
         camera_pos: glam::Vec3,
         model_matrix: Option<Mat4>,
-    ) -> Result<(usize, u32, vk::Extent2D, Mat4, [f32; 2])> {
+    ) -> crate::Result<(usize, u32, vk::Extent2D, Mat4, [f32; 2])> {
         unsafe {
             let swapchain_extent = frame
                 .swapchain
@@ -572,38 +585,7 @@ impl Resources {
 
             let frame_index = frame.frame_manager.get_current_frame_index();
 
-            // Prepare culling data for this frame
-            scene.occlusion_culling.begin_frame();
-            for (i, item) in frame.draw_items.iter().enumerate() {
-                if let Some(uploaded) = scene.model_renderer.get(&item.key) {
-                    let bounds = scene
-                        .mesh_data
-                        .get(item.mesh_id as usize)
-                        .map(|m| m.bounds)
-                        .unwrap_or_else(|| {
-                            crate::renderer::CullBoundingBox::new(
-                                glam::Vec3::ZERO,
-                                glam::Vec3::ONE * 100.0,
-                            )
-                        });
-                    let material_index = item.material_handle.index as u32;
-                    let vertex_offset = uploaded.vertex_offset.unwrap_or(0) as i32 / 64;
-
-                    scene.occlusion_culling.push_clusters(
-                        bounds,
-                        item.transform,
-                        i as u32,
-                        uploaded.index_offset.unwrap_or(0) as u32 / 4,
-                        uploaded.index_count(),
-                        material_index,
-                        vertex_offset,
-                        uploaded.clusters(),
-                    );
-                } else {
-                    log::warn!("Mesh key '{}' not found in model renderer cache!", item.key);
-                }
-            }
-
+            // Prepare culling data (Phase 7.2C Fix: Moved to Renderer::submit_render_commands)
             // Apply sub-pixel jitter for VSR if enabled
             let mut jittered_projection = projection;
             let mut jitter_uv = [0.0f32; 2];
@@ -680,7 +662,15 @@ impl Resources {
                 let view_proj = matrices.view_proj;
                 ub.update()?;
                 frame.prev_view_proj = view_proj;
+                self.current_view_proj = view_proj;
+                self.swapchain_extent = swapchain_extent;
             }
+
+            // Phase 7.2A: Purify CPU preparation - update instance buffers
+            let instancing_manager =
+                std::mem::replace(&mut self.instancing_manager, InstancingManager::new());
+            self.update_instance_buffers(&instancing_manager, frame_index)?;
+            self.instancing_manager = instancing_manager;
 
             Ok((
                 frame_index,
@@ -690,5 +680,30 @@ impl Resources {
                 jitter_uv,
             ))
         }
+    }
+
+    /// Update instance buffers and compute batch offsets (Phase 7.2A)
+    pub fn update_instance_buffers(
+        &mut self,
+        instancing_manager: &InstancingManager,
+        frame_index: usize,
+    ) -> crate::Result<()> {
+        let mut all_instances = Vec::new();
+        let mut batch_offsets = HashMap::new();
+
+        for batch in instancing_manager.batches() {
+            batch_offsets.insert(batch.key.clone(), all_instances.len() as u32);
+            all_instances.extend_from_slice(&batch.instances);
+        }
+
+        if !all_instances.is_empty() {
+            unsafe {
+                self.instance_buffers[frame_index].update(&all_instances)?;
+            }
+        }
+
+        self.total_instance_count = all_instances.len() as u32;
+        self.batch_offsets = batch_offsets;
+        Ok(())
     }
 }

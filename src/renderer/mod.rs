@@ -4,6 +4,7 @@
 //! for PBR rendering, materials, meshes, and textures.
 
 pub mod assets;
+pub mod builder;
 pub mod cleanup_traits;
 pub mod command_list;
 pub mod context;

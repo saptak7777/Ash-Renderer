@@ -2,10 +2,9 @@ use crate::{
     renderer::{
         features::ShadowSystem,
         passes::hiz::{AdaptiveHiZManager, HiZPass},
-        passes::vsr::VsrPass,
         systems::post_process::PostProcessSystem,
         vcgs::IndirectDrawPass,
-        ForwardPlusIntegration, HdrSystem, Scene,
+        DrawItem, ForwardPlusIntegration, Resources, Scene,
     },
     Result,
 };
@@ -17,9 +16,9 @@ use std::sync::{Arc, RwLock};
 /// It owns the major rendering subsystems and manages their execution order.
 pub struct RenderPipeline {
     shadow_system: Option<ShadowSystem>,
-    post_process: PostProcessSystem,
+    pub post_process: PostProcessSystem,
     pub(crate) hiz_pass: Option<Arc<RwLock<HiZPass>>>, // Keep crate-public for Renderer access for now
-    adaptive_hiz_manager: AdaptiveHiZManager,
+    adaptive_hiz_manager: Arc<RwLock<AdaptiveHiZManager>>,
 
     // Moved from Renderer (Chunk 3.2a)
     pub forward_plus: Option<Arc<RwLock<ForwardPlusIntegration>>>,
@@ -54,6 +53,7 @@ pub struct GeometryRenderContext<'a> {
     pub transform: &'a crate::renderer::Transform,
     pub is_swapchain_image: bool,
     pub depth_format: vk::Format,
+    pub draw_items: &'a [DrawItem],
 }
 
 impl RenderPipeline {
@@ -61,7 +61,7 @@ impl RenderPipeline {
         shadow_system: Option<ShadowSystem>,
         post_process: PostProcessSystem,
         hiz_pass: Option<Arc<RwLock<HiZPass>>>,
-        adaptive_hiz_manager: AdaptiveHiZManager,
+        adaptive_hiz_manager: Arc<RwLock<AdaptiveHiZManager>>,
         forward_plus: Option<Arc<RwLock<ForwardPlusIntegration>>>,
         indirect_draw_pass: Option<Arc<RwLock<IndirectDrawPass>>>,
         main_graphics_pipeline: Option<crate::vulkan::Pipeline>,
@@ -90,7 +90,7 @@ impl RenderPipeline {
     /// Any other code that acquires both locks must follow this same ordering
     /// to avoid deadlocks.
     pub fn execute_hiz_pass(
-        &mut self,
+        &self,
         command_buffer: vk::CommandBuffer,
         depth_image: vk::Image,
         gpu_profiler: Option<&crate::renderer::diagnostics::GpuProfiler>,
@@ -104,14 +104,20 @@ impl RenderPipeline {
             })?;
 
             // Update adaptive quality based on previous frame's metrics
-            if let Some(profiler) = gpu_profiler {
-                let timings = profiler.last_extended_timings();
+            if let Some(timings) = gpu_profiler.map(|p| p.last_extended_timings()) {
                 if timings.valid {
                     let hiz_time_ms = timings.hiz_generate_ms as f64;
-                    if let Some(new_quality) =
-                        self.adaptive_hiz_manager.update(hiz.quality(), hiz_time_ms)
-                    {
-                        hiz.set_quality(new_quality);
+                    // Handle poisoning for adaptive manager
+                    match self.adaptive_hiz_manager.write() {
+                        Ok(mut manager) => {
+                            if let Some(new_quality) = manager.update(hiz.quality(), hiz_time_ms) {
+                                hiz.set_quality(new_quality);
+                            }
+                        }
+                        Err(e) => {
+                            log::warn!("Adaptive HiZ manager lock poisoned: {}", e);
+                            // Continue execution - failing to update quality shouldn't crash render
+                        }
                     }
                 }
             }
@@ -154,11 +160,11 @@ impl RenderPipeline {
     /// Render shadow maps for the current frame.
     /// This implementation currently supports Virtual Shadow Maps (VSM).
     pub fn render_shadows(
-        &mut self,
+        &self,
         command_buffer: vk::CommandBuffer,
         scene: &Scene,
         frame_index: usize,
-        device: &ash::Device,
+        _device: &ash::Device,
         bindless_descriptor_set: vk::DescriptorSet,
         uniform_buffer_address: u64,
         instance_buffer_address: u64,
@@ -167,7 +173,7 @@ impl RenderPipeline {
         tile_ptr: u64,
         all_instances_len: usize,
     ) -> Result<()> {
-        if let Some(shadow_system) = &mut self.shadow_system {
+        if let Some(shadow_system) = &self.shadow_system {
             if shadow_system
                 .vsm_feature()
                 .shadow_pipeline_layout()
@@ -182,93 +188,34 @@ impl RenderPipeline {
                     log::warn!("Shadow Pass: Invalid Geometry BDA pointers (V: {}, I: {}). Shadows will be skipped.", vertex_ptr, index_ptr);
                     return Ok(());
                 }
-                let vsm_feature = shadow_system.vsm_feature();
+
+                let ctx = crate::renderer::features::shadows::ShadowRenderContext {
+                    light_direction: light_dir,
+                    object_count: all_instances_len as u32,
+                    frame_index,
+                    frame_descriptor_set: vk::DescriptorSet::null(),
+                    bindless_descriptor_set,
+                    frame_ptr: uniform_buffer_address,
+                    vertex_ptr,
+                    instance_ptr: instance_buffer_address,
+                    material_ptr: material_heap_address,
+                    index_ptr,
+                    light_ptr,
+                    tile_ptr,
+                    transform_ptr: scene.transform_system.arena_addr,
+                    transform_index: 0,
+                };
+
                 unsafe {
-                    vsm_feature.render_shadows(
-                        command_buffer,
-                        light_dir,
-                        all_instances_len as u32,
-                        frame_index,
-                        vk::DescriptorSet::null(),
-                        bindless_descriptor_set,
-                        uniform_buffer_address,
-                        vertex_ptr,
-                        instance_buffer_address,
-                        material_heap_address,
-                        index_ptr,
-                        light_ptr,
-                        tile_ptr,
-                        scene.transform_system.arena_addr,
-                        0,
-                    );
+                    shadow_system.render(command_buffer, &ctx);
                 }
 
-                // Synchronization barrier for VSM results
-                let vsm_barrier = vk::ImageMemoryBarrier::default()
-                    .image(shadow_system.vsm_feature().resources.physical_cache)
-                    .old_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
-                    .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
-                    .src_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE)
-                    .dst_access_mask(vk::AccessFlags::SHADER_READ)
-                    .subresource_range(vk::ImageSubresourceRange {
-                        aspect_mask: vk::ImageAspectFlags::COLOR,
-                        base_mip_level: 0,
-                        level_count: 1,
-                        base_array_layer: 0,
-                        layer_count: 1,
-                    });
-
+                // Transition shadow map for reading in main pass (now using system's helper)
                 unsafe {
-                    device.cmd_pipeline_barrier(
-                        command_buffer,
-                        vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
-                        vk::PipelineStageFlags::FRAGMENT_SHADER,
-                        vk::DependencyFlags::empty(),
-                        &[],
-                        &[],
-                        &[vsm_barrier],
-                    );
+                    shadow_system.barrier_transition_for_read(command_buffer);
                 }
             }
         }
-        Ok(())
-    }
-
-    /// Execute post-processing effects including blooming, tonemapping, and upscaling resolve.
-    pub fn render_post_process(
-        &mut self,
-        command_buffer: vk::CommandBuffer,
-        image_index: usize,
-        swapchain_extent: vk::Extent2D,
-        target_image: vk::Image,
-        target_view: vk::ImageView,
-        hdr_system: Option<&HdrSystem>,
-        vsr_pass: Option<&VsrPass>,
-        black_texture_view: vk::ImageView,
-    ) -> Result<()> {
-        if let Some(hdr) = hdr_system {
-            let input_view = vsr_pass
-                .map(|vsr| vsr.active_view())
-                .unwrap_or_else(|| hdr.view());
-
-            self.post_process.update_descriptor_set(
-                image_index,
-                input_view,
-                black_texture_view, // bloom_view placeholder
-                black_texture_view, // ssgi_view placeholder
-                hdr.sampler(),
-            );
-
-            // Final tonemapping and swapchain resolve
-            self.post_process.render(
-                command_buffer,
-                image_index,
-                swapchain_extent,
-                target_image,
-                target_view,
-            )?;
-        }
-
         Ok(())
     }
 
@@ -315,30 +262,13 @@ impl RenderPipeline {
 
     /// Render the main geometry pass.
     /// Manages its own rendering scope via Dynamic Rendering (cmd_begin_rendering).
-    pub fn render_geometry(&self, ctx: &GeometryRenderContext) -> Result<()> {
-        use crate::renderer::model_renderer::{
-            DrawContext, IndirectDrawCountParams, MaterialPushConstants,
-        };
-        use crate::renderer::MaterialHandle;
-        use crate::AshError;
-
-        let pipeline_handle = self
-            .main_graphics_pipeline
-            .as_ref()
-            .map(|p| p.pipeline)
-            .ok_or_else(|| {
-                AshError::VulkanError(
-                    "RenderPipeline: main_graphics_pipeline not initialized".to_string(),
-                )
-            })?;
-        let layout_handle = self
-            .pipeline_layout
-            .as_ref()
-            .map(|l| l.handle())
-            .ok_or_else(|| {
-                AshError::VulkanError("RenderPipeline: pipeline_layout not initialized".to_string())
-            })?;
-
+    pub fn render_geometry(
+        &self,
+        ctx: &GeometryRenderContext,
+        resources: &Resources,
+        scene: &Scene,
+        frame_index: usize,
+    ) -> Result<()> {
         // Dynamics 1: Validate Views
         if ctx.color_view == vk::ImageView::null() || ctx.depth_view == vk::ImageView::null() {
             return Ok(());
@@ -469,121 +399,15 @@ impl RenderPipeline {
                 .device
                 .cmd_begin_rendering(ctx.command_buffer.handle(), &rendering_info);
         }
-        unsafe {
-            ctx.device.device.cmd_bind_pipeline(
-                ctx.command_buffer.handle(),
-                vk::PipelineBindPoint::GRAPHICS,
-                pipeline_handle,
-            );
-        }
 
-        // 2. Dynamic State
-        let viewport = vk::Viewport {
-            x: 0.0,
-            y: 0.0,
-            width: ctx.swapchain_extent.width as f32,
-            height: ctx.swapchain_extent.height as f32,
-            min_depth: 0.0,
-            max_depth: 1.0,
-        };
-        let scissor = vk::Rect2D {
-            offset: vk::Offset2D { x: 0, y: 0 },
-            extent: ctx.swapchain_extent,
-        };
-        unsafe {
-            ctx.device
-                .device
-                .cmd_set_viewport(ctx.command_buffer.handle(), 0, &[viewport]);
-            ctx.device
-                .device
-                .cmd_set_scissor(ctx.command_buffer.handle(), 0, &[scissor]);
-        }
-
-        // 3. Bind Descriptor Sets
-        // Unified Bindless (Set 0)
-        unsafe {
-            ctx.device.device.cmd_bind_descriptor_sets(
-                ctx.command_buffer.handle(),
-                vk::PipelineBindPoint::GRAPHICS,
-                layout_handle,
-                0,
-                &[ctx.bindless_descriptor_set],
-                &[],
-            );
-        }
-
-        // 4. Draw
-        if let Some(ref indirect_arc) = self.indirect_draw_pass {
-            let indirect_pass = indirect_arc.read().map_err(|e| {
-                log::error!("Indirect draw pass RwLock poisoned: {}", e);
-                crate::AshError::VulkanError("Indirect draw pass RwLock poisoned".into())
-            })?;
-
-            if ctx.scene.occlusion_culling.object_count() > 0 {
-                let (vertex_ptr, index_ptr) = ctx.scene.get_geometry_buffer_addresses();
-                let instance_ptr = indirect_pass.object_buffer_address();
-
-                if vertex_ptr == 0 || index_ptr == 0 || instance_ptr == 0 || ctx.material_ptr == 0 {
-                    log::error!("CRITICAL: BDA Null Pointer in render_geometry. Skipping draw.");
-                    return Ok(());
-                }
-
-                // Placeholder mesh for DrawContext (required but not used for BDA indirect)
-                let Some(uploaded) = ctx
-                    .scene
-                    .model_renderer
-                    .uploaded_meshes()
-                    .next()
-                    .map(|(_, m)| m)
-                else {
-                    return Ok(());
-                };
-
-                let material_push = MaterialPushConstants::new(MaterialHandle::null())
-                    .with_receive_shadows(true)
-                    .with_debug_visualization(ctx.debug_enabled);
-
-                let draw_ctx = DrawContext {
-                    command_buffer: ctx.command_buffer.handle(),
-                    pipeline_layout: layout_handle,
-                    uploaded,
-                    material: &material_push,
-                    frame_ptr: ctx.frame_ptr,
-                    vertex_ptr,
-                    instance_ptr,
-                    material_ptr: ctx.material_ptr,
-                    index_ptr,
-                    light_ptr: ctx.light_ptr,
-                    tile_ptr: ctx.tile_ptr,
-                    skybox_index: ctx.scene.skybox_texture_index,
-                    vsm_page_index: self
-                        .shadow_system()
-                        .map(|s| s.vsm_page_index())
-                        .unwrap_or(0),
-                    vsm_cache_index: self
-                        .shadow_system()
-                        .map(|s| s.vsm_cache_index())
-                        .unwrap_or(0),
-                    transform_ptr: ctx.scene.transform_system.arena_addr,
-                    transform_index: 0,
-                };
-
-                let count_params = IndirectDrawCountParams {
-                    indirect_buffer: indirect_pass.indirect_buffer(),
-                    indirect_offset: 0,
-                    count_buffer: indirect_pass.count_buffer(),
-                    count_offset: 0,
-                    max_draw_count: ctx.scene.occlusion_culling.object_count() as u32,
-                    stride: std::mem::size_of::<vk::DrawIndirectCommand>() as u32,
-                };
-
-                unsafe {
-                    ctx.scene
-                        .model_renderer
-                        .draw_indirect_count(&draw_ctx, &count_params);
-                }
-            }
-        }
+        // DELEGATED RECORDING (Phase 7.3)
+        self.render_main_view(
+            ctx.command_buffer.handle(),
+            ctx,
+            resources,
+            scene,
+            frame_index,
+        )?;
 
         // INJECTION: Render Features within the active dynamic rendering pass
         if let Some(features) = ctx.features {
@@ -621,7 +445,9 @@ impl RenderPipeline {
             ctx.device
                 .device
                 .cmd_end_rendering(ctx.command_buffer.handle());
+        }
 
+        unsafe {
             // Post-Render Barrier: Transition Color Image based on whether it is swapchain or HDR
             let (target_layout, target_access, target_stage) = if ctx.is_swapchain_image {
                 // Case 1: Direct to Swapchain (Ready for Presentation)
@@ -688,6 +514,199 @@ impl RenderPipeline {
                 &[],
                 &[barrier, depth_post_barrier],
             );
+        }
+
+        Ok(())
+    }
+
+    pub fn render_main_view(
+        &self,
+        cmd: vk::CommandBuffer,
+        ctx: &GeometryRenderContext,
+        resources: &Resources,
+        scene: &Scene,
+        _frame_index: usize,
+    ) -> Result<()> {
+        use crate::renderer::model_renderer::{
+            DrawContext, IndirectDrawCountParams, MaterialPushConstants,
+        };
+        use crate::renderer::MaterialHandle;
+        use crate::AshError;
+
+        let pipeline_handle = self
+            .main_graphics_pipeline
+            .as_ref()
+            .map(|p| p.pipeline)
+            .ok_or_else(|| {
+                AshError::VulkanError(
+                    "RenderPipeline: main_graphics_pipeline not initialized".to_string(),
+                )
+            })?;
+        let layout_handle = self
+            .pipeline_layout
+            .as_ref()
+            .map(|l| l.handle())
+            .ok_or_else(|| {
+                AshError::VulkanError("RenderPipeline: pipeline_layout not initialized".to_string())
+            })?;
+
+        // 1. Dynamic State
+        let viewport = vk::Viewport {
+            x: 0.0,
+            y: 0.0,
+            width: ctx.swapchain_extent.width as f32,
+            height: ctx.swapchain_extent.height as f32,
+            min_depth: 0.0,
+            max_depth: 1.0,
+        };
+        let scissor = vk::Rect2D {
+            offset: vk::Offset2D { x: 0, y: 0 },
+            extent: ctx.swapchain_extent,
+        };
+        unsafe {
+            ctx.device.device.cmd_set_viewport(cmd, 0, &[viewport]);
+            ctx.device.device.cmd_set_scissor(cmd, 0, &[scissor]);
+        }
+
+        // 2. Bind Pipeline
+        unsafe {
+            ctx.device.device.cmd_bind_pipeline(
+                cmd,
+                vk::PipelineBindPoint::GRAPHICS,
+                pipeline_handle,
+            );
+        }
+
+        // 3. Bind Descriptors
+        unsafe {
+            ctx.device.device.cmd_bind_descriptor_sets(
+                cmd,
+                vk::PipelineBindPoint::GRAPHICS,
+                layout_handle,
+                0,
+                &[ctx.bindless_descriptor_set],
+                &[],
+            );
+        }
+
+        // 4. Draw Dispatch
+        if resources.indirect_draw_enabled {
+            if let Some(ref indirect_arc) = self.indirect_draw_pass {
+                let indirect_pass = indirect_arc.read().map_err(|e| {
+                    log::error!("Indirect draw pass RwLock poisoned: {}", e);
+                    AshError::VulkanError("Indirect draw pass RwLock poisoned".into())
+                })?;
+
+                if scene.occlusion_culling.object_count() > 0 {
+                    let (vertex_ptr, index_ptr) = scene.get_geometry_buffer_addresses();
+                    let instance_ptr = indirect_pass.object_buffer_address();
+
+                    if vertex_ptr == 0
+                        || index_ptr == 0
+                        || instance_ptr == 0
+                        || ctx.material_ptr == 0
+                    {
+                        log::error!(
+                            "CRITICAL: BDA Null Pointer in render_main_view. Skipping draw."
+                        );
+                        return Ok(());
+                    }
+
+                    // Placeholder mesh for DrawContext (required but not used for BDA indirect)
+                    let Some(uploaded) = scene
+                        .model_renderer
+                        .uploaded_meshes()
+                        .next()
+                        .map(|(_, m)| m)
+                    else {
+                        return Ok(());
+                    };
+
+                    let material_push = MaterialPushConstants::new(MaterialHandle::null())
+                        .with_receive_shadows(true)
+                        .with_debug_visualization(ctx.debug_enabled);
+
+                    let draw_ctx = DrawContext {
+                        command_buffer: cmd,
+                        pipeline_layout: layout_handle,
+                        uploaded,
+                        material: &material_push,
+                        frame_ptr: ctx.frame_ptr,
+                        vertex_ptr,
+                        instance_ptr,
+                        material_ptr: ctx.material_ptr,
+                        index_ptr,
+                        light_ptr: ctx.light_ptr,
+                        tile_ptr: ctx.tile_ptr,
+                        skybox_index: scene.skybox_texture_index,
+                        vsm_page_index: self
+                            .shadow_system()
+                            .map(|s| s.vsm_page_index())
+                            .unwrap_or(0),
+                        vsm_cache_index: self
+                            .shadow_system()
+                            .map(|s| s.vsm_cache_index())
+                            .unwrap_or(0),
+                        transform_ptr: scene.transform_system.arena_addr,
+                        transform_index: 0,
+                    };
+
+                    let count_params = IndirectDrawCountParams {
+                        indirect_buffer: indirect_pass.indirect_buffer(),
+                        indirect_offset: 0,
+                        count_buffer: indirect_pass.count_buffer(),
+                        count_offset: 0,
+                        max_draw_count: scene.occlusion_culling.object_count() as u32,
+                        stride: std::mem::size_of::<vk::DrawIndirectCommand>() as u32,
+                    };
+
+                    unsafe {
+                        scene
+                            .model_renderer
+                            .draw_indirect_count(&draw_ctx, &count_params);
+                    }
+                }
+            }
+        } else {
+            // Fallback: CPU-side Batch Loop (Legacy/Simple Mode)
+            for item in ctx.draw_items {
+                if let Some(uploaded) = scene.model_renderer.get(&item.key) {
+                    let material_push = MaterialPushConstants::new(item.material_handle)
+                        .with_receive_shadows(true)
+                        .with_debug_visualization(ctx.debug_enabled);
+
+                    let (vertex_ptr, index_ptr) = scene.get_geometry_buffer_addresses();
+                    let draw_ctx = DrawContext {
+                        command_buffer: cmd,
+                        pipeline_layout: layout_handle,
+                        uploaded,
+                        material: &material_push,
+                        frame_ptr: ctx.frame_ptr,
+                        vertex_ptr,
+                        instance_ptr: 0, // Not used for direct draw
+                        material_ptr: ctx.material_ptr,
+                        index_ptr,
+                        light_ptr: ctx.light_ptr,
+                        tile_ptr: ctx.tile_ptr,
+                        skybox_index: scene.skybox_texture_index,
+                        vsm_page_index: self
+                            .shadow_system()
+                            .map(|s| s.vsm_page_index())
+                            .unwrap_or(0),
+                        vsm_cache_index: self
+                            .shadow_system()
+                            .map(|s| s.vsm_cache_index())
+                            .unwrap_or(0),
+                        transform_ptr: scene.transform_system.arena_addr,
+                        transform_index: 0, // In single-draw, we don't have a specific index here yet
+                    };
+
+                    unsafe {
+                        scene.model_renderer.draw_direct(&draw_ctx, 1, 0);
+                        // Reusing direct draw for single item fallback
+                    }
+                }
+            }
         }
 
         Ok(())

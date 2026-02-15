@@ -402,74 +402,79 @@ impl ForwardPlusIntegration {
     /// Command buffer must be in recording state. Device must be valid. All internal
     /// buffers (light, tile, info, camera) must have been initialized via `init()`
     /// and `upload_to_gpu()`.
-    pub unsafe fn dispatch(
-        &self,
-        command_buffer: vk::CommandBuffer,
-        device: &ash::Device,
-        frame_index: usize,
-    ) {
+    /// Dispatch light culling compute shader.
+    ///
+    /// This method encapsulates all technical details of the light culling pass:
+    /// - Pipeline and descriptor set binding
+    /// - Push constant calculation
+    /// - Compute dispatch
+    /// - Execution barriers for tile buffer visibility
+    pub fn cull_lights(&self, command_buffer: vk::CommandBuffer, frame_index: usize) -> Result<()> {
         if let Some(pipeline) = &self.compute_pipeline {
             if self.compute_descriptor_sets.is_empty() {
-                return;
+                return Ok(());
             }
 
-            device.cmd_bind_pipeline(
-                command_buffer,
-                vk::PipelineBindPoint::COMPUTE,
-                pipeline.handle(),
-            );
-
-            // Bind Set 0: Depth buffer, camera buffer (frame-specific)
-            device.cmd_bind_descriptor_sets(
-                command_buffer,
-                vk::PipelineBindPoint::COMPUTE,
-                pipeline.layout(),
-                0,
-                &[self.compute_descriptor_sets[frame_index]],
-                &[],
-            );
-
-            let (tx, ty, tz) = self.lights.get_dispatch_dimensions();
-
-            // Reconstruct screen size for PC
-            let width = self.cached_info.num_tiles[0] * self.cached_info.tile_size;
-            let height = self.cached_info.num_tiles[1] * self.cached_info.tile_size;
-
-            let push_constants = self
-                .lights
-                .get_culling_push_constants(width, height, frame_index);
-
-            device.cmd_push_constants(
-                command_buffer,
-                pipeline.layout(),
-                vk::ShaderStageFlags::COMPUTE,
-                0,
-                bytemuck::bytes_of(&push_constants),
-            );
-
-            device.cmd_dispatch(command_buffer, tx, ty, tz);
-
-            // Pipeline barrier to ensure writes are visible to fragment shader
-            // LightManager owns tile buffer, used in Set 2 binding 2.
-            if let Some(t_buf) = self.lights.get_tile_buffer(frame_index) {
-                let barrier = vk::BufferMemoryBarrier::default()
-                    .src_access_mask(vk::AccessFlags::SHADER_WRITE)
-                    .dst_access_mask(vk::AccessFlags::SHADER_READ)
-                    .buffer(t_buf)
-                    .offset(0)
-                    .size(vk::WHOLE_SIZE); // Or proper size
-
-                device.cmd_pipeline_barrier(
+            unsafe {
+                self.device.cmd_bind_pipeline(
                     command_buffer,
-                    vk::PipelineStageFlags::COMPUTE_SHADER,
-                    vk::PipelineStageFlags::FRAGMENT_SHADER,
-                    vk::DependencyFlags::empty(),
-                    &[],
-                    &[barrier],
+                    vk::PipelineBindPoint::COMPUTE,
+                    pipeline.handle(),
+                );
+
+                // Bind Set 0: Depth buffer, camera buffer (frame-specific)
+                self.device.cmd_bind_descriptor_sets(
+                    command_buffer,
+                    vk::PipelineBindPoint::COMPUTE,
+                    pipeline.layout(),
+                    0,
+                    &[self.compute_descriptor_sets[frame_index]],
                     &[],
                 );
+
+                let (tx, ty, tz) = self.lights.get_dispatch_dimensions();
+
+                // Reconstruct screen size for PC
+                let width = self.cached_info.num_tiles[0] * self.cached_info.tile_size;
+                let height = self.cached_info.num_tiles[1] * self.cached_info.tile_size;
+
+                let push_constants =
+                    self.lights
+                        .get_culling_push_constants(width, height, frame_index);
+
+                self.device.cmd_push_constants(
+                    command_buffer,
+                    pipeline.layout(),
+                    vk::ShaderStageFlags::COMPUTE,
+                    0,
+                    bytemuck::bytes_of(&push_constants),
+                );
+
+                self.device.cmd_dispatch(command_buffer, tx, ty, tz);
+
+                // Pipeline barrier to ensure writes are visible to fragment shader
+                // LightManager owns tile buffer, used in Set 2 binding 2.
+                if let Some(t_buf) = self.lights.get_tile_buffer(frame_index) {
+                    let barrier = vk::BufferMemoryBarrier::default()
+                        .src_access_mask(vk::AccessFlags::SHADER_WRITE)
+                        .dst_access_mask(vk::AccessFlags::SHADER_READ)
+                        .buffer(t_buf)
+                        .offset(0)
+                        .size(vk::WHOLE_SIZE); // Or proper size
+
+                    self.device.cmd_pipeline_barrier(
+                        command_buffer,
+                        vk::PipelineStageFlags::COMPUTE_SHADER,
+                        vk::PipelineStageFlags::FRAGMENT_SHADER,
+                        vk::DependencyFlags::empty(),
+                        &[],
+                        &[barrier],
+                        &[],
+                    );
+                }
             }
         }
+        Ok(())
     }
 
     /// Check if Forward+ is enabled (has lights)

@@ -1,6 +1,8 @@
+pub mod culling;
 pub mod post_process;
 
 use crate::renderer::features::AutoRotateFeature;
+use crate::renderer::systems::culling::CullingSystem;
 use crate::renderer::{
     context::Context,
     diagnostics::{DiagnosticsOverlay, DiagnosticsState, FrameProfiler, GpuProfiler},
@@ -26,6 +28,7 @@ use std::sync::{Arc, RwLock};
 /// Systems manages high-level rendering logic and pipeline state.
 pub struct Systems {
     pub pipeline: RenderPipeline,
+    pub culling: CullingSystem,
     pub skybox_pass: Option<SkyboxPass>,
 
     // Features & Config
@@ -82,6 +85,13 @@ impl Systems {
             .take()
             .expect("Pipelines not initialized");
 
+        let indirect_draw_pass = Some(Arc::new(RwLock::new(
+            passes
+                .indirect_draw_pass
+                .take()
+                .expect("Indirect Draw Pass not found"),
+        )));
+
         let systems = Self {
             pipeline: RenderPipeline::new(
                 lighting.shadow_system.take(),
@@ -89,17 +99,13 @@ impl Systems {
                 Some(Arc::new(RwLock::new(
                     passes.hiz_pass.take().expect("HiZ Pass not found"),
                 ))),
-                AdaptiveHiZManager::new(3.0),
+                Arc::new(RwLock::new(AdaptiveHiZManager::new(3.0))),
                 Some(Arc::new(RwLock::new(lighting.forward_plus))),
-                Some(Arc::new(RwLock::new(
-                    passes
-                        .indirect_draw_pass
-                        .take()
-                        .expect("Indirect Draw Pass not found"),
-                ))),
+                indirect_draw_pass.clone(),
                 Some(pipelines.pipeline),
                 Some(pipelines.layout),
             ),
+            culling: CullingSystem::new(indirect_draw_pass),
             skybox_pass: passes.skybox_pass.take(),
             features,
             vsr_pass: None,

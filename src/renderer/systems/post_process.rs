@@ -6,6 +6,13 @@ use ash::vk;
 use bytemuck;
 use std::sync::Arc;
 
+use crate::renderer::frame::Frame;
+use crate::renderer::passes::temporal_aa::ConfigMetrics;
+use crate::renderer::passes::vsr::{SharpenConfig, VsrConfig, VsrPass};
+use crate::renderer::resources::HdrSystem;
+use crate::renderer::resources::Resources;
+use crate::vulkan::SwapchainWrapper;
+
 /// Configuration for post-processing effects.
 #[derive(Clone, Copy, Debug)]
 pub struct PostProcessConfig {
@@ -161,6 +168,116 @@ impl PostProcessSystem {
         unsafe {
             self.device.update_descriptor_sets(&writes, &[]);
         }
+    }
+}
+
+/// Context for post-processing and upscaling.
+pub struct PostProcessContext<'a> {
+    pub device: &'a ash::Device,
+    pub command_buffer: vk::CommandBuffer,
+    pub frame_index: usize,
+    pub image_index: usize,
+    pub resources: &'a Resources,
+    pub frame: &'a Frame,
+    pub swapchain: &'a SwapchainWrapper,
+    pub vsr: Option<&'a mut VsrPass>,
+    pub hdr: Option<&'a HdrSystem>,
+    pub taa_metrics: Option<&'a mut ConfigMetrics>,
+    pub vsr_config: VsrConfig,
+    pub sharpen_config: Option<SharpenConfig>,
+    pub jitter_uv: [f32; 2],
+}
+
+impl PostProcessSystem {
+    /// Execute the complete post-processing chain.
+    ///
+    /// This method orchestrates:
+    /// 1. VSR (upscaling) dispatch if enabled.
+    /// 2. Tone Mapping (HDR to SDR) with swapchain barriers.
+    pub fn execute(&mut self, mut ctx: PostProcessContext) -> Result<()> {
+        // 1. VSR / Upscaling Phase
+        if let Some(ref mut vsr) = ctx.vsr {
+            let upscale_config = crate::renderer::passes::vsr::VsrUpscaleConfig {
+                velocity_threshold: 0.05, // Standard threshold
+                history_weight: ctx.vsr_config.history_weight(),
+                clamping_gamma: ctx.vsr_config.clamping_gamma(),
+                anti_ghosting: ctx.vsr_config.anti_ghosting,
+            };
+
+            let vsr_inputs = crate::renderer::passes::vsr::VsrInputs {
+                color_index: ctx.frame.hdr_image_index.ok_or_else(|| {
+                    crate::AshError::VulkanError(
+                        "HDR image index not initialized for VSR".to_string(),
+                    )
+                })?,
+                depth_index: {
+                    let gbuffer_indices = ctx.frame.gbuffer_indices.as_ref().unwrap();
+                    if gbuffer_indices.depth_index == u32::MAX {
+                        0 // Fallback to default white texture index
+                    } else {
+                        gbuffer_indices.depth_index
+                    }
+                },
+                motion_index: {
+                    let gbuffer_indices = ctx.frame.gbuffer_indices.as_ref().unwrap();
+                    if gbuffer_indices.motion_index == u32::MAX {
+                        0 // Fallback to default white texture index
+                    } else {
+                        gbuffer_indices.motion_index
+                    }
+                },
+                jitter: ctx.jitter_uv,
+            };
+
+            unsafe {
+                vsr.upscale_with_sharpening(
+                    ctx.command_buffer,
+                    vsr_inputs,
+                    &upscale_config,
+                    ctx.sharpen_config.as_ref(),
+                )
+                .map_err(|e| crate::AshError::VulkanError(format!("VSR upscale failed: {e}")))?;
+            }
+            vsr.next_frame();
+        }
+
+        // 2. Tonemapping / Swapchain Resolution Phase
+        if let Some(hdr) = ctx.hdr {
+            // Resolve input view (VSR output vs raw HDR output)
+            let input_view = ctx
+                .vsr
+                .as_ref()
+                .map(|vsr| vsr.active_view())
+                .unwrap_or_else(|| hdr.view());
+
+            let black_view = ctx.resources.black_texture.view();
+
+            self.update_descriptor_set(
+                ctx.image_index,
+                input_view,
+                black_view, // bloom_view placeholder
+                black_view, // ssgi_view placeholder
+                hdr.sampler(),
+            );
+
+            let swapchain_extent = vk::Extent2D {
+                width: ctx.swapchain.extent.width,
+                height: ctx.swapchain.extent.height,
+            };
+
+            let target_image = ctx.swapchain.images[ctx.image_index];
+            let target_view = ctx.swapchain.image_views[ctx.image_index];
+
+            self.render(
+                ctx.command_buffer,
+                ctx.image_index,
+                swapchain_extent,
+                target_image,
+                target_view,
+            )?;
+        }
+
+        Ok(())
     }
 
     pub fn render(

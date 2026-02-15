@@ -283,17 +283,11 @@ impl ModelRenderer {
         })
     }
 
-    /// Specialized draw call for shadow map generation.
-    /// Uses traditional instancing for CPU-side batch submission.
+    /// Records direct draw commands for a batch of instances (Shadows or Main Pass Fallback).
     ///
     /// # Safety
     /// Command buffer must be in recording state and instances must be valid.
-    pub unsafe fn draw_shadow_batch(
-        &self,
-        ctx: &DrawContext,
-        instance_count: u32,
-        first_instance: u32,
-    ) {
+    pub unsafe fn draw_direct(&self, ctx: &DrawContext, instance_count: u32, first_instance: u32) {
         if instance_count == 0 {
             return;
         }

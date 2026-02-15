@@ -99,7 +99,10 @@ impl ApplicationHandler for App {
         let surface_provider = ash_renderer::vulkan::WindowSurfaceProvider::new(&window);
         
         // Init renderer (Warning: May take a second to cook shaders)
-        self.renderer = Some(Renderer::new(&surface_provider).expect("Vulkan forgot how to GPU"));
+        self.renderer = Some(Renderer::builder()
+            .with_vsync(true) // Explicit VSync control
+            .build(&surface_provider)
+            .expect("Vulkan forgot how to GPU"));
         self.window = Some(window);
         
         // Setup basic mesh and material
@@ -218,7 +221,7 @@ recorder.record_parallel(cmd, pass_count, |idx, cmd| {
 
 ### Renderer
 The heavy lifter. You probably only need one.
-- `Renderer::new(provider)`: The constructor. Expects a `SurfaceProvider`.
+- `Renderer::builder()`: The entry point. Use `.build(provider)` to create the renderer.
 - `render_frame(view, proj, camera_pos, target)`: Call this every frame or nothing happens.
 - `upload_mesh(mesh)`: Sends geometry to the GPU, returns handle.
 - `register_and_upload_material(material)`: Registers and uploads PBR material.
@@ -317,7 +320,7 @@ PRs are welcome! If you find a bug, open an issue. I might fix it, or I might ju
 
 ## The Real Reason This Exists
 
-**WARNING**: This engine is built on pure recklessness and a willingness to break everything in the name of progress. I don't care about backward compatibility. I don't care about your carefully crafted code. I care about making this the most badass renderer on the block.
+**WARNING**: This renderer is built on pure recklessness and a willingness to break everything in the name of progress. I don't care about backward compatibility. I don't care about your carefully crafted code. I care about making this the most badass renderer on the block.
 
 Every update might:
 - Rename all your favorite functions

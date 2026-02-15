@@ -34,13 +34,18 @@ impl SwapchainWrapper {
         vk_device: &crate::vulkan::VulkanDevice,
         headless: bool,
         preferred_extent: vk::Extent2D,
+        present_mode: vk::PresentModeKHR,
     ) -> Result<Self> {
         let (swapchain_loader, swapchain, images, image_views, format, extent, headless_memory) =
             if !headless {
                 let swapchain_loader =
                     swapchain::Device::new(vk_device.instance.instance(), &vk_device.device);
-                let (swapchain, images, image_views, format, extent) =
-                    Self::build_swapchain(vk_device, &swapchain_loader, vk::SwapchainKHR::null())?;
+                let (swapchain, images, image_views, format, extent) = Self::build_swapchain(
+                    vk_device,
+                    &swapchain_loader,
+                    vk::SwapchainKHR::null(),
+                    present_mode,
+                )?;
                 (
                     Some(swapchain_loader),
                     swapchain,
@@ -178,6 +183,7 @@ impl SwapchainWrapper {
         vk_device: &crate::vulkan::VulkanDevice,
         swapchain_loader: &swapchain::Device,
         old_swapchain: vk::SwapchainKHR,
+        present_mode: vk::PresentModeKHR,
     ) -> Result<(
         vk::SwapchainKHR,
         Vec<vk::Image>,
@@ -241,7 +247,7 @@ impl SwapchainWrapper {
             .image_sharing_mode(vk::SharingMode::EXCLUSIVE)
             .pre_transform(capabilities.current_transform)
             .composite_alpha(vk::CompositeAlphaFlagsKHR::OPAQUE)
-            .present_mode(vk::PresentModeKHR::FIFO)
+            .present_mode(present_mode)
             .clipped(true)
             .old_swapchain(old_swapchain);
 
@@ -309,7 +315,8 @@ impl SwapchainWrapper {
 
         let loader = self.swapchain_loader.as_ref().unwrap();
         let (swapchain, images, image_views, format, extent) =
-            Self::build_swapchain(vk_device, loader, self.swapchain)?;
+            // Reuse current present mode on recreation for now
+            Self::build_swapchain(vk_device, loader, self.swapchain, vk::PresentModeKHR::FIFO)?;
 
         self.swapchain = swapchain;
         self.images = images;

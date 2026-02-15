@@ -20,8 +20,9 @@ pub unsafe fn create_swapchain_data(
     device: &vulkan::VulkanDevice,
     alloc: &Arc<vulkan::Allocator>,
     extent: vk::Extent2D,
+    present_mode: vk::PresentModeKHR,
 ) -> Result<SwapchainData> {
-    let swapchain = vulkan::SwapchainWrapper::new(device, device.headless, extent)?;
+    let swapchain = vulkan::SwapchainWrapper::new(device, device.headless, extent, present_mode)?;
 
     let depth_buffer = resources::DepthBuffer::new(
         Arc::clone(&device.device),
@@ -41,12 +42,13 @@ pub unsafe fn init_swapchain<S: vulkan::SurfaceProvider>(
     alloc: &Arc<vulkan::Allocator>,
     resources: &Arc<ResourceRegistry>,
     surface_provider: &S,
+    present_mode: vk::PresentModeKHR,
 ) -> Result<SwapchainDataWithIds> {
     let (width, height) = surface_provider.physical_size();
     let extent = vk::Extent2D { width, height };
 
     log::info!("Creating Swapchain & Frame Resources");
-    let mut data = create_swapchain_data(device, alloc, extent)?;
+    let mut data = create_swapchain_data(device, alloc, extent, present_mode)?;
 
     let mut swapchain_image_view_ids = Vec::with_capacity(data.swapchain.image_views.len());
     for &view in &data.swapchain.image_views {
@@ -492,6 +494,7 @@ pub unsafe fn init_lighting_system(
     upload_command_pool: vk::CommandPool,
     frame_count: u32,
     extent: vk::Extent2D,
+    shadow_resolution: u32,
 ) -> Result<LightingSystem> {
     log::info!("Initializing Lighting System...");
 
@@ -509,13 +512,16 @@ pub unsafe fn init_lighting_system(
     forward_plus.init(alloc);
     forward_plus.on_resize(extent.width, extent.height);
 
+    let mut vsm_config = crate::renderer::features::default_vsm_config();
+    vsm_config.physical_resolution = shadow_resolution;
+
     let shadow_system = match crate::renderer::features::ShadowSystem::new(
         Arc::clone(&device.device),
         Arc::clone(alloc),
         bindless_manager,
         upload_command_pool,
         device.graphics_queue,
-        crate::renderer::features::default_vsm_config(),
+        vsm_config,
         frame_count,
     ) {
         Ok(system) => Some(system),

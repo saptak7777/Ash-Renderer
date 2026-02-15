@@ -6,6 +6,13 @@ use crate::{
 };
 use std::sync::Arc;
 
+/// # Safety
+///
+/// **DO NOT IMPLEMENT `Drop`**.
+/// Manually destroying the `device` here will cause crashes in `alloc` and `resources`
+/// which likely get dropped *after* this struct or its fields.
+/// Rely on OS cleanup for the Device/Instance.
+///
 /// Vulkan core infrastructure handles.
 /// Grouped to ensure proper LIFO destruction order.
 pub struct Context {

@@ -141,6 +141,10 @@ impl PipelineConfig {
 
 #[derive(Clone, Debug)]
 pub struct RendererConfig {
+    pub resolution: Option<(u32, u32)>,
+    pub present_mode: vk::PresentModeKHR,
+    pub shadow_resolution: u32,
+    pub vsr_config: crate::renderer::passes::vsr::VsrConfig,
     pub pipeline: PipelineConfig,
     pub texture_compression: bool,
     pub strict_mode: bool,
@@ -149,6 +153,10 @@ pub struct RendererConfig {
 impl Default for RendererConfig {
     fn default() -> Self {
         Self {
+            resolution: None,
+            present_mode: vk::PresentModeKHR::FIFO,
+            shadow_resolution: 4096,
+            vsr_config: crate::renderer::passes::vsr::VsrConfig::default(),
             pipeline: PipelineConfig::default(),
             texture_compression: true,
             strict_mode: false,

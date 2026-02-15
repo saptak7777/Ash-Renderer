@@ -54,7 +54,12 @@ impl ApplicationHandler for App {
         let window = event_loop.create_window(window_attrs).unwrap();
         let surface_provider = ash_renderer::vulkan::WindowSurfaceProvider::new(&window);
 
-        match Renderer::new(&surface_provider) {
+        let renderer = Renderer::builder()
+            .with_vsync(true)
+            .with_shadow_resolution(2048) // Lower shadow res for better perf in example
+            .build(&surface_provider);
+
+        match renderer {
             Ok(mut renderer) => {
                 let mut scene = Scene::new(
                     Arc::clone(&renderer.context.device.device),
@@ -335,7 +340,9 @@ fn run_headless(max_frames: u32) -> Result<()> {
     let height = 720;
     let surface_provider = ash_renderer::vulkan::HeadlessSurfaceProvider::new(width, height);
 
-    let mut renderer = Renderer::new(&surface_provider)?;
+    let mut renderer = Renderer::builder()
+        .with_vsync(false) // No vsync for headless profiling
+        .build(&surface_provider)?;
     let mut scene = Scene::new(
         Arc::clone(&renderer.context.device.device),
         Arc::clone(&renderer.context.alloc),

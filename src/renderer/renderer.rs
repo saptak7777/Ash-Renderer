@@ -8,13 +8,12 @@ use crate::{
             MeshData, RendererConfig,
         },
         passes::{
-            vsr as vsr_pass,
             hiz::HiZPass,
             temporal_aa::{
                 detect_config_change, ConfigChangeType, ConfigMetrics, ConfigMetricsReport,
-                ConfigValidationError, SharpeningMode, TaaConfig, Validate,
+                ConfigValidationError, TaaConfig, Validate,
             },
-            vsr::{SharpenConfig, VsrInputs, VsrPass, VsrQuality, VsrUpscaleConfig},
+            vsr::{VsrPass, VsrQuality},
         },
         vcgs::IndirectDrawPass,
         instancing::{BatchKey, InstanceData},
@@ -30,7 +29,7 @@ use crate::{
 };
 
 use ash::vk;
-use glam::{Mat4, Vec3};
+use glam::Mat4;
 use rayon::prelude::*;
 use resources::BufferPool;
 use std::collections::HashMap;
@@ -57,28 +56,36 @@ use super::frame::Frame;
 
 /// Main rendering system.
 ///
-/// # Safety Contract
+/// # Safety & Drop Semantics
+/// 
+/// ## CRITICAL: DO NOT IMPLEMENT `Drop` FOR THIS STRUCT
+/// 
+/// This renderer relies on **OS-level resource reclamation** for the Vulkan Device and Instance 
+/// to avoid complex double-free/use-after-free crashes that occur when manually destroying 
+/// the device while other components (Allocators, Buffers) still hold `Arc<Device>` references.
 ///
-/// The `Renderer` manages complex GPU resource lifecycles. To ensure memory safety:
-///
-/// 1. **Drop Order**: Rust's drop order (top-to-bottom for fields) is critical. 
-///    Systems must be destroyed before Frame resources, which must be destroyed before the Device.
-/// 2. **Layout**:
-///    - Systems -> Drops FIRST
-///    - Frame -> Drops SECOND
-///    - Resources -> Drops THIRD
-///    - Context -> Drops LAST
+/// ## Field Drop Order
+/// 
+/// Rust drops fields in declaration order (top-to-bottom). The specific order below is **REQUIRED**
+/// for safe teardown before the OS takes over:
+/// 
+/// 1. `systems`: High-level logic (e.g., RenderPipeline) must be dropped first to release references.
+/// 2. `frame`: Synchronization primitives (Fences, Semaphores).
+/// 3. `resources`: Heavy GPU assets.
+/// 4. `context`: The Vulkan Device/Instance. Drops LAST.
+/// 
+/// **DO NOT REORDER THESE FIELDS.**
 pub struct Renderer {
-    // 1. Systems (High-level logic) -> Drops FIRST
+    /// High-level logic and systems. Drops FIRST.
     pub systems: Systems,
 
-    // 2. Frame (Swapchain/Sync) -> Drops SECOND
+    /// Frame-level synchronization and command management. Drops SECOND.
     pub frame: Frame,
 
-    // 3. Resources (Buffers/Assets) -> Drops THIRD
+    /// GPU resources and asset managers. Drops THIRD.
     pub resources: Resources,
 
-    // 4. Vulkan (Device/Instance) -> Drops LAST
+    /// Vulkan context (Device/Instance). Drops LAST.
     pub context: Context,
 }
 
@@ -99,6 +106,10 @@ pub struct MainPassParameters<'a> {
 }
 
 impl Renderer {
+    /// Returns a new [`RendererBuilder`] to configure and build the renderer.
+    pub fn builder() -> crate::renderer::builder::RendererBuilder {
+        crate::renderer::builder::RendererBuilder::new()
+    }
 
     pub fn wait_for_idle(&self) -> Result<()> {
         self.context.wait_for_idle()
@@ -109,24 +120,30 @@ impl Renderer {
         log::info!("Debug mode set to: {mode:?}");
     }
 
-    /// Initializes the renderer.
-    pub fn new<S: vulkan::SurfaceProvider>(surface_provider: &S) -> Result<Self> {
-        log::info!("Renderer::new: Starting initialization");
+    /// Initializes the renderer with a specific configuration.
+    pub(crate) fn new_with_config<S: vulkan::SurfaceProvider>(
+        surface_provider: &S,
+        config: RendererConfig,
+    ) -> Result<Self> {
+        log::info!("Renderer::new_with_config: Starting initialization");
         unsafe {
             let context = Context::new(surface_provider)?;
             let pipeline_cache = PipelineCache::new(Arc::clone(&context.device.device))?;
-            let renderer_config = RendererConfig::default();
             
-            let (width, height) = surface_provider.physical_size();
+            let (width, height) = if let Some((w, h)) = config.resolution {
+                (w, h)
+            } else {
+                surface_provider.physical_size()
+            };
             
-            let mut frame = Frame::new(&context, width, height)?;
+            let mut frame = Frame::new(&context, width, height, config.present_mode)?;
             
             // Single line initialization! (Phase 5.2/5.3)
             let mut resources = Resources::new(
                 &context, 
                 width, 
                 height, 
-                &renderer_config, 
+                &config, 
                 surface_provider, 
                 &pipeline_cache,
                 frame.swapchain.as_ref().unwrap(),
@@ -141,7 +158,7 @@ impl Renderer {
                 pipeline_cache,
                 width,
                 height,
-                &renderer_config,
+                &config,
             )?;
 
             let mut renderer = Self {
@@ -177,6 +194,11 @@ impl Renderer {
 
             Ok(renderer)
         }
+    }
+
+    /// Convenience for default initialization.
+    pub fn new<S: vulkan::SurfaceProvider>(surface_provider: &S) -> Result<Self> {
+        Self::builder().build(surface_provider)
     }
 
     /// Register all major subsystems with the ResourceRegistry for automatic cleanup
@@ -241,13 +263,6 @@ impl Renderer {
 
 
 
-    /// Convenience for setting view and projection at once
-    pub fn set_view(&mut self, _eye: Vec3, _center: Vec3, _up: Vec3) {
-        // We calculate the view matrix here.
-        // The projection is usually handled by the camera, but we can store it or calculate it.
-        // For simplicity, let's just make this a no-op that logs for now, or actually store it.
-        // Wait, renderer doesn't have a view matrix field yet.
-    }
 
 
     /// Get immutable access to consolidated mesh data.
@@ -372,6 +387,7 @@ impl Renderer {
         log::debug!("Submitting {} render commands", commands.len());
         self.frame.draw_items.clear();
         self.resources.instancing_manager.begin_frame();
+        scene.occlusion_culling.begin_frame();
 
         const PARALLEL_THRESHOLD: usize = 1000;
 
@@ -539,6 +555,28 @@ impl Renderer {
                 .then_with(|| a.key.cmp(&b.key))
         });
 
+        // POPULATE OCCLUSION CULLING FROM SORTED ITEMS (Phase 7.2C Fix)
+        for (i, item) in self.frame.draw_items.iter().enumerate() {
+            if let Some(uploaded) = scene.model_renderer.get(&item.key) {
+                let bounds = scene.mesh_data.get(item.mesh_id as usize)
+                    .map(|m| m.bounds)
+                    .unwrap_or_else(|| {
+                         crate::renderer::CullBoundingBox::new(glam::Vec3::ZERO, glam::Vec3::ONE * 100.0)
+                    });
+                
+                scene.occlusion_culling.push_clusters(
+                    bounds,
+                    item.transform,
+                    i as u32,
+                    (uploaded.index_offset.unwrap_or(0) / 4) as u32,
+                    uploaded.index_count(),
+                    item.material_handle.index as u32,
+                    (uploaded.vertex_offset.unwrap_or(0) / 64) as i32,
+                    uploaded.clusters(),
+                );
+            }
+        }
+
         Ok(())
     }
 
@@ -639,93 +677,13 @@ impl Renderer {
     /// - `camera_pos`: Camera world position (for lighting calculations)
 
 
-    /// Executes the GPU-driven culling pass (Compute).
-    /// Must be called OUTSIDE of a render pass.
-    pub fn cull_main_pass(
-        &mut self,
-        params: &MainPassParameters,
-    ) -> Result<()> {
-        let cmd_ctx = params.cmd_ctx;
-        let frame_index = params.frame_index;
-        let view = params.view;
-        let projection = params.projection;
-
-        // Modern Phase 4: Full GPU-Driven Indirect Draw (Opaque Path)
-            if let Some(ref indirect_arc) = self.systems.pipeline.indirect_draw_pass {
-                let indirect_pass = indirect_arc.write().unwrap();
-            // No longer populating objects here; they were already populated in render_frame
-            // with high-fidelity clusters.
-
-            // 2. Upload and Execute Culling
-            log::debug!("Occlusion culling object count: {}", params.scene.occlusion_culling.object_count());
-            if params.scene.occlusion_culling.object_count() > 0 {
-                let _frame_address = self.resources.uniform_buffers[frame_index].read().unwrap().device_address();
-                
-                unsafe {
-                    indirect_pass.upload_objects(&self.context.alloc.vma, params.scene.occlusion_culling.object_data(), 0)?;
-                    
-                    // Reset count buffer to 0 before compute pass
-                    self.context.device.device.cmd_fill_buffer(cmd_ctx.handle(), indirect_pass.count_buffer(), 0, 4, 0);
-
-                    // Compute barrier: ensure fill is done
-                    let fill_barrier = vk::MemoryBarrier::default()
-                        .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
-                        .dst_access_mask(vk::AccessFlags::SHADER_READ | vk::AccessFlags::SHADER_WRITE);
-                    
-                    cmd_ctx.pipeline_barrier(
-                        vk::PipelineStageFlags::TRANSFER,
-                        vk::PipelineStageFlags::COMPUTE_SHADER,
-                        vk::DependencyFlags::empty(),
-                        &[fill_barrier],
-                        &[],
-                        &[].as_ref(),
-                    );
-
-                    let extent = self.frame.swapchain.as_ref().map_or(vk::Extent2D { width: 1, height: 1 }, |sw| sw.extent);
-
-                    indirect_pass.execute_culling(
-                        cmd_ctx.handle(),
-                        &params.scene.occlusion_culling,
-                        projection * view,
-                        extent.width,
-                        extent.height,
-                        0,
-                        params.scene.occlusion_culling.object_count() as u32,
-                        0,
-                        self.resources.global_cluster_buffer.as_ref().map(|b| b.device_address()).unwrap_or(0),
-                    )?;
-
-                    // CRITICAL BARRIER: Compute-to-Graphics for Indirect Buffers
-                    let indirect_barrier = vk::MemoryBarrier::default()
-                        .src_access_mask(vk::AccessFlags::SHADER_WRITE)
-                        .dst_access_mask(vk::AccessFlags::INDIRECT_COMMAND_READ | vk::AccessFlags::SHADER_READ);
-                    
-                    cmd_ctx.pipeline_barrier(
-                        vk::PipelineStageFlags::COMPUTE_SHADER,
-                        vk::PipelineStageFlags::DRAW_INDIRECT | vk::PipelineStageFlags::VERTEX_SHADER,
-                        vk::DependencyFlags::empty(),
-                        &[indirect_barrier],
-                        &[],
-                        &[].as_ref(),
-                    );
-                }
-            }
-        }
-        Ok(())
-    }
 
     pub fn render_main_pass(
-        &mut self,
+        &self,
         params: &MainPassParameters,
     ) -> Result<()> {
         let cmd_ctx = params.cmd_ctx;
         let frame_index = params.frame_index;
-        let _scene_pipeline = params.scene_pipeline;
-        let _pipeline_layout_handle = params.pipeline_layout_handle;
-        let _batch_offsets = params.batch_offsets;
-        let _view = params.view;
-        let _projection = params.projection;
-        let _swapchain_extent = params.swapchain_extent;
 
         // Resolve global debug state
         let debug_enabled = match self.systems.debug_mode {
@@ -747,10 +705,21 @@ impl Renderer {
             .map(|d| (d.view(), d.image(), d.format()))
             .ok_or_else(|| AshError::VulkanError("Depth buffer missing".into()))?;
 
+        // Fallback Logic: Prepare DrawItems for CPU-side batching if indirect is disabled
+        let draw_items: Vec<DrawItem> = params.batch_offsets.keys().map(|key| {
+            DrawItem {
+                key: Arc::from(format!("{}", key.mesh_id)), // Assuming we can use ID as key for now or resolve from manager
+                mesh_id: key.mesh_id,
+                transform: Mat4::IDENTITY, // Instance data handles transform
+                material: crate::renderer::resources::Material::default(), // Placeholder
+                material_handle: key.material_id,
+            }
+        }).collect();
+
         // Create a dummy transform for feature rendering context
         let dummy_transform = crate::renderer::Transform::identity();
 
-        // Phase 3.2, Part 2: Relocated Geometry Rendering
+        // Phase 7.3: Consolidated Geometry Delegation
         let geo_ctx = GeometryRenderContext {
             device: &self.context.device,
             command_buffer: cmd_ctx,
@@ -776,47 +745,15 @@ impl Renderer {
             transform: &dummy_transform,
             is_swapchain_image: self.systems.hdr_system.is_none(),
             depth_format,
+            draw_items: &draw_items,
         };
 
-        self.systems.pipeline.render_geometry(&geo_ctx)?;
-
-        // --- PHASE 4: STRICT MODERN - Legacy paths removed ---
-        // (Only skinned meshes would remain here if we hadn't moved them, 
-        // but for now we focus on opaque stability)
+        self.systems.pipeline.render_geometry(&geo_ctx, &self.resources, params.scene, frame_index)?;
 
         Ok(())
     }
 
 
-
-    pub fn render_skybox(
-        &mut self,
-        cmd_ctx: &CommandBufferContext,
-        frame_index: usize,
-        _view: Mat4,
-        _projection: Mat4,
-    ) -> Result<()> {
-        if let Some(ref skybox_pass) = self.systems.skybox_pass {
-            let bindless_set = self.resources.assets.bindless_manager.descriptor_set();
-            let frame_ptr = self.resources.uniform_buffers[frame_index].read().unwrap().device_address();
-            
-            unsafe {
-                skybox_pass.render(&self.context.device, cmd_ctx, bindless_set, frame_ptr)?;
-            }
-        }
-        Ok(())
-    }
-
-    /// Set scene lighting configuration (RAGE)
-    /// Deprecated: Use scene.set_lighting() instead.
-    pub fn set_lighting(&mut self, _lighting: &crate::renderer::features::SceneLighting) {
-        log::warn!("Renderer::set_lighting is deprecated. Use scene.set_lighting() instead.");
-    }
-
-    pub fn set_light_direction(&mut self, _direction: Vec3) {
-        // Legacy shadow feature removed. VSM handles light direction internally or via scene updates.
-        // self.shadow_feature.set_light_direction(direction);
-    }
 
     /// Update TAA configuration with validation, metrics, and resource management.
     ///
@@ -954,7 +891,7 @@ impl Renderer {
         )
     }
 
-    fn execute_hiz_pass(&mut self, command_buffer: vk::CommandBuffer) -> Result<()> {
+    fn execute_hiz_pass(&self, command_buffer: vk::CommandBuffer) -> Result<()> {
         if let Some(ref db) = self.resources.depth_buffer {
             self.systems.pipeline.execute_hiz_pass(
                 command_buffer,
@@ -968,25 +905,11 @@ impl Renderer {
     }
 
     fn execute_shadow_pass(
-        &mut self,
+        &self,
         command_buffer: vk::CommandBuffer,
-        scene: &mut Scene,
+        scene: &Scene,
         frame_index: usize,
-    ) -> Result<(Vec<InstanceData>, HashMap<BatchKey, u32>)> {
-        let mut all_instances = Vec::new();
-        let mut batch_offsets = HashMap::new();
-        {
-            for batch in self.resources.instancing_manager.batches() {
-                batch_offsets.insert(batch.key.clone(), all_instances.len() as u32);
-                all_instances.extend_from_slice(&batch.instances);
-            }
-        }
-        if !all_instances.is_empty() {
-            unsafe {
-                self.resources.instance_buffers[frame_index].update(&all_instances)?;
-            }
-        }
-
+    ) -> Result<()> {
         let light_ptr = self.systems.pipeline.forward_plus.as_ref().map(|fp| fp.read().unwrap().get_lights().light_ptr(frame_index)).unwrap_or(0);
         let tile_ptr = self.systems.pipeline.forward_plus.as_ref().map(|fp| fp.read().unwrap().get_lights().tile_ptr(frame_index)).unwrap_or(0);
 
@@ -1004,45 +927,15 @@ impl Renderer {
             self.resources.material_heap_address,
             light_ptr,
             tile_ptr,
-            all_instances.len(),
+            self.resources.total_instance_count as usize,
         )?;
         
-        Ok((all_instances, batch_offsets))
-    }
-
-    fn dispatch_light_culling(&self, command_buffer: vk::CommandBuffer, frame_index: usize) -> Result<()> {
-        if let Some(ref fp_integration) = self.systems.pipeline.forward_plus {
-            let fp = fp_integration.read().unwrap();
-            unsafe {
-                fp.dispatch(command_buffer, &self.context.device.device, frame_index as usize);
-            }
-
-            let light_barrier = vk::BufferMemoryBarrier::default()
-                .buffer(fp.lights().get_light_buffer(frame_index as usize).unwrap_or(vk::Buffer::null()))
-                .src_access_mask(vk::AccessFlags::SHADER_WRITE)
-                .dst_access_mask(vk::AccessFlags::SHADER_READ)
-                .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                .offset(0)
-                .size(vk::WHOLE_SIZE);
-
-            unsafe {
-                self.context.device.device.cmd_pipeline_barrier(
-                    command_buffer,
-                    vk::PipelineStageFlags::COMPUTE_SHADER,
-                    vk::PipelineStageFlags::FRAGMENT_SHADER,
-                    vk::DependencyFlags::empty(),
-                    &[],
-                    &[light_barrier],
-                    &[],
-                );
-            }
-        }
         Ok(())
     }
 
+
     fn execute_geometry_pass(
-        &mut self,
+        &self,
         cmd_ctx: &CommandBufferContext,
         frame_index: usize,
         image_index: u32,
@@ -1050,7 +943,6 @@ impl Renderer {
         view: Mat4,
         jittered_projection: Mat4,
         swapchain_extent: vk::Extent2D,
-        batch_offsets: &HashMap<BatchKey, u32>,
         scene_pipeline: vk::Pipeline,
     ) -> Result<()> {
         let light_ptr = self.systems.pipeline.forward_plus.as_ref().map(|fp| fp.read().unwrap().get_lights().light_ptr(frame_index)).unwrap_or(0);
@@ -1067,7 +959,7 @@ impl Renderer {
             image_index,
             scene_pipeline,
             pipeline_layout_handle,
-            batch_offsets,
+            batch_offsets: &self.resources.batch_offsets,
             view,
             projection: jittered_projection,
             swapchain_extent,
@@ -1076,108 +968,9 @@ impl Renderer {
             scene,
         };
 
-        self.cull_main_pass(&main_pass_params)?;
-
-        cmd_ctx.bind_pipeline(vk::PipelineBindPoint::GRAPHICS, scene_pipeline);
-
-        let viewport = vk::Viewport {
-            x: 0.0,
-            y: 0.0,
-            width: swapchain_extent.width as f32,
-            height: swapchain_extent.height as f32,
-            min_depth: 0.0,
-            max_depth: 1.0,
-        };
-        let scissor = vk::Rect2D {
-            offset: vk::Offset2D { x: 0, y: 0 },
-            extent: swapchain_extent,
-        };
-        cmd_ctx.set_viewport(0, &[viewport]);
-        cmd_ctx.set_scissor(0, &[scissor]);
-
-        if self.resources.descriptors.is_some() {
-            cmd_ctx.bind_descriptor_sets(
-                vk::PipelineBindPoint::GRAPHICS,
-                pipeline_layout_handle,
-                0, 
-                &[self.resources.assets.bindless_manager.descriptor_set()],
-                &[],
-            );
-        }
-
+        // DELEGATED PASS (Phase 7.3)
+        // All state management shifted to RenderPipeline
         self.render_main_pass(&main_pass_params)?;
-        Ok(())
-    }
-
-    fn execute_post_process(
-        &mut self,
-        command_buffer: vk::CommandBuffer,
-        image_index: u32,
-        swapchain_extent: vk::Extent2D,
-        jitter_uv: [f32; 2],
-    ) -> Result<()> {
-        if let (Some(ref mut vsr), Some(ref mut _gbuffer)) = (&mut self.systems.vsr_pass, &mut self.resources.gbuffer) {
-            let _: std::result::Result<vsr_pass::VsrMetricsReadback, vsr_pass::VsrError> = vsr.readback_metrics(command_buffer, &self.context.alloc.vma);
-
-            let sharpen_mode = self.systems.taa_config.sharpening;
-            let sharpen_config = if sharpen_mode != SharpeningMode::None {
-                Some(SharpenConfig {
-                    strength: sharpen_mode.strength(),
-                    edge_threshold: 0.12,
-                    adaptive: true,
-                })
-            } else {
-                None
-            };
-
-            let vsr_config = VsrUpscaleConfig {
-                velocity_threshold: self.systems.taa_config.velocity_threshold,
-                history_weight: self.systems.taa_config.blend_factor,
-                clamping_gamma: self.systems.taa_config.quality.clamping_gamma(),
-                anti_ghosting: true,
-            };
-
-            let vsr_inputs = VsrInputs {
-                color_index: self.frame.hdr_image_index.ok_or_else(|| {
-                    AshError::VulkanError("HDR image index not initialized for VSR".to_string())
-                })?,
-                depth_index: {
-                    let gbuffer_indices = self.frame.gbuffer_indices.as_ref().unwrap();
-                    if gbuffer_indices.depth_index == u32::MAX {
-                        0 // Fallback to default white texture index
-                    } else {
-                        gbuffer_indices.depth_index
-                    }
-                },
-                motion_index: {
-                    let gbuffer_indices = self.frame.gbuffer_indices.as_ref().unwrap();
-                    if gbuffer_indices.motion_index == u32::MAX {
-                        0 // Fallback to default white texture index
-                    } else {
-                        gbuffer_indices.motion_index
-                    }
-                },
-                jitter: jitter_uv,
-            };
-
-            unsafe {
-                vsr.upscale_with_sharpening(command_buffer, vsr_inputs, &vsr_config, sharpen_config.as_ref())
-                    .map_err(|e| AshError::VulkanError(format!("VSR upscale failed: {e}")))?;
-            }
-            vsr.next_frame();
-        }
-
-        self.systems.pipeline.render_post_process(
-            command_buffer,
-            image_index as usize,
-            swapchain_extent,
-            self.frame.swapchain.as_ref().unwrap().images[image_index as usize],
-            self.frame.swapchain.as_ref().unwrap().image_views[image_index as usize],
-            self.systems.hdr_system.as_ref(),
-            self.systems.vsr_pass.as_ref(),
-            self.resources.black_texture.view(),
-        )?;
-
         Ok(())
     }
 
@@ -1229,14 +1022,39 @@ impl Renderer {
                 &[],
             );
 
+
+            // 2. GPU-Driven Culling Data Upload (Phase 7.2C Fix)
+            if let Some(indirect_arc) = &self.systems.culling.indirect_draw_pass {
+                let indirect_pass = indirect_arc.read().map_err(|e| {
+                    AshError::VulkanError(format!("Indirect draw pass lock poisoned: {e}"))
+                })?;
+                
+                indirect_pass.upload_objects(
+                    &self.context.alloc.vma,
+                    scene.occlusion_culling.object_data(),
+                    0,
+                )?;
+            }
+
+            // Execute culling pass to populate indirect draw buffers
+            self.systems.culling.execute_culling(
+                cmd_ctx.handle(),
+                &self.context,
+                &self.resources,
+                scene,
+                frame_index,
+            )?;
+
             // 2. Hi-Z Pass
             self.execute_hiz_pass(command_buffer)?;
 
-            // 3. Shadow Pass (Includes Instance Data Preparation)
-            let (_all_instances, batch_offsets) = self.execute_shadow_pass(command_buffer, scene, frame_index)?;
+            // 3. Shadow Pass
+            self.execute_shadow_pass(command_buffer, scene, frame_index)?;
 
             // 4. Light Culling Pass
-            self.dispatch_light_culling(command_buffer, frame_index)?;
+            if let Some(ref fp) = self.systems.pipeline.forward_plus {
+                fp.read().unwrap().cull_lights(command_buffer, frame_index)?;
+            }
 
             // 5. Geometry Pass (Culling & Main Rendering)
             self.execute_geometry_pass(
@@ -1247,12 +1065,35 @@ impl Renderer {
                 view,
                 jittered_projection,
                 swapchain_extent,
-                &batch_offsets,
                 scene_pipeline,
             )?;
 
-            // 6. Post-Process Pass (Includes VSR)
-            self.execute_post_process(command_buffer, image_index, swapchain_extent, jitter_uv)?;
+            // 6. Post-Process Pass (Includes VSR + Tone Mapping)
+            let pp_ctx = crate::renderer::systems::post_process::PostProcessContext {
+                device: &self.context.device.device,
+                command_buffer,
+                frame_index,
+                image_index: image_index as usize,
+                resources: &self.resources,
+                frame: &self.frame,
+                swapchain: self.frame.swapchain.as_ref().unwrap(),
+                vsr: self.systems.vsr_pass.as_mut(),
+                hdr: self.systems.hdr_system.as_ref(),
+                taa_metrics: Some(&mut self.systems.taa_config_metrics),
+                vsr_config: self.systems.vsr_config.clone(),
+                sharpen_config: if self.systems.vsr_config.sharpening > 0.0 {
+                    Some(crate::renderer::passes::vsr::SharpenConfig {
+                        strength: self.systems.vsr_config.sharpening,
+                        edge_threshold: 0.12,
+                        adaptive: true,
+                    })
+                } else {
+                    None
+                },
+                jitter_uv,
+            };
+
+            self.systems.pipeline.post_process.execute(pp_ctx)?;
 
             // 7. End and Submit
             cmd_ctx.end()?;
@@ -1699,7 +1540,10 @@ impl Renderer {
     /// Log quality reports for debug/profiling
     pub fn log_quality_reports(&self) {
         if let Some(hiz) = &self.systems.pipeline.hiz_pass {
-            log::info!("{}", hiz.read().unwrap().quality_report());
+            match hiz.read() {
+                Ok(guard) => log::info!("{}", guard.quality_report()),
+                Err(e) => log::warn!("HiZ lock poisoned in log_quality_reports: {}", e),
+            }
         }
 
         if let Some(vsr) = &self.systems.vsr_pass {

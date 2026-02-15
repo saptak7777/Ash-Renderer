@@ -30,13 +30,22 @@ pub struct Frame {
 
 impl Frame {
     /// Initializes frame-related resources and state.
-    pub fn new(context: &Context, width: u32, height: u32) -> Result<Self> {
+    pub fn new(
+        context: &Context,
+        width: u32,
+        height: u32,
+        present_mode: vk::PresentModeKHR,
+    ) -> Result<Self> {
         let extent = vk::Extent2D { width, height };
 
         unsafe {
             // Relocated logic from Renderer::new / Resources::new
-            let mut swapchain =
-                SwapchainWrapper::new(&context.device, context.device.headless, extent)?;
+            let mut swapchain = SwapchainWrapper::new(
+                &context.device,
+                context.device.headless,
+                extent,
+                present_mode,
+            )?;
 
             let mut swapchain_image_view_ids = Vec::with_capacity(swapchain.image_views.len());
             for &view in &swapchain.image_views {
