@@ -59,7 +59,7 @@ impl ComputePipeline {
         self.layout
     }
 
-    pub fn builder(device: Arc<ash::Device>) -> ComputePipelineBuilder {
+    pub fn builder<'a>(device: Arc<ash::Device>) -> ComputePipelineBuilder<'a> {
         ComputePipelineBuilder::new(device)
     }
 }
@@ -77,17 +77,18 @@ impl Drop for ComputePipeline {
 }
 
 /// Builder for compute pipelines.
-pub struct ComputePipelineBuilder {
+pub struct ComputePipelineBuilder<'a> {
     device: Arc<ash::Device>,
     layout: Option<vk::PipelineLayout>,
     shader_module: Option<vk::ShaderModule>,
     entry_point: String,
     set_layouts: Vec<vk::DescriptorSetLayout>,
     push_constant_ranges: Vec<vk::PushConstantRange>,
+    specialization_info: Option<vk::SpecializationInfo<'a>>,
 }
 
-impl ComputePipelineBuilder {
-    pub fn new(device: Arc<ash::Device>) -> Self {
+impl<'a> ComputePipelineBuilder<'a> {
+    pub fn new(device: Arc<ash::Device>) -> ComputePipelineBuilder<'a> {
         Self {
             device,
             layout: None,
@@ -95,6 +96,7 @@ impl ComputePipelineBuilder {
             entry_point: "main".to_string(),
             set_layouts: Vec::new(),
             push_constant_ranges: Vec::new(),
+            specialization_info: None,
         }
     }
 
@@ -120,6 +122,11 @@ impl ComputePipelineBuilder {
 
     pub fn add_push_constant(mut self, range: vk::PushConstantRange) -> Self {
         self.push_constant_ranges.push(range);
+        self
+    }
+
+    pub fn with_specialization(mut self, info: vk::SpecializationInfo<'a>) -> Self {
+        self.specialization_info = Some(info);
         self
     }
 
@@ -152,10 +159,14 @@ impl ComputePipelineBuilder {
             (layout, true)
         };
 
-        let stage = vk::PipelineShaderStageCreateInfo::default()
+        let mut stage = vk::PipelineShaderStageCreateInfo::default()
             .stage(vk::ShaderStageFlags::COMPUTE)
             .module(shader_module)
             .name(&entry_point);
+
+        if let Some(spec) = &self.specialization_info {
+            stage = stage.specialization_info(spec);
+        }
 
         let create_info = vk::ComputePipelineCreateInfo::default()
             .stage(stage)

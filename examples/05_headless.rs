@@ -36,17 +36,17 @@ fn main() -> Result<()> {
     cmd_context.begin(ash::vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT)?;
 
     let mut staging_resources = Vec::new();
-    let mesh_handle = scene.upload_mesh(
-        Arc::clone(&renderer.context.device.device),
-        Arc::clone(&renderer.context.alloc),
-        renderer.frame.cmds.upload_command_pool_handle(),
-        upload_cmd,
-        &renderer.context.device.graphics_queue,
-        &mut cube,
-        &mut renderer.resources.assets,
-        &mut staging_resources,
-        None,
-    )?;
+    let mesh_handle = scene.upload_mesh(ash_renderer::renderer::MeshUploadInfo {
+        device: Arc::clone(&renderer.context.device.device),
+        allocator: Arc::clone(&renderer.context.alloc),
+        command_pool: renderer.frame.cmds.upload_command_pool_handle(),
+        command_buffer: upload_cmd,
+        queue: renderer.context.device.graphics_queue,
+        mesh: &mut cube,
+        asset_manager: &mut renderer.resources.assets,
+        staging_resources: &mut staging_resources,
+        material_override: None,
+    })?;
 
     cmd_context.end()?;
 
@@ -99,7 +99,7 @@ fn main() -> Result<()> {
         }],
     )?;
 
-    renderer.render_frame(&mut scene, view, proj, camera_pos, None)?;
+    renderer.render_frame(&mut scene, view, proj, camera_pos, None, None)?;
 
     // 6. Read back the image data
     log::info!("Reading back image data...");

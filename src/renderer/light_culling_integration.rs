@@ -50,8 +50,17 @@ impl LightCullingIntegration {
     /// Call this during renderer initialization.
     pub fn load_shader(&mut self, device: &VulkanDevice) -> Result<()> {
         let code = include_bytes!(concat!(env!("OUT_DIR"), "/light_cull.comp.spv"));
-        let shader =
-            ShaderModule::load_from_bytes(&device.device, code, vk::ShaderStageFlags::COMPUTE)?;
+        let max_unbounded = Some(
+            device
+                .properties12
+                .max_descriptor_set_update_after_bind_sampled_images,
+        );
+        let shader = ShaderModule::load_from_bytes(
+            &device.device,
+            code,
+            vk::ShaderStageFlags::COMPUTE,
+            max_unbounded,
+        )?;
 
         self.shader_module = Some(shader.module);
         // Note: shader will be dropped, but module handle is Copy

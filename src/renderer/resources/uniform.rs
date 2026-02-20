@@ -7,7 +7,7 @@ use vk_mem::Alloc;
 
 use crate::renderer::vcgs::CullObjectData;
 
-/// Uniform buffer data for MVP matrices (Phase 5: improved memory management)
+/// Uniform buffer data for MVP matrices
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct MvpMatrices {
@@ -163,7 +163,7 @@ impl MvpMatrices {
     }
 }
 
-/// Uniform buffer wrapper with Phase 5 improvements
+/// Uniform buffer wrapper
 pub struct UniformBuffer {
     pub buffer: vk::Buffer,
     pub allocation: vk_mem::Allocation,
@@ -175,7 +175,7 @@ pub struct UniformBuffer {
 
 impl UniformBuffer {
     /// # Safety
-    /// Requires valid allocator, device, and proper vulkan context
+    /// Caller must ensure that the provided allocator and device are valid and remain active for the duration of the buffer's life.
     pub unsafe fn new(
         allocator: Arc<crate::vulkan::Allocator>,
         device: Arc<ash::Device>,
@@ -245,9 +245,15 @@ impl UniformBuffer {
             guard.copy_from_slice(&[self.data]);
         }
 
+        // --- Lead Engineer Fix: Aligned Flush ---
+        // Ensure the flush range is a multiple of nonCoherentAtomSize (usually 64 or 256)
+        const ATOM_SIZE: u64 = 256;
+        let aligned_offset = 0; // Starts at 0, so already aligned
+        let aligned_size = size.div_ceil(ATOM_SIZE) * ATOM_SIZE;
+
         self.allocator
             .vma
-            .flush_allocation(&self.allocation, 0, size)
+            .flush_allocation(&self.allocation, aligned_offset, aligned_size)
             .map_err(|e| {
                 crate::AshError::VulkanError(format!("Failed to flush uniform buffer: {e}"))
             })?;
@@ -271,7 +277,7 @@ impl UniformBuffer {
         unsafe { self.device.get_buffer_device_address(&info) }
     }
 
-    /// Phase 5: Proper cleanup - called before destruction
+    /// Proper cleanup - called before destruction
     pub fn cleanup(&mut self) -> crate::Result<()> {
         if self.destroyed {
             return Ok(());
@@ -326,7 +332,7 @@ pub struct MaterialBuffer {
 
 impl MaterialBuffer {
     /// # Safety
-    /// Requires a valid allocator and device
+    /// Caller must ensure that the provided allocator and device are valid.
     pub unsafe fn new(
         allocator: Arc<crate::vulkan::Allocator>,
         device: Arc<ash::Device>,
@@ -393,9 +399,13 @@ impl MaterialBuffer {
             guard.copy_from_slice(&[self.data]);
         }
 
+        // --- Lead Engineer Fix: Aligned Flush ---
+        const ATOM_SIZE: u64 = 256;
+        let aligned_size = size.div_ceil(ATOM_SIZE) * ATOM_SIZE;
+
         self.allocator
             .vma
-            .flush_allocation(&self.allocation, 0, size)
+            .flush_allocation(&self.allocation, 0, aligned_size)
             .map_err(|e| {
                 crate::AshError::VulkanError(format!("Failed to flush material buffer: {e}"))
             })?;
@@ -458,7 +468,7 @@ impl InstanceBuffer {
     /// Create a new instance buffer
     ///
     /// # Safety
-    /// Allocator and device must be valid.
+    /// Caller must ensure that the provided allocator and device are valid.
     pub unsafe fn new(
         allocator: Arc<crate::vulkan::Allocator>,
         device: Arc<ash::Device>,
@@ -502,7 +512,7 @@ impl InstanceBuffer {
     /// Update instance buffer with new data
     ///
     /// # Safety
-    /// Buffer must not be destroyed and data must fit within capacity.
+    /// Caller must ensure the buffer is not currently being read by the GPU (e.g., during culling or drawing). Data must fit within the allocated capacity.
     pub unsafe fn update(
         &mut self,
         data: &[crate::renderer::vcgs::CullObjectData],
@@ -519,9 +529,13 @@ impl InstanceBuffer {
             guard.copy_from_slice(data);
         }
 
+        // --- Lead Engineer Fix: Aligned Flush ---
+        const ATOM_SIZE: u64 = 256;
+        let aligned_size = size.div_ceil(ATOM_SIZE) * ATOM_SIZE;
+
         self.allocator
             .vma
-            .flush_allocation(&self.allocation, 0, size)
+            .flush_allocation(&self.allocation, 0, aligned_size)
             .map_err(|e| {
                 crate::AshError::VulkanError(format!("Failed to flush instance buffer: {e}"))
             })?;
@@ -574,7 +588,7 @@ impl<T: Copy> StorageBuffer<T> {
     /// Create a new storage buffer with the given capacity
     ///
     /// # Safety
-    /// Allocator and device must be valid.
+    /// Caller must ensure that the provided allocator and device are valid.
     pub unsafe fn new(
         allocator: Arc<crate::vulkan::Allocator>,
         device: Arc<ash::Device>,
@@ -623,7 +637,7 @@ impl<T: Copy> StorageBuffer<T> {
     /// Update storage buffer with new data and flush to GPU
     ///
     /// # Safety
-    /// Buffer must not be destroyed and data must fit within capacity.
+    /// Caller must ensure that the buffer is not in use by the GPU and that the provided data slice length does not exceed the buffer's capacity.
     pub unsafe fn update(&mut self, data: &[T]) -> crate::Result<()> {
         if data.is_empty() {
             return Ok(());
@@ -645,10 +659,14 @@ impl<T: Copy> StorageBuffer<T> {
             guard.copy_from_slice(data);
         }
 
+        // --- Lead Engineer Fix: Aligned Flush ---
+        const ATOM_SIZE: u64 = 256;
+        let aligned_size = size.div_ceil(ATOM_SIZE) * ATOM_SIZE;
+
         // CRITICAL: Ensure GPU sees the data
         self.allocator
             .vma
-            .flush_allocation(&self.allocation, 0, size)
+            .flush_allocation(&self.allocation, 0, aligned_size)
             .map_err(|e| {
                 crate::AshError::VulkanError(format!("Failed to flush storage buffer: {e}"))
             })?;
@@ -664,8 +682,7 @@ impl<T: Copy> StorageBuffer<T> {
     /// mapped at creation time, so we write directly to the persistent pointer and flush.
     ///
     /// # Safety
-    /// - Buffer must not be destroyed
-    /// - index must be less than capacity
+    /// Caller must ensure the buffer has not been destroyed and that the index is within bounds [0, capacity).
     pub unsafe fn write_element_at(&mut self, index: usize, element: &T) -> crate::Result<()> {
         if index >= self.capacity {
             return Err(crate::AshError::VulkanError(format!(
@@ -676,10 +693,9 @@ impl<T: Copy> StorageBuffer<T> {
 
         let element_size = std::mem::size_of::<T>();
         let offset_bytes = (index * element_size) as u64;
-        let full_size = (self.capacity * element_size) as u64;
+        // let full_size = (self.capacity * element_size) as u64; // Unused for persistent map
 
         // AAA Pattern: Use persistent mapping (allocated with MAPPED flag)
-        // Get the persistent mapped pointer from VMA - it's already mapped
         let mapped_ptr = self
             .allocator
             .vma
@@ -687,29 +703,36 @@ impl<T: Copy> StorageBuffer<T> {
             .mapped_data;
 
         if mapped_ptr.is_null() {
-            // Fallback for non-persistent mapping (shouldn't happen with our flags)
-            let mut guard = self
-                .allocator
-                .map_allocation_guarded(&mut self.allocation, full_size)?;
+            // Unlikely with current allocation flags
+            let mut guard = self.allocator.map_allocation_guarded(
+                &mut self.allocation,
+                (self.capacity * element_size) as u64,
+            )?;
             let base = guard.as_mut_ptr() as *mut T;
             std::ptr::write(base.add(index), *element);
-            // Guard is automatically unmapped here
         } else {
-            // Direct write to persistent mapping - this is the AAA pattern
             let base = mapped_ptr as *mut T;
             std::ptr::write(base.add(index), *element);
         }
 
-        // Flush only the modified range (optimization) or full buffer (safe fallback)
-        // UE5/Unity pattern: flush the specific range that was written
-        let flush_offset = offset_bytes;
-        let flush_size = std::mem::size_of::<T>() as u64;
+        // --- Lead Engineer Fix: Aligned Flush Range ---
+        // Violating nonCoherentAtomSize (usually 64 or 256) causes silent data loss.
+        // Index 1 (Offset 80) is unaligned on 64-byte atom GPUs, failing to update Metallic.
+        const ATOM_SIZE: u64 = 256; // Global safe upper bound
+        let start = offset_bytes;
+        let end = start + element_size as u64;
+
+        let aligned_start = (start / ATOM_SIZE) * ATOM_SIZE;
+        let aligned_end = end.div_ceil(ATOM_SIZE) * ATOM_SIZE;
+        let aligned_size = aligned_end - aligned_start;
 
         self.allocator
             .vma
-            .flush_allocation(&self.allocation, flush_offset, flush_size)
+            .flush_allocation(&self.allocation, aligned_start, aligned_size)
             .map_err(|e| {
-                crate::AshError::VulkanError(format!("Failed to flush storage buffer: {e}"))
+                crate::AshError::VulkanError(format!(
+                    "Failed to flush storage buffer at index {index}: {e}"
+                ))
             })?;
 
         Ok(())
@@ -735,7 +758,7 @@ impl<T: Copy> StorageBuffer<T> {
     /// Read all data from the buffer into a Vec
     ///
     /// # Safety
-    /// Buffer must be host-visible.
+    /// Caller must ensure that the buffer is host-visible. GPU-side writes to this buffer must have completed before reading.
     pub unsafe fn read_all(&mut self) -> crate::Result<Vec<T>> {
         let size = (self.capacity * std::mem::size_of::<T>()) as u64;
         let guard = self
@@ -747,7 +770,7 @@ impl<T: Copy> StorageBuffer<T> {
     /// Read a single element from the buffer at the specified index
     ///
     /// # Safety
-    /// Buffer must be host-visible and index must be valid.
+    /// Buffer must be host-visible and index must be valid [0, capacity).
     pub unsafe fn read_element_at(&self, index: usize) -> T {
         // Buffer is allocated with MAPPED flag, so we can read directly
         let mapped_ptr = self

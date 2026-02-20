@@ -57,6 +57,7 @@ impl ApplicationHandler for App {
         let renderer = Renderer::builder()
             .with_vsync(true)
             .with_shadow_resolution(2048) // Lower shadow res for better perf in example
+            .with_environment_map("assets/textures/skybox.hdr")
             .build(&surface_provider);
 
         match renderer {
@@ -88,14 +89,14 @@ impl ApplicationHandler for App {
                 let material = Material {
                     name: "ShinyRed".to_string(),
                     color: [1.0, 0.0, 0.0, 1.0], // Pure red
-                    metallic: 0.9,               // Highly metallic (but not perfect mirror)
-                    roughness: 0.2,              // Smooth but with some blurring
+                    metallic: 1.0,               // Fully metallic (Colored reflections)
+                    roughness: 0.3,              // Softer highlights (less "plastic" look)
                     ..Default::default()
                 };
 
                 // Register and upload material
                 let material_handle = scene.register_material(&material).unwrap();
-                log::info!("✓ Uploaded red PBR material to GPU with handle {material_handle:?}");
+                println!("✓ Uploaded red PBR material to GPU with handle {material_handle:?}");
 
                 // Upload mesh
                 let upload_cmd = renderer.get_transfer_command_buffer().unwrap();
@@ -106,17 +107,17 @@ impl ApplicationHandler for App {
 
                 let mut staging_resources = Vec::new();
                 let mesh_handle = scene
-                    .upload_mesh(
-                        Arc::clone(&renderer.context.device.device),
-                        Arc::clone(&renderer.context.alloc),
-                        renderer.frame.cmds.upload_command_pool_handle(),
-                        upload_cmd,
-                        &renderer.context.device.graphics_queue,
-                        &mut cube,
-                        &mut renderer.resources.assets,
-                        &mut staging_resources,
-                        Some(material_handle),
-                    )
+                    .upload_mesh(ash_renderer::renderer::MeshUploadInfo {
+                        device: Arc::clone(&renderer.context.device.device),
+                        allocator: Arc::clone(&renderer.context.alloc),
+                        command_pool: renderer.frame.cmds.upload_command_pool_handle(),
+                        command_buffer: upload_cmd,
+                        queue: renderer.context.device.graphics_queue,
+                        mesh: &mut cube,
+                        asset_manager: &mut renderer.resources.assets,
+                        staging_resources: &mut staging_resources,
+                        material_override: Some(material_handle),
+                    })
                     .unwrap();
 
                 cmd_context.end().unwrap();
@@ -135,14 +136,16 @@ impl ApplicationHandler for App {
                             vk::Fence::null(),
                         )
                         .unwrap();
+                    println!("Queue submit ok");
                     renderer
                         .context
                         .device
                         .device
                         .queue_wait_idle(renderer.context.device.graphics_queue)
                         .unwrap();
+                    println!("Queue wait idle ok");
                 }
-                log::info!("✓ Mesh uploaded to GPU");
+                println!("✓ Mesh uploaded to GPU");
 
                 // Setup the initial render command
                 self.render_commands
@@ -163,7 +166,7 @@ impl ApplicationHandler for App {
                     )
                 {
                     self.tint_buffer = Some(tint_buffer);
-                    log::info!("✓ Registered default tint buffer");
+                    println!("✓ Registered default tint buffer");
                 }
 
                 // CRITICAL: Must call enable_post_processing() to initialize HDR/Tonemapping pipelines!
@@ -189,7 +192,7 @@ impl ApplicationHandler for App {
                 self.scene = Some(scene);
                 self.window = Some(window);
                 self.start_time = Instant::now();
-                log::info!("PBR Cube renderer initialized!");
+                println!("PBR Cube renderer initialized!");
             }
             Err(e) => {
                 log::error!("Failed to create renderer: {e}");
@@ -225,7 +228,7 @@ impl ApplicationHandler for App {
                                 light_distance * (elapsed * 1.5).sin(),
                             ),
                             color: Vec3::new(1.0, 1.0, 1.0), // White light
-                            intensity: 5.0,
+                            intensity: 3.0,                  // Reduced from 5.0 to prevent blowout
                             radius: 10.0,
                         },
                         PointLight {
@@ -235,7 +238,7 @@ impl ApplicationHandler for App {
                                 light_distance * (elapsed * 2.0 + std::f32::consts::PI).sin(),
                             ),
                             color: Vec3::new(1.0, 0.5, 0.5), // Pale red light
-                            intensity: 8.0,
+                            intensity: 4.0,                  // Reduced from 8.0 to prevent blowout
                             radius: 10.0,
                         },
                     ];
@@ -267,7 +270,8 @@ impl ApplicationHandler for App {
                         log::error!("Failed to submit render commands: {e}");
                     }
 
-                    if let Err(e) = renderer.render_frame(scene, view, proj, camera_pos, None) {
+                    if let Err(e) = renderer.render_frame(scene, view, proj, camera_pos, None, None)
+                    {
                         log::error!("Render error: {e}");
                     }
                 }
@@ -342,6 +346,7 @@ fn run_headless(max_frames: u32) -> Result<()> {
 
     let mut renderer = Renderer::builder()
         .with_vsync(false) // No vsync for headless profiling
+        .with_environment_map("assets/textures/skybox.hdr")
         .build(&surface_provider)?;
     let mut scene = Scene::new(
         Arc::clone(&renderer.context.device.device),
@@ -366,17 +371,17 @@ fn run_headless(max_frames: u32) -> Result<()> {
     let mut staging_resources = Vec::new();
     let material_handle = scene.register_material(&material).unwrap();
     let mesh_handle = scene
-        .upload_mesh(
-            Arc::clone(&renderer.context.device.device),
-            Arc::clone(&renderer.context.alloc),
-            renderer.frame.cmds.upload_command_pool_handle(),
-            upload_cmd,
-            &renderer.context.device.graphics_queue,
-            &mut cube,
-            &mut renderer.resources.assets,
-            &mut staging_resources,
-            Some(material_handle),
-        )
+        .upload_mesh(ash_renderer::renderer::MeshUploadInfo {
+            device: Arc::clone(&renderer.context.device.device),
+            allocator: Arc::clone(&renderer.context.alloc),
+            command_pool: renderer.frame.cmds.upload_command_pool_handle(),
+            command_buffer: upload_cmd,
+            queue: renderer.context.device.graphics_queue,
+            mesh: &mut cube,
+            asset_manager: &mut renderer.resources.assets,
+            staging_resources: &mut staging_resources,
+            material_override: Some(material_handle),
+        })
         .unwrap();
 
     let render_commands = vec![ash_renderer::renderer::RenderCommand {
@@ -459,7 +464,7 @@ fn run_headless(max_frames: u32) -> Result<()> {
         proj.y_axis.y *= -1.0;
 
         renderer.submit_render_commands(&mut scene, &frame_commands)?;
-        renderer.render_frame(&mut scene, view, proj, camera_pos, None)?;
+        renderer.render_frame(&mut scene, view, proj, camera_pos, None, None)?;
 
         if frame % 100 == 0 {
             log::info!("Headless frame {frame}/{max_frames}");

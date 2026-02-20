@@ -34,8 +34,13 @@ impl ShaderReflection {
     ///
     /// Requires the `shader_reflection` feature to be enabled.
     #[cfg(feature = "shader_reflection")]
-    pub fn reflect(code: &[u32], stage: vk::ShaderStageFlags) -> Result<Self> {
-        let reflection_module = Reflection::new_from_spirv(code)
+    pub fn reflect(
+        code: &[u32],
+        stage: vk::ShaderStageFlags,
+        max_unbounded_count: Option<u32>,
+    ) -> Result<Self> {
+        let code_u8 = bytemuck::cast_slice(code);
+        let reflection_module = Reflection::new_from_spirv(code_u8)
             .map_err(|e| AshError::VulkanError(format!("SPIR-V reflection failed: {e}")))?;
 
         let mut reflection = ShaderReflection {
@@ -82,17 +87,25 @@ impl ShaderReflection {
                     .iter()
                     .map(|(binding_idx, binding_info)| {
                         let desc_type = convert_descriptor_type(binding_info.ty);
+                        let descriptor_count = match binding_info.binding_count {
+                            rspirv_reflect::BindingCount::One => 1,
+                            rspirv_reflect::BindingCount::StaticSized(n) => n,
+                            rspirv_reflect::BindingCount::Unbounded => {
+                                max_unbounded_count.unwrap_or(1024)
+                            }
+                        };
+
                         log::debug!(
                             "  - binding {}: {:?} x{} ({})",
                             binding_idx,
                             desc_type,
-                            binding_info.binding_count,
+                            descriptor_count,
                             binding_info.name
                         );
                         vk::DescriptorSetLayoutBinding {
                             binding: *binding_idx,
                             descriptor_type: desc_type,
-                            descriptor_count: binding_info.binding_count,
+                            descriptor_count: descriptor_count as u32,
                             stage_flags: stage,
                             ..Default::default()
                         }
@@ -117,7 +130,11 @@ impl ShaderReflection {
     /// Stub implementation when shader_reflection feature is disabled.
     /// Returns default empty reflection.
     #[cfg(not(feature = "shader_reflection"))]
-    pub fn reflect(_code: &[u32], stage: vk::ShaderStageFlags) -> Result<Self> {
+    pub fn reflect(
+        _code: &[u32],
+        stage: vk::ShaderStageFlags,
+        _max_unbounded_count: Option<u32>,
+    ) -> Result<Self> {
         log::warn!("ShaderReflection::reflect called without shader_reflection feature enabled - returning empty reflection");
         Ok(Self {
             stage,
@@ -155,20 +172,32 @@ impl ShaderReflection {
 #[cfg(feature = "shader_reflection")]
 fn convert_descriptor_type(ty: rspirv_reflect::DescriptorType) -> vk::DescriptorType {
     use rspirv_reflect::DescriptorType as Ty;
-    match ty {
-        Ty::Sampler => vk::DescriptorType::SAMPLER,
-        Ty::CombinedImageSampler => vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-        Ty::SampledImage => vk::DescriptorType::SAMPLED_IMAGE,
-        Ty::StorageImage => vk::DescriptorType::STORAGE_IMAGE,
-        Ty::UniformTexelBuffer => vk::DescriptorType::UNIFORM_TEXEL_BUFFER,
-        Ty::StorageTexelBuffer => vk::DescriptorType::STORAGE_TEXEL_BUFFER,
-        Ty::UniformBuffer => vk::DescriptorType::UNIFORM_BUFFER,
-        Ty::StorageBuffer => vk::DescriptorType::STORAGE_BUFFER,
-        Ty::UniformBufferDynamic => vk::DescriptorType::UNIFORM_BUFFER_DYNAMIC,
-        Ty::StorageBufferDynamic => vk::DescriptorType::STORAGE_BUFFER_DYNAMIC,
-        Ty::InputAttachment => vk::DescriptorType::INPUT_ATTACHMENT,
-        Ty::AccelerationStructureKHR => vk::DescriptorType::ACCELERATION_STRUCTURE_KHR,
-        _ => vk::DescriptorType::SAMPLER,
+    if ty == Ty::SAMPLER {
+        vk::DescriptorType::SAMPLER
+    } else if ty == Ty::COMBINED_IMAGE_SAMPLER {
+        vk::DescriptorType::COMBINED_IMAGE_SAMPLER
+    } else if ty == Ty::SAMPLED_IMAGE {
+        vk::DescriptorType::SAMPLED_IMAGE
+    } else if ty == Ty::STORAGE_IMAGE {
+        vk::DescriptorType::STORAGE_IMAGE
+    } else if ty == Ty::UNIFORM_TEXEL_BUFFER {
+        vk::DescriptorType::UNIFORM_TEXEL_BUFFER
+    } else if ty == Ty::STORAGE_TEXEL_BUFFER {
+        vk::DescriptorType::STORAGE_TEXEL_BUFFER
+    } else if ty == Ty::UNIFORM_BUFFER {
+        vk::DescriptorType::UNIFORM_BUFFER
+    } else if ty == Ty::STORAGE_BUFFER {
+        vk::DescriptorType::STORAGE_BUFFER
+    } else if ty == Ty::UNIFORM_BUFFER_DYNAMIC {
+        vk::DescriptorType::UNIFORM_BUFFER_DYNAMIC
+    } else if ty == Ty::STORAGE_BUFFER_DYNAMIC {
+        vk::DescriptorType::STORAGE_BUFFER_DYNAMIC
+    } else if ty == Ty::INPUT_ATTACHMENT {
+        vk::DescriptorType::INPUT_ATTACHMENT
+    } else if ty == Ty::ACCELERATION_STRUCTURE_KHR {
+        vk::DescriptorType::ACCELERATION_STRUCTURE_KHR
+    } else {
+        vk::DescriptorType::SAMPLER
     }
 }
 
@@ -185,18 +214,20 @@ impl ShaderModule {
         device: &Arc<ash::Device>,
         path: impl AsRef<Path>,
         stage: vk::ShaderStageFlags,
+        max_unbounded_count: Option<u32>,
     ) -> Result<Self> {
         let code = fs::read(path.as_ref()).map_err(|e| {
             AshError::VulkanError(format!("Failed to read shader {:?}: {e}", path.as_ref()))
         })?;
 
-        Self::load_from_bytes(device, &code, stage)
+        Self::load_from_bytes(device, &code, stage, max_unbounded_count)
     }
 
     pub fn load_from_bytes(
         device: &Arc<ash::Device>,
         code: &[u8],
         stage: vk::ShaderStageFlags,
+        max_unbounded_count: Option<u32>,
     ) -> Result<Self> {
         if code.len() % 4 != 0 {
             return Err(AshError::VulkanError(
@@ -228,7 +259,7 @@ impl ShaderModule {
         let code_u32 = ash::util::read_spv(&mut Cursor::new(code))
             .map_err(|e| AshError::VulkanError(format!("Failed to parse SPIR-V: {e}")))?;
 
-        let reflection = ShaderReflection::reflect(&code_u32, stage)?;
+        let reflection = ShaderReflection::reflect(&code_u32, stage, max_unbounded_count)?;
 
         let module = unsafe {
             let create_info = vk::ShaderModuleCreateInfo::default().code(&code_u32);
@@ -286,11 +317,12 @@ pub fn load_shader_module(device: &ash::Device, path: &str) -> Result<vk::Shader
         }
     }
 
-    let code_u32 =
-        unsafe { std::slice::from_raw_parts(code.as_ptr() as *const u32, code.len() / 4) };
+    let mut cursor = std::io::Cursor::new(&code);
+    let code_u32 = ash::util::read_spv(&mut cursor)
+        .map_err(|e| AshError::VulkanError(format!("Failed to parse SPIR-V from {path}: {e}")))?;
 
     let module = unsafe {
-        let create_info = vk::ShaderModuleCreateInfo::default().code(code_u32);
+        let create_info = vk::ShaderModuleCreateInfo::default().code(&code_u32);
         device
             .create_shader_module(&create_info, None)
             .map_err(|e| AshError::VulkanError(format!("Failed to create shader module: {e}")))?

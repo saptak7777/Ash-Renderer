@@ -76,17 +76,21 @@ impl ApplicationHandler for App {
                                         .unwrap();
 
                                     let mut staging_resources = Vec::new();
-                                    let upload_res = scene.upload_mesh(
-                                        Arc::clone(&renderer.context.device.device),
-                                        Arc::clone(&renderer.context.alloc),
-                                        renderer.frame.cmds.upload_command_pool_handle(),
-                                        upload_cmd,
-                                        &renderer.context.device.graphics_queue,
-                                        &mut mesh,
-                                        &mut renderer.resources.assets,
-                                        &mut staging_resources,
-                                        None,
-                                    );
+                                    let upload_res =
+                                        scene.upload_mesh(ash_renderer::renderer::MeshUploadInfo {
+                                            device: Arc::clone(&renderer.context.device.device),
+                                            allocator: Arc::clone(&renderer.context.alloc),
+                                            command_pool: renderer
+                                                .frame
+                                                .cmds
+                                                .upload_command_pool_handle(),
+                                            command_buffer: upload_cmd,
+                                            queue: renderer.context.device.graphics_queue,
+                                            mesh: &mut mesh,
+                                            asset_manager: &mut renderer.resources.assets,
+                                            staging_resources: &mut staging_resources,
+                                            material_override: None,
+                                        });
 
                                     cmd_context.end().unwrap();
 
@@ -183,17 +187,17 @@ impl ApplicationHandler for App {
                         .unwrap();
 
                     let mut staging_resources = Vec::new();
-                    let upload_res = scene.upload_mesh(
-                        Arc::clone(&renderer.context.device.device),
-                        Arc::clone(&renderer.context.alloc),
-                        renderer.frame.cmds.upload_command_pool_handle(),
-                        upload_cmd,
-                        &renderer.context.device.graphics_queue,
-                        &mut cube,
-                        &mut renderer.resources.assets,
-                        &mut staging_resources,
-                        None,
-                    );
+                    let upload_res = scene.upload_mesh(ash_renderer::renderer::MeshUploadInfo {
+                        device: Arc::clone(&renderer.context.device.device),
+                        allocator: Arc::clone(&renderer.context.alloc),
+                        command_pool: renderer.frame.cmds.upload_command_pool_handle(),
+                        command_buffer: upload_cmd,
+                        queue: renderer.context.device.graphics_queue,
+                        mesh: &mut cube,
+                        asset_manager: &mut renderer.resources.assets,
+                        staging_resources: &mut staging_resources,
+                        material_override: None,
+                    });
 
                     cmd_context.end().unwrap();
 
@@ -224,12 +228,12 @@ impl ApplicationHandler for App {
 
                         // Check if material was registered
                         let mat_handle = scene.mesh_data[handle as usize].material_handle;
-                        if !mat_handle.is_null() {
-                            if scene.material_manager.is_handle_valid(mat_handle) {
-                                log::info!(
-                                    "✅ Material registered for test cube (handle {mat_handle:?})"
-                                );
-                            }
+                        if !mat_handle.is_null()
+                            && scene.material_manager.is_handle_valid(mat_handle)
+                        {
+                            log::info!(
+                                "✅ Material registered for test cube (handle {mat_handle:?})"
+                            );
                         }
                     } else {
                         log::error!("Failed to register test cube");
@@ -274,7 +278,8 @@ impl ApplicationHandler for App {
                     let mut proj = Mat4::perspective_rh(45.0_f32.to_radians(), aspect, 0.5, 100.0);
                     proj.y_axis.y *= -1.0; // Vulkan Y-flip
 
-                    if let Err(e) = renderer.render_frame(scene, view, proj, camera_pos, None) {
+                    if let Err(e) = renderer.render_frame(scene, view, proj, camera_pos, None, None)
+                    {
                         log::error!("Render error: {e}");
                     }
                 }

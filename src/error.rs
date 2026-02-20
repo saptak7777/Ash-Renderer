@@ -71,6 +71,9 @@ pub enum AshError {
     /// Transform arena overflow.
     #[error("Transform arena overflow (1MB limit reached)")]
     TransformArenaOverflow,
+    /// A lock (Mutex/RwLock) was poisoned.
+    #[error("Lock poisoned: {0}")]
+    LockPoisoned(String),
 }
 
 impl AshError {

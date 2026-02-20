@@ -44,7 +44,7 @@ layout(push_constant) uniform ShadowPushConstants {
 } pc;
 
 // Binding 0: Textures (Set 0)
-layout(set = 0, binding = 0) uniform sampler2D textures[];
+layout(set = 1, binding = 0) uniform sampler2D global_textures[];
 
 void main() {
     // Alpha testing for transparent materials
@@ -54,7 +54,7 @@ void main() {
         
         int base_color_idx = mat.texture_indices.x;
         if (base_color_idx >= 0) {
-            float alpha = texture(textures[nonuniformEXT(base_color_idx)], inUV).a;
+            float alpha = texture(global_textures[nonuniformEXT(base_color_idx)], inUV).a;
             if (alpha * mat.base_color_factor.a < mat.alpha_cutoff) {
                 discard;
             }

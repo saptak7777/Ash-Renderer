@@ -315,58 +315,7 @@ impl Default for VsrConfig {
     }
 }
 
-/// Halton sequence for QMC jittering
-pub struct HaltonSequence {
-    indices: Vec<(f32, f32)>,
-    curr_idx: usize,
-}
-
-impl HaltonSequence {
-    pub fn new(samples: usize) -> Self {
-        let mut indices = Vec::with_capacity(samples);
-        for i in 1..=samples {
-            indices.push((Self::phi(i as u32, 2) - 0.5, Self::phi(i as u32, 3) - 0.5));
-        }
-        Self {
-            indices,
-            curr_idx: 0,
-        }
-    }
-
-    fn phi(mut i: u32, b: u32) -> f32 {
-        let mut r = 0.0;
-        let mut f = 1.0 / b as f32;
-        while i > 0 {
-            r += f * (i % b) as f32;
-            i /= b;
-            f /= b as f32;
-        }
-        r
-    }
-
-    /// Next jitter sample in [-0.5, 0.5]
-    pub fn next_sample(&mut self) -> (f32, f32) {
-        let res = self.indices[self.curr_idx];
-        self.curr_idx = (self.curr_idx + 1) % self.indices.len();
-        res
-    }
-
-    pub fn reset(&mut self) {
-        self.curr_idx = 0;
-    }
-
-    pub fn peek(&self) -> (f32, f32) {
-        self.indices[self.curr_idx]
-    }
-
-    pub fn capacity(&self) -> usize {
-        self.indices.len()
-    }
-
-    pub fn progress(&self) -> f32 {
-        self.curr_idx as f32 / self.indices.len() as f32
-    }
-}
+use crate::renderer::util::halton::HaltonSequence;
 
 /// Push constants for VSR upscale shader
 #[repr(C)]
@@ -589,7 +538,7 @@ impl VsrPass {
             render_h: 0,
             display_w: 0,
             display_h: 0,
-            halton: HaltonSequence::new(16),
+            halton: HaltonSequence::new(2, 3),
             frame_idx: 0,
             metrics: VsrMetrics::default(),
             metrics_buffer: vk::Buffer::null(),
@@ -1020,15 +969,16 @@ impl VsrPass {
     }
 
     pub fn jitter_projection(&mut self, projection: glam::Mat4) -> glam::Mat4 {
-        let (jx, jy) = self.halton.next_sample();
-        let dx = jx / self.render_w as f32;
-        let dy = jy / self.render_h as f32;
+        let j = self.halton.next_sample();
+        let dx = j.x / self.render_w as f32;
+        let dy = j.y / self.render_h as f32;
         let mat = glam::Mat4::from_translation(glam::Vec3::new(dx * 2.0, dy * 2.0, 0.0));
         mat * projection
     }
 
     pub fn next_jitter(&mut self) -> (f32, f32) {
-        self.halton.next_sample()
+        let j = self.halton.next_sample();
+        (j.x, j.y)
     }
 
     pub fn readback_metrics(
@@ -1070,6 +1020,15 @@ impl VsrPass {
         let alloc_info = alloc.get_allocation_info(allocation);
         let ptr = alloc_info.mapped_data;
         if !ptr.is_null() {
+            // Safety: Ensure pointer is 4-byte aligned for u32 read
+            if (ptr as usize) % 4 != 0 {
+                return Err(VsrError::MetricsReadbackFailed(
+                    "Host mapped pointer is not 4-byte aligned".into(),
+                ));
+            }
+
+            // Safety: The caller MUST ensure the command buffer has finished execution (e.g. via fence wait)
+            // before this method is called to avoid reading stale or incomplete data.
             let data = std::slice::from_raw_parts(ptr as *const u32, 4);
             let rejection_rate = data[0] as f32 / 1000.0;
             let avg_blend_weight = data[1] as f32 / 1000.0;
@@ -1248,6 +1207,27 @@ impl VsrPass {
             );
         }
 
+        Ok(())
+    }
+
+    /// Record all VSR frame commands into `cmd`.
+    ///
+    /// This method encompasses the full VSR frame lifecycle:
+    /// 1. Temporal upscaling (`upscale_with_config`).
+    /// 2. Optional sharpening (`apply_sharpening`).
+    /// 3. Advancing the temporal frame index (`next_frame`).
+    ///
+    /// # Safety
+    /// Command buffer must be in recording state and images must be in valid layouts.
+    pub unsafe fn record_commands(
+        &mut self,
+        cmd: vk::CommandBuffer,
+        inputs: VsrInputs,
+        upscale_config: &VsrUpscaleConfig,
+        sharpen_config: Option<&SharpenConfig>,
+    ) -> Result<(), VsrError> {
+        self.upscale_with_sharpening(cmd, inputs, upscale_config, sharpen_config)?;
+        self.next_frame();
         Ok(())
     }
 

@@ -7,15 +7,37 @@ use crate::renderer::resources::{
     uniform::{StorageBuffer, UniformBuffer},
     Texture, TextureData,
 };
-use crate::renderer::types::*;
+use crate::renderer::{types::*, TextureInitContext};
 use crate::vulkan;
 use crate::AshError;
 use crate::Result;
 use ash::vk;
 
-use std::sync::Arc;
+use crate::renderer::passes::hiz::HiZPass;
+use crate::renderer::passes::vsr::{VsrPass, VsrQuality};
+use crate::renderer::passes::SkyboxInitContext;
+use crate::renderer::vcgs::IndirectDrawPass;
+use std::sync::{Arc, RwLock};
 use std::thread;
 
+pub type RenderPassResult = Result<(Arc<RwLock<HiZPass>>, Arc<RwLock<IndirectDrawPass>>)>;
+
+/// Configuration for main pipeline creation.
+pub struct MainPipelineCreateDesc<'a> {
+    pub device: &'a vulkan::VulkanDevice,
+    pub resources: &'a Arc<ResourceRegistry>,
+    pub swapchain_extent: vk::Extent2D,
+    pub color_formats: &'a [vk::Format],
+    pub set_layouts: &'a [vk::DescriptorSetLayout],
+    pub pipeline_cfg: &'a PipelineConfig,
+    pub depth_format: vk::Format,
+    pub pipeline_cache: vk::PipelineCache,
+}
+
+/// Creates swapchain data including the swapchain wrapper and depth buffer.
+///
+/// # Safety
+/// The caller must ensure that the device and allocator are valid and that the extent matches the surface capabilities.
 pub unsafe fn create_swapchain_data(
     device: &vulkan::VulkanDevice,
     alloc: &Arc<vulkan::Allocator>,
@@ -37,6 +59,10 @@ pub unsafe fn create_swapchain_data(
     })
 }
 
+/// Initializes the swapchain and registers image views and depth buffers.
+///
+/// # Safety
+/// The caller must ensure that the device, allocator, and resources registry are valid.
 pub unsafe fn init_swapchain<S: vulkan::SurfaceProvider>(
     device: &vulkan::VulkanDevice,
     alloc: &Arc<vulkan::Allocator>,
@@ -66,6 +92,11 @@ pub unsafe fn init_swapchain<S: vulkan::SurfaceProvider>(
     })
 }
 
+/// Creates per-frame synchronization objects and command pools.
+///
+/// # Safety
+/// The caller must ensure that the device handle is valid and that the max frames in flight
+/// is greater than zero.
 pub unsafe fn create_frame_resources(
     device: &vulkan::VulkanDevice,
     swapchain_image_count: usize,
@@ -95,15 +126,15 @@ pub unsafe fn create_frame_resources(
     })
 }
 
+/// Creates the main rendering pipeline and layout.
+///
+/// # Safety
+/// The provided Vulkan device, resources,    /// Creates the main rendering pipeline for the forward pass.
+///
+/// # Safety
+/// The caller must ensure that the device and render pass are valid.
 pub unsafe fn create_main_pipeline(
-    device: &vulkan::VulkanDevice,
-    resources: &Arc<ResourceRegistry>,
-    swapchain_extent: vk::Extent2D,
-    color_formats: &[vk::Format],
-    set_layouts: &[vk::DescriptorSetLayout],
-    pipeline_cfg: &PipelineConfig,
-    depth_format: vk::Format,
-    pipeline_cache: vk::PipelineCache,
+    desc: MainPipelineCreateDesc,
 ) -> Result<(
     vulkan::PipelineLayout,
     crate::renderer::resource_registry::ResourceId,
@@ -116,8 +147,9 @@ pub unsafe fn create_main_pipeline(
         size: DRAW_PUSH_VERTEX_BYTES + DRAW_PUSH_FRAGMENT_BYTES,
     }];
 
-    let mut pipeline_layout_builder = vulkan::PipelineLayout::builder(Arc::clone(&device.device));
-    for layout in set_layouts {
+    let mut pipeline_layout_builder =
+        vulkan::PipelineLayout::builder(Arc::clone(&desc.device.device));
+    for layout in desc.set_layouts {
         pipeline_layout_builder = pipeline_layout_builder.add_set_layout(*layout);
     }
     for range in &push_constant_ranges {
@@ -127,28 +159,23 @@ pub unsafe fn create_main_pipeline(
     pipeline_layout_wrapper.mark_managed_by_registry();
     let pipeline_layout_handle = pipeline_layout_wrapper.handle();
 
-    let mut pipeline_builder = vulkan::Pipeline::builder(Arc::clone(&device.device))
-        .with_layout(pipeline_layout_handle)
-        .with_dynamic_rendering(color_formats, Some(depth_format), None)
-        .with_extent(swapchain_extent)
-        .with_pipeline_cache(pipeline_cache)
-        .with_depth_format(depth_format)
-        .with_depth_test(vk::CompareOp::GREATER_OR_EQUAL, true)
-        .with_cull_mode(vk::CullModeFlags::NONE)
-        .with_front_face(vk::FrontFace::CLOCKWISE)
-        .with_multisampling(pipeline_cfg.multisample_config())
-        .add_shader_from_bytes(
-            include_bytes!(concat!(env!("OUT_DIR"), "/forward.vert.spv")),
-            vk::ShaderStageFlags::VERTEX,
-            "main",
-        )?
-        .add_shader_from_bytes(
-            include_bytes!(concat!(env!("OUT_DIR"), "/forward.frag.spv")),
-            vk::ShaderStageFlags::FRAGMENT,
-            "main",
-        )?;
+    let vert_code = include_bytes!(concat!(env!("OUT_DIR"), "/forward.vert.spv"));
+    let frag_code = include_bytes!(concat!(env!("OUT_DIR"), "/forward.frag.spv"));
 
-    for specialization in &pipeline_cfg.specialization_constants {
+    let mut pipeline_builder = vulkan::Pipeline::builder(Arc::clone(&desc.device.device))
+        .with_layout(pipeline_layout_handle)
+        .with_dynamic_rendering(desc.color_formats, Some(desc.depth_format), None)
+        .with_extent(desc.swapchain_extent)
+        .with_pipeline_cache(desc.pipeline_cache)
+        .with_depth_format(desc.depth_format)
+        .with_depth_test(vk::CompareOp::GREATER_OR_EQUAL, true)
+        .with_cull_mode(vk::CullModeFlags::BACK)
+        .with_front_face(vk::FrontFace::COUNTER_CLOCKWISE)
+        .with_multisampling(desc.pipeline_cfg.multisample_config())
+        .add_shader_from_bytes(vert_code, vk::ShaderStageFlags::VERTEX, "main")?
+        .add_shader_from_bytes(frag_code, vk::ShaderStageFlags::FRAGMENT, "main")?;
+
+    for specialization in &desc.pipeline_cfg.specialization_constants {
         pipeline_builder = pipeline_builder.with_specialization_bytes(
             specialization.stage,
             specialization.constant_id,
@@ -161,8 +188,12 @@ pub unsafe fn create_main_pipeline(
     let pipeline_handle = pipeline_wrapper.pipeline;
 
     // Register resources
-    let pipeline_layout_id = resources.register_pipeline_layout(pipeline_layout_handle)?;
-    let pipeline_id = resources.register_pipeline(pipeline_handle, &[pipeline_layout_id])?;
+    let pipeline_layout_id = desc
+        .resources
+        .register_pipeline_layout(pipeline_layout_handle)?;
+    let pipeline_id = desc
+        .resources
+        .register_pipeline(pipeline_handle, &[pipeline_layout_id])?;
 
     Ok((
         pipeline_layout_wrapper,
@@ -172,17 +203,24 @@ pub unsafe fn create_main_pipeline(
     ))
 }
 
-pub unsafe fn init_pipelines(
-    device: &vulkan::VulkanDevice,
-    resources: &Arc<ResourceRegistry>,
-    extent: vk::Extent2D,
-    color_formats: &[vk::Format],
-    set_layouts: &[vk::DescriptorSetLayout],
-    pipeline_cfg: &PipelineConfig,
-    depth_format: vk::Format,
-    pipeline_cache: vk::PipelineCache,
-) -> Result<PipelineData> {
-    let (layout, layout_id, pipeline, pipeline_id) = create_main_pipeline(
+/// Configuration for pipeline initialization.
+pub struct PipelineInitInfo<'a> {
+    pub device: &'a vulkan::VulkanDevice,
+    pub resources: &'a Arc<ResourceRegistry>,
+    pub extent: vk::Extent2D,
+    pub color_formats: &'a [vk::Format],
+    pub set_layouts: &'a [vk::DescriptorSetLayout],
+    pub pipeline_cfg: &'a PipelineConfig,
+    pub depth_format: vk::Format,
+    pub pipeline_cache: vk::PipelineCache,
+}
+
+/// Initializes all pipelines for the renderer.
+///
+/// # Safety
+/// All provided Vulkan handles (device, resources, etc.) must be valid and appropriately synchronized.
+pub unsafe fn init_pipelines(info: PipelineInitInfo<'_>) -> Result<PipelineData> {
+    let PipelineInitInfo {
         device,
         resources,
         extent,
@@ -191,7 +229,19 @@ pub unsafe fn init_pipelines(
         pipeline_cfg,
         depth_format,
         pipeline_cache,
-    )?;
+    } = info;
+
+    let (layout, layout_id, pipeline, pipeline_id) =
+        create_main_pipeline(MainPipelineCreateDesc {
+            device,
+            resources,
+            swapchain_extent: extent,
+            color_formats,
+            set_layouts,
+            pipeline_cfg,
+            depth_format,
+            pipeline_cache,
+        })?;
 
     Ok(PipelineData {
         layout,
@@ -201,6 +251,11 @@ pub unsafe fn init_pipelines(
     })
 }
 
+/// Initializes core rendering resources like uniform buffers and default textures.
+///
+/// # Safety
+/// The caller must ensure that the allocator, device, and command pool are valid and that
+/// the queue can be used for transfer operations.
 pub unsafe fn init_resources(
     alloc: &Arc<vulkan::Allocator>,
     device: &vulkan::VulkanDevice,
@@ -227,58 +282,56 @@ pub unsafe fn init_resources(
         uniform_buffers.push(buffer);
     }
 
+    let tex_ctx = TextureInitContext {
+        allocator: Arc::clone(alloc),
+        device: Arc::clone(&device.device),
+        command_pool,
+        queue: device.graphics_queue,
+    };
+
     // Create default texture
     let default_texture_data = TextureData::solid_color([255, 255, 255, 255]);
-    let default_texture = Texture::from_data(
-        Arc::clone(alloc),
-        Arc::clone(&device.device),
-        command_pool,
-        device.graphics_queue,
-        &default_texture_data,
-        vk::Format::R8G8B8A8_SRGB,
-        Some("default_texture"),
-    )?;
+    let default_texture = unsafe {
+        Texture::from_data(
+            &tex_ctx,
+            &default_texture_data,
+            vk::Format::R8G8B8A8_SRGB,
+            Some("default_texture"),
+        )?
+    };
 
     // Create black texture for IBL fallback (provides some ambient light when IBL not loaded)
     let black_texture_data = TextureData::solid_color([0, 0, 0, 255]);
-    let black_texture = Texture::from_data(
-        Arc::clone(alloc),
-        Arc::clone(&device.device),
-        command_pool,
-        device.graphics_queue,
-        &black_texture_data,
-        vk::Format::R8G8B8A8_SRGB,
-        Some("black_texture"),
-    )?;
+    let black_texture = unsafe {
+        Texture::from_data(
+            &tex_ctx,
+            &black_texture_data,
+            vk::Format::R8G8B8A8_SRGB,
+            Some("black_texture"),
+        )?
+    };
 
     // Create white texture for Occlusion Culling fallback (Standard-Z Far Plane = 1.0)
     let white_texture_data = TextureData::solid_color([255, 255, 255, 255]);
-    let white_texture = Texture::from_data(
-        Arc::clone(alloc),
-        Arc::clone(&device.device),
-        command_pool,
-        device.graphics_queue,
-        &white_texture_data,
-        vk::Format::R8G8B8A8_UNORM, // Use UNORM for precise 1.0 mapping
-        Some("white_texture"),
-    )?;
+    let white_texture = unsafe {
+        Texture::from_data(
+            &tex_ctx,
+            &white_texture_data,
+            vk::Format::R8G8B8A8_UNORM, // Use UNORM for precise 1.0 mapping
+            Some("white_texture"),
+        )?
+    };
 
     // Create procedural skybox
-    let default_skybox = Texture::create_procedural_skybox(
-        Arc::clone(alloc),
-        Arc::clone(&device.device),
-        command_pool,
-        device.graphics_queue,
-        512,
-    )?;
+    let default_skybox = Texture::create_procedural_skybox(&tex_ctx, 512)?;
 
     // Create default cube black
-    let default_cube_black = Texture::create_default_cube_black(
-        Arc::clone(alloc),
-        Arc::clone(&device.device),
-        command_pool,
-        device.graphics_queue,
-    )?;
+    let default_cube_black = Texture::create_default_cube_black(&tex_ctx)?;
+
+    // Create black dummy textures for IBL fallbacks
+    let dummy_black_cube = Texture::create_default_cube_black(&tex_ctx)?;
+
+    let dummy_black_2d = Texture::create_default_black(&tex_ctx)?;
 
     // Initialize material storage buffer (Bindless-ready)
     let mut material_storage_buffer = StorageBuffer::<resources::uniform::MaterialUniform>::new(
@@ -334,12 +387,18 @@ pub unsafe fn init_resources(
         white_texture,
         default_skybox,
         default_cube_black,
+        dummy_black_cube,
+        dummy_black_2d,
         material_storage_buffer,
         instance_buffers,
         post_sampler,
     })
 }
 
+/// Initializes all core renderer systems and infrastructure.
+///
+/// # Safety
+/// The caller must ensure that the Vulkan instance and device are fully initialized and valid.
 pub unsafe fn init_core_infrastructure(
     device: &vulkan::VulkanDevice,
     alloc: &Arc<vulkan::Allocator>,
@@ -377,11 +436,7 @@ pub unsafe fn init_core_infrastructure(
         device.physical_device,
         Arc::clone(&device.device),
         &mut descriptor_allocator,
-        crate::vulkan::BindlessManager::DEFAULT_MAX_TEXTURES,
-        crate::vulkan::BindlessManager::DEFAULT_MAX_PAGE_TABLES,
-        crate::vulkan::BindlessManager::DEFAULT_MAX_CUBEMAPS,
-        crate::vulkan::BindlessManager::DEFAULT_MAX_STORAGE_IMAGES,
-        crate::vulkan::BindlessManager::DEFAULT_MAX_BUFFERS,
+        crate::vulkan::BindlessConfig::default(),
     )?;
 
     let renderer_resources =
@@ -397,22 +452,44 @@ pub unsafe fn init_core_infrastructure(
     })
 }
 
-pub unsafe fn init_rendering_passes(
-    device: &vulkan::VulkanDevice,
-    alloc: &Arc<vulkan::Allocator>,
-    resources: &Arc<ResourceRegistry>,
-    bindless_manager: &mut crate::vulkan::BindlessManager,
-    renderer_resources: &RendererResources,
-    swapchain_format: vk::Format,
-    swapchain_extent: vk::Extent2D,
-    depth_format: vk::Format,
-    depth_view: vk::ImageView,
-    pipeline_cache: vk::PipelineCache,
-    multisample_config: vulkan::MultisampleConfig,
-    set_layouts: &[vk::DescriptorSetLayout],
-    model_renderer: &crate::renderer::model_renderer::ModelRenderer,
-    upload_command_pool: vk::CommandPool,
-) -> Result<RenderingPasses> {
+pub struct RenderingPassesConfig<'a> {
+    pub device: &'a vulkan::VulkanDevice,
+    pub alloc: &'a Arc<vulkan::Allocator>,
+    pub resources: &'a Arc<ResourceRegistry>,
+    pub bindless_manager: &'a mut crate::vulkan::BindlessManager,
+    pub renderer_resources: &'a RendererResources,
+    pub swapchain_format: vk::Format,
+    pub swapchain_extent: vk::Extent2D,
+    pub depth_format: vk::Format,
+    pub depth_view: vk::ImageView,
+    pub pipeline_cache: vk::PipelineCache,
+    pub multisample_config: vulkan::MultisampleConfig,
+    pub set_layouts: &'a [vk::DescriptorSetLayout],
+    pub model_renderer: &'a crate::renderer::model_renderer::ModelRenderer,
+    pub upload_command_pool: vk::CommandPool,
+}
+
+/// Initializes the rendering pass chain based on the provided configuration.
+///
+/// # Safety
+/// The caller must ensure all dependencies (GBuffer, resource registry, etc.) are valid.
+pub unsafe fn init_rendering_passes(cfg: RenderingPassesConfig) -> Result<RenderingPasses> {
+    let RenderingPassesConfig {
+        device,
+        alloc,
+        resources,
+        bindless_manager,
+        renderer_resources,
+        swapchain_format,
+        swapchain_extent,
+        depth_format,
+        depth_view,
+        pipeline_cache,
+        multisample_config,
+        set_layouts,
+        model_renderer,
+        upload_command_pool,
+    } = cfg;
     log::info!("Initializing Rendering Passes...");
 
     let gbuffer = crate::renderer::GBuffer::new(
@@ -440,16 +517,16 @@ pub unsafe fn init_rendering_passes(
     )?;
 
     // Register GBuffer indices
-    let mut gbuffer_indices = GBufferIndices::default();
-    gbuffer_indices.motion_index = bindless_manager.add_sampled_image(
-        gbuffer.motion_view(),
-        renderer_resources.default_texture.sampler(),
-    )?;
+    let gbuffer_indices = GBufferIndices {
+        motion_index: bindless_manager.add_sampled_image(
+            gbuffer.motion_view(),
+            renderer_resources.default_texture.sampler(),
+        )?,
+        depth_index: bindless_manager
+            .add_sampled_image(depth_view, renderer_resources.default_texture.sampler())?,
+    };
 
-    gbuffer_indices.depth_index = bindless_manager
-        .add_sampled_image(depth_view, renderer_resources.default_texture.sampler())?;
-
-    // Skybox Initialization
+    // ── Skybox Data: Cubemap binding + oversized cube mesh ─────────────────
     let skybox_index = bindless_manager.add_cubemap(
         renderer_resources.default_skybox.view(),
         renderer_resources.default_skybox.sampler(),
@@ -465,18 +542,20 @@ pub unsafe fn init_rendering_passes(
         model_renderer.upload_mesh_data(&mesh, upload_command_pool, device.graphics_queue)?
     };
 
-    let skybox_pass = crate::renderer::passes::SkyboxPass::new(
+    // ── Construct Skybox Pass (logical, no GPU work) ─────────────
+    let mut skybox_pass = crate::renderer::passes::SkyboxPass::new(skybox_mesh, skybox_index);
+
+    // ── Initialize Skybox GPU Resources ───────────────────────────
+    skybox_pass.init(SkyboxInitContext {
         device,
         resources,
-        swapchain_format,
-        swapchain_extent,
+        color_format: swapchain_format,
+        extent: swapchain_extent,
         pipeline_cache,
         depth_format,
         multisample_config,
         set_layouts,
-        skybox_mesh,
-        skybox_index,
-    )?;
+    })?;
 
     Ok(RenderingPasses {
         gbuffer: Some(gbuffer),
@@ -487,14 +566,17 @@ pub unsafe fn init_rendering_passes(
     })
 }
 
+/// Initializes the lighting and shadow management systems.
+///
+/// # Safety
+/// The caller must ensure that the device and resource registry are valid.
 pub unsafe fn init_lighting_system(
     device: &vulkan::VulkanDevice,
     alloc: &Arc<vulkan::Allocator>,
-    bindless_manager: &mut crate::vulkan::BindlessManager,
-    upload_command_pool: vk::CommandPool,
+    _bindless_manager: &mut crate::vulkan::BindlessManager,
+    _upload_command_pool: vk::CommandPool,
     frame_count: u32,
     extent: vk::Extent2D,
-    shadow_resolution: u32,
 ) -> Result<LightingSystem> {
     log::info!("Initializing Lighting System...");
 
@@ -512,30 +594,66 @@ pub unsafe fn init_lighting_system(
     forward_plus.init(alloc);
     forward_plus.on_resize(extent.width, extent.height);
 
-    let mut vsm_config = crate::renderer::features::default_vsm_config();
-    vsm_config.physical_resolution = shadow_resolution;
-
-    let shadow_system = match crate::renderer::features::ShadowSystem::new(
-        Arc::clone(&device.device),
-        Arc::clone(alloc),
-        bindless_manager,
-        upload_command_pool,
-        device.graphics_queue,
-        vsm_config,
-        frame_count,
-    ) {
-        Ok(system) => Some(system),
-        Err(e) => {
-            log::error!("Failed to initialize Shadow System: {e}");
-            None
-        }
-    };
+    // VSM is now handled directly by Renderer and registers itself.
+    // ShadowSystem is being removed.
 
     Ok(LightingSystem {
         forward_plus,
-        shadow_system,
         global_cluster_buffer: Arc::new(global_cluster_buffer),
     })
+}
+
+/// Creates the compute descriptor set layout for VSM passes.
+///
+/// # Safety
+/// The caller must ensure that the device is valid.
+pub unsafe fn create_vsm_compute_layout(device: &ash::Device) -> Result<vk::DescriptorSetLayout> {
+    let compute_bindings = [
+        // Binding 0: Metadata (Uniform Buffer)
+        vk::DescriptorSetLayoutBinding::default()
+            .binding(0)
+            .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+            .descriptor_count(1)
+            .stage_flags(vk::ShaderStageFlags::COMPUTE | vk::ShaderStageFlags::FRAGMENT),
+        // Binding 1: Request Buffer (Storage Buffer)
+        vk::DescriptorSetLayoutBinding::default()
+            .binding(1)
+            .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+            .descriptor_count(1)
+            .stage_flags(vk::ShaderStageFlags::COMPUTE),
+        // Binding 2: Allocation Buffer (Storage Buffer)
+        vk::DescriptorSetLayoutBinding::default()
+            .binding(2)
+            .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+            .descriptor_count(1)
+            .stage_flags(vk::ShaderStageFlags::COMPUTE),
+        // Binding 3: Page Table (Storage Image)
+        vk::DescriptorSetLayoutBinding::default()
+            .binding(3)
+            .descriptor_type(vk::DescriptorType::STORAGE_IMAGE)
+            .descriptor_count(1)
+            .stage_flags(vk::ShaderStageFlags::COMPUTE | vk::ShaderStageFlags::FRAGMENT),
+        // Binding 4: Physical Cache (Storage Image)
+        vk::DescriptorSetLayoutBinding::default()
+            .binding(4)
+            .descriptor_type(vk::DescriptorType::STORAGE_IMAGE)
+            .descriptor_count(1)
+            .stage_flags(vk::ShaderStageFlags::COMPUTE | vk::ShaderStageFlags::FRAGMENT),
+        // Binding 5: Scene Depth Buffer (Combined Image Sampler)
+        vk::DescriptorSetLayoutBinding::default()
+            .binding(5)
+            .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+            .descriptor_count(1)
+            .stage_flags(vk::ShaderStageFlags::COMPUTE),
+    ];
+
+    let compute_layout_info =
+        vk::DescriptorSetLayoutCreateInfo::default().bindings(&compute_bindings);
+    device
+        .create_descriptor_set_layout(&compute_layout_info, None)
+        .map_err(|e| {
+            AshError::VulkanError(format!("Failed to create VSM compute layout helper: {e}"))
+        })
 }
 
 pub fn init_post_processing(
@@ -556,6 +674,10 @@ pub fn init_post_processing(
     Ok(PostProcessingSystem { post_process })
 }
 
+/// Internal helper to create frame synchronization primitives.
+///
+/// # Safety
+/// The caller must ensure that the device is valid.
 pub unsafe fn create_frame_syncs_internal(
     device: &Arc<ash::Device>,
     count: usize,
@@ -568,6 +690,10 @@ pub unsafe fn create_frame_syncs_internal(
     Ok(frame_syncs)
 }
 
+/// Initializes the command submission queue and associated data.
+///
+/// # Safety
+/// The caller must ensure that the Vulkan device is valid.
 pub unsafe fn init_render_queue(device: &vulkan::VulkanDevice) -> Result<RenderQueueData> {
     let queue = crate::renderer::queue::RenderQueue::new(
         Arc::clone(&device.device),
@@ -577,4 +703,71 @@ pub unsafe fn init_render_queue(device: &vulkan::VulkanDevice) -> Result<RenderQ
     )?;
 
     Ok(RenderQueueData { queue })
+}
+
+/// Initializes the occlusion culling compute system.
+///
+/// # Safety
+/// The caller must ensure that the device and resource registry are valid.
+pub unsafe fn initialize_occlusion_culling(
+    device: &vulkan::VulkanDevice,
+    alloc: &Arc<vulkan::Allocator>,
+    bindless_manager: &mut crate::vulkan::BindlessManager,
+    black_texture: &crate::renderer::resources::Texture,
+    extent: vk::Extent2D,
+) -> RenderPassResult {
+    // 1. Create Hi-Z pass
+    let mut hiz = HiZPass::new(Arc::clone(&device.device));
+    hiz.init(alloc, device, extent.width, extent.height)?;
+
+    // 2. Create Indirect Draw pass
+    let mut indirect = IndirectDrawPass::new(Arc::clone(&device.device));
+    indirect.init(
+        alloc,
+        device,
+        bindless_manager,
+        crate::renderer::vcgs::MAX_INDIRECT_OBJECTS,
+    )?;
+
+    // 3. Link them together
+    let hiz_view = if let Some(view) = hiz.hiz_view() {
+        view
+    } else {
+        black_texture.view()
+    };
+
+    let hiz_sampler = if hiz.is_initialized() {
+        hiz.hiz_sampler()
+    } else {
+        black_texture.sampler()
+    };
+    indirect.update_hiz_descriptor(hiz_view, hiz_sampler);
+
+    Ok((Arc::new(RwLock::new(hiz)), Arc::new(RwLock::new(indirect))))
+}
+
+/// Helper to initialize VSR pass.
+/// Extracted from Renderer for modularity.
+///
+/// # Safety
+/// The caller must ensure that the device, allocator, and bindless manager are valid.
+pub unsafe fn initialize_vsr_pass(
+    device: &vulkan::VulkanDevice,
+    alloc: &Arc<vulkan::Allocator>,
+    bindless_manager: &mut crate::vulkan::BindlessManager,
+    extent: vk::Extent2D,
+    quality: VsrQuality,
+) -> Result<VsrPass> {
+    let mut vsr = VsrPass::new(Arc::clone(&device.device));
+    vsr.init(
+        &alloc.vma,
+        device,
+        bindless_manager,
+        extent.width,
+        extent.height,
+        quality,
+    )
+    .map_err(|e| AshError::VulkanError(format!("VSR init failed: {e}")))?;
+
+    Ok(vsr)
 }

@@ -52,11 +52,11 @@ impl PoolStats {
     /// Format stats as a string
     pub fn format(&self) -> String {
         format!(
-            "Pool: {} acquires ({:.1}% hit), {} available (peak: {})",
-            self.acquires,
-            self.hit_rate() * 100.0,
-            self.available,
-            self.peak_available
+            "Pool: {acquires} acquires ({hit_rate:.1}% hit), {available} available (peak: {peak})",
+            acquires = self.acquires,
+            hit_rate = self.hit_rate() * 100.0,
+            available = self.available,
+            peak = self.peak_available
         )
     }
 }

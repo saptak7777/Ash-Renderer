@@ -1,234 +1,125 @@
 #version 450
+layout(local_size_x = 8, local_size_y = 8) in;
 
-//! Temporal Anti-Aliasing Resolve Shader
-//!
-//! Blends current frame with history using motion vectors and color clamping.
+layout(set = 0, binding = 0, rgba16f) uniform image2D u_Result;
+layout(set = 0, binding = 1) uniform sampler2D u_Color;   // Current (Jittered)
+layout(set = 0, binding = 2) uniform sampler2D u_Depth;
+layout(set = 0, binding = 3) uniform sampler2D u_Motion;
+layout(set = 0, binding = 4) uniform sampler2D u_History; // Previous Resolved
 
-layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
-
-// Input: Current frame color
-layout(set = 0, binding = 0) uniform sampler2D currentColor;
-// Input: History color
-layout(set = 0, binding = 1) uniform sampler2D historyColor;
-// Input: Velocity buffer (motion vectors)
-layout(set = 0, binding = 2) uniform sampler2D velocityBuffer;
-// Input: Depth buffer
-layout(set = 0, binding = 3) uniform sampler2D depthBuffer;
-
-// Output: Resolved color
-layout(set = 0, binding = 4, rgba16f) uniform writeonly image2D outputColor;
-
-// Push constants
-layout(push_constant) uniform PushConstants {
-    vec4 screenParams;      // width, height, 1/width, 1/height
-    vec4 params;            // blendFactor, colorClamp, velocityRejection, clampingGamma
-    vec4 qualityParams;     // velocityThreshold, depthThreshold, antiFlicker, padding
-    vec2 jitter;            // Current frame jitter
-    vec2 prevJitter;        // Previous frame jitter
+layout(push_constant) uniform Constants {
+    vec2 resolution;
+    vec2 jitter;
+    vec2 prev_jitter;
+    float blend_factor;
+    float clamping_gamma;
+    uint anti_flicker;
 } pc;
 
-// ============================================================================
-// UTILITY FUNCTIONS
-// ============================================================================
+// Reversible Tonemap (Hides Fireflies and prevents Variance Box explosion)
+vec3 ToneMap(vec3 c) {
+    return c / (1.0 + max(c.r, max(c.g, c.b)));
+}
 
-// Convert RGB to YCoCg color space
-vec3 rgbToYCoCg(vec3 rgb) {
+vec3 UnToneMap(vec3 c) {
+    return c / max(1.0 - max(c.r, max(c.g, c.b)), 0.0001);
+}
+
+// RGB <-> YCoCg for improved compression in variance clipping
+vec3 RGBToYCoCg(vec3 c) {
     return vec3(
-        0.25 * rgb.r + 0.5 * rgb.g + 0.25 * rgb.b,
-        0.5 * rgb.r - 0.5 * rgb.b,
-        -0.25 * rgb.r + 0.5 * rgb.g - 0.25 * rgb.b
+        c.r * 0.25 + c.g * 0.5 + c.b * 0.25,
+        c.r * 0.5 - c.b * 0.5,
+        -c.r * 0.25 + c.g * 0.5 - c.b * 0.25
     );
 }
 
-// Convert YCoCg to RGB color space
-vec3 yCoCgToRgb(vec3 ycocg) {
-    float y = ycocg.x;
-    float co = ycocg.y;
-    float cg = ycocg.z;
+vec3 YCoCgToRGB(vec3 y) {
     return vec3(
-        y + co - cg,
-        y + cg,
-        y - co - cg
+        y.x + y.y - y.z,
+        y.x + y.z,
+        y.x - y.y - y.z
     );
 }
-
-// Apply tone mapping for better clamping
-vec3 tonemap(vec3 color) {
-    return color / (1.0 + color);
-}
-
-vec3 untonemap(vec3 color) {
-    return color / (1.0 - color + 0.0001);
-}
-
-// Clamp to neighborhood AABB in YCoCg space
-vec3 clipAABB(vec3 aabbMin, vec3 aabbMax, vec3 color, vec3 historyColor) {
-    vec3 center = 0.5 * (aabbMax + aabbMin);
-    vec3 halfSize = 0.5 * (aabbMax - aabbMin) + 0.001;
-    
-    vec3 delta = historyColor - center;
-    vec3 v = delta / halfSize;
-    
-    float maxV = max(max(abs(v.x), abs(v.y)), abs(v.z));
-    
-    if (maxV > 1.0) {
-        return center + delta / maxV;
-    }
-    return historyColor;
-}
-
-// Enhanced AABB clamping with gamma (Unreal TSR)
-vec3 clipAABBGamma(vec3 aabbMin, vec3 aabbMax, vec3 historyColor, float gamma) {
-    vec3 center = 0.5 * (aabbMax + aabbMin);
-    vec3 extents = 0.5 * (aabbMax - aabbMin);
-    
-    // Extend AABB by gamma (reduces flickering)
-    extents *= gamma;
-    
-    vec3 clampedMin = center - extents;
-    vec3 clampedMax = center + extents;
-    
-    return clamp(historyColor, clampedMin, clampedMax);
-}
-
-// Bicubic history sampling (Catmull-Rom) - Unreal TSR quality
-vec3 sampleHistoryBicubic(sampler2D tex, vec2 uv) {
-    vec2 texSize = vec2(textureSize(tex, 0));
-    vec2 pixel = uv * texSize;
-    vec2 frac = fract(pixel);
-    vec2 iPixel = floor(pixel);
-    
-    // Catmull-Rom weights
-    vec2 w0 = frac * (-0.5 + frac * (1.0 - 0.5 * frac));
-    vec2 w1 = 1.0 + frac * frac * (-2.5 + 1.5 * frac);
-    vec2 w2 = frac * (0.5 + frac * (2.0 - 1.5 * frac));
-    vec2 w3 = frac * frac * (-0.5 + 0.5 * frac);
-    
-    // Sample 4x4 kernel
-    vec3 color = vec3(0.0);
-    for (int y = -1; y <= 2; y++) {
-        for (int x = -1; x <= 2; x++) {
-            vec2 offset = vec2(x, y);
-            vec2 sampleUV = (iPixel + offset + 0.5) / texSize;
-            
-            float wx = (x == -1) ? w0.x : (x == 0) ? w1.x : (x == 1) ? w2.x : w3.x;
-            float wy = (y == -1) ? w0.y : (y == 0) ? w1.y : (y == 1) ? w2.y : w3.y;
-            
-            color += texture(tex, sampleUV).rgb * wx * wy;
-        }
-    }
-    
-    return color;
-}
-
-// ============================================================================
-// MAIN
-// ============================================================================
 
 void main() {
     ivec2 pos = ivec2(gl_GlobalInvocationID.xy);
-    vec2 screenSize = pc.screenParams.xy;
+    if (any(greaterThanEqual(pos, ivec2(pc.resolution)))) return;
+
+    vec2 uv = (vec2(pos) + 0.5) / pc.resolution;
+
+    // 1. Jitter-Compensated Reprojection
+    // We must un-shift the current UV (biased by current jitter) and 
+    // re-shift to history's jitter state.
+    vec2 velocity = texture(u_Motion, uv).rg;
     
-    if (pos.x >= int(screenSize.x) || pos.y >= int(screenSize.y)) {
+    // Jitter is in pixels, convert to UV space for the re-projection correction
+    vec2 jitterDelta = (pc.prev_jitter - pc.jitter) / pc.resolution; 
+    vec2 prevUV = uv - velocity + jitterDelta;
+
+    // 2. Sample Current Neighborhood (Tonemapped)
+    vec3 centerColor = texture(u_Color, uv).rgb;
+    vec3 centerTM = ToneMap(centerColor);
+    vec3 centerYCC = RGBToYCoCg(centerTM);
+
+    vec3 m1 = vec3(0.0);
+    vec3 m2 = vec3(0.0);
+
+    // Variance Box calculation in Tonemapped YCoCg space
+    for(int x = -1; x <= 1; x++) {
+        for(int y = -1; y <= 1; y++) {
+            vec3 c = texture(u_Color, uv + vec2(x, y) / pc.resolution).rgb;
+            c = RGBToYCoCg(ToneMap(c)); 
+            m1 += c;
+            m2 += c * c;
+        }
+    }
+
+    vec3 mu = m1 / 9.0;
+    vec3 sigma = sqrt(abs(m2 / 9.0 - mu * mu));
+
+    // 3. Sample & Clip History (Tonemapped)
+    // Check if previous UV is off-screen
+    if (any(lessThan(prevUV, vec2(0.0))) || any(greaterThan(prevUV, vec2(1.0)))) {
+        imageStore(u_Result, pos, vec4(centerColor, 1.0));
         return;
     }
+
+    vec3 history = texture(u_History, prevUV).rgb;
+    vec3 historyTM = ToneMap(history);
+    vec3 historyYCC = RGBToYCoCg(historyTM);
+
+    // Variance Clip (AABB) using configurable clamping gamma
+    vec3 minC = mu - pc.clamping_gamma * sigma;
+    vec3 maxC = mu + pc.clamping_gamma * sigma;
     
-    vec2 uv = (vec2(pos) + 0.5) / screenSize;
+    // Soft Clip History towards neighborhood center
+    vec3 p_clip = 0.5 * (maxC + minC);
+    vec3 e_clip = 0.5 * (maxC - minC) + 0.00001;
+    vec3 v_clip = historyYCC - p_clip;
+    vec3 v_unit = v_clip / e_clip;
+    vec3 a_unit = abs(v_unit);
+    float ma_unit = max(a_unit.x, max(a_unit.y, a_unit.z));
     
-    // Sample velocity (motion vector)
-    vec2 velocity = texture(velocityBuffer, uv).xy;
-    
-    // If no velocity buffer, use jitter difference
-    if (length(velocity) < 0.0001) {
-        velocity = (pc.jitter - pc.prevJitter) / screenSize;
+    if (ma_unit > 1.0) {
+        historyYCC = p_clip + v_clip / ma_unit;
     }
-    
-    // Reproject to find history position
-    vec2 historyUV = clamp(uv - velocity, 0.0, 1.0);
-    
-    // Sample current color (at current position, unjittered)
-    vec3 current = texture(currentColor, uv).rgb;
-    float currentDepth = texture(depthBuffer, uv).r;
-    
-    // Sample history color (bicubic for quality, bilinear for responsive)
-    // Use bicubic if clampingGamma <= 1.2 (Quality/Balanced presets)
-    vec3 history;
-    if (pc.params.w <= 1.2) {
-        history = sampleHistoryBicubic(historyColor, historyUV);
-    } else {
-        history = texture(historyColor, historyUV).rgb;
+
+    // 4. Resolve
+    // Blend with CENTER pixel (sharper) instead of neighbourhood Mean (blurry)
+    float blend = pc.blend_factor; 
+
+    // Anti-flicker: Reduce blend weight for samples with high variance/luminance spikes
+    if (pc.anti_flicker > 0) {
+        float luminanceDiff = abs(historyYCC.x - centerYCC.x);
+        float flickerWeight = 1.0 / (1.0 + luminanceDiff * 4.0);
+        blend *= flickerWeight;
     }
+
+    vec3 resolvedYCC = mix(centerYCC, historyYCC, blend);
     
-    // Color clamping in YCoCg space
-    vec3 result;
-    if (pc.params.y > 0.5) {
-        // Sample 3x3 neighborhood
-        vec3 samples[9];
-        int idx = 0;
-        for (int y = -1; y <= 1; y++) {
-            for (int x = -1; x <= 1; x++) {
-                vec2 sampleUV = uv + vec2(x, y) * pc.screenParams.zw;
-                samples[idx++] = rgbToYCoCg(tonemap(texture(currentColor, sampleUV).rgb));
-            }
-        }
-        
-        // Find AABB in YCoCg space
-        vec3 aabbMin = samples[0];
-        vec3 aabbMax = samples[0];
-        for (int i = 1; i < 9; i++) {
-            aabbMin = min(aabbMin, samples[i]);
-            aabbMax = max(aabbMax, samples[i]);
-        }
-        
-        // Enhanced AABB clamping with gamma (Unreal TSR)
-        vec3 currentYCoCg = rgbToYCoCg(tonemap(current));
-        vec3 historyYCoCg = rgbToYCoCg(tonemap(history));
-        vec3 clampedHistory = clipAABBGamma(aabbMin, aabbMax, historyYCoCg, pc.params.w);
-        history = untonemap(yCoCgToRgb(clampedHistory));
-    }
+    // 5. Un-Tonemap and Store
+    vec3 resolved = UnToneMap(YCoCgToRGB(resolvedYCC));
     
-    // Velocity rejection - use threshold from push constants
-    float blendFactor = pc.params.x;
-    if (pc.params.z > 0.5) {
-        float velocityLength = length(velocity * screenSize);
-        float velocityThreshold = pc.qualityParams.x;
-        if (velocityLength > velocityThreshold) {
-            blendFactor *= max(0.0, 1.0 - (velocityLength - velocityThreshold) * 10.0);
-        }
-    }
-    
-    // Depth rejection
-    float historyDepth = texture(depthBuffer, historyUV).r;
-    float depthDiff = abs(currentDepth - historyDepth);
-    float depthThreshold = pc.qualityParams.y;
-    if (depthDiff > depthThreshold) {
-        blendFactor *= 0.5; // Reduce history influence
-    }
-    
-    // Anti-flicker (Unreal TSR feature)
-    if (pc.qualityParams.z > 0.5) {
-        // Reduce history weight if current is much brighter (prevents flicker)
-        float currentLuma = dot(current, vec3(0.299, 0.587, 0.114));
-        float historyLuma = dot(history, vec3(0.299, 0.587, 0.114));
-        
-        if (currentLuma > historyLuma * 1.5) {
-            blendFactor *= 0.5;  // Reduce history influence
-        }
-    }
-    
-    // Check if history is valid (within screen bounds)
-    if (historyUV.x < 0.0 || historyUV.x > 1.0 || 
-        historyUV.y < 0.0 || historyUV.y > 1.0) {
-        blendFactor = 0.0; // Use current frame only
-    }
-    
-    // Blend current and history
-    result = mix(current, history, blendFactor);
-    
-    // Write output
-    imageStore(outputColor, pos, vec4(result, 1.0));
-    
-    // CRITICAL FIX: Memory barrier to ensure history buffer writes are visible
-    // This prevents race conditions when the next frame reads history
-    memoryBarrierImage();
+    imageStore(u_Result, pos, vec4(resolved, 1.0));
 }

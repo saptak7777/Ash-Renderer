@@ -49,7 +49,7 @@ impl RenderQueue {
     /// - `vk::Semaphore`: Semaphore signaled when image is available for rendering.
     /// - `vk::Semaphore`: Semaphore to be signaled when rendering is finished.
     /// - `vk::Fence`: Fence to be signaled when the command buffer execution completes.
-    /// Requests a swapchain resize.
+    ///   Requests a swapchain resize.
     pub fn request_resize(&mut self, extent: vk::Extent2D) {
         self.resize_pending = true;
         self.pending_extent = Some(extent);

@@ -144,6 +144,7 @@ pub struct RendererConfig {
     pub resolution: Option<(u32, u32)>,
     pub present_mode: vk::PresentModeKHR,
     pub shadow_resolution: u32,
+    pub environment_map: Option<std::path::PathBuf>,
     pub vsr_config: crate::renderer::passes::vsr::VsrConfig,
     pub pipeline: PipelineConfig,
     pub texture_compression: bool,
@@ -156,6 +157,7 @@ impl Default for RendererConfig {
             resolution: None,
             present_mode: vk::PresentModeKHR::FIFO,
             shadow_resolution: 4096,
+            environment_map: None,
             vsr_config: crate::renderer::passes::vsr::VsrConfig::default(),
             pipeline: PipelineConfig::default(),
             texture_compression: true,
@@ -223,4 +225,46 @@ impl Default for MeshData {
             cluster_count: 0,
         }
     }
+}
+
+/// Context for a single frame's rendering operations.
+/// Used to pass large numbers of parameters through the pass chain.
+pub struct RenderFrameContext<'a> {
+    pub frame_index: usize,
+    pub image_index: u32,
+    pub scene: &'a crate::renderer::scene::Scene,
+    pub view: Mat4,
+    pub jitter_proj: Mat4,
+    pub jitter_uv: [f32; 2],
+    pub extent: vk::Extent2D,
+    pub ui_callback: Option<&'a dyn Fn(vk::CommandBuffer)>,
+}
+
+/// Parameters for GPU-based occlusion culling
+pub struct CullingContext {
+    pub view_proj: Mat4,
+    pub width: u32,
+    pub height: u32,
+    pub object_offset: u32,
+    pub object_count: u32,
+    pub indirect_offset: u32,
+    pub cluster_buffer_addr: u64,
+}
+
+/// Parameters for texture resource creation
+#[derive(Clone, Copy, Debug)]
+pub struct TextureCreateInfo<'a> {
+    pub width: u32,
+    pub height: u32,
+    pub format: vk::Format,
+    pub mip_levels: u32,
+    pub name: Option<&'a str>,
+}
+
+/// Common Vulkan context required for texture initialization
+pub struct TextureInitContext {
+    pub allocator: Arc<vulkan::Allocator>,
+    pub device: Arc<ash::Device>,
+    pub command_pool: vk::CommandPool,
+    pub queue: vk::Queue,
 }

@@ -45,24 +45,48 @@ pub struct BindlessManager {
     resources: Vec<RegisteredResource>,
 }
 
+pub struct BindlessConfig {
+    pub max_images: u32,
+    pub max_page_tables: u32,
+    pub max_cubemaps: u32,
+    pub max_storage_images: u32,
+    pub max_buffers: u32,
+}
+
+impl Default for BindlessConfig {
+    fn default() -> Self {
+        Self {
+            max_images: BindlessManager::DEFAULT_MAX_TEXTURES,
+            max_page_tables: BindlessManager::DEFAULT_MAX_PAGE_TABLES,
+            max_cubemaps: BindlessManager::DEFAULT_MAX_CUBEMAPS,
+            max_storage_images: BindlessManager::DEFAULT_MAX_STORAGE_IMAGES,
+            max_buffers: BindlessManager::DEFAULT_MAX_BUFFERS,
+        }
+    }
+}
+
 impl BindlessManager {
     pub const DEFAULT_MAX_TEXTURES: u32 = 16384;
     pub const DEFAULT_MAX_PAGE_TABLES: u32 = 1024;
     pub const DEFAULT_MAX_CUBEMAPS: u32 = 1024;
     pub const DEFAULT_MAX_STORAGE_IMAGES: u32 = 1024;
     pub const DEFAULT_MAX_BUFFERS: u32 = 1024;
+    pub const IBL_IRRADIANCE_BINDING: u32 = 10;
+    pub const IBL_PREFILTER_BINDING: u32 = 11;
+    pub const IBL_BRDF_LUT_BINDING: u32 = 12;
 
     pub fn new(
         instance: &ash::Instance,
         physical_device: vk::PhysicalDevice,
         device: Arc<ash::Device>,
         allocator: &mut DescriptorAllocator,
-        max_images: u32,
-        max_page_tables: u32,
-        max_cubemaps: u32,
-        max_storage_images: u32,
-        mut max_buffers: u32,
+        config: BindlessConfig,
     ) -> Result<Self> {
+        let max_images = config.max_images;
+        let max_page_tables = config.max_page_tables;
+        let max_cubemaps = config.max_cubemaps;
+        let max_storage_images = config.max_storage_images;
+        let mut max_buffers = config.max_buffers;
         // Hardware Validation: Clamp buffers to hardware limits to prevent DEVICE_LOST
         unsafe {
             let mut v12_props = vk::PhysicalDeviceVulkan12Properties::default();
@@ -72,9 +96,7 @@ impl BindlessManager {
             let hw_max_buffers = v12_props.max_descriptor_set_update_after_bind_storage_buffers;
             if max_buffers > hw_max_buffers {
                 log::warn!(
-                    "Requested {} bindless storage buffers, but hardware only supports {}. Clamping.",
-                    max_buffers,
-                    hw_max_buffers
+                    "Requested {max_buffers} bindless storage buffers, but hardware only supports {hw_max_buffers}. Clamping."
                 );
                 max_buffers = hw_max_buffers;
             }
@@ -110,6 +132,24 @@ impl BindlessManager {
                 vk::DescriptorType::STORAGE_BUFFER,
                 vk::ShaderStageFlags::ALL_GRAPHICS | vk::ShaderStageFlags::COMPUTE,
                 max_buffers,
+            )
+            .add_binding(
+                Self::IBL_IRRADIANCE_BINDING, // u_IrradianceMap
+                vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+                vk::ShaderStageFlags::FRAGMENT | vk::ShaderStageFlags::COMPUTE,
+                1,
+            )
+            .add_binding(
+                Self::IBL_PREFILTER_BINDING, // u_PrefilterMap
+                vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+                vk::ShaderStageFlags::FRAGMENT | vk::ShaderStageFlags::COMPUTE,
+                1,
+            )
+            .add_binding(
+                Self::IBL_BRDF_LUT_BINDING, // u_BrdfLut
+                vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+                vk::ShaderStageFlags::FRAGMENT | vk::ShaderStageFlags::COMPUTE,
+                1,
             )
             .build(Arc::clone(&device))?;
 
@@ -221,8 +261,7 @@ impl BindlessManager {
             .find(|r| r.index == index && r.binding == 0)
             .ok_or_else(|| {
                 AshError::VulkanError(format!(
-                    "Bindless index {} (binding 0) not found for update",
-                    index
+                    "Bindless index {index} (binding 0) not found for update"
                 ))
             })?;
 
@@ -438,5 +477,78 @@ impl BindlessManager {
             }
             _ => Err(AshError::VulkanError("Invalid bindless binding".into())),
         }
+    }
+
+    /// Update the static IBL descriptor bindings (Phase 9.3)
+    pub fn update_ibl_descriptors(
+        &mut self,
+        irradiance_view: vk::ImageView,
+        irradiance_sampler: vk::Sampler,
+        prefilter_view: vk::ImageView,
+        prefilter_sampler: vk::Sampler,
+        brdf_view: vk::ImageView,
+        brdf_sampler: vk::Sampler,
+    ) -> Result<()> {
+        // 1. Update the actual descriptor set
+        self.descriptor_set.update_image(
+            Self::IBL_IRRADIANCE_BINDING,
+            irradiance_view,
+            irradiance_sampler,
+            vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+            vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+        )?;
+
+        self.descriptor_set.update_image(
+            Self::IBL_PREFILTER_BINDING,
+            prefilter_view,
+            prefilter_sampler,
+            vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+            vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+        )?;
+
+        self.descriptor_set.update_image(
+            Self::IBL_BRDF_LUT_BINDING,
+            brdf_view,
+            brdf_sampler,
+            vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+            vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+        )?;
+
+        // 2. Track these for automatic recreation
+        // Remove any existing entries for these bindings
+        self.resources.retain(|r| {
+            r.binding != Self::IBL_IRRADIANCE_BINDING
+                && r.binding != Self::IBL_PREFILTER_BINDING
+                && r.binding != Self::IBL_BRDF_LUT_BINDING
+        });
+
+        self.resources.push(RegisteredResource {
+            index: 0,
+            binding: Self::IBL_IRRADIANCE_BINDING,
+            info: ResourceInfo::Image {
+                view: irradiance_view,
+                sampler: irradiance_sampler,
+            },
+        });
+
+        self.resources.push(RegisteredResource {
+            index: 0,
+            binding: Self::IBL_PREFILTER_BINDING,
+            info: ResourceInfo::Image {
+                view: prefilter_view,
+                sampler: prefilter_sampler,
+            },
+        });
+
+        self.resources.push(RegisteredResource {
+            index: 0,
+            binding: Self::IBL_BRDF_LUT_BINDING,
+            info: ResourceInfo::Image {
+                view: brdf_view,
+                sampler: brdf_sampler,
+            },
+        });
+
+        Ok(())
     }
 }

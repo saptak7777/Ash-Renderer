@@ -62,7 +62,10 @@ impl ApplicationHandler for App {
         let window = event_loop.create_window(window_attrs).unwrap();
         let surface_provider = ash_renderer::vulkan::WindowSurfaceProvider::new(&window);
 
-        match Renderer::new(&surface_provider) {
+        match Renderer::builder()
+            .with_environment_map("assets/textures/skybox.hdr")
+            .build(&surface_provider)
+        {
             Ok(mut renderer) => {
                 // Create Scene
                 let mut scene = Scene::new(
@@ -95,7 +98,6 @@ impl ApplicationHandler for App {
                         bloom_enabled: true,
                         bloom_intensity: 0.04,
                         tonemapping_enabled: true,
-                        ..Default::default()
                     },
                 );
 
@@ -134,10 +136,9 @@ impl ApplicationHandler for App {
                         });
 
                         if let Err(panic) = result {
-                            log::error!("Async Loader: Thread panicked: {:?}", panic);
+                            log::error!("Async Loader: Thread panicked: {panic:?}");
                             let _ = tx_panic.send(LoaderMessage::LoadError(format!(
-                                "Thread panicked: {:?}",
-                                panic
+                                "Thread panicked: {panic:?}"
                             )));
                         }
                     })
@@ -219,28 +220,27 @@ impl ApplicationHandler for App {
                                 for (i, mut mesh) in meshes.into_iter().enumerate() {
                                     let name = mesh.name.clone();
                                     let mesh_handle = scene
-                                        .upload_mesh(
-                                            Arc::clone(&renderer.context.device.device),
-                                            Arc::clone(&renderer.context.alloc),
-                                            renderer.frame.cmds.upload_command_pool_handle(),
-                                            upload_cmd,
-                                            &renderer.context.device.graphics_queue,
-                                            &mut mesh,
-                                            &mut renderer.resources.assets,
-                                            &mut staging_resources,
-                                            None,
-                                        )
+                                        .upload_mesh(ash_renderer::renderer::MeshUploadInfo {
+                                            device: Arc::clone(&renderer.context.device.device),
+                                            allocator: Arc::clone(&renderer.context.alloc),
+                                            command_pool: renderer
+                                                .frame
+                                                .cmds
+                                                .upload_command_pool_handle(),
+                                            command_buffer: upload_cmd,
+                                            queue: renderer.context.device.graphics_queue,
+                                            mesh: &mut mesh,
+                                            asset_manager: &mut renderer.resources.assets,
+                                            staging_resources: &mut staging_resources,
+                                            material_override: None,
+                                        })
                                         .unwrap();
 
                                     let material_handle =
                                         scene.mesh_data[mesh_handle as usize].material_handle;
 
                                     log::info!(
-                                        "Scheduled Mesh {}: '{}' (Handle: {:?}, Material: {:?})",
-                                        i,
-                                        name,
-                                        mesh_handle,
-                                        material_handle
+                                        "Scheduled Mesh {i}: '{name}' (Handle: {mesh_handle:?}, Material: {material_handle:?})"
                                     );
 
                                     self.render_commands.push(
@@ -377,7 +377,8 @@ impl ApplicationHandler for App {
                             proj.y_axis.y *= -1.0;
 
                             let _ = renderer.submit_render_commands(scene, &self.render_commands);
-                            let _ = renderer.render_frame(scene, view, proj, camera_pos, None);
+                            let _ =
+                                renderer.render_frame(scene, view, proj, camera_pos, None, None);
                         }
                     }
                 }

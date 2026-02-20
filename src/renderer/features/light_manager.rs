@@ -312,6 +312,8 @@ impl LightManager {
         Ok(())
     }
 
+    /// # Safety
+    /// Caller must ensure that the allocator is valid and that no GPU commands are currently referencing the tile buffers.
     pub unsafe fn recreate_tile_buffer_if_needed(
         &mut self,
         allocator: &Allocator,
@@ -324,7 +326,7 @@ impl LightManager {
 
         // Check if any buffer exists and size matches
         let needs_recreation =
-            if let Some(ref tile_buffer) = self.tile_buffers.first().and_then(|b| b.as_ref()) {
+            if let Some(tile_buffer) = self.tile_buffers.first().and_then(|b| b.as_ref()) {
                 if tile_buffer.size == new_tile_buffer_size {
                     // Size hasn't changed, no need to recreate
                     self.dirty = false;
@@ -416,12 +418,14 @@ impl LightManager {
     ///
     /// # Safety
     /// Buffer must have been created and be valid.
+    /// # Safety
+    /// Caller must ensure that the light buffer has been created and the frame index is within bounds.
     pub unsafe fn upload_lights(
         &mut self,
         allocator: &Allocator,
         frame_index: usize,
     ) -> crate::Result<()> {
-        let Some(ref light_buffer) = self.light_buffers.get(frame_index).and_then(|b| b.as_ref())
+        let Some(light_buffer) = self.light_buffers.get(frame_index).and_then(|b| b.as_ref())
         else {
             return Ok(()); // Light buffer not initialized
         };

@@ -30,7 +30,7 @@ pub struct Scene {
     pub scene_lighting: SceneLighting, // IBL settings, etc.
     pub skybox_texture_index: u32,
 
-    // Metadata & Tracking (Moved from Renderer)
+    // Metadata & Tracking
     pub mesh_data: Vec<MeshData>,
     pub uploaded_material_indices: HashSet<u32>,
     pub transform_system: TransformSystem,
@@ -38,6 +38,19 @@ pub struct Scene {
     // Buffers moved from Renderer
     pub global_cluster_buffer: Option<Arc<GlobalClusterBuffer>>,
     pub material_storage_buffer: Option<Arc<RwLock<StorageBuffer<MaterialUniform>>>>,
+}
+
+/// Information for uploading a mesh to the GPU and scene.
+pub struct MeshUploadInfo<'a> {
+    pub device: Arc<ash::Device>,
+    pub allocator: Arc<Allocator>,
+    pub command_pool: vk::CommandPool,
+    pub command_buffer: vk::CommandBuffer,
+    pub queue: vk::Queue,
+    pub mesh: &'a mut CpuMesh,
+    pub asset_manager: &'a mut AssetManager,
+    pub staging_resources: &'a mut Vec<crate::renderer::resources::BufferHandle>,
+    pub material_override: Option<MaterialHandle>,
 }
 
 impl Scene {
@@ -91,18 +104,18 @@ impl Scene {
     }
 
     /// Uploads a mesh to the GPU and registers it with the scene.
-    pub fn upload_mesh(
-        &mut self,
-        device: Arc<ash::Device>,
-        allocator: Arc<Allocator>,
-        command_pool: vk::CommandPool,
-        command_buffer: vk::CommandBuffer,
-        queue: &vk::Queue,
-        mesh: &mut CpuMesh,
-        asset_manager: &mut AssetManager,
-        staging_resources: &mut Vec<crate::renderer::resources::BufferHandle>,
-        material_override: Option<MaterialHandle>,
-    ) -> Result<u32> {
+    pub fn upload_mesh(&mut self, info: MeshUploadInfo<'_>) -> Result<u32> {
+        let MeshUploadInfo {
+            device,
+            allocator,
+            command_pool,
+            command_buffer,
+            queue,
+            mesh,
+            asset_manager,
+            staging_resources,
+            material_override,
+        } = info;
         // 0. Strict check for cluster buffer
         if self.global_cluster_buffer.is_none() {
             return Err(AshError::vulkan("Critical: Global Cluster Buffer missing during mesh upload. Ensure scene.global_cluster_buffer is assigned."));
@@ -112,14 +125,14 @@ impl Scene {
 
         // 1. Upload geometry to ModelRenderer
         self.model_renderer
-            .ensure_mesh(&key, mesh, command_pool, *queue)?;
+            .ensure_mesh(&key, mesh, command_pool, queue)?;
 
         // 2. Register textures with bindless manager via AssetManager
         asset_manager.ingest_mesh_textures(
             device,
             allocator.clone(),
             &command_pool,
-            queue,
+            &queue,
             mesh,
         )?;
 
@@ -131,7 +144,7 @@ impl Scene {
         if material_override.is_none() {
             if let Some(props) = &mesh.material_properties {
                 let material = Material {
-                    name: format!("{}_material", &*mesh.name),
+                    name: format!("{name}_material", name = &*mesh.name),
                     color: props.base_color_factor,
                     metallic: props.metallic_factor,
                     roughness: props.roughness_factor,

@@ -1,5 +1,5 @@
 use crate::renderer::vram_budget::VramBudget;
-use crate::renderer::{resources, Texture};
+use crate::renderer::{resources, Texture, TextureInitContext};
 use crate::vulkan::{Allocator, BindlessManager};
 use crate::Result;
 use ash::vk;
@@ -37,13 +37,17 @@ impl AssetManager {
     ) -> Result<(u32, u32, u32)> {
         let name = "Global_IBL"; // Internal name for debug
 
+        let tex_ctx = TextureInitContext {
+            allocator: Arc::clone(&allocator),
+            device: Arc::clone(&device.device),
+            command_pool: upload_command_pool,
+            queue,
+        };
+
         // 1. Upload Irradiance (Cubemap, 1 mip)
         let irradiance_texture = unsafe {
             resources::Texture::create_cubemap_from_data(
-                allocator.clone(),
-                device.device.clone(),
-                upload_command_pool,
-                queue,
+                &tex_ctx,
                 params.irradiance,
                 params.irradiance_size,
                 1,
@@ -58,10 +62,7 @@ impl AssetManager {
         // 2. Upload Prefilter (Cubemap, N mips)
         let prefilter_texture = unsafe {
             resources::Texture::create_cubemap_from_data(
-                allocator.clone(),
-                device.device.clone(),
-                upload_command_pool,
-                queue,
+                &tex_ctx,
                 params.prefilter,
                 params.prefilter_size,
                 params.prefilter_mips,
@@ -81,10 +82,7 @@ impl AssetManager {
         };
         let brdf_texture = unsafe {
             resources::Texture::from_data(
-                allocator.clone(),
-                device.device.clone(),
-                upload_command_pool,
-                queue,
+                &tex_ctx,
                 &brdf_data,
                 vk::Format::R16G16_SFLOAT, // Standard for BRDF LUTs
                 Some(&(name.to_owned() + "_BRDF_LUT")),
@@ -103,10 +101,7 @@ impl AssetManager {
             .insert(brdf_idx, Arc::new(brdf_texture));
 
         log::info!(
-            "IBL maps uploaded to bindless slots (Irradiance: {}, Prefilter: {}, BRDF: {})",
-            irradiance_idx,
-            prefilter_idx,
-            brdf_idx
+            "IBL maps uploaded to bindless slots (Irradiance: {irradiance_idx}, Prefilter: {prefilter_idx}, BRDF: {brdf_idx})"
         );
 
         Ok((irradiance_idx, prefilter_idx, brdf_idx))

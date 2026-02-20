@@ -85,7 +85,7 @@ impl IndirectDrawPass {
     /// Initialize indirect draw pass resources.
     ///
     /// # Safety
-    /// The caller must ensure that the provided allocator and device are valid.
+    /// Caller must ensure that the provided allocator, device, and bindless manager are valid and remain active for the duration of the pass.
     pub unsafe fn init(
         &mut self,
         allocator: &Arc<Allocator>,
@@ -147,6 +147,8 @@ impl IndirectDrawPass {
             .map_err(|e| crate::AshError::VulkanError(format!("Object buffer: {e:?}")))?;
 
         // SAFETY: BDA requires initialized memory. Zero it out to prevent wild pointers.
+        // SAFETY: Directly mapping memory and writing zero bytes to ensure
+        // BDA pointers are initialized to null/zero state.
         unsafe {
             let ptr = allocator.map_memory(&mut object_alloc)?;
             std::ptr::write_bytes(ptr, 0, object_size as usize);
@@ -161,9 +163,8 @@ impl IndirectDrawPass {
         let info = vk::BufferDeviceAddressInfo::default().buffer(object_buffer);
         let addr = self.device.get_buffer_device_address(&info);
         log::info!(
-            "IndirectDrawPass: Object Buffer Address = {:#x} (Aligned: {})",
-            addr,
-            addr % 16 == 0
+            "IndirectDrawPass: Object Buffer Address = {addr:#x} (Aligned: {aligned})",
+            aligned = addr % 16 == 0
         );
 
         self.object_buffer = object_buffer;
@@ -322,8 +323,7 @@ impl IndirectDrawPass {
     /// Reload compute pipeline with new shader code
     ///
     /// # Safety
-    /// The caller must ensure that the pipeline is not in use and that the
-    /// provided SPIR-V code is valid.
+    /// Caller must ensure that the pipeline is not currently in use by the GPU. The provided SPIR-V code must be valid compute shader code.
     pub unsafe fn reload_pipeline(&mut self, spirv_code: &[u32]) -> Result<()> {
         log::info!("IndirectDrawPass: Reloading pipeline...");
 
@@ -379,7 +379,7 @@ impl IndirectDrawPass {
     /// Update descriptors with Hi-Z image
     ///
     /// # Safety
-    /// Resources must be valid.
+    /// Hi-Z view and sampler must be valid and accurately represent the current frame's occlusion data.
     pub unsafe fn update_hiz_descriptor(&self, hiz_view: vk::ImageView, hiz_sampler: vk::Sampler) {
         if !self.initialized {
             return;
@@ -433,7 +433,7 @@ impl IndirectDrawPass {
     /// Upload object data for culling
     ///
     /// # Safety
-    /// Allocator must be valid and offset (in elements of T) must be within buffer capacity.
+    /// Allocator must be valid. The provided offset and objects slice must not exceed the allocated buffer capacity.
     pub unsafe fn upload_objects(
         &self,
         allocator: &vk_mem::Allocator,
@@ -475,7 +475,7 @@ impl IndirectDrawPass {
                 allocator.flush_allocation(
                     alloc,
                     offset as u64,
-                    (objects.len() * std::mem::size_of::<CullObjectData>()) as u64,
+                    std::mem::size_of_val(objects) as u64,
                 )?;
             }
         }
@@ -488,21 +488,14 @@ impl IndirectDrawPass {
     /// Execute culling pass
     ///
     /// # Safety
-    /// Command buffer must be in recording state and all resources must be valid for the current frame.
-    #[allow(clippy::too_many_arguments)]
+    /// Command buffer must be in recording state. All bound resources (object buffer, hiz image, etc.) must be valid and correctly synchronized for compute access.
     pub unsafe fn execute_culling(
         &self,
         cmd: vk::CommandBuffer,
         culling: &OcclusionCulling,
-        view_proj: glam::Mat4,
-        width: u32,
-        height: u32,
-        object_offset: u32,
-        object_count: u32,
-        indirect_offset: u32,
-        cluster_buffer_addr: u64,
+        ctx: &crate::renderer::types::CullingContext,
     ) -> Result<()> {
-        if !self.initialized || !culling.is_enabled() || object_count == 0 {
+        if !self.initialized || !culling.is_enabled() || ctx.object_count == 0 {
             return Ok(());
         }
 
@@ -555,14 +548,14 @@ impl IndirectDrawPass {
         // Bindless (Set 1) REMOVED - using BDA now
 
         // Push constants
-        let mut push = culling.push_constants(view_proj, width, height);
-        push.object_count = object_count;
-        push.base_index = object_offset;
-        push.indirect_start = indirect_offset;
+        let mut push = culling.push_constants(ctx.view_proj, ctx.width, ctx.height);
+        push.object_count = ctx.object_count;
+        push.base_index = ctx.object_offset;
+        push.indirect_start = ctx.indirect_offset;
 
         // ADDRESS INJECTION: Pass the BDA pointer directly to the shader
         push.object_buffer_addr = self.object_buffer_address();
-        push.cluster_buffer_addr = cluster_buffer_addr;
+        push.cluster_buffer_addr = ctx.cluster_buffer_addr;
 
         self.device.cmd_push_constants(
             cmd,
@@ -573,7 +566,7 @@ impl IndirectDrawPass {
         );
 
         // Dispatch: 64 threads per workgroup
-        let group_count = object_count.div_ceil(64);
+        let group_count = ctx.object_count.div_ceil(64);
         self.device.cmd_dispatch(cmd, group_count, 1, 1);
 
         // Barrier for indirect read
@@ -619,6 +612,7 @@ impl IndirectDrawPass {
     /// Get object buffer device address for BDA pulling
     pub fn object_buffer_address(&self) -> u64 {
         let info = vk::BufferDeviceAddressInfo::default().buffer(self.object_buffer);
+        // SAFETY: Retrieves the device address of the object buffer. Buffer must be valid.
         unsafe { self.device.get_buffer_device_address(&info) }
     }
 
@@ -642,7 +636,7 @@ impl IndirectDrawPass {
     /// Read the visible count back to the CPU
     ///
     /// # Safety
-    /// Allocator must be valid and the count buffer must have been populated by the GPU.
+    /// Allocator must be valid. The caller must ensure that previous GPU commands writing to the count buffer have completed (e.g., via sync fences).
     pub unsafe fn read_visible_count(&self, allocator: &vk_mem::Allocator) -> u32 {
         if !self.initialized {
             return 0;
@@ -662,7 +656,7 @@ impl IndirectDrawPass {
     /// Destroy GPU resources
     ///
     /// # Safety
-    /// Resources must not be in use.
+    /// Caller must ensure that no GPU commands are currently referencing any resources within this pass.
     pub unsafe fn destroy(&mut self) {
         if self.destroyed {
             return;
@@ -717,6 +711,7 @@ impl IndirectDrawPass {
 
 impl Drop for IndirectDrawPass {
     fn drop(&mut self) {
+        // SAFETY: Destruction of raw Vulkan resources. Caller must ensure GPU is idle.
         unsafe {
             self.destroy();
         }
@@ -725,6 +720,7 @@ impl Drop for IndirectDrawPass {
 
 impl crate::renderer::cleanup_traits::VulkanResourceCleanup for IndirectDrawPass {
     fn cleanup_with_device(&mut self, _device: &ash::Device) -> std::result::Result<(), String> {
+        // SAFETY: Delegate cleanup to the destroy method.
         unsafe {
             self.destroy();
         }

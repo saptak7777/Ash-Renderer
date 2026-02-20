@@ -117,6 +117,18 @@ pub struct CullObjectData {
     pub material_index: u32,
 }
 
+/// Description of an object to be culled, used to simplify API arguments.
+#[derive(Clone, Copy, Debug)]
+pub struct CullObjectDesc {
+    pub bounds: CullBoundingBox,
+    pub model: Mat4,
+    pub draw_index: u32,
+    pub first_index: u32,
+    pub index_count: u32,
+    pub material_index: u32,
+    pub vertex_offset: i32,
+}
+
 impl CullObjectData {
     /// Create culling data for an object
     pub fn new(bounds: CullBoundingBox, model: Mat4, draw_index: u32) -> Self {
@@ -139,25 +151,29 @@ impl CullObjectData {
             material_index: 0,
         }
     }
+}
 
+pub struct ClusterCullInfo {
+    pub center: [f32; 3],
+    pub radius: f32,
+    pub model: glam::Mat4,
+    pub draw_index: u32,
+    pub first_index: u32,
+    pub index_count: u32,
+    pub parent_index: u32,
+    pub error_metric: f32,
+    pub material_index: u32,
+    pub vertex_offset: i32,
+}
+
+impl CullObjectData {
     /// Create culling data for a cluster
-    pub fn for_cluster(
-        center: [f32; 3],
-        radius: f32,
-        model: Mat4,
-        draw_index: u32,
-        first_index: u32,
-        index_count: u32,
-        parent_index: u32,
-        error_metric: f32,
-        material_index: u32,
-        vertex_offset: i32,
-    ) -> Self {
-        let cols = model.to_cols_array_2d();
+    pub fn for_cluster(info: ClusterCullInfo) -> Self {
+        let cols = info.model.to_cols_array_2d();
         // Pack sphere into CullBoundingBox for unified data structure
         let bounds = CullBoundingBox {
-            center: [center[0], center[1], center[2], 1.0], // w=1 means sphere mode
-            extents: [radius, radius, radius, 0.0],
+            center: [info.center[0], info.center[1], info.center[2], 1.0], // w=1 means sphere mode
+            extents: [info.radius, info.radius, info.radius, 0.0],
         };
 
         Self {
@@ -166,16 +182,16 @@ impl CullObjectData {
             model_row1: cols[1],
             model_row2: cols[2],
             model_row3: cols[3],
-            draw_index,
-            first_index,
-            index_count,
-            vertex_offset,
-            color: [1.0, 1.0, 1.0, 1.0],
-            custom: [0.0; 4],
-            parent_index,
-            error_metric,
-            flags: 1,
-            material_index,
+            draw_index: info.draw_index,
+            first_index: info.first_index,
+            index_count: info.index_count,
+            vertex_offset: info.vertex_offset,
+            color: [1.0, 1.0, 1.0, 1.0], // Default color
+            custom: [0.0; 4],            // Default custom data
+            parent_index: info.parent_index,
+            error_metric: info.error_metric,
+            flags: 0, // Flags are typically set via `with_flags` methods
+            material_index: info.material_index,
         }
     }
 
@@ -424,22 +440,16 @@ impl OcclusionCulling {
 
     pub fn push_clusters(
         &mut self,
-        bounds: CullBoundingBox,
-        model: Mat4,
-        draw_index: u32,
-        first_index: u32,
-        index_count: u32,
-        material_index: u32,
-        vertex_offset: i32,
+        desc: CullObjectDesc,
         clusters: &[crate::renderer::resources::mesh::MeshCluster],
     ) {
         if clusters.is_empty() {
             // Assume caller handles capacity for hot path performance
-            let mut data = CullObjectData::new(bounds, model, draw_index);
-            data.first_index = first_index;
-            data.index_count = index_count;
-            data.material_index = material_index;
-            data.vertex_offset = vertex_offset;
+            let mut data = CullObjectData::new(desc.bounds, desc.model, desc.draw_index);
+            data.first_index = desc.first_index;
+            data.index_count = desc.index_count;
+            data.material_index = desc.material_index;
+            data.vertex_offset = desc.vertex_offset;
             self.objects.push(data);
         } else {
             let cluster_start_offset = self.objects.len() as u32;
@@ -449,43 +459,25 @@ impl OcclusionCulling {
                 } else {
                     cluster_start_offset + cluster.parent_index
                 };
-
-                self.objects.push(CullObjectData::for_cluster(
-                    cluster.bounds_center,
-                    cluster.bounds_radius,
-                    model,
-                    draw_index,
-                    cluster.first_index,
-                    cluster.index_count,
-                    global_parent,
-                    cluster.error_metric,
-                    material_index,
-                    vertex_offset,
-                ));
+                self.objects
+                    .push(CullObjectData::for_cluster(ClusterCullInfo {
+                        center: cluster.bounds_center,
+                        radius: cluster.bounds_radius,
+                        model: desc.model,
+                        draw_index: desc.draw_index,
+                        first_index: cluster.first_index,
+                        index_count: cluster.index_count,
+                        parent_index: global_parent,
+                        error_metric: cluster.error_metric,
+                        material_index: desc.material_index,
+                        vertex_offset: desc.vertex_offset,
+                    }));
             }
         }
     }
 
-    pub fn add_object(
-        &mut self,
-        bounds: CullBoundingBox,
-        model: Mat4,
-        draw_index: u32,
-        first_index: u32,
-        index_count: u32,
-        material_index: u32,
-        vertex_offset: i32,
-    ) {
-        self.push_clusters(
-            bounds,
-            model,
-            draw_index,
-            first_index,
-            index_count,
-            material_index,
-            vertex_offset,
-            &[],
-        );
+    pub fn add_object(&mut self, desc: CullObjectDesc) {
+        self.push_clusters(desc, &[]);
     }
 
     /// Get object data for GPU upload

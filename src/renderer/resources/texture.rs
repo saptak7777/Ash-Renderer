@@ -1,6 +1,7 @@
 use ash::vk;
 use std::sync::Arc;
 
+use crate::renderer::types::TextureInitContext;
 use crate::{vulkan, AshError, Result};
 
 /// CPU-side texture data ready for GPU upload (RGBA8)
@@ -16,8 +17,8 @@ impl TextureData {
         let expected = width as usize * height as usize * 4;
         if pixels.len() != expected {
             return Err(AshError::VulkanError(format!(
-                "Texture pixel data size mismatch: expected {expected} bytes, got {}",
-                pixels.len()
+                "Texture pixel data size mismatch: expected {expected} bytes, got {got}",
+                got = pixels.len()
             )));
         }
         Ok(Self {
@@ -47,30 +48,45 @@ impl TextureData {
 
 /// GPU texture with image, view, and sampler
 pub struct Texture {
-    image: Option<vk::Image>,
-    view: Option<vk::ImageView>,
-    sampler: Option<vk::Sampler>,
-    allocation: Option<vk_mem::Allocation>,
-    allocator: Arc<vulkan::Allocator>,
-    device: Arc<ash::Device>,
+    pub(crate) image: Option<vk::Image>,
+    pub(crate) view: Option<vk::ImageView>,
+    pub(crate) sampler: Option<vk::Sampler>,
+    pub(crate) allocation: Option<vk_mem::Allocation>,
+    pub(crate) allocator: Arc<vulkan::Allocator>,
+    pub(crate) device: Arc<ash::Device>,
+}
+
+/// Description for creating a new GPU texture.
+#[derive(Clone, Copy, Debug)]
+pub struct TextureDesc<'a> {
+    pub width: u32,
+    pub height: u32,
+    pub mip_levels: u32,
+    pub format: vk::Format,
+    pub usage: vk::ImageUsageFlags,
+    pub name: Option<&'a str>,
 }
 
 impl Texture {
-    /// # Safety
-    /// Caller must ensure the provided Vulkan handles remain valid for the lifetime of the texture.
     /// Creates a cubemap from raw data (6 faces).
     /// Mips: The data is expected to contain all 6 faces for each mip level sequentially.
+    ///
+    /// # Safety
+    /// All members of `ctx` (allocator, device, command_pool, queue) must be valid and remain valid for the duration of this call.
+    /// `resolution` and `mip_levels` must be consistent with the provided `data` buffer size for the specified `format`.
+    /// Specifically, the buffer must be large enough to contain 6 faces for each mip level.
     pub unsafe fn create_cubemap_from_data(
-        allocator: Arc<vulkan::Allocator>,
-        device: Arc<ash::Device>,
-        command_pool: vk::CommandPool,
-        queue: vk::Queue,
+        ctx: &TextureInitContext,
         data: &[u8],
         resolution: u32,
         mip_levels: u32,
         format: vk::Format,
         name: Option<&str>,
     ) -> Result<Self> {
+        let allocator = Arc::clone(&ctx.allocator);
+        let device = Arc::clone(&ctx.device);
+        let command_pool = ctx.command_pool;
+        let queue = ctx.queue;
         let image_size = data.len() as vk::DeviceSize;
         if image_size == 0 {
             return Err(crate::AshError::VulkanError(
@@ -119,8 +135,7 @@ impl Texture {
             vk::Format::R8G8B8A8_UNORM | vk::Format::R8G8B8A8_SRGB => 4,
             _ => {
                 return Err(crate::AshError::VulkanError(format!(
-                    "Unsupported texture format for bytes_per_pixel calculation: {:?}",
-                    format
+                    "Unsupported texture format for bytes_per_pixel calculation: {format:?}"
                 )))
             }
         };
@@ -265,15 +280,21 @@ impl Texture {
         })
     }
 
+    /// Create a texture from raw data
+    ///
+    /// # Safety
+    /// All members of `ctx` (allocator, device, command_pool, queue) must be valid and remain active during the upload sequence.
+    /// `TextureData` must be consistent with the provided `format`.
     pub unsafe fn from_data(
-        allocator: Arc<vulkan::Allocator>,
-        device: Arc<ash::Device>,
-        command_pool: vk::CommandPool,
-        queue: vk::Queue,
+        ctx: &TextureInitContext,
         data: &TextureData,
         format: vk::Format,
         name: Option<&str>,
     ) -> Result<Self> {
+        let allocator = Arc::clone(&ctx.allocator);
+        let device = Arc::clone(&ctx.device);
+        let command_pool = ctx.command_pool;
+        let queue = ctx.queue;
         let image_size = data.pixels.len() as vk::DeviceSize;
         if image_size == 0 {
             return Err(crate::AshError::VulkanError(
@@ -570,17 +591,17 @@ impl Texture {
                 label,
             );
             log::info!(
-                "Created texture '{label}' ({}x{}, {} mips)",
-                data.width,
-                data.height,
-                mip_levels
+                "Created texture '{label}' ({width}x{height}, {mip_levels} mips)",
+                width = data.width,
+                height = data.height,
+                mip_levels = mip_levels
             );
         } else {
             log::info!(
-                "Created texture ({}x{}, {} mips)",
-                data.width,
-                data.height,
-                mip_levels
+                "Created texture ({width}x{height}, {mip_levels} mips)",
+                width = data.width,
+                height = data.height,
+                mip_levels = mip_levels
             );
         }
 
@@ -597,20 +618,18 @@ impl Texture {
     /// Creates a 2D texture from raw bytes and format.
     ///
     /// # Safety
-    /// Caller must ensure Vulkan handles are valid.
+    /// All members of `ctx` must be valid. `raw_data` must contain exactly the expected number of bytes
+    /// for the dimensions and format specified in `info`.
     #[allow(clippy::too_many_arguments)]
     pub unsafe fn from_raw_data(
-        allocator: Arc<vulkan::Allocator>,
-        device: Arc<ash::Device>,
-        command_pool: vk::CommandPool,
-        queue: vk::Queue,
+        ctx: &TextureInitContext,
         raw_data: &[u8],
-        width: u32,
-        height: u32,
-        format: vk::Format,
-        mip_levels: u32,
-        name: Option<&str>,
+        info: &crate::renderer::types::TextureCreateInfo,
     ) -> Result<Self> {
+        let allocator = Arc::clone(&ctx.allocator);
+        let device = Arc::clone(&ctx.device);
+        let command_pool = ctx.command_pool;
+        let queue = ctx.queue;
         let image_size = raw_data.len() as vk::DeviceSize;
 
         let (staging_buffer, mut staging_alloc) = allocator.create_buffer_with_flags(
@@ -633,13 +652,13 @@ impl Texture {
         // Image creation
         let image_info = vk::ImageCreateInfo::default()
             .image_type(vk::ImageType::TYPE_2D)
-            .format(format)
+            .format(info.format)
             .extent(vk::Extent3D {
-                width,
-                height,
+                width: info.width,
+                height: info.height,
                 depth: 1,
             })
-            .mip_levels(mip_levels)
+            .mip_levels(info.mip_levels)
             .array_layers(1)
             .samples(vk::SampleCountFlags::TYPE_1)
             .tiling(vk::ImageTiling::OPTIMAL)
@@ -661,7 +680,7 @@ impl Texture {
                 .subresource_range(vk::ImageSubresourceRange {
                     aspect_mask: vk::ImageAspectFlags::COLOR,
                     base_mip_level: 0,
-                    level_count: mip_levels,
+                    level_count: info.mip_levels,
                     base_array_layer: 0,
                     layer_count: 1,
                 });
@@ -688,8 +707,8 @@ impl Texture {
                 },
                 image_offset: vk::Offset3D { x: 0, y: 0, z: 0 },
                 image_extent: vk::Extent3D {
-                    width,
-                    height,
+                    width: info.width,
+                    height: info.height,
                     depth: 1,
                 },
             };
@@ -711,7 +730,7 @@ impl Texture {
                 .subresource_range(vk::ImageSubresourceRange {
                     aspect_mask: vk::ImageAspectFlags::COLOR,
                     base_mip_level: 0,
-                    level_count: mip_levels,
+                    level_count: info.mip_levels,
                     base_array_layer: 0,
                     layer_count: 1,
                 });
@@ -734,11 +753,11 @@ impl Texture {
         let view_info = vk::ImageViewCreateInfo::default()
             .image(image)
             .view_type(vk::ImageViewType::TYPE_2D)
-            .format(format)
+            .format(info.format)
             .subresource_range(vk::ImageSubresourceRange {
                 aspect_mask: vk::ImageAspectFlags::COLOR,
                 base_mip_level: 0,
-                level_count: mip_levels,
+                level_count: info.mip_levels,
                 base_array_layer: 0,
                 layer_count: 1,
             });
@@ -753,12 +772,16 @@ impl Texture {
             .address_mode_v(vk::SamplerAddressMode::CLAMP_TO_EDGE)
             .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_EDGE)
             .min_lod(0.0)
-            .max_lod(mip_levels as f32);
+            .max_lod(info.mip_levels as f32);
 
         let sampler = device.create_sampler(&sampler_info, None)?;
 
-        if let Some(label) = name {
-            log::info!("Created raw texture '{label}' ({width}x{height})");
+        if let Some(label) = info.name {
+            log::info!(
+                "Created raw texture '{label}' ({width}x{height})",
+                width = info.width,
+                height = info.height
+            );
         }
 
         Ok(Self {
@@ -784,19 +807,18 @@ impl Texture {
     /// Useful for compressed textures where GPU-side mipmap generation (blitting) is not supported.
     ///
     /// # Safety
-    /// Caller must ensure Vulkan handles are valid.
+    /// All members of `ctx` must be valid. Each mip level in the provided `mips` slice must have a size
+    /// (in bytes) consistent with its resolution as defined by starting size in `info` and downscaling logic.
     #[allow(clippy::too_many_arguments)]
     pub unsafe fn from_mips(
-        allocator: Arc<vulkan::Allocator>,
-        device: Arc<ash::Device>,
-        command_pool: vk::CommandPool,
-        queue: vk::Queue,
+        ctx: &TextureInitContext,
         mips: &[Vec<u8>],
-        width: u32,
-        height: u32,
-        format: vk::Format,
-        name: Option<&str>,
+        info: &crate::renderer::types::TextureCreateInfo,
     ) -> Result<Self> {
+        let allocator = Arc::clone(&ctx.allocator);
+        let device = Arc::clone(&ctx.device);
+        let command_pool = ctx.command_pool;
+        let queue = ctx.queue;
         if mips.is_empty() {
             return Err(crate::AshError::VulkanError(
                 "Cannot create texture from empty mip chain".to_string(),
@@ -837,10 +859,10 @@ impl Texture {
         // Create image
         let image_info = vk::ImageCreateInfo::default()
             .image_type(vk::ImageType::TYPE_2D)
-            .format(format)
+            .format(info.format)
             .extent(vk::Extent3D {
-                width,
-                height,
+                width: info.width,
+                height: info.height,
                 depth: 1,
             })
             .mip_levels(mip_levels)
@@ -884,8 +906,8 @@ impl Texture {
             // Copy regions
             let mut regions = Vec::with_capacity(mip_levels as usize);
             let mut buffer_offset = 0;
-            let mut mip_width = width;
-            let mut mip_height = height;
+            let mut mip_width = info.width;
+            let mut mip_height = info.height;
 
             for i in 0..mip_levels {
                 regions.push(vk::BufferImageCopy {
@@ -959,7 +981,7 @@ impl Texture {
         let view_info = vk::ImageViewCreateInfo::default()
             .image(image)
             .view_type(vk::ImageViewType::TYPE_2D)
-            .format(format)
+            .format(info.format)
             .subresource_range(vk::ImageSubresourceRange {
                 aspect_mask: vk::ImageAspectFlags::COLOR,
                 base_mip_level: 0,
@@ -984,16 +1006,24 @@ impl Texture {
             .compare_enable(false)
             .mip_lod_bias(0.0)
             .min_lod(0.0)
-            .max_lod(mip_levels as f32);
+            .max_lod(info.mip_levels as f32);
 
         let sampler = device.create_sampler(&sampler_info, None)?;
 
-        if let Some(label) = name {
+        if let Some(label) = info.name {
             log::info!(
-                "Created texture '{label}' ({width}x{height}, {mip_levels} mips, compressed)"
+                "Created texture '{label}' ({width}x{height}, {mip_levels} mips, compressed)",
+                width = info.width,
+                height = info.height,
+                mip_levels = info.mip_levels
             );
         } else {
-            log::info!("Created texture ({width}x{height}, {mip_levels} mips, compressed)");
+            log::info!(
+                "Created texture ({width}x{height}, {mip_levels} mips, compressed)",
+                width = info.width,
+                height = info.height,
+                mip_levels = info.mip_levels
+            );
         }
 
         Ok(Self {
@@ -1005,19 +1035,11 @@ impl Texture {
             device,
         })
     }
-    pub fn create_default_white(
-        allocator: Arc<vulkan::Allocator>,
-        device: Arc<ash::Device>,
-        command_pool: vk::CommandPool,
-        queue: vk::Queue,
-    ) -> Result<Self> {
+    pub fn create_default_white(ctx: &TextureInitContext) -> Result<Self> {
         let white = TextureData::solid_color([255, 255, 255, 255]);
         unsafe {
             Self::from_data(
-                allocator,
-                device,
-                command_pool,
-                queue,
+                ctx,
                 &white,
                 vk::Format::R8G8B8A8_UNORM,
                 Some("DefaultWhite"),
@@ -1025,19 +1047,15 @@ impl Texture {
         }
     }
 
-    pub fn create_default_black(
-        allocator: Arc<vulkan::Allocator>,
-        device: Arc<ash::Device>,
-        command_pool: vk::CommandPool,
-        queue: vk::Queue,
-    ) -> Result<Self> {
+    pub fn create_default_2d_white(ctx: &TextureInitContext) -> Result<Self> {
+        Self::create_default_white(ctx)
+    }
+
+    pub fn create_default_black(ctx: &TextureInitContext) -> Result<Self> {
         let black = TextureData::solid_color([0, 0, 0, 255]);
         unsafe {
             Self::from_data(
-                allocator,
-                device,
-                command_pool,
-                queue,
+                ctx,
                 &black,
                 vk::Format::R8G8B8A8_UNORM,
                 Some("DefaultBlack"),
@@ -1045,19 +1063,16 @@ impl Texture {
         }
     }
 
-    pub fn create_default_cube_black(
-        allocator: Arc<vulkan::Allocator>,
-        device: Arc<ash::Device>,
-        command_pool: vk::CommandPool,
-        queue: vk::Queue,
-    ) -> Result<Self> {
+    pub fn create_default_cube_black(ctx: &TextureInitContext) -> Result<Self> {
+        let allocator = Arc::clone(&ctx.allocator);
+        let device = Arc::clone(&ctx.device);
+        let command_pool = ctx.command_pool;
+        let queue = ctx.queue;
         let resolution = 1;
         let format = vk::Format::R8G8B8A8_UNORM;
         let pixel_size = 4;
         let total_size = resolution * resolution * pixel_size * 6; // 6 faces
 
-        // Create staging buffer (all zeros for black)
-        // Create staging buffer (all zeros for black)
         let (staging_buffer, mut staging_alloc) = unsafe {
             allocator.create_buffer_with_flags(
                 total_size as vk::DeviceSize,
@@ -1072,12 +1087,12 @@ impl Texture {
                 allocator
                     .map_allocation_guarded(&mut staging_alloc, total_size as vk::DeviceSize)?
             };
-            // Dark grey initialize (provides subtle ambient fallback)
+            // Pure black initialize (Fixes Nuclear Ambient)
             for i in 0..6 {
                 let offset = i * 4;
-                guard[offset] = 30; // R
-                guard[offset + 1] = 30; // G
-                guard[offset + 2] = 30; // B
+                guard[offset] = 0; // R
+                guard[offset + 1] = 0; // G
+                guard[offset + 2] = 0; // B
                 guard[offset + 3] = 255; // A
             }
         }
@@ -1235,6 +1250,204 @@ impl Texture {
         let sampler = unsafe { device.create_sampler(&sampler_info, None)? };
 
         log::info!("Created default black cubemap (1x1)");
+
+        Ok(Self {
+            image: Some(image),
+            view: Some(view),
+            sampler: Some(sampler),
+            allocation: Some(allocation),
+            allocator,
+            device,
+        })
+    }
+
+    pub fn create_default_cube_white(
+        allocator: Arc<vulkan::Allocator>,
+        device: Arc<ash::Device>,
+        command_pool: vk::CommandPool,
+        queue: vk::Queue,
+    ) -> Result<Self> {
+        let resolution = 1;
+        let format = vk::Format::R8G8B8A8_UNORM;
+        let pixel_size = 4;
+        let total_size = resolution * resolution * pixel_size * 6; // 6 faces
+
+        let (staging_buffer, mut staging_alloc) = unsafe {
+            allocator.create_buffer_with_flags(
+                total_size as vk::DeviceSize,
+                vk::BufferUsageFlags::TRANSFER_SRC,
+                vk_mem::MemoryUsage::AutoPreferHost,
+                vk_mem::AllocationCreateFlags::HOST_ACCESS_SEQUENTIAL_WRITE,
+            )?
+        };
+
+        {
+            let mut guard = unsafe {
+                allocator
+                    .map_allocation_guarded(&mut staging_alloc, total_size as vk::DeviceSize)?
+            };
+            for i in 0..6 {
+                let offset = i * 4;
+                guard[offset] = 255; // R
+                guard[offset + 1] = 255; // G
+                guard[offset + 2] = 255; // B
+                guard[offset + 3] = 255; // A
+            }
+        }
+
+        allocator
+            .vma
+            .flush_allocation(&staging_alloc, 0, total_size as vk::DeviceSize)
+            .map_err(|e| {
+                AshError::VulkanError(format!("Failed to flush default white cube staging: {e}"))
+            })?;
+
+        // Create Cubemap Image
+        let image_info = vk::ImageCreateInfo::default()
+            .image_type(vk::ImageType::TYPE_2D)
+            .format(format)
+            .extent(vk::Extent3D {
+                width: resolution,
+                height: resolution,
+                depth: 1,
+            })
+            .mip_levels(1)
+            .array_layers(6)
+            .samples(vk::SampleCountFlags::TYPE_1)
+            .tiling(vk::ImageTiling::OPTIMAL)
+            .usage(vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::SAMPLED)
+            .sharing_mode(vk::SharingMode::EXCLUSIVE)
+            .flags(vk::ImageCreateFlags::CUBE_COMPATIBLE)
+            .initial_layout(vk::ImageLayout::UNDEFINED);
+
+        let (image, allocation) =
+            unsafe { allocator.create_image(&image_info, vk_mem::MemoryUsage::AutoPreferDevice)? };
+
+        // Upload
+        vulkan::utils::execute_single_use(device.as_ref(), command_pool, queue, |cmd| {
+            // Transition to TRANSFER_DST
+            let barrier = vk::ImageMemoryBarrier::default()
+                .old_layout(vk::ImageLayout::UNDEFINED)
+                .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                .src_access_mask(vk::AccessFlags::empty())
+                .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                .image(image)
+                .subresource_range(vk::ImageSubresourceRange {
+                    aspect_mask: vk::ImageAspectFlags::COLOR,
+                    base_mip_level: 0,
+                    level_count: 1,
+                    base_array_layer: 0,
+                    layer_count: 6,
+                });
+
+            unsafe {
+                device.cmd_pipeline_barrier(
+                    cmd,
+                    vk::PipelineStageFlags::TOP_OF_PIPE,
+                    vk::PipelineStageFlags::TRANSFER,
+                    vk::DependencyFlags::empty(),
+                    &[],
+                    &[],
+                    &[barrier],
+                );
+            }
+
+            // Copy 6 faces
+            let mut regions = Vec::with_capacity(6);
+            for i in 0..6 {
+                regions.push(vk::BufferImageCopy {
+                    buffer_offset: (i * 4) as vk::DeviceSize,
+                    buffer_row_length: 0,
+                    buffer_image_height: 0,
+                    image_subresource: vk::ImageSubresourceLayers {
+                        aspect_mask: vk::ImageAspectFlags::COLOR,
+                        mip_level: 0,
+                        base_array_layer: i as u32,
+                        layer_count: 1,
+                    },
+                    image_offset: vk::Offset3D { x: 0, y: 0, z: 0 },
+                    image_extent: vk::Extent3D {
+                        width: resolution,
+                        height: resolution,
+                        depth: 1,
+                    },
+                });
+            }
+
+            unsafe {
+                device.cmd_copy_buffer_to_image(
+                    cmd,
+                    staging_buffer,
+                    image,
+                    vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                    &regions,
+                );
+            }
+
+            // Transition to SHADER_READ_ONLY
+            let barrier_end = vk::ImageMemoryBarrier::default()
+                .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+                .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                .dst_access_mask(vk::AccessFlags::SHADER_READ)
+                .image(image)
+                .subresource_range(vk::ImageSubresourceRange {
+                    aspect_mask: vk::ImageAspectFlags::COLOR,
+                    base_mip_level: 0,
+                    level_count: 1,
+                    base_array_layer: 0,
+                    layer_count: 6,
+                });
+
+            unsafe {
+                device.cmd_pipeline_barrier(
+                    cmd,
+                    vk::PipelineStageFlags::TRANSFER,
+                    vk::PipelineStageFlags::FRAGMENT_SHADER,
+                    vk::DependencyFlags::empty(),
+                    &[],
+                    &[],
+                    &[barrier_end],
+                );
+            }
+        })?;
+
+        // Cleanup Staging
+        unsafe {
+            allocator
+                .vma
+                .destroy_buffer(staging_buffer, &mut staging_alloc);
+        }
+
+        // View
+        let view_info = vk::ImageViewCreateInfo::default()
+            .image(image)
+            .view_type(vk::ImageViewType::CUBE)
+            .format(format)
+            .subresource_range(vk::ImageSubresourceRange {
+                aspect_mask: vk::ImageAspectFlags::COLOR,
+                base_mip_level: 0,
+                level_count: 1,
+                base_array_layer: 0,
+                layer_count: 6,
+            });
+
+        let view = unsafe { device.create_image_view(&view_info, None)? };
+
+        // Sampler
+        let sampler_info = vk::SamplerCreateInfo::default()
+            .mag_filter(vk::Filter::NEAREST)
+            .min_filter(vk::Filter::NEAREST)
+            .mipmap_mode(vk::SamplerMipmapMode::NEAREST)
+            .address_mode_u(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+            .address_mode_v(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+            .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+            .min_lod(0.0)
+            .max_lod(1.0); // 1 Mip
+
+        let sampler = unsafe { device.create_sampler(&sampler_info, None)? };
+
+        log::info!("Created default white cubemap (1x1)");
 
         Ok(Self {
             image: Some(image),
@@ -1588,8 +1801,7 @@ impl Texture {
             let sampler = device.create_sampler(&sampler_info, None)?;
 
             log::info!(
-                "Created VSM default UINT array texture (R32_UINT, {} layers, NEAREST filtering)",
-                layer_count
+                "Created VSM default UINT array texture (R32_UINT, {layer_count} layers, NEAREST filtering)"
             );
 
             Ok(Self {
@@ -1603,13 +1815,176 @@ impl Texture {
         }
     }
 
-    pub fn create_procedural_skybox(
+    /// Creates an empty cubemap with specific usage (e.g. for compute storage write)
+    pub fn create_empty_cubemap(
         allocator: Arc<vulkan::Allocator>,
         device: Arc<ash::Device>,
-        command_pool: vk::CommandPool,
-        queue: vk::Queue,
-        resolution: u32,
+        desc: TextureDesc<'_>,
     ) -> Result<Self> {
+        let TextureDesc {
+            width: resolution,
+            height: _, // Resolution is width=height for cubemaps
+            mip_levels,
+            format,
+            usage,
+            name,
+        } = desc;
+
+        // 1. Create Cubemap Image
+        let image_info = vk::ImageCreateInfo::default()
+            .image_type(vk::ImageType::TYPE_2D)
+            .format(format)
+            .extent(vk::Extent3D {
+                width: resolution,
+                height: resolution,
+                depth: 1,
+            })
+            .mip_levels(mip_levels)
+            .array_layers(6)
+            .samples(vk::SampleCountFlags::TYPE_1)
+            .tiling(vk::ImageTiling::OPTIMAL)
+            .usage(usage)
+            .sharing_mode(vk::SharingMode::EXCLUSIVE)
+            .flags(vk::ImageCreateFlags::CUBE_COMPATIBLE)
+            .initial_layout(vk::ImageLayout::UNDEFINED);
+
+        let (image, allocation) =
+            unsafe { allocator.create_image(&image_info, vk_mem::MemoryUsage::AutoPreferDevice)? };
+
+        // 2. Create View and Sampler
+        let view_info = vk::ImageViewCreateInfo::default()
+            .image(image)
+            .view_type(vk::ImageViewType::CUBE)
+            .format(format)
+            .subresource_range(
+                vk::ImageSubresourceRange::default()
+                    .aspect_mask(vk::ImageAspectFlags::COLOR)
+                    .base_mip_level(0)
+                    .level_count(mip_levels)
+                    .base_array_layer(0)
+                    .layer_count(6),
+            );
+
+        let view = unsafe { device.create_image_view(&view_info, None)? };
+
+        let sampler_info = vk::SamplerCreateInfo::default()
+            .mag_filter(vk::Filter::LINEAR)
+            .min_filter(vk::Filter::LINEAR)
+            .mipmap_mode(vk::SamplerMipmapMode::LINEAR)
+            .address_mode_u(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+            .address_mode_v(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+            .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+            .min_lod(0.0)
+            .max_lod(mip_levels as f32);
+
+        let sampler = unsafe { device.create_sampler(&sampler_info, None)? };
+
+        if let Some(name) = name {
+            vulkan::set_debug_object_name(
+                allocator.debug_utils.as_ref(),
+                image,
+                vk::ObjectType::IMAGE,
+                name,
+            );
+        }
+
+        Ok(Self {
+            image: Some(image),
+            view: Some(view),
+            sampler: Some(sampler),
+            allocation: Some(allocation),
+            allocator,
+            device,
+        })
+    }
+
+    /// Creates an empty 2D texture with specific usage (e.g. for compute storage write)
+    pub fn create_empty_2d(
+        allocator: Arc<vulkan::Allocator>,
+        device: Arc<ash::Device>,
+        desc: TextureDesc<'_>,
+    ) -> Result<Self> {
+        let TextureDesc {
+            width,
+            height,
+            mip_levels,
+            format,
+            usage,
+            name,
+        } = desc;
+
+        // 1. Create Image
+        let image_info = vk::ImageCreateInfo::default()
+            .image_type(vk::ImageType::TYPE_2D)
+            .format(format)
+            .extent(vk::Extent3D {
+                width,
+                height,
+                depth: 1,
+            })
+            .mip_levels(mip_levels)
+            .array_layers(1)
+            .samples(vk::SampleCountFlags::TYPE_1)
+            .tiling(vk::ImageTiling::OPTIMAL)
+            .usage(usage)
+            .sharing_mode(vk::SharingMode::EXCLUSIVE)
+            .initial_layout(vk::ImageLayout::UNDEFINED);
+
+        let (image, allocation) =
+            unsafe { allocator.create_image(&image_info, vk_mem::MemoryUsage::AutoPreferDevice)? };
+
+        // 2. Create View and Sampler
+        let view_info = vk::ImageViewCreateInfo::default()
+            .image(image)
+            .view_type(vk::ImageViewType::TYPE_2D)
+            .format(format)
+            .subresource_range(
+                vk::ImageSubresourceRange::default()
+                    .aspect_mask(vk::ImageAspectFlags::COLOR)
+                    .base_mip_level(0)
+                    .level_count(mip_levels)
+                    .base_array_layer(0)
+                    .layer_count(1),
+            );
+
+        let view = unsafe { device.create_image_view(&view_info, None)? };
+
+        let sampler_info = vk::SamplerCreateInfo::default()
+            .mag_filter(vk::Filter::LINEAR)
+            .min_filter(vk::Filter::LINEAR)
+            .mipmap_mode(vk::SamplerMipmapMode::LINEAR)
+            .address_mode_u(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+            .address_mode_v(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+            .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+            .min_lod(0.0)
+            .max_lod(mip_levels as f32);
+
+        let sampler = unsafe { device.create_sampler(&sampler_info, None)? };
+
+        if let Some(name) = name {
+            vulkan::set_debug_object_name(
+                allocator.debug_utils.as_ref(),
+                image,
+                vk::ObjectType::IMAGE,
+                name,
+            );
+        }
+
+        Ok(Self {
+            image: Some(image),
+            view: Some(view),
+            sampler: Some(sampler),
+            allocation: Some(allocation),
+            allocator,
+            device,
+        })
+    }
+
+    pub fn create_procedural_skybox(ctx: &TextureInitContext, resolution: u32) -> Result<Self> {
+        let allocator = Arc::clone(&ctx.allocator);
+        let device = Arc::clone(&ctx.device);
+        let command_pool = ctx.command_pool;
+        let queue = ctx.queue;
         let format = vk::Format::R8G8B8A8_UNORM;
         let pixel_size = 4;
         let total_size = (resolution * resolution * pixel_size * 6) as u64;

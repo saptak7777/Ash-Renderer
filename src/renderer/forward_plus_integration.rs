@@ -145,11 +145,16 @@ impl ForwardPlusIntegration {
         device: Arc<ash::Device>,
         depth_sampler: vk::Sampler,
         depth_image_view: vk::ImageView,
+        max_unbounded_count: Option<u32>,
     ) -> Result<()> {
         // Load shader
         let code = include_bytes!(concat!(env!("OUT_DIR"), "/light_cull.comp.spv"));
-        let shader_module =
-            ShaderModule::load_from_bytes(&device, code, vk::ShaderStageFlags::COMPUTE)?;
+        let shader_module = ShaderModule::load_from_bytes(
+            &device,
+            code,
+            vk::ShaderStageFlags::COMPUTE,
+            max_unbounded_count,
+        )?;
 
         // 1. Create Descriptor Set Layout (Set 0 for Compute)
         // NOTE: LightBuffer moved to Set 3 to match fragment shader

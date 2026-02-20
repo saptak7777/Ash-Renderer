@@ -31,10 +31,9 @@ impl VramBudget {
         let safety_threshold = (total_raw_vram / 5) * 4; // Use up to 80%
 
         log::info!(
-            "VRAM Budget initialized for heap {}: Total {}MB, Safety Threshold {}MB",
-            largest_heap_index,
-            total_raw_vram / 1024 / 1024,
-            safety_threshold / 1024 / 1024
+            "VRAM Budget initialized for heap {largest_heap_index}: Total {total_mb}MB, Safety Threshold {safety_mb}MB",
+            total_mb = total_raw_vram / 1024 / 1024,
+            safety_mb = safety_threshold / 1024 / 1024
         );
 
         Self {

@@ -78,12 +78,12 @@ impl BufferPoolStats {
     /// Format stats as a summary string
     pub fn format(&self) -> String {
         format!(
-            "BufferPool: {} allocs ({:.1}% reuse), {} available, {} in use, {:.2} MB",
-            self.total_allocations,
-            self.reuse_rate * 100.0,
-            self.current_available,
-            self.current_in_use,
-            self.total_allocated_bytes as f64 / (1024.0 * 1024.0)
+            "BufferPool: {total} allocs ({reuse_rate:.1}% reuse), {available} available, {in_use} in use, {mb:.2} MB",
+            total = self.total_allocations,
+            reuse_rate = self.reuse_rate * 100.0,
+            available = self.current_available,
+            in_use = self.current_in_use,
+            mb = self.total_allocated_bytes as f64 / (1024.0 * 1024.0)
         )
     }
 }
@@ -326,7 +326,10 @@ impl BufferPool {
 
         // Destroy outside the locks
         if !to_destroy.is_empty() {
-            log::debug!("Reclaiming {} expired buffers from pool", to_destroy.len());
+            log::debug!(
+                "Reclaiming {count} expired buffers from pool",
+                count = to_destroy.len()
+            );
             for mut alloc in to_destroy {
                 unsafe {
                     self.allocator
@@ -378,11 +381,11 @@ impl Drop for BufferPool {
     fn drop(&mut self) {
         let stats = self.stats();
         log::info!(
-            "Buffer pool destroyed: {} reuses/{} allocs ({:.1}% reuse), {:.2} MB allocated",
-            stats.total_reuses,
-            stats.total_allocations,
-            stats.reuse_rate * 100.0,
-            stats.total_allocated_bytes as f64 / (1024.0 * 1024.0)
+            "Buffer pool destroyed: {reuses} reuses/{allocs} allocs ({reuse_rate:.1}% reuse), {mb:.2} MB allocated",
+            reuses = stats.total_reuses,
+            allocs = stats.total_allocations,
+            reuse_rate = stats.reuse_rate * 100.0,
+            mb = stats.total_allocated_bytes as f64 / (1024.0 * 1024.0)
         );
     }
 }

@@ -3,6 +3,8 @@
 #extension GL_GOOGLE_include_directive : require
 
 #include "interop/structures.glsl"
+#include "interop/bindings.glsl"
+#include "common/pbr_utils.glsl"
 
 layout(location = 0) in vec3 fragColor;
 layout(location = 1) in vec2 fragUV;
@@ -31,18 +33,21 @@ layout(location = 1) out vec4 outNormal;
 layout(location = 2) out vec4 outAlbedo;
 layout(location = 3) out vec2 outMotion;
 
-// Set 1: Bindless consolidated resources are inherited from structures.glsl
-// global_textures[]      -> Binding 0
-// global_page_tables[]   -> Binding 1
-// global_cubemaps[]      -> Binding 2
-// bindless_buffers[]    -> Binding 3
+// Set 1: VSM Resources
+layout(set = 1, binding = 0) uniform VsmGlobalInfo {
+    mat4 light_view_projections[16];
+    mat4 view_proj;
+    mat4 inv_view_proj;
+    vec4 camera_position;
+    vec4 light_dir;
+    uint page_table_size;
+} u_VsmGlobal;
 
-// Set 2: No longer used (migrated to Set 1 Bindless)
-
-// Set 3: No longer used (Forward+ migrated to BDA)
-#define MAX_LIGHTS_PER_TILE 256
-
-const float PI = 3.14159265359;
+// Binding 1: Request Buffer (Not needed in frag)
+// Binding 2: Allocation Buffer (Not needed in frag)
+layout(set = 1, binding = 3, r32ui) uniform uimage2DArray u_PageTable;
+layout(set = 1, binding = 4, rg32f) uniform image2D u_PhysicalMemory;
+const uint MAX_LIGHTS_PER_TILE = 256;
 
 // Convert sRGB color to linear space for proper color handling
 vec3 srgb_to_linear(vec3 color) {
@@ -54,108 +59,61 @@ vec3 srgb_to_linear(vec3 color) {
 }
 
 
-// VSM Shadow Calculation - Virtual Shadow Maps with Clipmaps
-// Uses page table lookup to find physical cache location
-float VsmShadowCalculation(vec4 fragPosLightSpace, vec3 normal, vec3 lightDir) {
-    FrameData frame = FrameData(push.frame_ptr);
-    // For now, use a simple clipmap selection based on distance from camera
-    // In a full implementation, this would use the ClipmapData uniform
-    // to select the appropriate level based on world position
-    
-    // Calculate distance from camera for level selection
-    vec3 worldPos = fragWorldPos;
-    float distFromCamera = length(worldPos - frame.camera_pos.xyz);
-    
-    // Simple level selection (8 levels, exponentially spaced)
-    // Level 0: 0-100m, Level 1: 100-200m, etc.
-    int clipmapLayer = 0;
-    float levelSize = 100.0;
-    for (int i = 0; i < 8; i++) {
-        if (distFromCamera < levelSize * float(i + 1)) {
-            clipmapLayer = i;
-            break;
-        }
+float SampleVSM(vec3 worldPos) {
+    // 1. Project World -> Light Clip Space (Cascade 0 for now)
+    vec4 shadowClip = u_VsmGlobal.light_view_projections[0] * vec4(worldPos, 1.0);
+    vec3 shadowNDC = shadowClip.xyz / shadowClip.w;
+    vec2 shadowUV = shadowNDC.xy * 0.5 + 0.5;
+    shadowUV.y = 1.0 - shadowUV.y; // Flip Y for Vulkan convention
+
+    // 2. Check bounds
+    if (any(lessThan(shadowUV, vec2(0.0))) || any(greaterThan(shadowUV, vec2(1.0)))) {
+        return 1.0; // Outside shadow map -> Unshadowed
     }
-    clipmapLayer = clamp(clipmapLayer, 0, 7);
+
+    // 3. Virtual Page Lookup
+    ivec2 pageTableSize = imageSize(u_PageTable).xy;
+    ivec2 pageCoord = ivec2(shadowUV * vec2(pageTableSize));
     
-    // 1. PROJECT & NORMALIZE TO [0,1]
-    vec3 projCoords = fragPosLightSpace.xyz / fragPosLightSpace.w;
-    projCoords.xy = projCoords.xy * 0.5 + 0.5;
+    // Read Page Entry (R32UI) from Layer 0 (Directional Light)
+    uint pageEntry = imageLoad(u_PageTable, ivec3(pageCoord, 0)).r;
     
-    // 2. EARLY REJECTION
-    if (projCoords.z > 1.0) {
-        return 0.0; // Outside shadow map = fully lit
-    }
+    // 4. Check Residency
+    if (pageEntry == 0xFFFFFFFFu) return 1.0; 
+
+    // 5. Physical Address Translation
+    // Unpack Physical Coord (16-bit X | 16-bit Y)
+    uint pX = pageEntry & 0xFFFFu;
+    uint pY = (pageEntry >> 16) & 0xFFFFu;
     
-    // 3. CALCULATE VIRTUAL PAGE COORDINATES
-    // Assume 16k virtual resolution with 128x128 pages = 128x128 page table
-    const float virtualResolution = 16384.0;
-    const float pageSize = 128.0;
-    const float pageTableResolution = virtualResolution / pageSize; // 128
+    // Fraction inside the page
+    vec2 pageFract = fract(shadowUV * vec2(pageTableSize));
+    ivec2 physicalTexel = ivec2(pX, pY) * 128 + ivec2(pageFract * 128.0);
     
-    vec2 virtualUV = clamp(projCoords.xy, 0.0, 1.0); // Simple clamp without custom bounds
-    vec2 virtualPageFloat = virtualUV * pageTableResolution;
-    ivec2 virtualPage = ivec2(virtualPageFloat);
+    // 6. Sample VSM Moments (R32G32F: Depth, Depth^2)
+    vec2 moments = imageLoad(u_PhysicalMemory, physicalTexel).rg;
     
-    // 4. SAMPLE PAGE TABLE TO GET PHYSICAL PAGE (with layer)
-    vec3 pageTableCoord = vec3((vec2(virtualPage) + 0.5) / pageTableResolution, float(clipmapLayer));
-    uint packedPhysical = texture(global_page_tables[nonuniformEXT(push.vsm_page_index)], pageTableCoord).r;
+    // 7. Chebyshev's Inequality
+    float currentDepth = shadowNDC.z;
     
-    // Check if page is allocated (0xFFFFFFFF = invalid)
-    const uint INVALID_PAGE = 0xFFFFFFFFu;
-    if (packedPhysical == INVALID_PAGE) {
-        return 0.0; // Page not allocated = fully lit (no shadow data)
-    }
-    
-    // 5. UNPACK PHYSICAL COORDINATES
-    uint physical_x = packedPhysical & 0xFFFFu;
-    uint physical_y = packedPhysical >> 16u;
-    
-    // 6. CALCULATE PHYSICAL UV
-    // Physical cache is 4096x4096 with 128x128 pages = 32x32 pages
-    const float physicalResolution = 4096.0;
-    vec2 localUV = fract(virtualPageFloat); // UV within the page [0,1]
-    vec2 physicalPageBase = vec2(float(physical_x), float(physical_y)) * pageSize;
-    vec2 physicalPixel = physicalPageBase + localUV * pageSize;
-    vec2 physicalUV = physicalPixel / physicalResolution;
-    
-    // 7. ADAPTIVE BIAS (Slope-Scaled)
-    float cosAngle = clamp(dot(normal, lightDir), 0.0, 1.0);
-    float NdotL = cosAngle;
-    float slopeBias = clamp(0.005 * tan(acos(NdotL)), 0.0, 0.01);
-    float bias = max(slopeBias, 0.0002);
-    
-    // 8. VARIANCE SHADOW MAPPING (Chebyshev's Inequality)
-    // Sample variance moments (depth, depth^2) from physical cache
-    // Physical cache is a standard sampler2D in global_textures
-    vec2 moments = texture(global_textures[nonuniformEXT(push.vsm_cache_index)], physicalUV).rg;
-    
-    float currentDepth = projCoords.z;
-    
-    // If current depth is closer than mean, fully lit
+    // Fully lit if closer than the average depth
     if (currentDepth <= moments.x) {
-        return 0.0; // No shadow
+        return 1.0;
     }
     
-    // Calculate variance and use Chebyshev's inequality
+    // Variance calculation with epsilon to prevent NaNs and light bleeding
     float variance = moments.y - (moments.x * moments.x);
-    variance = max(variance, 0.00002); // Prevent division by zero
+    variance = max(variance, 0.00001);
     
     float d = currentDepth - moments.x;
     float p_max = variance / (variance + d * d);
     
-    // Apply light bleeding reduction (optional, helps with artifacts)
-    float lightBleedingReduction = 0.2;
-    p_max = clamp((p_max - lightBleedingReduction) / (1.0 - lightBleedingReduction), 0.0, 1.0);
-    
-    // Return shadow factor (1.0 = fully shadowed, 0.0 = fully lit)
-    // Invert p_max because it represents visibility probability
-    return 1.0 - p_max;
+    // REVERSE-Z: Optional: Clamp p_max to prevent excessive light bleeding in high contrast areas
+    return p_max;
 }
 
 float ShadowCalculation(vec4 fragPosLightSpace, vec3 normal, vec3 lightDir) {
-    // VSM by default
-    return VsmShadowCalculation(fragPosLightSpace, normal, lightDir);
+    return SampleVSM(fragWorldPos);
 }
 
 float distribution_ggx(float NdotH, float roughness) {
@@ -182,26 +140,7 @@ vec3 fresnel_schlick_fast(float cosTheta, vec3 F0) {
     return F0 + (1.0 - F0) * t5;
 }
 
-vec3 fresnel_schlick_roughness(float cosTheta, vec3 F0, float roughness) {
-    return F0 + (max(vec3(1.0 - roughness), F0) - F0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
-}
-
-// ============================================================================
-// AMBIENT CALCULATION - RAGE HEMISPHERE
-// ============================================================================
-
-vec3 calculateHemisphereAmbient(vec3 normal, vec3 albedo) {
-    FrameData frame = FrameData(push.frame_ptr);
-    // Blend between sky and ground based on normal.y
-    float skyFactor = normal.y * 0.5 + 0.5;
-    
-    vec3 skyContribution = frame.scene_lighting.ambient.sky_color.xyz * skyFactor;
-    vec3 groundContribution = frame.scene_lighting.ambient.ground_color.xyz * (1.0 - skyFactor);
-    
-    vec3 ambientColor = (skyContribution + groundContribution) * frame.scene_lighting.ambient.sky_color.w;
-    
-    return ambientColor * albedo;
-}
+// Hemisphere ambient logic transitioned to IBL in pbr_utils.glsl
 
 // ============================================================================
 // DIRECTIONAL LIGHT CALCULATION
@@ -244,45 +183,7 @@ vec3 calculateDirectionalLight(
     return (diffuse + specular) * radiance * NdotL * (1.0 - shadow);
 }
 
-// ============================================================================
-// IMAGE-BASED LIGHTING (IBL) - SPLIT SUM APPROXIMATION
-// ============================================================================
-
-vec3 calculateIBL(vec3 N, vec3 V, vec3 albedo, float metallic, float roughness, float occlusion) {
-    FrameData frame = FrameData(push.frame_ptr);
-    
-    // Fallback if IBL is not bound
-    if (frame.scene_lighting.ibl_irradiance_index < 0 || frame.scene_lighting.ibl_prefilter_index < 0) {
-        return calculateHemisphereAmbient(N, albedo) * occlusion;
-    }
-
-    vec3 R = reflect(-V, N);
-    vec3 F0 = mix(vec3(0.04), albedo, metallic);
-    
-    // 1. Diffuse Part: Irradiance Map
-    vec3 irradiance = texture(global_cubemaps[nonuniformEXT(frame.scene_lighting.ibl_irradiance_index)], N).rgb;
-    vec3 diffuse = irradiance * albedo;
-
-    // 2. Specular Part: Prefilter Map + BRDF LUT
-    int prefilter_idx = frame.scene_lighting.ibl_prefilter_index;
-    float max_lod = float(textureQueryLevels(global_cubemaps[nonuniformEXT(prefilter_idx)])) - 1.0;
-    vec3 prefilteredColor = textureLod(global_cubemaps[nonuniformEXT(prefilter_idx)], R, roughness * max_lod).rgb;
-    
-    vec2 brdf = vec2(0.0);
-    if (frame.scene_lighting.ibl_brdf_lut_index >= 0) {
-        // Sample BRDF LUT using NdotV and roughness
-        float NdotV = max(dot(N, V), 0.0);
-        brdf = texture(global_textures[nonuniformEXT(frame.scene_lighting.ibl_brdf_lut_index)], vec2(NdotV, roughness)).rg;
-    }
-    
-    vec3 F = fresnel_schlick_roughness(max(dot(N, V), 0.0), F0, roughness);
-    vec3 specular = prefilteredColor * (F * brdf.x + brdf.y);
-
-    vec3 kS = F;
-    vec3 kD = (1.0 - kS) * (1.0 - metallic);
-    
-    return (kD * diffuse + specular) * occlusion * frame.scene_lighting.ibl_intensity;
-}
+// IBL logic shifted to pbr_utils.glsl for cross-pass reuse
 
 void main() {
     FrameData frame = FrameData(push.frame_ptr);
@@ -507,21 +408,27 @@ void main() {
             specular *= 65000.0 / specularMax;
         }
         
+        // Diffuse term must be normalized by PI (Energy Conservation)
         vec3 kD = (1.0 - F) * (1.0 - metallic);
-        vec3 diffuse = kD * baseColor;
+        vec3 diffuse = kD * baseColor / PI;
         
         // Accumulate this light's contribution
         vec3 radiance = light.color.rgb * light.color.a; // intensity in alpha
         Lo += (diffuse + specular) * radiance * NdotL * attenuation;
     }
     
-    // Layer 1: Ambient / IBL
-    vec3 ambient = calculateIBL(normal, viewDir, baseColor, metallic, roughness, occlusion);
-    
+    // Final Reflectance (F0) and Reflection Vector (R) for IBL
+    vec3 R = reflect(-viewDir, normal);
+
+    // Layer 1: Ambient (IBL)
+    vec3 ambient = getIBLContribution(NdotV, normal, R, F0, roughness, baseColor, metallic, occlusion);
+    ambient *= frame.scene_lighting.ibl_intensity; // Apply global intensity
+
     // Layer 2: Global Directional Light
     vec3 directional = calculateDirectionalLight(
         normal, viewDir, baseColor, metallic, roughness, fragPosLightSpace
     );
+    // directional *= SampleVSM(fragWorldPos); // REMOVED: calculateDirectionalLight already calls ShadowCalculation
 
     // Emissive
     int emissive_idx = mat.emissive_texture_index;
@@ -532,6 +439,11 @@ void main() {
 
     // Combine: IBL + Directional + Dynamic(Lo) + Emissive
     vec3 color = ambient + directional + Lo + emissive;
+
+    // FP16 Safety Clamp: Max value is bounded to 65000.0 (near FP16 max of 65504.0)
+    // This prevents NaN propagation and overflow in the bloom/resolve passes 
+    // while preserving extreme high dynamic range for intense highlights.
+    color = clamp(color, 0.0, 65000.0);
 
     // Final Output
     outColor = vec4(color, 1.0);

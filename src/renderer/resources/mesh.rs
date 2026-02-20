@@ -5,9 +5,10 @@ use std::sync::Arc;
 use super::material::MaterialHandle;
 use super::texture::{Texture, TextureData};
 use super::texture_compressor::{CompressionFormat, TextureCompressor};
-use crate::renderer::Material;
+use crate::renderer::vram_budget::VramBudget;
+use crate::renderer::{Material, TextureInitContext};
 
-/// Mesh Cluster for fine-grained culling (VCGS Phase 3)
+/// Mesh Cluster for fine-grained culling
 #[derive(Debug, Clone, Copy, Default, bytemuck::Pod, bytemuck::Zeroable)]
 #[repr(C)]
 pub struct MeshCluster {
@@ -77,7 +78,7 @@ impl Default for MaterialProperties {
     }
 }
 
-/// Submesh descriptor for multi-material meshes (Phase 2)
+/// Submesh descriptor for multi-material meshes
 #[derive(Debug, Clone, Default)]
 pub struct SubmeshDescriptor {
     pub start_index: u32,
@@ -96,8 +97,7 @@ pub struct Mesh {
     pub texture: Option<Arc<Texture>>,
     pub texture_path: Option<std::path::PathBuf>,
 
-    // Phase 2: Multi-material support foundation
-    pub material_handle: Option<MaterialHandle>, // Single material (Phase 1)
+    pub material_handle: Option<MaterialHandle>, // Single material
     pub material_handles: Vec<MaterialHandle>,   // Multiple materials (future)
     pub submeshes: Vec<SubmeshDescriptor>,       // Future submesh descriptors
 
@@ -115,7 +115,6 @@ pub struct Mesh {
     pub emissive_texture_path: Option<std::path::PathBuf>,
     pub material_properties: Option<MaterialProperties>,
 
-    // Phase 6: Bindless indices
     pub texture_index: Option<u32>,
     pub normal_texture_index: Option<u32>,
     pub metallic_roughness_texture_index: Option<u32>,
@@ -124,7 +123,6 @@ pub struct Mesh {
 
     pub clusters: Vec<MeshCluster>,
 
-    // Phase 7: Global Cluster Buffer tracking
     pub cluster_start_index: Option<u32>,
     pub cluster_count: Option<u32>,
 }
@@ -519,19 +517,23 @@ impl Mesh {
         vram_budget: &mut crate::renderer::vram_budget::VramBudget,
         compression_enabled: bool,
     ) -> crate::Result<()> {
+        let tex_ctx = TextureInitContext {
+            allocator: Arc::clone(&allocator),
+            device: Arc::clone(&device),
+            command_pool,
+            queue,
+        };
+
         #[allow(clippy::too_many_arguments)]
         unsafe fn upload_texture_map(
             mesh_name: &str,
             map_name: &str,
-            allocator: &Arc<crate::vulkan::Allocator>,
-            device: &Arc<ash::Device>,
-            command_pool: vk::CommandPool,
-            queue: vk::Queue,
+            tex_ctx: &TextureInitContext,
             texture: &mut Option<Arc<Texture>>,
             data: &mut Option<TextureData>,
             srgb: bool,
             compression: CompressionFormat,
-            vram_budget: &mut crate::renderer::vram_budget::VramBudget,
+            vram_budget: &mut VramBudget,
             compression_enabled: bool,
         ) -> crate::Result<()> {
             if texture.is_none() {
@@ -585,15 +587,14 @@ impl Mesh {
                         } else {
                             [255, 255, 255, 255]
                         });
-                        let gpu_texture = Texture::from_data(
-                            Arc::clone(allocator),
-                            Arc::clone(device),
-                            command_pool,
-                            queue,
-                            &fallback_data,
-                            format,
-                            Some(&format!("{mesh_name}_{map_name}_fallback")),
-                        )?;
+                        let gpu_texture = unsafe {
+                            Texture::from_data(
+                                tex_ctx,
+                                &fallback_data,
+                                format,
+                                Some(&format!("{mesh_name}_{map_name}_fallback")),
+                            )?
+                        };
                         *texture = Some(Arc::new(gpu_texture));
                         vram_budget.allocate(4); // Minimal
                     } else {
@@ -601,15 +602,14 @@ impl Mesh {
                             "Uploading {map_name} texture for mesh '{mesh_name}' (Estimated: {}MB)",
                             estimated_total / 1024 / 1024
                         );
-                        let gpu_texture = Texture::from_data(
-                            Arc::clone(allocator),
-                            Arc::clone(device),
-                            command_pool,
-                            queue,
-                            &texture_data,
-                            format,
-                            Some(&format!("{mesh_name}_{map_name}")),
-                        )?;
+                        let gpu_texture = unsafe {
+                            Texture::from_data(
+                                tex_ctx,
+                                &texture_data,
+                                format,
+                                Some(&format!("{mesh_name}_{map_name}")),
+                            )?
+                        };
                         *texture = Some(Arc::new(gpu_texture));
                         vram_budget.allocate(estimated_total);
                     }
@@ -620,70 +620,59 @@ impl Mesh {
 
         upload_texture_map(
             &self.name,
-            "albedo",
-            &allocator,
-            &device,
-            command_pool,
-            queue,
+            "base",
+            &tex_ctx,
             &mut self.texture,
             &mut self.texture_data,
-            true, // srgb
+            true, // Albedo = SRGB
             CompressionFormat::Bc7,
             vram_budget,
             compression_enabled,
         )?;
+
         upload_texture_map(
             &self.name,
             "normal",
-            &allocator,
-            &device,
-            command_pool,
-            queue,
+            &tex_ctx,
             &mut self.normal_texture,
             &mut self.normal_texture_data,
-            false, // unorm
+            false, // Normal = Linear
             CompressionFormat::Bc5,
             vram_budget,
             compression_enabled,
         )?;
+
         upload_texture_map(
             &self.name,
             "metallic_roughness",
-            &allocator,
-            &device,
-            command_pool,
-            queue,
+            &tex_ctx,
             &mut self.metallic_roughness_texture,
             &mut self.metallic_roughness_texture_data,
-            false,                  // unorm
-            CompressionFormat::Bc7, // or Bc5 if 2 channels, but MR is often packed
+            false, // MR = Linear
+            CompressionFormat::Bc5,
             vram_budget,
             compression_enabled,
         )?;
+
         upload_texture_map(
             &self.name,
             "occlusion",
-            &allocator,
-            &device,
-            command_pool,
-            queue,
+            &tex_ctx,
             &mut self.occlusion_texture,
             &mut self.occlusion_texture_data,
-            false, // unorm
-            CompressionFormat::Bc7,
+            false, // Occlusion = Linear
+            CompressionFormat::Bc5,
             vram_budget,
             compression_enabled,
         )?;
+
         upload_texture_map(
             &self.name,
             "emissive",
-            &allocator,
-            &device,
-            command_pool,
-            queue,
+            &tex_ctx,
             &mut self.emissive_texture,
             &mut self.emissive_texture_data,
-            true, // srgb
+            true, // Emissive = SRGB
             CompressionFormat::Bc7,
             vram_budget,
             compression_enabled,
@@ -828,6 +817,6 @@ mod tests {
             "Arc<str> should be faster than String for cloning"
         );
         let speedup = string_duration.as_secs_f64() / arc_duration.as_secs_f64();
-        log::debug!("Speedup factor: {:.2}x", speedup);
+        log::debug!("Speedup factor: {speedup:.2}x");
     }
 }

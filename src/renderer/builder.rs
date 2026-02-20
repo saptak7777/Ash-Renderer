@@ -51,6 +51,12 @@ impl RendererBuilder {
         self
     }
 
+    /// Set the environment map HDR file path for IBL.
+    pub fn with_environment_map(mut self, path: impl Into<std::path::PathBuf>) -> Self {
+        self.config.environment_map = Some(path.into());
+        self
+    }
+
     /// Finalize and build the [Renderer].
     pub fn build<S: crate::vulkan::SurfaceProvider>(
         self,

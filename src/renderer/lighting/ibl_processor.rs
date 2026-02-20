@@ -1,6 +1,6 @@
-use crate::renderer::resources::Texture;
+use crate::renderer::resources::{Texture, TextureDesc};
 use crate::vulkan::{ComputePipeline, ComputePipelineBuilder, VulkanDevice};
-use crate::Result;
+use crate::{AshError, Result};
 use ash::vk;
 use std::sync::Arc;
 
@@ -22,6 +22,17 @@ pub struct IblProcessor {
     compute_dsl: vk::DescriptorSetLayout,
     brdf_dsl: vk::DescriptorSetLayout,
     compute_pool: vk::DescriptorPool,
+}
+
+/// Helper struct for layout transitions
+struct ImageLayoutTransitionInfo {
+    image: vk::Image,
+    old_layout: vk::ImageLayout,
+    new_layout: vk::ImageLayout,
+    mips: u32,
+    layers: u32,
+    src_access: vk::AccessFlags,
+    dst_access: vk::AccessFlags,
 }
 
 impl IblProcessor {
@@ -176,6 +187,10 @@ impl IblProcessor {
 
     /// Generates IBL maps from an equirectangular HDR texture.
     /// This is a synchronous operation intended for load-time.
+    ///
+    /// # Safety
+    /// The caller must ensure that the command pool and queue are valid and that the
+    /// equirectangular texture is valid and has been transitioned to shader read layout.
     pub unsafe fn generate(
         &self,
         vulkan_device: &VulkanDevice,
@@ -192,56 +207,93 @@ impl IblProcessor {
         let hdr_format = vk::Format::R16G16B16A16_SFLOAT;
 
         // 1. Allocate resources
+        // 1. Allocate resources
         let env_cubemap = Texture::create_empty_cubemap(
             Arc::clone(&allocator),
             Arc::clone(&self.device),
-            env_res,
-            1, // Mips handled later or not needed for base env
-            hdr_format,
-            vk::ImageUsageFlags::STORAGE | vk::ImageUsageFlags::SAMPLED,
-            Some("IBL_Environment_Cubemap"),
+            TextureDesc {
+                width: env_res,
+                height: env_res, // Cubemap faces are square
+                mip_levels: 1,   // Mips handled later or not needed for base env
+                format: hdr_format,
+                usage: vk::ImageUsageFlags::STORAGE | vk::ImageUsageFlags::SAMPLED,
+                name: Some("IBL_Environment_Cubemap"),
+            },
         )?;
 
         let irradiance_map = Texture::create_empty_cubemap(
             Arc::clone(&allocator),
             Arc::clone(&self.device),
-            irr_res,
-            1,
-            hdr_format,
-            vk::ImageUsageFlags::STORAGE | vk::ImageUsageFlags::SAMPLED,
-            Some("IBL_Irradiance_Map"),
+            TextureDesc {
+                width: irr_res,
+                height: irr_res,
+                mip_levels: 1,
+                format: hdr_format,
+                usage: vk::ImageUsageFlags::STORAGE | vk::ImageUsageFlags::SAMPLED,
+                name: Some("IBL_Irradiance_Map"),
+            },
         )?;
 
         let prefilter_mips = (pref_res as f32).log2().floor() as u32 + 1;
         let prefilter_map = Texture::create_empty_cubemap(
             Arc::clone(&allocator),
             Arc::clone(&self.device),
-            pref_res,
-            prefilter_mips,
-            hdr_format,
-            vk::ImageUsageFlags::STORAGE | vk::ImageUsageFlags::SAMPLED,
-            Some("IBL_Prefilter_Map"),
+            TextureDesc {
+                width: pref_res,
+                height: pref_res,
+                mip_levels: prefilter_mips,
+                format: hdr_format,
+                usage: vk::ImageUsageFlags::STORAGE | vk::ImageUsageFlags::SAMPLED,
+                name: Some("IBL_Prefilter_Map"),
+            },
         )?;
 
         let brdf_lut = Texture::create_empty_2d(
             Arc::clone(&allocator),
             Arc::clone(&self.device),
-            brdf_res,
-            brdf_res,
-            1,
-            vk::Format::R16G16_SFLOAT,
-            vk::ImageUsageFlags::STORAGE | vk::ImageUsageFlags::SAMPLED,
-            Some("IBL_BRDF_LUT"),
+            TextureDesc {
+                width: brdf_res,
+                height: brdf_res,
+                mip_levels: 1,
+                format: vk::Format::R16G16_SFLOAT,
+                usage: vk::ImageUsageFlags::STORAGE | vk::ImageUsageFlags::SAMPLED,
+                name: Some("IBL_BRDF_LUT"),
+            },
         )?;
 
         // 2. Dispatch Compute
         let mut dispatch_result: Result<()> = Ok(());
         vulkan_device.execute_single_use(command_pool, |cmd| {
+            // Helper to get image or record error
+            let mut get_image = |opt: Option<vk::Image>, name: &str| -> Option<vk::Image> {
+                if opt.is_none() {
+                    dispatch_result = Err(AshError::VulkanError(format!("{name} image missing")));
+                }
+                opt
+            };
+
             // Initial transition
-            self.transition_to_general(cmd, env_cubemap.image.unwrap(), 1, 6);
-            self.transition_to_general(cmd, irradiance_map.image.unwrap(), 1, 6);
-            self.transition_to_general(cmd, prefilter_map.image.unwrap(), prefilter_mips, 6);
-            self.transition_to_general(cmd, brdf_lut.image.unwrap(), 1, 1);
+            let env_img = match get_image(env_cubemap.image, "Env cubemap") {
+                Some(i) => i,
+                None => return,
+            };
+            let irr_img = match get_image(irradiance_map.image, "Irradiance map") {
+                Some(i) => i,
+                None => return,
+            };
+            let pref_img = match get_image(prefilter_map.image, "Prefilter map") {
+                Some(i) => i,
+                None => return,
+            };
+            let brdf_img = match get_image(brdf_lut.image, "BRDF LUT") {
+                Some(i) => i,
+                None => return,
+            };
+
+            self.transition_to_general(cmd, env_img, 1, 6);
+            self.transition_to_general(cmd, irr_img, 1, 6);
+            self.transition_to_general(cmd, pref_img, prefilter_mips, 6);
+            self.transition_to_general(cmd, brdf_img, 1, 1);
 
             // A. Equirect -> Cubemap
             if let Err(e) = self.dispatch_equirect(cmd, equirect_hdr, &env_cubemap) {
@@ -250,7 +302,7 @@ impl IblProcessor {
             }
 
             // Transition Env Map to SHADER_READ for sampling
-            self.transition_to_read(cmd, env_cubemap.image.unwrap(), 1, 6);
+            self.transition_to_read(cmd, env_img, 1, 6);
 
             // B. Irradiance Convolution
             if let Err(e) = self.dispatch_irradiance(cmd, &env_cubemap, &irradiance_map) {
@@ -350,7 +402,7 @@ impl IblProcessor {
             &[],
         );
 
-        self.device.cmd_dispatch(cmd, 32 / 32, 32 / 32, 6);
+        self.device.cmd_dispatch(cmd, 1, 1, 6);
         Ok(())
     }
 
@@ -409,9 +461,9 @@ impl IblProcessor {
                 bytemuck::bytes_of(&roughness),
             );
 
-            let mip_res = (128 >> mip).max(1);
+            let mip_res = (128u32 >> mip).max(1);
             self.device
-                .cmd_dispatch(cmd, (mip_res + 31) / 32, (mip_res + 31) / 32, 6);
+                .cmd_dispatch(cmd, mip_res.div_ceil(32), mip_res.div_ceil(32), 6);
 
             self.device.destroy_image_view(mip_view, None);
         }
@@ -509,13 +561,15 @@ impl IblProcessor {
     ) {
         self.transition_layout(
             cmd,
-            image,
-            vk::ImageLayout::UNDEFINED,
-            vk::ImageLayout::GENERAL,
-            vk::AccessFlags::empty(),
-            vk::AccessFlags::SHADER_WRITE,
-            mips,
-            layers,
+            ImageLayoutTransitionInfo {
+                image,
+                old_layout: vk::ImageLayout::UNDEFINED,
+                new_layout: vk::ImageLayout::GENERAL,
+                src_access: vk::AccessFlags::empty(),
+                dst_access: vk::AccessFlags::SHADER_WRITE,
+                mips,
+                layers,
+            },
         );
     }
 
@@ -528,39 +582,35 @@ impl IblProcessor {
     ) {
         self.transition_layout(
             cmd,
-            image,
-            vk::ImageLayout::GENERAL,
-            vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-            vk::AccessFlags::SHADER_WRITE,
-            vk::AccessFlags::SHADER_READ,
-            mips,
-            layers,
+            ImageLayoutTransitionInfo {
+                image,
+                old_layout: vk::ImageLayout::GENERAL,
+                new_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                src_access: vk::AccessFlags::SHADER_WRITE,
+                dst_access: vk::AccessFlags::SHADER_READ,
+                mips,
+                layers,
+            },
         );
     }
 
-    unsafe fn transition_layout(
-        &self,
-        cmd: vk::CommandBuffer,
-        image: vk::Image,
-        old_layout: vk::ImageLayout,
-        new_layout: vk::ImageLayout,
-        src_access: vk::AccessFlags,
-        dst_access: vk::AccessFlags,
-        mips: u32,
-        layers: u32,
-    ) {
+    /// Transitions a texture layout using a pipeline barrier.
+    ///
+    /// # Safety
+    /// The caller must ensure that the command buffer is in a recording state and that the image handle is valid.
+    unsafe fn transition_layout(&self, cmd: vk::CommandBuffer, info: ImageLayoutTransitionInfo) {
         let barrier = vk::ImageMemoryBarrier::default()
-            .old_layout(old_layout)
-            .new_layout(new_layout)
-            .src_access_mask(src_access)
-            .dst_access_mask(dst_access)
-            .image(image)
+            .old_layout(info.old_layout)
+            .new_layout(info.new_layout)
+            .src_access_mask(info.src_access)
+            .dst_access_mask(info.dst_access)
+            .image(info.image)
             .subresource_range(vk::ImageSubresourceRange {
                 aspect_mask: vk::ImageAspectFlags::COLOR,
                 base_mip_level: 0,
-                level_count: mips,
+                level_count: info.mips,
                 base_array_layer: 0,
-                layer_count: layers,
+                layer_count: info.layers,
             });
 
         self.device.cmd_pipeline_barrier(

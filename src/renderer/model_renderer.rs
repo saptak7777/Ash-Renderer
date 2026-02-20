@@ -139,7 +139,7 @@ struct DrawPushConstants {
     vsm_page_index: u32,  // 56
     vsm_cache_index: u32, // 60
 
-    // Phase 19: Transient Transform (64-79)
+    // Transient Transform (64-79)
     transform_ptr_low: u32,  // 64
     transform_ptr_high: u32, // 68
     transform_index: u32,    // 72
@@ -175,7 +175,7 @@ pub struct DrawContext<'a> {
     pub vsm_page_index: u32,
     pub vsm_cache_index: u32,
 
-    // Phase 19: Transient Transform data
+    // Transient Transform data
     pub transform_ptr: u64,
     pub transform_index: u32,
 }
@@ -323,7 +323,7 @@ impl ModelRenderer {
             transform_ptr_high: (ctx.transform_ptr >> 32) as u32,
             transform_index: ctx.transform_index,
             _padding_ptr: 0,
-            material_index: material_handle.index as u32,
+            material_index: material_handle.index,
             use_instancing: 0,
             flags: ctx.material.flags,
             debug_path: 0,
@@ -342,7 +342,7 @@ impl ModelRenderer {
             push_bytes,
         );
 
-        // Software Index Pulling (Phase 1):
+        // Software Index Pulling:
         // We use cmd_draw to drive gl_VertexIndex as an iterator into the index heap.
         // firstVertex MUST be the offset into the index buffer (in elements).
         let first_vertex = (ctx.uploaded.index_offset.unwrap_or(0) / 4) as u32;
@@ -400,7 +400,7 @@ impl ModelRenderer {
             transform_ptr_high: (ctx.transform_ptr >> 32) as u32,
             transform_index: ctx.transform_index,
             _padding_ptr: 0,
-            material_index: ctx.material.material_handle.index as u32,
+            material_index: ctx.material.material_handle.index,
             use_instancing: 1,
             flags: ctx.material.flags,
             debug_path: 0,
@@ -462,7 +462,7 @@ impl ModelRenderer {
             transform_ptr_high: (ctx.transform_ptr >> 32) as u32,
             transform_index: ctx.transform_index,
             _padding_ptr: 0,
-            material_index: material_handle.index as u32,
+            material_index: material_handle.index,
             use_instancing: 1,
             flags: ctx.material.flags,
             debug_path: 0,
@@ -504,6 +504,9 @@ impl ModelRenderer {
 
     /// Registers a new material and streams it to the GPU buffer at a unique index.
     /// Reserves Index 0 as a global "Magenta Fallback" error material.
+    ///
+    /// # Safety
+    /// The caller must ensure that the storage buffer is valid and has capacity.
     pub unsafe fn register_material(
         &mut self,
         material: &Material,
@@ -512,11 +515,10 @@ impl ModelRenderer {
         let id = self.next_material_index;
         self.next_material_index += 1;
 
-        // AAA Guard: Ensure we don't overflow the fixed-size GPU storage buffer
+        // Guard: Ensure we don't overflow the fixed-size GPU storage buffer
         if id >= 1024 {
             return Err(AshError::VulkanError(format!(
-                "CRITICAL: Material index {} exceeds capacity (1024)! Increase MAX_MATERIALS.",
-                id
+                "CRITICAL: Material index {id} exceeds capacity (1024)! Increase MAX_MATERIALS."
             )));
         }
 
@@ -552,7 +554,7 @@ impl ModelRenderer {
             material.tint_index,
         );
 
-        // AAA Pattern: Direct streaming write to GPU buffer
+        // Direct streaming write to GPU buffer
         // This avoids read-modify-write stalls and ensures the material is available
         // immediately for the next indirect draw call.
         buffer.write_element_at(id as usize, &mat_uniform)?;

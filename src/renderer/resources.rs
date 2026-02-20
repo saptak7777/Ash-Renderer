@@ -5,6 +5,7 @@ use crate::renderer::{
     instancing::{BatchKey, InstancingManager},
     resource_registry::ResourceId,
     vram_budget, DepthBuffer as DepthBufferType, RendererConfig, Texture as TextureType,
+    TextureInitContext,
 };
 use crate::{vulkan, AshError};
 use ash::vk;
@@ -12,7 +13,7 @@ use glam::Mat4;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
-// --- Submodules (New Style: Entry point in resources.rs) ---
+// --- Submodules ---
 pub mod bindless_validator;
 pub mod buffer;
 pub mod cluster_buffer;
@@ -48,7 +49,7 @@ pub use descriptor::DescriptorSetHandle;
 pub use gbuffer::GBuffer;
 pub use global_geometry_buffer::DualHeapGeometryBuffer;
 pub use ibl::{IblAssetHeader, IblUploadParams};
-pub use image::ImageHandle;
+pub use image::{ImageCreateInfo, ImageHandle};
 pub use material::{Material, MaterialHandle, MaterialManager};
 pub use mesh::{MaterialDescriptor, Mesh, MeshDescriptor, Vertex};
 pub use motion::ObjectMotionData;
@@ -56,11 +57,19 @@ pub use optimized_buffer_pool::{BufferAllocation, BufferPool, BufferPoolConfig, 
 pub use pipeline::PipelineHandle;
 pub use render_targets::HdrSystem;
 pub use safe_resource::SafeResource;
-pub use texture::{Texture, TextureData};
+pub use texture::{Texture, TextureData, TextureDesc};
 pub use texture_compressor::{CompressionFormat, TextureCompressor};
 pub use thread_safe_pool::{PoolStats, PooledResource, ThreadSafeResourcePool};
 pub use transform::{Camera, TemporalCamera, Transform, TransformHandle, TransformSystem, MVP};
 pub use uniform::{InstanceBuffer, MvpMatrices, UniformBuffer};
+
+extern crate image as image_crate;
+
+pub struct IblData {
+    pub irradiance_map: Texture,
+    pub prefilter_map: Texture,
+    pub brdf_lut: Texture,
+}
 
 /// Resources manages the lifecycle of heavy GPU buffers and asset managers.
 pub struct Resources {
@@ -86,7 +95,7 @@ pub struct Resources {
     pub descriptors: Option<vulkan::DescriptorAllocator>,
 
     // Instance System
-    pub instancing_manager: InstancingManager,
+    pub(crate) _instancing_manager: InstancingManager,
     pub instance_buffers: Vec<InstanceBuffer>,
     pub instance_buffer_addresses: Vec<u64>,
     pub batch_offsets: HashMap<BatchKey, u32>,
@@ -94,20 +103,28 @@ pub struct Resources {
     pub swapchain_extent: vk::Extent2D,
     pub current_view_proj: Mat4,
 
+    #[cfg(debug_assertions)]
+    pub(crate) instancing_guard_active: bool,
+
     // Render Targets & Debug
     pub readback_buffer: Option<BufferHandle>,
     pub gbuffer: Option<GBuffer>,
     pub depth_buffer: Option<DepthBufferType>,
     pub depth_buffer_id: Option<ResourceId>,
 
-    // Default Textures (Moved from RenderSystems)
+    // Default Textures
     pub default_texture: TextureType,
     pub black_texture: TextureType,
     pub white_texture: TextureType,
     pub default_skybox: TextureType,
     pub default_cube_black: TextureType,
+    pub dummy_black_cube: TextureType,
+    pub dummy_black_2d: TextureType,
 
-    // --- Temporary Internal Items (Moved out in Phase 5.4) ---
+    // IBL Data
+    pub ibl_data: Option<IblData>,
+
+    // --- Internal Resources ---
     pub(crate) pipelines: Option<crate::renderer::init_types::PipelineData>,
     pub(crate) passes: Option<crate::renderer::init_types::RenderingPasses>,
     pub(crate) lighting: Option<crate::renderer::init_types::LightingSystem>,
@@ -116,18 +133,32 @@ pub struct Resources {
     pub indirect_draw_enabled: bool,
 }
 
+pub struct ResourcesInitInfo<'a, S: vulkan::SurfaceProvider> {
+    pub context: &'a Context,
+    pub width: u32,
+    pub height: u32,
+    pub config: &'a RendererConfig,
+    pub surface_provider: &'a S,
+    pub pipeline_cache: &'a crate::renderer::pipeline_cache::PipelineCache,
+    pub swapchain: &'a vulkan::SwapchainWrapper,
+    pub cmds: &'a vulkan::CommandBufferManager,
+}
+
 impl Resources {
     /// Initializes all rendering resources.
-    pub fn new(
-        context: &Context,
-        width: u32,
-        height: u32,
-        config: &RendererConfig,
-        _surface_provider: &impl vulkan::SurfaceProvider,
-        pipeline_cache: &crate::renderer::pipeline_cache::PipelineCache,
-        swapchain: &vulkan::SwapchainWrapper,
-        cmds: &vulkan::CommandBufferManager,
-    ) -> crate::Result<Self> {
+    pub fn new<S: vulkan::SurfaceProvider>(info: ResourcesInitInfo<'_, S>) -> crate::Result<Self> {
+        let ResourcesInitInfo {
+            context,
+            width,
+            height,
+            config,
+            surface_provider: _surface_provider,
+            pipeline_cache,
+            swapchain,
+            cmds,
+        } = info;
+        // SAFETY: Initialization involves raw Vulkan pointer manipulation and resource creation
+        // that must follow strict device/allocator lifetimes.
         unsafe {
             let dev_mem_props = context.device.memory_properties;
             let vram_budget = vram_budget::VramBudget::new(&dev_mem_props);
@@ -151,7 +182,7 @@ impl Resources {
 
             let aspect = width as f32 / height as f32;
 
-            // --- Phase 2: Core & Pass Initialization ---
+            // --- Core & Pass Initialization ---
             let mut core = initialization::init_core_infrastructure(
                 &context.device,
                 &context.alloc,
@@ -162,36 +193,44 @@ impl Resources {
                 aspect,
             )?;
 
-            let set_layouts = [core.bindless_manager.descriptor_set_layout()];
+            // Create VSM compute layout manually since Manager is not yet initialized
+            let vsm_compute_layout =
+                initialization::create_vsm_compute_layout(&context.device.device)?;
+
+            let set_layouts = [
+                core.bindless_manager.descriptor_set_layout(),
+                vsm_compute_layout,
+            ];
             let color_formats = vec![swapchain.format];
 
-            let pipelines = initialization::init_pipelines(
-                &context.device,
-                &context.resources,
-                swapchain.extent,
-                &color_formats,
-                &set_layouts,
-                &pipeline_cfg,
-                depth_buffer.format(),
-                pipeline_cache.handle(),
-            )?;
+            let pipelines = initialization::init_pipelines(initialization::PipelineInitInfo {
+                device: &context.device,
+                resources: &context.resources,
+                extent: swapchain.extent,
+                color_formats: &color_formats,
+                set_layouts: &set_layouts,
+                pipeline_cfg: &pipeline_cfg,
+                depth_format: depth_buffer.format(),
+                pipeline_cache: pipeline_cache.handle(),
+            })?;
 
-            let mut passes = initialization::init_rendering_passes(
-                &context.device,
-                &context.alloc,
-                &context.resources,
-                &mut core.bindless_manager,
-                &core.renderer_resources,
-                swapchain.format,
-                swapchain.extent,
-                depth_buffer.format(),
-                depth_buffer.view(),
-                pipeline_cache.handle(),
-                pipeline_cfg.multisample_config(),
-                &set_layouts,
-                &core.model_renderer,
-                cmds.upload_command_pool_handle(),
-            )?;
+            let mut passes =
+                initialization::init_rendering_passes(initialization::RenderingPassesConfig {
+                    device: &context.device,
+                    alloc: &context.alloc,
+                    resources: &context.resources,
+                    bindless_manager: &mut core.bindless_manager,
+                    renderer_resources: &core.renderer_resources,
+                    swapchain_format: swapchain.format,
+                    swapchain_extent: swapchain.extent,
+                    depth_format: depth_buffer.format(),
+                    depth_view: depth_buffer.view(),
+                    pipeline_cache: pipeline_cache.handle(),
+                    multisample_config: pipeline_cfg.multisample_config(),
+                    set_layouts: &set_layouts,
+                    model_renderer: &core.model_renderer,
+                    upload_command_pool: cmds.upload_command_pool_handle(),
+                })?;
 
             let lighting = initialization::init_lighting_system(
                 &context.device,
@@ -200,7 +239,6 @@ impl Resources {
                 cmds.upload_command_pool_handle(),
                 swapchain.image_views.len() as u32,
                 swapchain.extent,
-                config.shadow_resolution,
             )?;
 
             let post = initialization::init_post_processing(
@@ -210,7 +248,7 @@ impl Resources {
                 swapchain.format,
             )?;
 
-            // --- Phase 3: Metadata & Buffers ---
+            // --- Metadata & Buffers ---
             let material_heap_address = core
                 .renderer_resources
                 .material_storage_buffer
@@ -235,7 +273,7 @@ impl Resources {
                 None
             };
 
-            Ok(Self {
+            let mut resources = Self {
                 assets: {
                     let mut assets = AssetManager::new(core.bindless_manager, vram_budget);
                     assets.texture_compression = config.texture_compression;
@@ -254,7 +292,7 @@ impl Resources {
                     core.renderer_resources.material_storage_buffer,
                 ))),
                 descriptors: Some(core.descriptor_allocator),
-                instancing_manager: InstancingManager::new(),
+                _instancing_manager: InstancingManager::new(),
                 instance_buffers: core.renderer_resources.instance_buffers,
                 instance_buffer_addresses,
                 batch_offsets: HashMap::new(),
@@ -270,13 +308,103 @@ impl Resources {
                 white_texture: core.renderer_resources.white_texture,
                 default_skybox: core.renderer_resources.default_skybox,
                 default_cube_black: core.renderer_resources.default_cube_black,
+                dummy_black_cube: core.renderer_resources.dummy_black_cube,
+                dummy_black_2d: core.renderer_resources.dummy_black_2d,
+                ibl_data: None, // Will be filled below
                 pipelines: Some(pipelines),
                 passes: Some(passes),
                 lighting: Some(lighting),
                 post: Some(post),
                 total_instance_count: 0,
-                indirect_draw_enabled: true, // Enabled by default for Phase 7.3
-            })
+                indirect_draw_enabled: true,
+
+                #[cfg(debug_assertions)]
+                instancing_guard_active: false,
+            };
+
+            // --- IBL Generation ---
+            if let Some(env_path) = &config.environment_map {
+                log::info!("IBL: Generating data from environment map: {env_path:?}");
+
+                match (|| -> crate::Result<IblData> {
+                    let img = image_crate::open(env_path)
+                        .map_err(|e| {
+                            AshError::VulkanError(format!(
+                                "Failed to open/decode environment map: {e}"
+                            ))
+                        })?
+                        .to_rgba32f();
+
+                    let (width, height) = img.dimensions();
+                    let pixels = img.into_raw(); // Vec<f32>
+
+                    let hdr_tex = texture::Texture::from_raw_data(
+                        &TextureInitContext {
+                            allocator: Arc::clone(&context.alloc),
+                            device: Arc::clone(&context.device.device),
+                            command_pool: cmds.upload_command_pool_handle(),
+                            queue: context.device.graphics_queue,
+                        },
+                        bytemuck::cast_slice(&pixels),
+                        &crate::renderer::types::TextureCreateInfo {
+                            width,
+                            height,
+                            format: vk::Format::R32G32B32_SFLOAT,
+                            mip_levels: 1,
+                            name: Some("IBL_Source_HDR"),
+                        },
+                    )?;
+
+                    use crate::renderer::lighting::IblProcessor;
+                    let processor = IblProcessor::new(Arc::clone(&context.device.device))?;
+
+                    let bundle = processor.generate(
+                        &context.device,
+                        Arc::clone(&context.alloc),
+                        cmds.upload_command_pool_handle(),
+                        context.device.graphics_queue,
+                        &hdr_tex,
+                    )?;
+
+                    log::info!("IBL: Successfully generated Irradiance and Prefilter maps.");
+
+                    Ok(IblData {
+                        irradiance_map: bundle.irradiance_map,
+                        prefilter_map: bundle.prefilter_map,
+                        brdf_lut: bundle.brdf_lut,
+                    })
+                })() {
+                    Ok(data) => resources.ibl_data = Some(data),
+                    Err(e) => {
+                        log::warn!("IBL: Generation failed: {e}. Falling back to default.");
+                        resources.ibl_data = None;
+                    }
+                }
+            }
+
+            // --- Descriptor Plumbing ---
+            if let Some(data) = &resources.ibl_data {
+                resources.assets.bindless_manager.update_ibl_descriptors(
+                    data.irradiance_map.view(),
+                    data.irradiance_map.sampler(),
+                    data.prefilter_map.view(),
+                    data.prefilter_map.sampler(),
+                    data.brdf_lut.view(),
+                    data.brdf_lut.sampler(),
+                )?;
+            } else {
+                // Fallback to dummy black textures to prevent shader crashes and washed-out shadows
+                resources.assets.bindless_manager.update_ibl_descriptors(
+                    resources.dummy_black_cube.view(),
+                    resources.dummy_black_cube.sampler(),
+                    resources.dummy_black_cube.view(),
+                    resources.dummy_black_cube.sampler(),
+                    resources.dummy_black_2d.view(),
+                    resources.dummy_black_2d.sampler(),
+                )?;
+            }
+
+            Ok(resources)
         }
     }
 
@@ -293,6 +421,8 @@ impl Resources {
     )> {
         let bindless_manager = &mut self.assets.bindless_manager;
 
+        // SAFETY: Buffer creation and bindless registration involve raw Vulkan handles.
+        // T is Copy, and the buffer is sized correctly for the provided data.
         unsafe {
             let mut buffer = crate::renderer::resources::uniform::StorageBuffer::new(
                 Arc::clone(&context.alloc),
@@ -333,6 +463,8 @@ impl Resources {
         ))?;
 
         // Wait for the device to be idle to ensure rendering is complete
+        // SAFETY: Image-to-buffer copies and memory mapping require correct synchronization
+        // and valid resource handles. headless mode ensures the readback buffer exists.
         unsafe {
             context.device.device.device_wait_idle().map_err(|e| {
                 AshError::VulkanError(format!("Failed to wait for device idle: {e}"))
@@ -351,6 +483,7 @@ impl Resources {
         let begin_info = vk::CommandBufferBeginInfo::default()
             .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
 
+        // SAFETY: Begin command buffer is safe as cmd is a fresh one-time-submit buffer.
         unsafe {
             context
                 .device
@@ -444,6 +577,8 @@ impl Resources {
         let size = (swapchain.extent.width * swapchain.extent.height * 4) as usize;
         let mut data = vec![0u8; size];
 
+        // SAFETY: Memory mapping and raw pointer copies for headless readback.
+        // Size is validated against swapchain extent.
         unsafe {
             let ptr = context
                 .alloc
@@ -477,7 +612,8 @@ impl Resources {
             }
         }
 
-        let mut depth_buffer = unsafe {
+        let mut depth_buffer = // SAFETY: Fresh resource creation with valid device/allocator.
+            unsafe {
             DepthBuffer::new(
                 Arc::clone(&context.device.device),
                 Arc::clone(&context.alloc),
@@ -508,7 +644,8 @@ impl Resources {
         }
 
         // --- 2. Recreate GBuffer ---
-        let gbuffer = unsafe {
+        let gbuffer = // SAFETY: GBuffer involves raw resource creation; extent is validated.
+            unsafe {
             GBuffer::new(
                 Arc::clone(&context.device.device),
                 Arc::clone(&context.alloc),
@@ -538,6 +675,7 @@ impl Resources {
         }
         self.uniform_buffers.clear();
 
+        // SAFETY: Uniform buffer recreation during resize. All previous resources are cleaned up.
         unsafe {
             for _ in 0..image_count {
                 let mut buffer = UniformBuffer::new(
@@ -561,131 +699,10 @@ impl Resources {
         Ok(())
     }
 
-    /// Extracted frame preparation logic.
-    pub fn update_global_data(
-        &mut self,
-        context: &Context,
-        frame: &mut crate::renderer::frame::Frame,
-        scene: &mut crate::renderer::Scene,
-        systems: &mut crate::renderer::systems::Systems,
-        view: Mat4,
-        projection: Mat4,
-        camera_pos: glam::Vec3,
-        model_matrix: Option<Mat4>,
-    ) -> crate::Result<(usize, u32, vk::Extent2D, Mat4, [f32; 2])> {
-        unsafe {
-            let swapchain_extent = frame
-                .swapchain
-                .as_ref()
-                .ok_or(AshError::VulkanError("Swapchain not available".to_string()))?
-                .extent;
-
-            // Phase 1: Use FrameManager to acquire next frame and synchronization objects
-            let (image_index, _suboptimal) = frame.begin_frame(context)?;
-
-            let frame_index = frame.frame_manager.get_current_frame_index();
-
-            // Prepare culling data (Phase 7.2C Fix: Moved to Renderer::submit_render_commands)
-            // Apply sub-pixel jitter for VSR if enabled
-            let mut jittered_projection = projection;
-            let mut jitter_uv = [0.0f32; 2];
-            if let Some(ref mut vsr) = systems.vsr_pass {
-                let (jx, jy) = vsr.next_jitter();
-                jitter_uv = [jx, jy];
-                jittered_projection.col_mut(2).x += jx / swapchain_extent.width as f32;
-                jittered_projection.col_mut(2).y += jy / swapchain_extent.height as f32;
-            }
-
-            // GPU synchronization confirmed; safe to update uniform buffer.
-            {
-                let uniform_buffer = self.uniform_buffers.get_unchecked_mut(frame_index);
-                let mut dummy_transform =
-                    crate::renderer::resources::transform::Transform::identity();
-                let elapsed = frame.start_time.elapsed().as_secs_f32();
-                let mut feature_ctx = crate::renderer::features::FeatureFrameContext {
-                    device: context.device.device.as_ref(),
-                    descriptor_allocator: self.descriptors.as_ref(),
-                    transform: &mut dummy_transform,
-                    auto_rotate: false,
-                    elapsed_seconds: elapsed,
-                };
-                systems.features.before_frame(&mut feature_ctx);
-
-                if let Some(shadow_system) = systems.pipeline.shadow_system_mut() {
-                    shadow_system
-                        .vsm_feature_mut()
-                        .begin_frame(frame_index as u32, camera_pos);
-                }
-
-                let mut ub = uniform_buffer.write().unwrap();
-                let matrices = ub.matrices_mut();
-                let model = model_matrix.unwrap_or(Mat4::IDENTITY);
-                let mut transform = crate::renderer::resources::transform::Transform::identity();
-                transform.set_model(model);
-
-                matrices.model = model;
-                matrices.normal_matrix = Mat4::from_mat3(transform.normal_matrix());
-                matrices.view = view;
-                matrices.projection = jittered_projection;
-                matrices.view_proj = jittered_projection * view;
-                matrices.prev_view_proj = frame.prev_view_proj;
-                matrices.camera_pos = camera_pos.extend(1.0);
-
-                scene.scene_lighting.point_light_count = scene.point_lights.len() as u32;
-                if let Some(fp) = &systems.pipeline.forward_plus {
-                    let info = fp.read().unwrap().get_lights().get_forward_plus_info();
-                    scene.scene_lighting.num_tiles_x = info.num_tiles[0];
-                    scene.scene_lighting.num_tiles_y = info.num_tiles[1];
-                    scene.scene_lighting.tile_size = info.tile_size;
-                }
-                matrices.set_lighting(&scene.scene_lighting);
-                matrices.set_light_space_matrix(glam::Mat4::IDENTITY);
-
-                // Phase 2: Host-side Forward+ updates (Lights and Camera)
-                if let Some(ref fp_integration) = systems.pipeline.forward_plus {
-                    let mut fp = fp_integration.write().unwrap();
-                    fp.update_lights(
-                        &scene.point_lights,
-                        &scene.directional_lights,
-                        &scene.spot_lights,
-                    );
-                    fp.upload_to_gpu(&context.alloc, &context.device.device, frame_index as usize)?;
-                    fp.update_camera(
-                        &context.alloc,
-                        frame_index as usize,
-                        &view.to_cols_array_2d(),
-                        &projection.to_cols_array_2d(),
-                        &camera_pos.extend(1.0).to_array(),
-                    )?;
-                }
-
-                let view_proj = matrices.view_proj;
-                ub.update()?;
-                frame.prev_view_proj = view_proj;
-                self.current_view_proj = view_proj;
-                self.swapchain_extent = swapchain_extent;
-            }
-
-            // Phase 7.2A: Purify CPU preparation - update instance buffers
-            let instancing_manager =
-                std::mem::replace(&mut self.instancing_manager, InstancingManager::new());
-            self.update_instance_buffers(&instancing_manager, frame_index)?;
-            self.instancing_manager = instancing_manager;
-
-            Ok((
-                frame_index,
-                image_index,
-                swapchain_extent,
-                jittered_projection,
-                jitter_uv,
-            ))
-        }
-    }
-
-    /// Update instance buffers and compute batch offsets (Phase 7.2A)
+    /// Update instance buffers and compute batch offsets
     pub fn update_instance_buffers(
         &mut self,
-        instancing_manager: &InstancingManager,
+        instancing_manager: &crate::renderer::instancing::InstancingManager,
         frame_index: usize,
     ) -> crate::Result<()> {
         let mut all_instances = Vec::new();
@@ -697,6 +714,7 @@ impl Resources {
         }
 
         if !all_instances.is_empty() {
+            // SAFETY: Instance buffer updates with validated instance data.
             unsafe {
                 self.instance_buffers[frame_index].update(&all_instances)?;
             }
@@ -705,5 +723,25 @@ impl Resources {
         self.total_instance_count = all_instances.len() as u32;
         self.batch_offsets = batch_offsets;
         Ok(())
+    }
+
+    /// Get a reference to the instancing manager
+    pub fn instancing_manager(&self) -> &InstancingManager {
+        #[cfg(debug_assertions)]
+        debug_assert!(
+            !self.instancing_guard_active,
+            "InstancingManager accessed while checked out by guard!"
+        );
+        &self._instancing_manager
+    }
+
+    /// Get a mutable reference to the instancing manager
+    pub fn instancing_manager_mut(&mut self) -> &mut InstancingManager {
+        #[cfg(debug_assertions)]
+        debug_assert!(
+            !self.instancing_guard_active,
+            "InstancingManager accessed while checked out by guard!"
+        );
+        &mut self._instancing_manager
     }
 }

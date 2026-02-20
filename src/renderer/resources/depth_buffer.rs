@@ -20,8 +20,7 @@ impl DepthBuffer {
     /// Creates a new depth buffer with the given dimensions
     ///
     /// # Safety
-    ///
-    /// Device must remain valid for the lifetime of this buffer.
+    /// The provided Vulkan device and allocator must remain valid for the lifetime of this buffer.
     pub unsafe fn new(
         device: Arc<ash::Device>,
         allocator: Arc<Allocator>,
@@ -40,8 +39,7 @@ impl DepthBuffer {
     /// Creates a new depth buffer with the given dimensions and sample count
     ///
     /// # Safety
-    ///
-    /// Device must remain valid for the lifetime of this buffer.
+    /// The provided Vulkan device and allocator must remain valid. The sample count must be supported by the physical device for the depth format.
     pub unsafe fn with_sample_count(
         device: Arc<ash::Device>,
         allocator: Arc<Allocator>,

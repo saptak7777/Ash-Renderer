@@ -2,7 +2,7 @@ use ash::vk;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::renderer::resources::ImageHandle;
+use crate::renderer::resources::{ImageCreateInfo, ImageHandle};
 use crate::vulkan::Allocator;
 
 /// Key for bucketing transient resources by their properties.
@@ -127,17 +127,20 @@ impl ResourcePool {
             Arc::clone(&self.device),
             image,
             view,
-            format,
-            extent,
-            mip_levels,
-            1,
             Some(allocation),
             Some(Arc::clone(&self.allocator)),
-            Some(format!(
-                "transient_{width}x{height}",
-                width = extent.width,
-                height = extent.height
-            )),
+            ImageCreateInfo {
+                width: extent.width,
+                height: extent.height,
+                format,
+                mip_levels,
+                layers: 1,
+                name: Some(format!(
+                    "transient_{width}x{height}",
+                    width = extent.width,
+                    height = extent.height
+                )),
+            },
         )?;
 
         Ok(image_handle)

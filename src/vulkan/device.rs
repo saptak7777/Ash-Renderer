@@ -17,6 +17,8 @@ pub struct VulkanDevice {
     pub timestamp_period_ns: f32,
     pub sample_rate_shading_supported: bool,
     pub memory_properties: vk::PhysicalDeviceMemoryProperties,
+    pub properties: vk::PhysicalDeviceProperties,
+    pub properties12: vk::PhysicalDeviceVulkan12Properties<'static>,
     pub headless: bool,
     pub instance: Arc<crate::vulkan::VulkanInstance>,
 }
@@ -50,7 +52,7 @@ impl VulkanDevice {
                     vk::PhysicalDeviceType::CPU => "CPU",
                     _ => "Other",
                 };
-                log::info!("  [{}] {device_name:?} ({device_type})", idx);
+                log::info!("  [{idx}] {device_name:?} ({device_type})");
             }
 
             let mut selected = None;
@@ -71,7 +73,12 @@ impl VulkanDevice {
                     )
                 })?;
 
-            let device_properties = vk_instance.get_physical_device_properties(physical_device);
+            let mut properties12 = vk::PhysicalDeviceVulkan12Properties::default();
+            let mut device_properties2 =
+                vk::PhysicalDeviceProperties2::default().push_next(&mut properties12);
+            vk_instance.get_physical_device_properties2(physical_device, &mut device_properties2);
+
+            let device_properties = device_properties2.properties;
             let device_features_supported =
                 vk_instance.get_physical_device_features(physical_device);
             let sample_rate_shading_supported =
@@ -157,6 +164,8 @@ impl VulkanDevice {
                 timestamp_period_ns,
                 sample_rate_shading_supported,
                 memory_properties,
+                properties: device_properties,
+                properties12: std::mem::transmute(properties12), // Transmute to 'static for storage
                 headless,
                 debug_utils,
             })
@@ -227,18 +236,12 @@ impl VulkanDevice {
 
         match (graphics_family, present_family) {
             (Some(graphics), Some(present)) => {
-                log::debug!(
-                    "  ✓ Device suitable: graphics={}, present={}",
-                    graphics,
-                    present
-                );
+                log::debug!("  ✓ Device suitable: graphics={graphics}, present={present}");
                 Some((graphics, present))
             }
             _ => {
                 log::debug!(
-                    "  ✗ Device rejected: graphics={:?}, present={:?}",
-                    graphics_family,
-                    present_family
+                    "  ✗ Device rejected: graphics={graphics_family:?}, present={present_family:?}"
                 );
                 None
             }

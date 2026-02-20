@@ -7,6 +7,18 @@ use super::font_data::{get_glyph, GLYPH_HEIGHT, GLYPH_WIDTH};
 use super::overlay_types::{generate_quad_ndc, pixel_to_ndc, OverlayConfig, TextVertex};
 use super::DiagnosticsState;
 
+/// Parameters for rasterizing a single glyph
+struct GlyphRasterContext<'a> {
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+    pub glyph: &'a [u8; 8],
+    pub color: [f32; 4],
+    pub screen_w: f32,
+    pub screen_h: f32,
+}
+
 /// Diagnostics overlay renderer
 ///
 /// Generates vertex data for the debug overlay. Does not perform GPU rendering
@@ -95,16 +107,16 @@ impl DiagnosticsOverlay {
             let mut x = self.config.offset[0];
             for ch in line.chars() {
                 if let Some(glyph) = get_glyph(ch) {
-                    self.rasterize_glyph(
+                    self.rasterize_glyph(&GlyphRasterContext {
                         x,
                         y,
-                        glyph_w,
-                        glyph_h,
+                        w: glyph_w,
+                        h: glyph_h,
                         glyph,
-                        self.config.color,
-                        screen_width,
-                        screen_height,
-                    );
+                        color: self.config.color,
+                        screen_w: screen_width,
+                        screen_h: screen_height,
+                    });
                 }
                 x += glyph_w;
             }
@@ -115,43 +127,38 @@ impl DiagnosticsOverlay {
     }
 
     /// Rasterize a single glyph into vertices
-    #[allow(clippy::too_many_arguments)]
-    fn rasterize_glyph(
-        &mut self,
-        x: f32,
-        y: f32,
-        w: f32,
-        h: f32,
-        glyph: &[u8; 8],
-        color: [f32; 4],
-        screen_w: f32,
-        screen_h: f32,
-    ) {
-        let pixel_w = w / 8.0;
-        let pixel_h = h / 8.0;
+    fn rasterize_glyph(&mut self, ctx: &GlyphRasterContext) {
+        let pixel_w = ctx.w / 8.0;
+        let pixel_h = ctx.h / 8.0;
 
-        for (row, &row_bits) in glyph.iter().enumerate() {
+        for (row, &row_bits) in ctx.glyph.iter().enumerate() {
             if row_bits == 0 {
                 continue; // Skip empty rows for performance
             }
 
             for col in 0..8 {
                 if (row_bits >> (7 - col)) & 1 == 1 {
-                    let px = x + col as f32 * pixel_w;
-                    let py = y + row as f32 * pixel_h;
+                    let px = ctx.x + col as f32 * pixel_w;
+                    let py = ctx.y + row as f32 * pixel_h;
 
-                    let tl = pixel_to_ndc(px, py, screen_w, screen_h);
-                    let tr = pixel_to_ndc(px + pixel_w, py, screen_w, screen_h);
-                    let bl = pixel_to_ndc(px, py + pixel_h, screen_w, screen_h);
-                    let br = pixel_to_ndc(px + pixel_w, py + pixel_h, screen_w, screen_h);
+                    let tl = pixel_to_ndc(px, py, ctx.screen_w, ctx.screen_h);
+                    let tr = pixel_to_ndc(px + pixel_w, py, ctx.screen_w, ctx.screen_h);
+                    let bl = pixel_to_ndc(px, py + pixel_h, ctx.screen_w, ctx.screen_h);
+                    let br = pixel_to_ndc(px + pixel_w, py + pixel_h, ctx.screen_w, ctx.screen_h);
 
                     // Two triangles for quad
-                    self.vertices.push(TextVertex::new(tl, [0.0, 0.0], color));
-                    self.vertices.push(TextVertex::new(tr, [1.0, 0.0], color));
-                    self.vertices.push(TextVertex::new(bl, [0.0, 1.0], color));
-                    self.vertices.push(TextVertex::new(bl, [0.0, 1.0], color));
-                    self.vertices.push(TextVertex::new(tr, [1.0, 0.0], color));
-                    self.vertices.push(TextVertex::new(br, [1.0, 1.0], color));
+                    self.vertices
+                        .push(TextVertex::new(tl, [0.0, 0.0], ctx.color));
+                    self.vertices
+                        .push(TextVertex::new(tr, [1.0, 0.0], ctx.color));
+                    self.vertices
+                        .push(TextVertex::new(bl, [0.0, 1.0], ctx.color));
+                    self.vertices
+                        .push(TextVertex::new(bl, [0.0, 1.0], ctx.color));
+                    self.vertices
+                        .push(TextVertex::new(tr, [1.0, 0.0], ctx.color));
+                    self.vertices
+                        .push(TextVertex::new(br, [1.0, 1.0], ctx.color));
                 }
             }
         }

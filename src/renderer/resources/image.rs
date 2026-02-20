@@ -1,6 +1,16 @@
 use ash::vk;
 use std::sync::Arc;
 
+/// Parameters for creating an image handle.
+pub struct ImageCreateInfo {
+    pub width: u32,
+    pub height: u32,
+    pub format: vk::Format,
+    pub mip_levels: u32,
+    pub layers: u32,
+    pub name: Option<String>,
+}
+
 /// Safe image/texture wrapper with automatic cleanup
 pub struct ImageHandle {
     image: vk::Image,
@@ -19,42 +29,40 @@ impl ImageHandle {
     /// Creates a new image handle.
     ///
     /// # Safety
-    ///
-    /// The device must remain valid for the lifetime of this handle.
+    /// The Vulkan device must remain valid for the lifetime of this handle. The provided image and view must be valid handles.
     pub unsafe fn new(
         device: Arc<ash::Device>,
         image: vk::Image,
         image_view: vk::ImageView,
-        format: vk::Format,
-        extent: vk::Extent2D,
-        name: Option<String>,
+        info: ImageCreateInfo,
     ) -> crate::Result<Self> {
-        Self::new_with_allocation(
-            device, image, image_view, format, extent, 1, 1, None, None, name,
-        )
+        Self::new_with_allocation(device, image, image_view, None, None, info)
     }
 
     /// Creates a new image handle with VMA allocation.
     ///
     /// # Safety
-    /// The Vulkan handles must be valid and remain valid for the lifetime of this handle.
-    #[allow(clippy::too_many_arguments)]
+    /// All provided Vulkan handles (device, image, view, allocator) must be valid and remain active. The allocation must correspond to the provided image.
     pub unsafe fn new_with_allocation(
         device: Arc<ash::Device>,
         image: vk::Image,
         image_view: vk::ImageView,
-        format: vk::Format,
-        extent: vk::Extent2D,
-        mip_levels: u32,
-        layers: u32,
         allocation: Option<vk_mem::Allocation>,
         allocator: Option<Arc<crate::vulkan::Allocator>>,
-        name: Option<String>,
+        info: ImageCreateInfo,
     ) -> crate::Result<Self> {
-        if let Some(ref n) = name {
-            log::info!("Creating image '{n}' ({}x{})", extent.width, extent.height);
+        if let Some(ref n) = info.name {
+            log::info!(
+                "Creating image '{n}' ({width}x{height})",
+                width = info.width,
+                height = info.height
+            );
         } else {
-            log::info!("Creating image ({}x{})", extent.width, extent.height);
+            log::info!(
+                "Creating image ({width}x{height})",
+                width = info.width,
+                height = info.height
+            );
         }
 
         Ok(Self {
@@ -63,11 +71,14 @@ impl ImageHandle {
             device,
             allocation,
             allocator,
-            extent,
-            format,
-            mip_levels,
-            layers,
-            name,
+            extent: vk::Extent2D {
+                width: info.width,
+                height: info.height,
+            },
+            format: info.format,
+            mip_levels: info.mip_levels,
+            layers: info.layers,
+            name: info.name,
         })
     }
 
@@ -312,13 +323,16 @@ impl ImageHandle {
                 device,
                 image,
                 view,
-                format,
-                extent,
-                1,
-                1,
                 Some(allocation),
                 Some(allocator),
-                Some("BRDF_LUT".to_string()),
+                ImageCreateInfo {
+                    width: extent.width,
+                    height: extent.height,
+                    format,
+                    mip_levels: 1,
+                    layers: 1,
+                    name: Some("BRDF_LUT".to_string()),
+                },
             )
         }
     }
@@ -369,13 +383,16 @@ impl ImageHandle {
                 device,
                 image,
                 view,
-                format,
-                extent,
-                mip_levels,
-                6,
                 Some(allocation),
                 Some(allocator),
-                name,
+                ImageCreateInfo {
+                    width: extent.width,
+                    height: extent.height,
+                    format,
+                    mip_levels,
+                    layers: 6,
+                    name,
+                },
             )
         }
     }

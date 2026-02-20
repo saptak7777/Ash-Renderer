@@ -6,29 +6,32 @@ use std::sync::Arc;
 use crate::vulkan::Allocator;
 use crate::{AshError, Result};
 
-use super::resources::{PageAllocation, VsmResources};
+use super::resources::VsmResources;
+
+#[derive(Clone)]
+pub struct ShadowPageRenderInfo<'a> {
+    pub resources: &'a super::resources::VsmResources,
+    pub bindless_descriptor_set: vk::DescriptorSet,
+    pub vertex_addr: u64,
+    pub index_addr: u64,
+    pub pages: &'a [super::page_manager::PageToRender],
+}
 
 #[repr(C, align(16))]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct ShadowPushConstants {
-    // 0-31: BDA pointers (32 bytes)
-    pub vertex_ptr_low: u32,
-    pub vertex_ptr_high: u32,
-    pub instance_ptr_low: u32,
-    pub instance_ptr_high: u32,
-    pub index_ptr_low: u32,
-    pub index_ptr_high: u32,
-    pub transform_ptr_low: u32,
-    pub transform_ptr_high: u32,
+    // 0-15: BDA pointers (Vertex & Index)
+    pub vertex_ptr: u64, // Offset 0
+    pub index_ptr: u64,  // Offset 8
 
-    // 32-63: Indices and Flags (32 bytes)
-    pub transform_index: u32,
-    pub use_instancing: u32,
-    pub _padding_lean: [u32; 6], // Padding to reach offset 64 for light_space_matrix
+    // 16-63: Padding
+    pub _padding: [u64; 6], // Padding to reach offset 64
 
     // 64-127: Light Space Matrix (64 bytes)
     pub light_space_matrix: [[f32; 4]; 4], // Mat4 at offset 64
 }
+
+pub const LIGHT_SPACE_MATRIX_OFFSET: u32 = 64;
 
 /// VSM shadow rendering pass
 pub struct VsmShadowPass {
@@ -228,7 +231,8 @@ impl VsmShadowPass {
     /// Device must remain valid. Descriptor set layouts must be valid.
     pub unsafe fn create_pipeline(
         &mut self,
-        descriptor_set_layouts: &[vk::DescriptorSetLayout],
+        _device_layout: vk::DescriptorSetLayout, // Set 0 (Dummy/Obsolete)
+        bindless_layout: vk::DescriptorSetLayout, // Set 1
     ) -> Result<()> {
         log::info!("Creating VSM shadow pipeline");
 
@@ -243,9 +247,13 @@ impl VsmShadowPass {
             size: DRAW_PUSH_VERTEX_BYTES + DRAW_PUSH_FRAGMENT_BYTES + LIGHT_SPACE_MATRIX_BYTES,
         };
 
+        // Descriptor set layouts: Set 0 (Dummy) and Set 1 (Bindless)
+        // We must have two layouts to match 'layout(set = 1, ...)' in the shader
+        let layouts = [_device_layout, bindless_layout];
+
         // Create pipeline layout
         let layout_info = vk::PipelineLayoutCreateInfo::default()
-            .set_layouts(descriptor_set_layouts)
+            .set_layouts(&layouts)
             .push_constant_ranges(std::slice::from_ref(&push_constant_range));
 
         let pipeline_layout = self
@@ -279,7 +287,7 @@ impl VsmShadowPass {
                 AshError::VulkanError(format!("Shadow fragment shader creation failed: {e:?}"))
             })?;
 
-        let entry_point = std::ffi::CStr::from_bytes_with_nul(b"main\0").unwrap();
+        let entry_point = c"main";
 
         let shader_stages = [
             vk::PipelineShaderStageCreateInfo::default()
@@ -381,204 +389,82 @@ impl VsmShadowPass {
         self.shadow_pipeline_layout
     }
 
-    /// Render shadows using GPU-generated indirect commands
+    /// Render shadows for specific pages using Dynamic Rendering
     ///
     /// # Safety
     /// Command buffer must be in recording state.
-    pub unsafe fn render_shadows_indirect(
+    pub unsafe fn render_pages<F>(
         &self,
         cmd: vk::CommandBuffer,
-        allocations: &[PageAllocation],
-        page_size: u32,
-        frame_set: vk::DescriptorSet,
-        bindless_set: vk::DescriptorSet,
-        indirect_buffer: vk::Buffer,
-        count_buffer: vk::Buffer,
-        max_commands_per_level: u32,
-        level_matrices: &[glam::Mat4],
-        _material_ptr: u64,
-        index_ptr: u64,
-        _light_ptr: u64,
-        _tile_ptr: u64,
-        _frame_ptr: u64,
-        vertex_ptr: u64,
-        instance_ptr: u64,
-        transform_ptr: u64,
-        transform_index: u32,
-    ) {
-        if allocations.is_empty() {
-            return;
-        }
-
-        log::debug!("Rendering {} shadow pages (indirect)", allocations.len());
-
-        let clear_values = [
-            vk::ClearValue {
-                color: vk::ClearColorValue {
-                    float32: [1.0, 1.0, 0.0, 0.0],
-                },
-            },
-            vk::ClearValue {
-                depth_stencil: vk::ClearDepthStencilValue {
-                    depth: 0.0, // Reverse-Z
-                    stencil: 0,
-                },
-            },
-        ];
-
-        let render_pass_begin = vk::RenderPassBeginInfo::default()
-            .render_pass(self.render_pass)
-            .framebuffer(self.framebuffer)
-            .render_area(vk::Rect2D {
-                offset: vk::Offset2D { x: 0, y: 0 },
-                extent: vk::Extent2D {
-                    width: self.physical_resolution,
-                    height: self.physical_resolution,
-                },
-            })
-            .clear_values(&clear_values);
-
-        self.device
-            .cmd_begin_render_pass(cmd, &render_pass_begin, vk::SubpassContents::INLINE);
-
-        // Bind Pipeline
-        if let Some(pipeline) = self.shadow_pipeline {
-            self.device
-                .cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, pipeline);
-        }
-
-        // Bind Descriptor Sets
-        if let Some(layout) = self.shadow_pipeline_layout {
-            self.device.cmd_bind_descriptor_sets(
-                cmd,
-                vk::PipelineBindPoint::GRAPHICS,
-                layout,
-                0,
-                &[frame_set, bindless_set],
-                &[],
-            );
-        }
-
-        // For each allocated page, set viewport and execute indirect draw
-        for allocation in allocations {
-            let x = (allocation.physical_x * page_size) as f32;
-            let y = (allocation.physical_y * page_size) as f32;
-
-            let viewport = vk::Viewport {
-                x,
-                y,
-                width: page_size as f32,
-                height: page_size as f32,
-                min_depth: 0.0,
-                max_depth: 1.0,
-            };
-
-            let scissor = vk::Rect2D {
-                offset: vk::Offset2D {
-                    x: x as i32,
-                    y: y as i32,
-                },
-                extent: vk::Extent2D {
-                    width: page_size,
-                    height: page_size,
-                },
-            };
-
-            self.device.cmd_set_viewport(cmd, 0, &[viewport]);
-            self.device.cmd_set_scissor(cmd, 0, &[scissor]);
-
-            // Push constants for this level
-            let level_matrix = level_matrices
-                .get(allocation.layer as usize)
-                .cloned()
-                .unwrap_or(glam::Mat4::IDENTITY);
-
-            let push_constants = ShadowPushConstants {
-                vertex_ptr_low: vertex_ptr as u32,
-                vertex_ptr_high: (vertex_ptr >> 32) as u32,
-                instance_ptr_low: instance_ptr as u32,
-                instance_ptr_high: (instance_ptr >> 32) as u32,
-                index_ptr_low: index_ptr as u32,
-                index_ptr_high: (index_ptr >> 32) as u32,
-                transform_ptr_low: transform_ptr as u32,
-                transform_ptr_high: (transform_ptr >> 32) as u32,
-
-                transform_index: transform_index,
-                use_instancing: 1, // DrawIndirect uses gl_InstanceIndex
-                _padding_lean: [0; 6],
-                light_space_matrix: level_matrix.to_cols_array_2d(),
-            };
-
-            if let Some(layout) = self.shadow_pipeline_layout {
-                self.device.cmd_push_constants(
-                    cmd,
-                    layout,
-                    vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
-                    0,
-                    bytemuck::bytes_of(&push_constants),
-                );
-            }
-
-            // Execute indirect draw for this page's clipmap level
-            let level_offset = (allocation.layer * max_commands_per_level) as vk::DeviceSize
-                * std::mem::size_of::<crate::renderer::vcgs::IndirectDrawCommand>()
-                    as vk::DeviceSize;
-            let count_offset = (allocation.layer * 4) as vk::DeviceSize;
-
-            self.device.cmd_draw_indirect_count(
-                cmd,
-                indirect_buffer,
-                level_offset,
-                count_buffer,
-                count_offset,
-                max_commands_per_level,
-                std::mem::size_of::<crate::renderer::vcgs::IndirectDrawCommand>() as u32,
-            );
-        }
-
-        self.device.cmd_end_render_pass(cmd);
-    }
-
-    /// Render shadows for allocated pages
-    ///
-    /// # Safety
-    /// Command buffer must be in recording state.
-    pub unsafe fn render_shadows<F>(
-        &self,
-        cmd: vk::CommandBuffer,
-        allocations: &[PageAllocation],
-        page_size: u32,
-        light_space_matrix: &glam::Mat4,
-        frame_set: vk::DescriptorSet,
-        bindless_set: vk::DescriptorSet,
-        mut draw_fn: F,
+        info: ShadowPageRenderInfo<'_>,
+        mut scene_draw_fn: F,
     ) where
-        F: FnMut(vk::CommandBuffer, &PageAllocation),
+        F: FnMut(vk::CommandBuffer),
     {
-        if allocations.is_empty() {
+        if info.pages.is_empty() {
             return;
         }
 
-        log::debug!("Rendering {} shadow pages", allocations.len());
+        log::debug!(
+            "Rendering {} shadow pages via Dynamic Rendering",
+            info.pages.len()
+        );
 
-        // CRITICAL FIX: Begin Render Pass with proper clear values
-        let clear_values = [
-            vk::ClearValue {
-                color: vk::ClearColorValue {
-                    float32: [1.0, 1.0, 0.0, 0.0], // Clear variance to (1.0, 1.0) for far depth
-                },
-            },
-            vk::ClearValue {
-                depth_stencil: vk::ClearDepthStencilValue {
-                    depth: 0.0, // Reverse-Z: 0.0 = far plane
-                    stencil: 0,
-                },
-            },
-        ];
+        // 1. Transition layouts to attachment optimal
+        let cache_barrier = vk::ImageMemoryBarrier::default()
+            .src_access_mask(vk::AccessFlags::SHADER_READ)
+            .dst_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE)
+            .old_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+            .new_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+            .image(info.resources.physical_cache)
+            .subresource_range(vk::ImageSubresourceRange {
+                aspect_mask: vk::ImageAspectFlags::COLOR,
+                base_mip_level: 0,
+                level_count: 1,
+                base_array_layer: 0,
+                layer_count: 1,
+            });
 
-        let render_pass_begin = vk::RenderPassBeginInfo::default()
-            .render_pass(self.render_pass)
-            .framebuffer(self.framebuffer)
+        let depth_barrier = vk::ImageMemoryBarrier::default()
+            .src_access_mask(vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_READ)
+            .dst_access_mask(vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE)
+            .old_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
+            .new_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL) // Using DEPTH_STENCIL_ATTACHMENT_OPTIMAL for broad hardware compatibility (avoids requiring KHR_separate_depth_stencil_layouts).
+            .image(info.resources.physical_depth_image)
+            .subresource_range(vk::ImageSubresourceRange {
+                aspect_mask: vk::ImageAspectFlags::DEPTH,
+                base_mip_level: 0,
+                level_count: 1,
+                base_array_layer: 0,
+                layer_count: 1,
+            });
+
+        self.device.cmd_pipeline_barrier(
+            cmd,
+            vk::PipelineStageFlags::FRAGMENT_SHADER | vk::PipelineStageFlags::LATE_FRAGMENT_TESTS,
+            vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT
+                | vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS,
+            vk::DependencyFlags::empty(),
+            &[],
+            &[],
+            &[cache_barrier, depth_barrier],
+        );
+
+        // 2. Begin Dynamic Rendering
+        let color_attachment = vk::RenderingAttachmentInfo::default()
+            .image_view(info.resources.physical_cache_view)
+            .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+            .load_op(vk::AttachmentLoadOp::LOAD) // Preserve atlas
+            .store_op(vk::AttachmentStoreOp::STORE);
+
+        let depth_attachment = vk::RenderingAttachmentInfo::default()
+            .image_view(info.resources.physical_depth_view)
+            .image_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
+            .load_op(vk::AttachmentLoadOp::LOAD) // Preserve atlas (we clear per-tile)
+            .store_op(vk::AttachmentStoreOp::STORE);
+
+        let color_attachments = [color_attachment];
+        let rendering_info = vk::RenderingInfo::default()
             .render_area(vk::Rect2D {
                 offset: vk::Offset2D { x: 0, y: 0 },
                 extent: vk::Extent2D {
@@ -586,34 +472,45 @@ impl VsmShadowPass {
                     height: self.physical_resolution,
                 },
             })
-            .clear_values(&clear_values);
+            .layer_count(1)
+            .color_attachments(&color_attachments)
+            .depth_attachment(&depth_attachment);
 
-        self.device
-            .cmd_begin_render_pass(cmd, &render_pass_begin, vk::SubpassContents::INLINE);
+        self.device.cmd_begin_rendering(cmd, &rendering_info);
 
-        // Bind Pipeline
+        // 3. Bind Pipeline
         if let Some(pipeline) = self.shadow_pipeline {
             self.device
                 .cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, pipeline);
         }
 
-        // Bind Bindless Descriptor Set (Set 1 for BDA vertex pulling)
+        // 4. Bind Bindless Descriptor Set (Set 1)
         if let Some(layout) = self.shadow_pipeline_layout {
             self.device.cmd_bind_descriptor_sets(
                 cmd,
                 vk::PipelineBindPoint::GRAPHICS,
                 layout,
-                0,                          // Start at Set 0
-                &[frame_set, bindless_set], // Bind Set 0 and Set 1
+                1, // Set 1
+                &[info.bindless_descriptor_set],
                 &[],
+            );
+
+            // 5. Push BDA pointers (Static for all pages)
+            let bda_push = [info.vertex_addr, info.index_addr];
+            self.device.cmd_push_constants(
+                cmd,
+                layout,
+                vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                0, // Offset 0
+                bytemuck::bytes_of(&bda_push),
             );
         }
 
-        // For each allocated page, set viewport and render
-        for allocation in allocations {
-            // Calculate viewport for this physical page
-            let x = (allocation.physical_x * page_size) as f32;
-            let y = (allocation.physical_y * page_size) as f32;
+        // 6. Iterate over pages
+        for page in info.pages {
+            let page_size = info.resources.config().page_size;
+            let x = (page.physical_coord.x * page_size as i32) as f32;
+            let y = (page.physical_coord.y * page_size as i32) as f32;
 
             let viewport = vk::Viewport {
                 x,
@@ -638,26 +535,67 @@ impl VsmShadowPass {
             self.device.cmd_set_viewport(cmd, 0, &[viewport]);
             self.device.cmd_set_scissor(cmd, 0, &[scissor]);
 
-            // Push lightSpaceMatrix from parameter (not hardcoded IDENTITY)
-            let matrix_bytes = bytemuck::bytes_of(light_space_matrix);
+            // Clear just this tile's depth
+            let clear_attachment = vk::ClearAttachment::default()
+                .aspect_mask(vk::ImageAspectFlags::DEPTH)
+                .clear_value(vk::ClearValue {
+                    depth_stencil: vk::ClearDepthStencilValue {
+                        depth: 0.0, // Reverse-Z standard: 0.0 is far plane
+                        stencil: 0,
+                    },
+                });
 
+            let clear_rect = vk::ClearRect::default()
+                .rect(scissor)
+                .base_array_layer(0)
+                .layer_count(1);
+
+            self.device
+                .cmd_clear_attachments(cmd, &[clear_attachment], &[clear_rect]);
+
+            // Push constants (Matrix)
+            let matrix = page.mvp.to_cols_array_2d();
+            let matrix_bytes = bytemuck::bytes_of(&matrix);
             if let Some(layout) = self.shadow_pipeline_layout {
                 self.device.cmd_push_constants(
                     cmd,
                     layout,
                     vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
-                    160,
+                    64, // Offset 64 for Light Space Matrix in ShadowPushConstants
                     matrix_bytes,
                 );
             }
 
-            // Call user draw function for this page
-            // Call user draw function for this page
-            draw_fn(cmd, allocation);
+            // Draw call
+            scene_draw_fn(cmd);
         }
 
-        // CRITICAL FIX: End Render Pass
-        self.device.cmd_end_render_pass(cmd);
+        self.device.cmd_end_rendering(cmd);
+
+        // 5. Transition Back
+        let back_cache_barrier = vk::ImageMemoryBarrier::default()
+            .src_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE)
+            .dst_access_mask(vk::AccessFlags::SHADER_READ)
+            .old_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+            .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+            .image(info.resources.physical_cache)
+            .subresource_range(vk::ImageSubresourceRange {
+                aspect_mask: vk::ImageAspectFlags::COLOR,
+                base_mip_level: 0,
+                level_count: 1,
+                base_array_layer: 0,
+                layer_count: 1,
+            });
+
+        self.device.cmd_pipeline_barrier(
+            cmd,
+            vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+            vk::PipelineStageFlags::FRAGMENT_SHADER,
+            vk::DependencyFlags::empty(),
+            &[],
+            &[],
+            &[back_cache_barrier],
+        );
     }
 
     /// Destroy resources
@@ -706,8 +644,8 @@ impl VsmShadowPass {
 
 impl Drop for VsmShadowPass {
     fn drop(&mut self) {
-        // Note: destroy() requires allocator, which we don't have in Drop
-        // The allocator will clean up the depth buffer when it's destroyed
-        log::warn!("VsmShadowPass dropped without explicit destroy() call");
+        if !self.destroyed {
+            log::warn!("VsmShadowPass dropped without explicit destroy() call");
+        }
     }
 }

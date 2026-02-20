@@ -85,17 +85,17 @@ impl ApplicationHandler for App {
 
                 let mut staging_resources = Vec::new();
                 let mesh_handle = scene
-                    .upload_mesh(
-                        Arc::clone(&renderer.context.device.device),
-                        Arc::clone(&renderer.context.alloc),
-                        renderer.frame.cmds.upload_command_pool_handle(),
-                        upload_cmd,
-                        &renderer.context.device.graphics_queue,
-                        &mut cube,
-                        &mut renderer.resources.assets,
-                        &mut staging_resources,
-                        None,
-                    )
+                    .upload_mesh(ash_renderer::renderer::MeshUploadInfo {
+                        device: Arc::clone(&renderer.context.device.device),
+                        allocator: Arc::clone(&renderer.context.alloc),
+                        command_pool: renderer.frame.cmds.upload_command_pool_handle(),
+                        command_buffer: upload_cmd,
+                        queue: renderer.context.device.graphics_queue,
+                        mesh: &mut cube,
+                        asset_manager: &mut renderer.resources.assets,
+                        staging_resources: &mut staging_resources,
+                        material_override: None,
+                    })
                     .unwrap();
 
                 cmd_context.end().unwrap();
@@ -215,7 +215,9 @@ impl ApplicationHandler for App {
                             log::error!("Failed to submit render commands: {e}");
                         }
 
-                        if let Err(e) = renderer.render_frame(scene, view, proj, camera_pos, None) {
+                        if let Err(e) =
+                            renderer.render_frame(scene, view, proj, camera_pos, None, None)
+                        {
                             log::error!("Render error: {e}");
                         }
                     }

@@ -17,6 +17,7 @@ pub mod init_types;
 pub mod initialization;
 pub mod instancing;
 pub mod light_culling_integration;
+pub mod lighting;
 pub mod model_renderer;
 pub mod passes;
 pub mod pipeline_cache;
@@ -29,6 +30,8 @@ pub mod resource_registry;
 pub mod resources;
 pub mod scene;
 pub(crate) mod swapchain_manager;
+pub mod sync;
+pub use sync::FramePreparationInfo;
 pub mod systems;
 pub mod types;
 pub mod util;
@@ -47,7 +50,7 @@ pub use render_pipeline::{GeometryRenderContext, RenderPipeline};
 pub use render_stats::{RenderStats, StatsCollector};
 pub use renderer::Renderer;
 pub use resource_registry::{ResourceId, ResourceRegistry};
-pub use scene::Scene;
+pub use scene::{MeshUploadInfo, Scene};
 
 // Pass-specific re-exports (if not covered by passes::*)
 pub use passes::fullscreen::FullscreenPass;

@@ -60,7 +60,7 @@ impl ApplicationHandler for App {
                     log::info!("Loading model from: {glb_path}");
                     match gltf_loader::load_model(glb_path) {
                         Ok(meshes) => {
-                            for (_i, mut mesh) in meshes.into_iter().enumerate() {
+                            for mut mesh in meshes.into_iter() {
                                 let upload_cmd = renderer.get_transfer_command_buffer().unwrap();
                                 let cmd_context = renderer.frame.cmds.context(upload_cmd);
                                 cmd_context
@@ -68,17 +68,21 @@ impl ApplicationHandler for App {
                                     .unwrap();
 
                                 let mut staging_resources = Vec::new();
-                                let upload_res = scene.upload_mesh(
-                                    Arc::clone(&renderer.context.device.device),
-                                    Arc::clone(&renderer.context.alloc),
-                                    renderer.frame.cmds.upload_command_pool_handle(),
-                                    upload_cmd,
-                                    &renderer.context.device.graphics_queue,
-                                    &mut mesh,
-                                    &mut renderer.resources.assets,
-                                    &mut staging_resources,
-                                    None,
-                                );
+                                let upload_res =
+                                    scene.upload_mesh(ash_renderer::renderer::MeshUploadInfo {
+                                        device: Arc::clone(&renderer.context.device.device),
+                                        allocator: Arc::clone(&renderer.context.alloc),
+                                        command_pool: renderer
+                                            .frame
+                                            .cmds
+                                            .upload_command_pool_handle(),
+                                        command_buffer: upload_cmd,
+                                        queue: renderer.context.device.graphics_queue,
+                                        mesh: &mut mesh,
+                                        asset_manager: &mut renderer.resources.assets,
+                                        staging_resources: &mut staging_resources,
+                                        material_override: None,
+                                    });
 
                                 cmd_context.end().unwrap();
 
@@ -127,17 +131,17 @@ impl ApplicationHandler for App {
                         .unwrap();
 
                     let mut staging_resources = Vec::new();
-                    let upload_res = scene.upload_mesh(
-                        Arc::clone(&renderer.context.device.device),
-                        Arc::clone(&renderer.context.alloc),
-                        renderer.frame.cmds.upload_command_pool_handle(),
-                        upload_cmd,
-                        &renderer.context.device.graphics_queue,
-                        &mut cube,
-                        &mut renderer.resources.assets,
-                        &mut staging_resources,
-                        None,
-                    );
+                    let upload_res = scene.upload_mesh(ash_renderer::renderer::MeshUploadInfo {
+                        device: Arc::clone(&renderer.context.device.device),
+                        allocator: Arc::clone(&renderer.context.alloc),
+                        command_pool: renderer.frame.cmds.upload_command_pool_handle(),
+                        command_buffer: upload_cmd,
+                        queue: renderer.context.device.graphics_queue,
+                        mesh: &mut cube,
+                        asset_manager: &mut renderer.resources.assets,
+                        staging_resources: &mut staging_resources,
+                        material_override: None,
+                    });
 
                     cmd_context.end().unwrap();
 
@@ -165,7 +169,7 @@ impl ApplicationHandler for App {
 
                     if let Ok(handle) = upload_res {
                         self.mesh_handles.push(handle);
-                        log::info!("Registered default cube with handle {}", handle);
+                        log::info!("Registered default cube with handle {handle}");
                     }
                 }
 
@@ -210,7 +214,7 @@ impl ApplicationHandler for App {
                     }
 
                     let _ = renderer.submit_render_commands(scene, &commands);
-                    let _ = renderer.render_frame(scene, view, proj, camera_pos, None);
+                    let _ = renderer.render_frame(scene, view, proj, camera_pos, None, None);
                 }
                 if let Some(window) = &self.window {
                     window.request_redraw();

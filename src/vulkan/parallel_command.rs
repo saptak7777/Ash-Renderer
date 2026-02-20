@@ -39,8 +39,6 @@ impl WorkerState {
 /// Manages per-worker command pools and cached secondary command buffers for parallel recording.
 pub struct ParallelCommandManager {
     device: Arc<ash::Device>,
-    /// Queue family index - reserved for future multi-queue support (e.g., transfer queue)
-    queue_family_index: u32,
     primary_pool: vk::CommandPool,
     tracked_primary: Mutex<Vec<vk::CommandBuffer>>,
     workers: Vec<Mutex<WorkerState>>,
@@ -69,7 +67,6 @@ impl ParallelCommandManager {
 
         Ok(Self {
             device,
-            queue_family_index,
             primary_pool,
             tracked_primary: Mutex::new(Vec::new()),
             workers,

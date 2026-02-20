@@ -1,8 +1,16 @@
 //! Page Manager - Handles virtual page allocation and tracking
 
+use glam::{IVec2, Mat4, Quat, Vec3};
 use std::collections::VecDeque;
 
 use super::resources::{PageAllocation, PageRequest};
+
+/// Struct representing a page that needs to be rendered
+#[derive(Copy, Clone, Debug)]
+pub struct PageToRender {
+    pub physical_coord: IVec2,
+    pub mvp: Mat4,
+}
 
 /// Page state tracking
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -36,6 +44,8 @@ pub struct PageManager {
     current_frame: u32,
     /// List of indices of dirty pages for efficient clearing
     dirty_pages_indices: Vec<usize>,
+    /// Pages allocated in the current frame
+    newly_allocated_pages: Vec<PageAllocation>,
 }
 
 impl PageManager {
@@ -78,12 +88,14 @@ impl PageManager {
             free_physical_pages,
             current_frame: 0,
             dirty_pages_indices: Vec::new(),
+            newly_allocated_pages: Vec::new(),
         }
     }
 
     /// Begin a new frame
     pub fn begin_frame(&mut self, frame_index: u32) {
         self.current_frame = frame_index;
+        self.newly_allocated_pages.clear();
 
         // Clear dirty flags from previous frame
         for idx in self.dirty_pages_indices.drain(..) {
@@ -154,7 +166,7 @@ impl PageManager {
                             _padding: [0; 2],
                         });
 
-                        log::debug!(
+                        log::trace!(
                             "Allocated page ({}, {}, L{}) -> ({}, {})",
                             request.virtual_x,
                             request.virtual_y,
@@ -164,7 +176,28 @@ impl PageManager {
                         );
                     } else {
                         // No free pages, try to evict LRU page
-                        if let Some((phys_x, phys_y)) = self.evict_lru_page() {
+                        if let Some((old_idx, phys_x, phys_y)) = self.evict_lru_page() {
+                            // Emit Invalidation for the old virtual page first
+                            let pages_per_layer = (self.virtual_pages_per_axis
+                                * self.virtual_pages_per_axis)
+                                as usize;
+                            let old_layer = (old_idx / pages_per_layer) as u32;
+                            let old_layer_local_idx = old_idx % pages_per_layer;
+                            let old_v_y =
+                                (old_layer_local_idx as u32) / self.virtual_pages_per_axis;
+                            let old_v_x =
+                                (old_layer_local_idx as u32) % self.virtual_pages_per_axis;
+
+                            allocations.push(PageAllocation {
+                                virtual_x: old_v_x,
+                                virtual_y: old_v_y,
+                                physical_x: 0,
+                                physical_y: 0,
+                                layer: old_layer,
+                                flags: 0, // INVALID/FREE
+                                _padding: [0; 2],
+                            });
+
                             self.page_states[idx] = PageState::Allocated {
                                 physical_x: phys_x,
                                 physical_y: phys_y,
@@ -183,7 +216,7 @@ impl PageManager {
                                 _padding: [0; 2],
                             });
 
-                            log::debug!(
+                            log::trace!(
                                 "Evicted LRU and allocated page ({}, {}, L{}) -> ({}, {})",
                                 request.virtual_x,
                                 request.virtual_y,
@@ -213,6 +246,7 @@ impl PageManager {
             }
         }
 
+        self.newly_allocated_pages.extend(allocations.clone());
         allocations
     }
 
@@ -221,8 +255,8 @@ impl PageManager {
         self.free_physical_pages.pop_front()
     }
 
-    /// Evict least recently used page
-    fn evict_lru_page(&mut self) -> Option<(u32, u32)> {
+    /// Evict least recently used page. Returns (virtual_index, physical_x, physical_y)
+    fn evict_lru_page(&mut self) -> Option<(usize, u32, u32)> {
         let mut oldest_frame = self.current_frame;
         let mut oldest_idx = None;
 
@@ -246,7 +280,7 @@ impl PageManager {
             } = self.page_states[idx]
             {
                 self.page_states[idx] = PageState::Free;
-                return Some((physical_x, physical_y));
+                return Some((idx, physical_x, physical_y));
             }
         }
 
@@ -339,6 +373,37 @@ impl PageManager {
         }
 
         log::info!("PageManager cleared");
+    }
+
+    /// Get pages that need rendering in the current frame
+    pub fn get_pages_to_render(&self, light_view_proj: Mat4) -> Vec<PageToRender> {
+        let table_size = self.virtual_pages_per_axis as f32;
+        let u_scale = 1.0 / table_size;
+        let w = 2.0 * u_scale; // Width in NDC
+        let h = 2.0 * u_scale;
+
+        self.newly_allocated_pages
+            .iter()
+            .map(|alloc| {
+                let u_offset = alloc.virtual_x as f32 * u_scale;
+                let v_offset = alloc.virtual_y as f32 * u_scale;
+
+                let center_x = -1.0 + 2.0 * (u_offset + 0.5 * u_scale);
+                let center_y = -1.0 + 2.0 * (v_offset + 0.5 * u_scale);
+
+                // Create a Scale-Translate Matrix to crop NDC
+                let crop_matrix = Mat4::from_scale_rotation_translation(
+                    Vec3::new(2.0 / w, 2.0 / h, 1.0), // Zoom in
+                    Quat::IDENTITY,
+                    Vec3::new(-center_x * (2.0 / w), -center_y * (2.0 / h), 0.0), // Re-center
+                );
+
+                PageToRender {
+                    physical_coord: IVec2::new(alloc.physical_x as i32, alloc.physical_y as i32),
+                    mvp: crop_matrix * light_view_proj,
+                }
+            })
+            .collect()
     }
 }
 

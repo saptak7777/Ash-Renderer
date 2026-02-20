@@ -1,4 +1,5 @@
 pub mod culling;
+pub mod lighting_system;
 pub mod post_process;
 
 use crate::renderer::features::AutoRotateFeature;
@@ -9,7 +10,6 @@ use crate::renderer::{
     features::FeatureManager,
     frame::Frame,
     passes::{
-        hiz::AdaptiveHiZManager,
         motion::MotionVectorPass,
         temporal_aa::{ConfigMetrics, TaaConfig},
         vsr::{VsrConfig, VsrPass},
@@ -55,6 +55,12 @@ pub struct Systems {
     pub taa_config: TaaConfig,
     pub taa_config_metrics: ConfigMetrics,
     pub vsr_config: VsrConfig,
+    /// Previous frame's jitter offset (UV space) for TAA reprojection.
+    pub prev_jitter_uv: [f32; 2],
+
+    // Owned Systems
+    /// Authoritative owner of scene lighting state and the Forward+ culling pipeline.
+    pub lighting: lighting_system::LightingSystem,
 }
 
 impl Systems {
@@ -74,37 +80,45 @@ impl Systems {
         features.set_device(Arc::clone(&context.device.device));
         features.add_feature(AutoRotateFeature::new());
 
-        let mut lighting = resources.lighting.take().expect("Lighting not initialized");
-        let post = resources
-            .post
-            .take()
-            .expect("Post-processing not initialized");
-        let mut passes = resources.passes.take().expect("Passes not initialized");
-        let pipelines = resources
-            .pipelines
-            .take()
-            .expect("Pipelines not initialized");
+        let lighting = resources.lighting.take().ok_or_else(|| {
+            AshError::VulkanError("Lighting system not found in ResourceRegistry".to_string())
+        })?;
+        let post = resources.post.take().ok_or_else(|| {
+            AshError::VulkanError(
+                "Post-processing system not found in ResourceRegistry".to_string(),
+            )
+        })?;
+        let mut passes = resources.passes.take().ok_or_else(|| {
+            AshError::VulkanError("PassRegistry not found in ResourceRegistry".to_string())
+        })?;
+        let pipelines = resources.pipelines.take().ok_or_else(|| {
+            AshError::VulkanError("PipelineRegistry not found in ResourceRegistry".to_string())
+        })?;
 
         let indirect_draw_pass = Some(Arc::new(RwLock::new(
             passes
                 .indirect_draw_pass
                 .take()
-                .expect("Indirect Draw Pass not found"),
+                .ok_or_else(|| AshError::VulkanError("Indirect Draw Pass not found".to_string()))?,
         )));
+
+        // Promote ForwardPlusIntegration into a shared Arc so both RenderPipeline
+        // (which needs it for descriptor binding) and LightingSystem (which owns updates)
+        // can refer to the same GPU state without copying.
+        let forward_plus_arc = Arc::new(RwLock::new(lighting.forward_plus));
 
         let systems = Self {
             pipeline: RenderPipeline::new(
-                lighting.shadow_system.take(),
                 post.post_process,
-                Some(Arc::new(RwLock::new(
-                    passes.hiz_pass.take().expect("HiZ Pass not found"),
-                ))),
-                Arc::new(RwLock::new(AdaptiveHiZManager::new(3.0))),
-                Some(Arc::new(RwLock::new(lighting.forward_plus))),
+                Some(Arc::new(RwLock::new(passes.hiz_pass.take().ok_or_else(
+                    || AshError::VulkanError("HiZ Pass not found".to_string()),
+                )?))),
+                Some(Arc::clone(&forward_plus_arc)),
                 indirect_draw_pass.clone(),
                 Some(pipelines.pipeline),
                 Some(pipelines.layout),
             ),
+
             culling: CullingSystem::new(indirect_draw_pass),
             skybox_pass: passes.skybox_pass.take(),
             features,
@@ -124,11 +138,33 @@ impl Systems {
             taa_config: TaaConfig::default(),
             taa_config_metrics: ConfigMetrics::default(),
             vsr_config: VsrConfig::default(),
+            prev_jitter_uv: [0.0, 0.0],
+            lighting: lighting_system::LightingSystem::new(forward_plus_arc),
         };
 
         frame.gbuffer_indices = Some(passes.gbuffer_indices);
 
         Ok(systems)
+    }
+
+    /// Access the post-processing system.
+    pub fn post_process(&self) -> &post_process::PostProcessSystem {
+        &self.pipeline.post_process
+    }
+
+    /// Access the post-processing system mutably.
+    pub fn post_process_mut(&mut self) -> &mut post_process::PostProcessSystem {
+        &mut self.pipeline.post_process
+    }
+
+    /// Access the lighting system.
+    pub fn lighting(&self) -> &lighting_system::LightingSystem {
+        &self.lighting
+    }
+
+    /// Access the lighting system mutably.
+    pub fn lighting_mut(&mut self) -> &mut lighting_system::LightingSystem {
+        &mut self.lighting
     }
 
     /// Initialize motion vector pass for VSR/TAA
@@ -319,7 +355,31 @@ impl Systems {
             .post_process_mut()
             .resize(image_count, extent)?;
 
+        // --- 5. TAA Pass Re-initialization ---
+        // Re-create ping-pong history buffers at the new render resolution.
+        self.pipeline
+            .post_process_mut()
+            .init(&context.alloc.vma, width, height)?;
+
         log::info!("Systems recreation complete");
         Ok(())
+    }
+
+    /// Explicitly destroy GPU resources that require the VMA allocator.
+    pub fn destroy(&mut self, context: &Context) {
+        // 1. Cleanup VSR Pass
+        if let Some(mut vsr) = self.vsr_pass.take() {
+            unsafe {
+                vsr.destroy(&context.alloc.vma);
+            }
+            log::info!("VSR pass resources destroyed.");
+        }
+
+        // 2. Cleanup Post Process Systems (including TAA)
+        self.pipeline
+            .post_process_mut()
+            .destroy_resources(&context.alloc.vma);
+
+        log::info!("Systems shutdown complete.");
     }
 }

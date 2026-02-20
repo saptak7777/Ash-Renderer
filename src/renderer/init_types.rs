@@ -31,6 +31,8 @@ pub struct RendererResources {
     pub white_texture: Texture,
     pub default_skybox: Texture, // Procedural skybox
     pub default_cube_black: Texture,
+    pub dummy_black_cube: Texture,
+    pub dummy_black_2d: Texture,
     pub material_storage_buffer:
         StorageBuffer<crate::renderer::resources::uniform::MaterialUniform>,
     pub instance_buffers: Vec<crate::renderer::resources::InstanceBuffer>,
@@ -63,7 +65,6 @@ pub struct RenderingPasses {
 
 pub struct LightingSystem {
     pub forward_plus: crate::renderer::ForwardPlusIntegration,
-    pub shadow_system: Option<crate::renderer::features::ShadowSystem>,
     pub global_cluster_buffer: Arc<crate::renderer::resources::GlobalClusterBuffer>,
 }
 

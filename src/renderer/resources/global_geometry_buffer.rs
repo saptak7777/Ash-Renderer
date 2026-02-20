@@ -77,9 +77,7 @@ impl DualHeapGeometryBuffer {
             ((index_capacity_mb as u64) * 1024 * 1024) / std::mem::size_of::<u32>() as u64;
 
         log::info!(
-            "Creating DualHeapGeometryBuffer: vertex={} MB, index={} MB",
-            vertex_capacity_mb,
-            index_capacity_mb
+            "Creating DualHeapGeometryBuffer: vertex={vertex_capacity_mb} MB, index={index_capacity_mb} MB"
         );
 
         // Create Vertex Heap with BDA support
@@ -97,7 +95,7 @@ impl DualHeapGeometryBuffer {
         let address_info = vk::BufferDeviceAddressInfo::default().buffer(vertex_heap);
         let vertex_device_address = device.get_buffer_device_address(&address_info);
 
-        log::info!("Vertex Heap BDA: 0x{:016X}", vertex_device_address);
+        log::info!("Vertex Heap BDA: {vertex_device_address:#018X}");
 
         // Create Index Heap with BDA support
         let (index_buffer, index_allocation) = allocator.create_buffer_with_flags_and_name(
@@ -115,7 +113,7 @@ impl DualHeapGeometryBuffer {
         let index_address_info = vk::BufferDeviceAddressInfo::default().buffer(index_buffer);
         let index_device_address = device.get_buffer_device_address(&index_address_info);
 
-        log::info!("Index Heap BDA: 0x{:016X}", index_device_address);
+        log::info!("Index Heap BDA: {index_device_address:#018X}");
 
         log::info!("✅ DualHeapGeometryBuffer created successfully");
 

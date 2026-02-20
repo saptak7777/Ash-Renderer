@@ -6,7 +6,6 @@ pub mod light_culling;
 pub mod light_manager;
 pub mod lighting;
 pub mod post_processing;
-pub mod shadows;
 pub mod tonemapping;
 pub mod vsm;
 
@@ -22,8 +21,7 @@ pub use light_culling::{
 pub use light_manager::{ForwardPlusInfo, LightManager};
 pub use lighting::{DirectionalLight, LightingConfig, LightingFeature, PointLight, SpotLight};
 pub use post_processing::{PostProcessingConfig, PostProcessingFeature};
-pub use shadows::{ShadowRenderContext, ShadowSystem};
 pub use tonemapping::{TonemapOperator, TonemappingConfig, TonemappingFeature};
 pub use vsm::{
-    default_vsm_config, high_quality_vsm_config, performance_vsm_config, VsmConfig, VsmFeature,
+    default_vsm_config, high_quality_vsm_config, performance_vsm_config, VsmConfig, VsmManager,
 };

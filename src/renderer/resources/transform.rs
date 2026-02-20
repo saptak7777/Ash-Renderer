@@ -176,7 +176,7 @@ impl TransformSystem {
         device: Arc<ash::Device>,
         allocator: Arc<crate::vulkan::Allocator>,
     ) -> crate::Result<Self> {
-        let arena_size = 1024 * 1024; // 1MB arena as per Phase 19
+        let arena_size = 1024 * 1024; // 1MB arena
         let (arena_buffer, arena_alloc) = unsafe {
             allocator.create_buffer_with_flags_and_name(
                 arena_size,
@@ -402,8 +402,8 @@ pub struct TemporalCamera {
     prev_view_proj: Mat4,
 
     // Jitter state
-    halton: crate::renderer::passes::vsr::HaltonSequence,
-    current_jitter: (f32, f32),
+    halton: crate::renderer::util::halton::HaltonSequence,
+    current_jitter: glam::Vec2,
 }
 
 impl TemporalCamera {
@@ -427,8 +427,8 @@ impl TemporalCamera {
             prev_view: view,
             prev_proj: proj,
             prev_view_proj: view_proj,
-            halton: crate::renderer::passes::vsr::HaltonSequence::new(16),
-            current_jitter: (0.0, 0.0),
+            halton: crate::renderer::util::halton::HaltonSequence::new(2, 3),
+            current_jitter: glam::Vec2::ZERO,
         }
     }
 
@@ -461,8 +461,11 @@ impl TemporalCamera {
         proj.y_axis.y *= -1.0; // Vulkan Y-flip
 
         // Apply sub-pixel jitter for TSR
-        let (jx, jy) = self.current_jitter;
-        let jitter_mat = Mat4::from_translation(Vec3::new(jx * 2.0 / self.aspect, jy * 2.0, 0.0));
+        let jitter_mat = Mat4::from_translation(Vec3::new(
+            self.current_jitter.x * 2.0 / self.aspect,
+            self.current_jitter.y * 2.0,
+            0.0,
+        ));
 
         self.proj = jitter_mat * proj;
         self.view_proj = self.proj * self.view;
@@ -496,7 +499,7 @@ impl TemporalCamera {
         )
     }
 
-    pub fn jitter(&self) -> (f32, f32) {
+    pub fn jitter(&self) -> glam::Vec2 {
         self.current_jitter
     }
 }

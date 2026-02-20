@@ -29,11 +29,12 @@ fn compile_shaders() {
             "vert" => "vert",
             "frag" => "frag",
             "comp" => "comp",
-            _ => continue, // Skip .glsl or other files
+            "glsl" if path.to_str().unwrap().contains("compute") => "comp",
+            _ => continue, // Skip other files
         };
 
         let file_name = path.file_name().and_then(|s| s.to_str()).unwrap();
-        let out_name = format!("{}.spv", file_name);
+        let out_name = format!("{file_name}.spv");
         let output_path = out_dir.join(&out_name);
 
         // Check if recompilation is needed
@@ -58,10 +59,10 @@ fn compile_shaders() {
         // Add include path for centralized structures
         cmd.arg("-I").arg(shader_src_dir);
 
-        cmd.arg(path)
+        cmd.arg(format!("-fshader-stage={kind}"))
             .arg("-o")
             .arg(&output_path)
-            .arg(format!("-fshader-stage={kind}"));
+            .arg(path);
 
         // Add special defines
         if file_name == "forward.frag" {
@@ -73,10 +74,9 @@ fn compile_shaders() {
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             panic!(
-                "SHADER COMPILATION FAILED:\nFile: {}\nExit Code: {:?}\nError: {}",
+                "SHADER COMPILATION FAILED:\nFile: {}\nExit Code: {:?}\nError: {stderr}",
                 path.display(),
                 output.status.code(),
-                stderr
             );
         }
     }

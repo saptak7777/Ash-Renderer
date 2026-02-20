@@ -1,26 +1,19 @@
 use crate::{
     renderer::{
-        features::ShadowSystem,
-        passes::hiz::{AdaptiveHiZManager, HiZPass},
-        systems::post_process::PostProcessSystem,
-        vcgs::IndirectDrawPass,
-        DrawItem, ForwardPlusIntegration, Resources, Scene,
+        features::vsm::VsmManager, passes::hiz::HiZPass, systems::post_process::PostProcessSystem,
+        vcgs::IndirectDrawPass, DrawItem, ForwardPlusIntegration, Resources, Scene,
     },
     Result,
 };
 use ash::vk;
-use glam::Vec3;
 use std::sync::{Arc, RwLock};
 
 /// RenderPipeline orchestrates the high-level rendering flow.
 /// It owns the major rendering subsystems and manages their execution order.
 pub struct RenderPipeline {
-    shadow_system: Option<ShadowSystem>,
     pub post_process: PostProcessSystem,
     pub(crate) hiz_pass: Option<Arc<RwLock<HiZPass>>>, // Keep crate-public for Renderer access for now
-    adaptive_hiz_manager: Arc<RwLock<AdaptiveHiZManager>>,
 
-    // Moved from Renderer (Chunk 3.2a)
     pub forward_plus: Option<Arc<RwLock<ForwardPlusIntegration>>>,
     pub indirect_draw_pass: Option<Arc<RwLock<IndirectDrawPass>>>,
     pub main_graphics_pipeline: Option<crate::vulkan::Pipeline>,
@@ -33,6 +26,8 @@ pub struct GeometryRenderContext<'a> {
     pub command_buffer: &'a crate::vulkan::CommandBufferContext<'a>,
     pub scene: &'a Scene,
     pub bindless_descriptor_set: vk::DescriptorSet,
+    pub vsm_descriptor_set: vk::DescriptorSet,
+    pub vsm_manager: &'a VsmManager, // Added to provide bindless indices
     pub swapchain_extent: vk::Extent2D,
     pub frame_ptr: u64,
     pub material_ptr: u64,
@@ -58,20 +53,16 @@ pub struct GeometryRenderContext<'a> {
 
 impl RenderPipeline {
     pub fn new(
-        shadow_system: Option<ShadowSystem>,
         post_process: PostProcessSystem,
         hiz_pass: Option<Arc<RwLock<HiZPass>>>,
-        adaptive_hiz_manager: Arc<RwLock<AdaptiveHiZManager>>,
         forward_plus: Option<Arc<RwLock<ForwardPlusIntegration>>>,
         indirect_draw_pass: Option<Arc<RwLock<IndirectDrawPass>>>,
         main_graphics_pipeline: Option<crate::vulkan::Pipeline>,
         pipeline_layout: Option<crate::vulkan::PipelineLayout>,
     ) -> Self {
         Self {
-            shadow_system,
             post_process,
             hiz_pass,
-            adaptive_hiz_manager,
             forward_plus,
             indirect_draw_pass,
             main_graphics_pipeline,
@@ -80,15 +71,13 @@ impl RenderPipeline {
     }
 
     /// Execute the Hi-Z depth pyramid construction pass.
-    /// This is typically done at the start of the frame after the previous frame's depth is available.
     ///
-    /// # Lock Ordering
-    /// This method acquires locks in the following order:
-    /// 1. `hiz_pass` (write lock)
-    /// 2. `indirect_draw_pass` (write lock, if provided)
+    /// Delegates directly to [`HiZPass::record_commands`] which now owns the
+    /// full lifecycle: adaptive quality, pyramid generation, and descriptor routing.
     ///
-    /// Any other code that acquires both locks must follow this same ordering
-    /// to avoid deadlocks.
+    /// # Lock ordering
+    /// Acquires the `hiz_pass` write-lock; the pass acquires the
+    /// `indirect_draw_pass` write-lock internally after all Hi-Z work.
     pub fn execute_hiz_pass(
         &self,
         command_buffer: vk::CommandBuffer,
@@ -97,139 +86,47 @@ impl RenderPipeline {
         black_texture_view: vk::ImageView,
         black_texture_sampler: vk::Sampler,
     ) -> Result<()> {
-        if let Some(ref hiz_arc) = self.hiz_pass {
-            let mut hiz = hiz_arc.write().map_err(|e| {
-                log::error!("Hi-Z pass RwLock poisoned: {}", e);
-                crate::AshError::VulkanError("Hi-Z pass RwLock poisoned".into())
-            })?;
+        let Some(ref hiz_arc) = self.hiz_pass else {
+            return Ok(());
+        };
 
-            // Update adaptive quality based on previous frame's metrics
-            if let Some(timings) = gpu_profiler.map(|p| p.last_extended_timings()) {
-                if timings.valid {
-                    let hiz_time_ms = timings.hiz_generate_ms as f64;
-                    // Handle poisoning for adaptive manager
-                    match self.adaptive_hiz_manager.write() {
-                        Ok(mut manager) => {
-                            if let Some(new_quality) = manager.update(hiz.quality(), hiz_time_ms) {
-                                hiz.set_quality(new_quality);
-                            }
-                        }
-                        Err(e) => {
-                            log::warn!("Adaptive HiZ manager lock poisoned: {}", e);
-                            // Continue execution - failing to update quality shouldn't crash render
-                        }
-                    }
-                }
-            }
+        let mut hiz = hiz_arc.write().map_err(|e| {
+            log::error!("Hi-Z pass RwLock poisoned: {e}");
+            crate::AshError::VulkanError("Hi-Z pass RwLock poisoned".into())
+        })?;
 
-            // Build Hi-Z pyramid from depth buffer
-            unsafe {
-                hiz.build_pyramid(command_buffer, depth_image)?;
-            }
+        // Collect prior-frame GPU timing for adaptive quality inside the pass.
+        let hiz_time_ms = gpu_profiler
+            .map(|p| p.last_extended_timings())
+            .filter(|t| t.valid)
+            .map(|t| t.hiz_generate_ms as f64);
 
-            // Update descriptors for systems that depend on Hi-Z (like occlusion culling)
-            let hiz_view = hiz.hiz_view().unwrap_or(black_texture_view);
-            let hiz_sampler = if hiz.is_initialized() {
-                hiz.hiz_sampler()
-            } else {
-                black_texture_sampler
-            };
+        // Lock the indirect draw pass so the pyramid view can be registered.
+        let indirect_guard = self
+            .indirect_draw_pass
+            .as_ref()
+            .and_then(|arc| arc.write().ok());
 
-            if let Some(ref indirect_arc) = self.indirect_draw_pass {
-                let indirect = indirect_arc.write().map_err(|e| {
-                    log::error!("Indirect draw pass RwLock poisoned: {}", e);
-                    crate::AshError::VulkanError("Indirect draw pass RwLock poisoned".into())
-                })?;
-                unsafe {
-                    indirect.update_hiz_descriptor(hiz_view, hiz_sampler);
-                }
-            }
+        unsafe {
+            hiz.record_commands(
+                command_buffer,
+                depth_image,
+                hiz_time_ms,
+                black_texture_view,
+                black_texture_sampler,
+                indirect_guard.as_deref(),
+            )?;
 
+            // Emit end-of-pass GPU timestamp if profiling is active.
             if let Some(profiler) = gpu_profiler {
-                unsafe {
-                    profiler.write_timestamp(
-                        command_buffer,
-                        crate::renderer::diagnostics::TimingScope::HiZGenerateEnd,
-                    );
-                }
+                profiler.write_timestamp(
+                    command_buffer,
+                    crate::renderer::diagnostics::TimingScope::HiZGenerateEnd,
+                );
             }
         }
+
         Ok(())
-    }
-
-    /// Render shadow maps for the current frame.
-    /// This implementation currently supports Virtual Shadow Maps (VSM).
-    pub fn render_shadows(
-        &self,
-        command_buffer: vk::CommandBuffer,
-        scene: &Scene,
-        frame_index: usize,
-        _device: &ash::Device,
-        bindless_descriptor_set: vk::DescriptorSet,
-        uniform_buffer_address: u64,
-        instance_buffer_address: u64,
-        material_heap_address: u64,
-        light_ptr: u64,
-        tile_ptr: u64,
-        all_instances_len: usize,
-    ) -> Result<()> {
-        if let Some(shadow_system) = &self.shadow_system {
-            if shadow_system
-                .vsm_feature()
-                .shadow_pipeline_layout()
-                .is_some()
-            {
-                let light_dir = Vec3::from_slice(&scene.scene_lighting.directional.direction[0..3]);
-
-                let (vertex_ptr, index_ptr) = scene.get_geometry_buffer_addresses();
-
-                if vertex_ptr == 0 || index_ptr == 0 {
-                    // Throttled warning to avoid spamming while still aiding diagnostics
-                    log::warn!("Shadow Pass: Invalid Geometry BDA pointers (V: {}, I: {}). Shadows will be skipped.", vertex_ptr, index_ptr);
-                    return Ok(());
-                }
-
-                let ctx = crate::renderer::features::shadows::ShadowRenderContext {
-                    light_direction: light_dir,
-                    object_count: all_instances_len as u32,
-                    frame_index,
-                    frame_descriptor_set: vk::DescriptorSet::null(),
-                    bindless_descriptor_set,
-                    frame_ptr: uniform_buffer_address,
-                    vertex_ptr,
-                    instance_ptr: instance_buffer_address,
-                    material_ptr: material_heap_address,
-                    index_ptr,
-                    light_ptr,
-                    tile_ptr,
-                    transform_ptr: scene.transform_system.arena_addr,
-                    transform_index: 0,
-                };
-
-                unsafe {
-                    shadow_system.render(command_buffer, &ctx);
-                }
-
-                // Transition shadow map for reading in main pass (now using system's helper)
-                unsafe {
-                    shadow_system.barrier_transition_for_read(command_buffer);
-                }
-            }
-        }
-        Ok(())
-    }
-
-    // Accessors
-    pub fn shadow_system(&self) -> Option<&ShadowSystem> {
-        self.shadow_system.as_ref()
-    }
-
-    pub fn shadow_system_mut(&mut self) -> Option<&mut ShadowSystem> {
-        self.shadow_system.as_mut()
-    }
-
-    pub fn take_shadow_system(&mut self) -> Option<ShadowSystem> {
-        self.shadow_system.take()
     }
 
     pub fn post_process(&self) -> &PostProcessSystem {
@@ -400,7 +297,7 @@ impl RenderPipeline {
                 .cmd_begin_rendering(ctx.command_buffer.handle(), &rendering_info);
         }
 
-        // DELEGATED RECORDING (Phase 7.3)
+        // DELEGATED RECORDING
         self.render_main_view(
             ctx.command_buffer.handle(),
             ctx,
@@ -584,7 +481,7 @@ impl RenderPipeline {
                 vk::PipelineBindPoint::GRAPHICS,
                 layout_handle,
                 0,
-                &[ctx.bindless_descriptor_set],
+                &[ctx.bindless_descriptor_set, ctx.vsm_descriptor_set],
                 &[],
             );
         }
@@ -593,7 +490,7 @@ impl RenderPipeline {
         if resources.indirect_draw_enabled {
             if let Some(ref indirect_arc) = self.indirect_draw_pass {
                 let indirect_pass = indirect_arc.read().map_err(|e| {
-                    log::error!("Indirect draw pass RwLock poisoned: {}", e);
+                    log::error!("Indirect draw pass RwLock poisoned: {e}");
                     AshError::VulkanError("Indirect draw pass RwLock poisoned".into())
                 })?;
 
@@ -639,14 +536,8 @@ impl RenderPipeline {
                         light_ptr: ctx.light_ptr,
                         tile_ptr: ctx.tile_ptr,
                         skybox_index: scene.skybox_texture_index,
-                        vsm_page_index: self
-                            .shadow_system()
-                            .map(|s| s.vsm_page_index())
-                            .unwrap_or(0),
-                        vsm_cache_index: self
-                            .shadow_system()
-                            .map(|s| s.vsm_cache_index())
-                            .unwrap_or(0),
+                        vsm_page_index: ctx.vsm_manager.page_table_bindless_index,
+                        vsm_cache_index: ctx.vsm_manager.physical_memory_bindless_index,
                         transform_ptr: scene.transform_system.arena_addr,
                         transform_index: 0,
                     };
@@ -689,14 +580,8 @@ impl RenderPipeline {
                         light_ptr: ctx.light_ptr,
                         tile_ptr: ctx.tile_ptr,
                         skybox_index: scene.skybox_texture_index,
-                        vsm_page_index: self
-                            .shadow_system()
-                            .map(|s| s.vsm_page_index())
-                            .unwrap_or(0),
-                        vsm_cache_index: self
-                            .shadow_system()
-                            .map(|s| s.vsm_cache_index())
-                            .unwrap_or(0),
+                        vsm_page_index: ctx.vsm_manager.page_table_bindless_index,
+                        vsm_cache_index: ctx.vsm_manager.physical_memory_bindless_index,
                         transform_ptr: scene.transform_system.arena_addr,
                         transform_index: 0, // In single-draw, we don't have a specific index here yet
                     };

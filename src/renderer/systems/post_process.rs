@@ -1,17 +1,17 @@
 use crate::renderer::passes::fullscreen::FullscreenPass;
 use crate::renderer::passes::fullscreen::PostProcessPushConstants;
+use crate::renderer::passes::temporal_aa::{ConfigMetrics, TaaPass, TaaPushConstants};
+use crate::renderer::passes::vsr::{SharpenConfig, VsrConfig, VsrPass};
+use crate::renderer::resources::HdrSystem;
+use crate::renderer::resources::Resources;
 use crate::vulkan;
+use crate::vulkan::SwapchainWrapper;
 use crate::Result;
 use ash::vk;
 use bytemuck;
 use std::sync::Arc;
 
 use crate::renderer::frame::Frame;
-use crate::renderer::passes::temporal_aa::ConfigMetrics;
-use crate::renderer::passes::vsr::{SharpenConfig, VsrConfig, VsrPass};
-use crate::renderer::resources::HdrSystem;
-use crate::renderer::resources::Resources;
-use crate::vulkan::SwapchainWrapper;
 
 /// Configuration for post-processing effects.
 #[derive(Clone, Copy, Debug)]
@@ -28,7 +28,7 @@ impl Default for PostProcessConfig {
         Self {
             tonemapping_enabled: true,
             exposure: 1.2,
-            gamma: 2.2,
+            gamma: 1.0,
             bloom_enabled: true,
             bloom_intensity: 0.1,
         }
@@ -46,6 +46,10 @@ pub struct PostProcessSystem {
     descriptor_pool: vk::DescriptorPool,
     descriptor_sets: Vec<vk::DescriptorSet>,
     pipeline: Option<vulkan::Pipeline>,
+
+    // Native TAA pass (1:1 resolution, no upscaling).
+    // Initialized on first resize() call when dimensions are known.
+    pub taa_pass: Option<TaaPass>,
 }
 
 impl PostProcessSystem {
@@ -66,6 +70,7 @@ impl PostProcessSystem {
             descriptor_pool: vk::DescriptorPool::null(),
             descriptor_sets: Vec::with_capacity(image_count),
             pipeline: None,
+            taa_pass: None, // Initialized in resize() once dimensions are known
         })
     }
 
@@ -79,7 +84,7 @@ impl PostProcessSystem {
         {
             Ok(p) => p,
             Err(e) => {
-                log::error!("Failed to create post-process pipeline: {}", e);
+                log::error!("Failed to create post-process pipeline: {e}");
                 return Err(e);
             }
         };
@@ -90,6 +95,44 @@ impl PostProcessSystem {
         }
 
         Ok(())
+    }
+
+    /// Initialize or re-initialize the post-processing system.
+    ///
+    /// Must be called after resize() whenever the render resolution changes.
+    /// Separate from resize() because it requires the VMA allocator.
+    pub fn init(&mut self, allocator: &vk_mem::Allocator, width: u32, height: u32) -> Result<()> {
+        if width == 0 || height == 0 {
+            return Ok(());
+        }
+
+        match &mut self.taa_pass {
+            Some(taa) => {
+                // Re-initialize existing pass with new dimensions
+                taa.init(allocator, width, height)?;
+            }
+            None => {
+                // First-time creation
+                let mut taa = TaaPass::new(Arc::clone(&self.device))?;
+                taa.init(allocator, width, height)?;
+                self.taa_pass = Some(taa);
+            }
+        }
+
+        log::info!("TAA pass initialized/resized to {width}x{height}");
+        Ok(())
+    }
+
+    /// Explicitly destroy GPU resources that require the VMA allocator.
+    ///
+    /// Must be called during shutdown before the allocator is destroyed.
+    pub fn destroy_resources(&mut self, allocator: &vk_mem::Allocator) {
+        if let Some(mut taa) = self.taa_pass.take() {
+            unsafe {
+                taa.destroy_resources(allocator);
+            }
+        }
+        log::info!("PostProcessSystem resources destroyed.");
     }
 
     fn reallocate_descriptors(&mut self, count: usize) -> Result<()> {
@@ -169,6 +212,63 @@ impl PostProcessSystem {
             self.device.update_descriptor_sets(&writes, &[]);
         }
     }
+
+    // ─── PostProcessConfig Setters ────────────────────────────────────────────
+
+    /// Replace the entire post-process configuration in one call.
+    pub fn set_config(&mut self, config: PostProcessConfig) {
+        self.config = config;
+    }
+
+    /// Enable or disable tonemapping.
+    pub fn set_tonemapping_enabled(&mut self, enabled: bool) {
+        self.config.tonemapping_enabled = enabled;
+    }
+
+    /// Query tonemapping enabled state.
+    pub fn tonemapping_enabled(&self) -> bool {
+        self.config.tonemapping_enabled
+    }
+
+    /// Set the exposure value (clamped to `>= 0.0`).
+    pub fn set_exposure(&mut self, exposure: f32) {
+        self.config.exposure = exposure.max(0.0);
+    }
+
+    /// Query the current exposure value.
+    pub fn exposure(&self) -> f32 {
+        self.config.exposure
+    }
+
+    /// Set the gamma value (clamped to `>= 0.1` to avoid gamma = 0).
+    pub fn set_gamma(&mut self, gamma: f32) {
+        self.config.gamma = gamma.max(0.1);
+    }
+
+    /// Query the current gamma value.
+    pub fn gamma(&self) -> f32 {
+        self.config.gamma
+    }
+
+    /// Enable or disable bloom.
+    pub fn set_bloom_enabled(&mut self, enabled: bool) {
+        self.config.bloom_enabled = enabled;
+    }
+
+    /// Query bloom enabled state.
+    pub fn bloom_enabled(&self) -> bool {
+        self.config.bloom_enabled
+    }
+
+    /// Set the bloom intensity (clamped to `[0.0, 2.0]`).
+    pub fn set_bloom_intensity(&mut self, intensity: f32) {
+        self.config.bloom_intensity = intensity.clamp(0.0, 2.0);
+    }
+
+    /// Query the current bloom intensity.
+    pub fn bloom_intensity(&self) -> f32 {
+        self.config.bloom_intensity
+    }
 }
 
 /// Context for post-processing and upscaling.
@@ -182,81 +282,79 @@ pub struct PostProcessContext<'a> {
     pub swapchain: &'a SwapchainWrapper,
     pub vsr: Option<&'a mut VsrPass>,
     pub hdr: Option<&'a HdrSystem>,
+    pub taa_config: crate::renderer::passes::temporal_aa::TaaConfig,
     pub taa_metrics: Option<&'a mut ConfigMetrics>,
     pub vsr_config: VsrConfig,
     pub sharpen_config: Option<SharpenConfig>,
     pub jitter_uv: [f32; 2],
+    pub prev_jitter_uv: [f32; 2],
+    /// Direct depth image view (SHADER_READ_ONLY_OPTIMAL) for TAA
+    pub depth_view: vk::ImageView,
+    /// Direct motion vector image view (SHADER_READ_ONLY_OPTIMAL) for TAA
+    pub motion_view: vk::ImageView,
 }
 
 impl PostProcessSystem {
-    /// Execute the complete post-processing chain.
+    /// Record the complete post-processing chain commands.
     ///
-    /// This method orchestrates:
-    /// 1. VSR (upscaling) dispatch if enabled.
-    /// 2. Tone Mapping (HDR to SDR) with swapchain barriers.
-    pub fn execute(&mut self, mut ctx: PostProcessContext) -> Result<()> {
-        // 1. VSR / Upscaling Phase
-        if let Some(ref mut vsr) = ctx.vsr {
-            let upscale_config = crate::renderer::passes::vsr::VsrUpscaleConfig {
-                velocity_threshold: 0.05, // Standard threshold
-                history_weight: ctx.vsr_config.history_weight(),
-                clamping_gamma: ctx.vsr_config.clamping_gamma(),
-                anti_ghosting: ctx.vsr_config.anti_ghosting,
-            };
-
-            let vsr_inputs = crate::renderer::passes::vsr::VsrInputs {
-                color_index: ctx.frame.hdr_image_index.ok_or_else(|| {
-                    crate::AshError::VulkanError(
-                        "HDR image index not initialized for VSR".to_string(),
-                    )
-                })?,
-                depth_index: {
-                    let gbuffer_indices = ctx.frame.gbuffer_indices.as_ref().unwrap();
-                    if gbuffer_indices.depth_index == u32::MAX {
-                        0 // Fallback to default white texture index
-                    } else {
-                        gbuffer_indices.depth_index
-                    }
-                },
-                motion_index: {
-                    let gbuffer_indices = ctx.frame.gbuffer_indices.as_ref().unwrap();
-                    if gbuffer_indices.motion_index == u32::MAX {
-                        0 // Fallback to default white texture index
-                    } else {
-                        gbuffer_indices.motion_index
-                    }
-                },
-                jitter: ctx.jitter_uv,
-            };
-
-            unsafe {
-                vsr.upscale_with_sharpening(
-                    ctx.command_buffer,
-                    vsr_inputs,
-                    &upscale_config,
-                    ctx.sharpen_config.as_ref(),
-                )
-                .map_err(|e| crate::AshError::VulkanError(format!("VSR upscale failed: {e}")))?;
-            }
-            vsr.next_frame();
-        }
-
-        // 2. Tonemapping / Swapchain Resolution Phase
+    /// Pipeline: Geometry → TAA Resolve → Tone Mapping → Swapchain
+    ///
+    /// VSR is intentionally bypassed while we validate native TAA stability.
+    pub fn record_commands(&mut self, ctx: PostProcessContext) -> Result<()> {
         if let Some(hdr) = ctx.hdr {
-            // Resolve input view (VSR output vs raw HDR output)
-            let input_view = ctx
-                .vsr
-                .as_ref()
-                .map(|vsr| vsr.active_view())
-                .unwrap_or_else(|| hdr.view());
-
+            let raw_hdr_view = hdr.view();
             let black_view = ctx.resources.black_texture.view();
 
+            // ── 1. TAA Resolve Phase (STRICT NATIVE) ──────────────────────────
+            // Run the TAA compute shader before tonemapping. The resolved output
+            // is in SHADER_READ_ONLY_OPTIMAL after resolve() returns.
+            let resolved_view = if let Some(taa) = &mut self.taa_pass {
+                if taa.is_initialized()
+                    && ctx.depth_view != vk::ImageView::null()
+                    && ctx.motion_view != vk::ImageView::null()
+                {
+                    let extent = ctx.swapchain.extent;
+                    let push = TaaPushConstants {
+                        width: extent.width as f32,
+                        height: extent.height as f32,
+                        jitter_x: ctx.jitter_uv[0],
+                        jitter_y: ctx.jitter_uv[1],
+                        prev_jitter_x: ctx.prev_jitter_uv[0],
+                        prev_jitter_y: ctx.prev_jitter_uv[1],
+                        blend_factor: ctx.taa_config.blend_factor,
+                        clamping_gamma: ctx.taa_config.quality.clamping_gamma(),
+                        anti_flicker: if ctx.taa_config.anti_flicker { 1 } else { 0 },
+                    };
+
+                    unsafe {
+                        taa.record_commands(
+                            ctx.command_buffer,
+                            raw_hdr_view,
+                            ctx.depth_view,
+                            ctx.motion_view,
+                            &push,
+                        )?;
+                    }
+                    taa.output_view()
+                } else {
+                    raw_hdr_view
+                }
+            } else {
+                raw_hdr_view
+            };
+
+            // ── 2. [VSR BYPASSED] ─────────────────────────────────────────────
+            // Strictly enforce Native TAA by bypassing VSR.
+            let _ = ctx.vsr;
+            let _ = ctx.vsr_config;
+            let _ = ctx.sharpen_config;
+
+            // ── 3. Tonemapping / Swapchain Phase ─────────────────────────────
             self.update_descriptor_set(
                 ctx.image_index,
-                input_view,
-                black_view, // bloom_view placeholder
-                black_view, // ssgi_view placeholder
+                resolved_view,
+                black_view, // bloom placeholder
+                black_view, // ssgi placeholder
                 hdr.sampler(),
             );
 
@@ -293,9 +391,8 @@ impl PostProcessSystem {
         }
 
         let pipeline_wrapper = self.pipeline.as_ref().unwrap();
-        let pipeline = pipeline_wrapper.pipeline; // helper from wrapper
+        let pipeline = pipeline_wrapper.pipeline;
 
-        // Handle case where image_index is out of bounds
         if image_index >= self.descriptor_sets.len() {
             return Ok(());
         }
@@ -439,7 +536,9 @@ impl Drop for PostProcessSystem {
                 self.device
                     .destroy_descriptor_pool(self.descriptor_pool, None);
             }
-            // Pipeline is dropped automatically by RAII
+            // Pipeline is dropped automatically by RAII.
+            // taa_pass: TaaPass does not impl Drop (requires allocator).
+            // The Renderer must call taa_pass.destroy_resources(&allocator) before drop.
         }
     }
 }

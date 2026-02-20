@@ -84,6 +84,9 @@ pub fn find_memory_type(
 }
 
 /// Helper to begin a single-time command buffer.
+///
+/// # Safety
+/// The caller must ensure that the device and command pool are valid.
 pub unsafe fn begin_single_time_commands(
     device: &ash::Device,
     command_pool: vk::CommandPool,
@@ -110,6 +113,9 @@ pub unsafe fn begin_single_time_commands(
 }
 
 /// Helper to end and submit a single-time command buffer.
+///
+/// # Safety
+/// The caller must ensure that the device, queue, and command buffer are valid.
 pub unsafe fn end_single_time_commands(
     device: &ash::Device,
     command_pool: vk::CommandPool,

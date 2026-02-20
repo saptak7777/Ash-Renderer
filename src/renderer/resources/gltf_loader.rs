@@ -137,22 +137,24 @@ pub fn load_model(path: impl AsRef<Path>) -> Result<Vec<Mesh>> {
                 .map(|n| format!("{n}_prim{prim_idx}"))
                 .unwrap_or_else(|| format!("Mesh{mesh_idx}_prim{prim_idx}"));
 
-            let mut mesh = Mesh::default();
-            mesh.name = mesh_name.into();
-            mesh.vertices = vertices;
-            mesh.indices = indices;
-            mesh.texture_data = base_color_texture;
-            mesh.normal_texture_data = normal_texture;
-            mesh.metallic_roughness_texture_data = metallic_roughness_texture;
-            mesh.occlusion_texture_data = occlusion_texture;
-            mesh.emissive_texture_data = emissive_texture;
-            mesh.material_properties = material_properties;
+            let mesh = Mesh {
+                name: mesh_name.into(),
+                vertices,
+                indices,
+                texture_data: base_color_texture,
+                normal_texture_data: normal_texture,
+                metallic_roughness_texture_data: metallic_roughness_texture,
+                occlusion_texture_data: occlusion_texture,
+                emissive_texture_data: emissive_texture,
+                material_properties,
+                ..Default::default()
+            };
 
             meshes.push(mesh);
         }
     }
 
-    log::info!("Loaded {} meshes from {:?}", meshes.len(), path);
+    log::info!("Loaded {count} meshes from {path:?}", count = meshes.len());
     Ok(meshes)
 }
 
@@ -184,7 +186,10 @@ fn load_texture_data(images: &[gltf::image::Data], index: usize) -> Option<Textu
             image.pixels.iter().flat_map(|&r| [r, r, r, 255]).collect()
         }
         _ => {
-            log::warn!("Unsupported texture format: {:?}", image.format);
+            log::warn!(
+                "Unsupported texture format: {format:?}",
+                format = image.format
+            );
             return None;
         }
     };

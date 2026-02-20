@@ -17,6 +17,16 @@ pub struct ShadowCullPushConstants {
     pub count_buffer_ptr: u64,
 }
 
+/// Configuration for shadow culling.
+pub struct ShadowCullInfo {
+    pub frame_index: usize,
+    pub view_proj: glam::Mat4,
+    pub object_count: u32,
+    pub base_index: u32,
+    pub clipmap_level: u32,
+    pub object_buffer_ptr: u64,
+}
+
 pub struct ShadowCullPass {
     device: Arc<ash::Device>,
     pub pipeline: vk::Pipeline,
@@ -48,9 +58,7 @@ impl ShadowCullPass {
             ));
         }
         log::info!(
-            "Creating ShadowCullPass (max_objects={}, clipmap_levels={})",
-            max_objects,
-            clipmap_levels
+            "Creating ShadowCullPass (max_objects={max_objects}, clipmap_levels={clipmap_levels})"
         );
 
         let max_commands = max_objects * clipmap_levels;
@@ -78,7 +86,7 @@ impl ShadowCullPass {
         let stage_info = vk::PipelineShaderStageCreateInfo::default()
             .stage(vk::ShaderStageFlags::COMPUTE)
             .module(shader_module)
-            .name(std::ffi::CStr::from_bytes_with_nul(b"main\0").unwrap());
+            .name(c"main");
 
         let pipeline_info = vk::ComputePipelineCreateInfo::default()
             .stage(stage_info)
@@ -131,7 +139,7 @@ impl ShadowCullPass {
                     | vk::BufferUsageFlags::TRANSFER_DST,
                 vk_mem::MemoryUsage::AutoPreferDevice,
                 vk_mem::AllocationCreateFlags::empty(),
-                Some(format!("Shadow Indirect Buffer {}", i)),
+                Some(format!("Shadow Indirect Buffer {i}")),
             )?;
 
             let (count_buffer, count_alloc) = allocator.create_buffer_with_flags_and_name(
@@ -142,7 +150,7 @@ impl ShadowCullPass {
                     | vk::BufferUsageFlags::TRANSFER_DST,
                 vk_mem::MemoryUsage::AutoPreferDevice,
                 vk_mem::AllocationCreateFlags::empty(),
-                Some(format!("Shadow Count Buffer {}", i)),
+                Some(format!("Shadow Count Buffer {i}")),
             )?;
 
             self.indirect_buffers.push(indirect_buffer);
@@ -154,18 +162,13 @@ impl ShadowCullPass {
         Ok(())
     }
 
-    pub unsafe fn cull_shadows(
-        &self,
-        cmd: vk::CommandBuffer,
-        frame_index: usize,
-        view_proj: glam::Mat4,
-        object_count: u32,
-        base_index: u32,
-        clipmap_level: u32,
-        object_buffer_ptr: u64,
-    ) {
-        let indirect_buffer = self.indirect_buffers[frame_index];
-        let count_buffer = self.count_buffers[frame_index];
+    /// Dispatches the shadow culling compute shader.
+    ///
+    /// # Safety
+    /// The caller must ensure that the command buffer is in a recording state and that all buffers are valid.
+    pub unsafe fn cull_shadows(&self, cmd: vk::CommandBuffer, info: ShadowCullInfo) {
+        let indirect_buffer = self.indirect_buffers[info.frame_index];
+        let count_buffer = self.count_buffers[info.frame_index];
 
         let indirect_ptr = self.device.get_buffer_device_address(
             &vk::BufferDeviceAddressInfo::default().buffer(indirect_buffer),
@@ -174,16 +177,16 @@ impl ShadowCullPass {
             &vk::BufferDeviceAddressInfo::default().buffer(count_buffer),
         );
 
-        let level_count_ptr = count_ptr + (clipmap_level as u64 * 4);
+        let level_count_ptr = count_ptr + (info.clipmap_level as u64 * 4);
         let max_objects_per_level = self.max_commands / self.clipmap_levels;
 
         let push_constants = ShadowCullPushConstants {
-            view_proj: view_proj.to_cols_array_2d(),
-            object_count,
-            base_index,
-            indirect_start: clipmap_level * max_objects_per_level,
+            view_proj: info.view_proj.to_cols_array_2d(),
+            object_count: info.object_count,
+            base_index: info.base_index,
+            indirect_start: info.clipmap_level * max_objects_per_level,
             _padding: 0,
-            object_buffer_ptr,
+            object_buffer_ptr: info.object_buffer_ptr,
             indirect_buffer_ptr: indirect_ptr,
             count_buffer_ptr: level_count_ptr,
         };
@@ -198,12 +201,16 @@ impl ShadowCullPass {
             bytemuck::bytes_of(&push_constants),
         );
 
-        let group_count = (object_count + 63) / 64;
+        let group_count = info.object_count.div_ceil(64);
         if group_count > 0 {
             self.device.cmd_dispatch(cmd, group_count, 1, 1);
         }
     }
 
+    /// Destroys all Vulkan resources associated with this pass.
+    ///
+    /// # Safety
+    /// The caller must ensure that the GPU is idle and no resources are currently in use.
     pub unsafe fn destroy(&mut self, allocator: &Arc<Allocator>) {
         if self.destroyed {
             return;

@@ -23,9 +23,9 @@ pub fn build_mesh_dag(mesh: &mut Mesh) {
     let vertices = &mesh.vertices;
 
     log::info!(
-        "Building VCGS V2 DAG for '{}' ({} tris)...",
-        mesh.name,
-        indices.len() / 3
+        "Building VCGS V2 DAG for '{name}' ({tris} tris)...",
+        name = mesh.name,
+        tris = indices.len() / 3
     );
 
     // Prepare position buffer for meshopt (flattened f32)
@@ -71,7 +71,7 @@ pub fn build_mesh_dag(mesh: &mut Mesh) {
             // Reconstruct triangles
             for i in 0..meshlet.triangle_count {
                 let t_idx = meshlet.triangle_offset as usize + i as usize;
-                let v0_local = meshlets.triangles[t_idx * 3 + 0];
+                let v0_local = meshlets.triangles[t_idx * 3];
                 let v1_local = meshlets.triangles[t_idx * 3 + 1];
                 let v2_local = meshlets.triangles[t_idx * 3 + 2];
 
@@ -133,8 +133,8 @@ pub fn build_mesh_dag(mesh: &mut Mesh) {
                 error_metric,
                 bounds_radius: radius_sq.sqrt(),
                 parent_index: u32::MAX,
-                first_index: first_index as u32,
-                index_count: meshlet.triangle_count as u32 * 3,
+                first_index,
+                index_count: meshlet.triangle_count * 3,
             });
         }
 
@@ -257,9 +257,8 @@ pub fn build_mesh_dag(mesh: &mut Mesh) {
 
     if total_errors > 0 {
         log::warn!(
-            "VCGS Builder: Skipped {} invalid indices/vertices for mesh '{}'",
-            total_errors,
-            mesh.name
+            "VCGS Builder: Skipped {total_errors} invalid indices/vertices for mesh '{name}'",
+            name = mesh.name
         );
     }
 
@@ -268,9 +267,8 @@ pub fn build_mesh_dag(mesh: &mut Mesh) {
     mesh.clusters = clusters;
 
     log::info!(
-        "DAG V2 Build Complete: {} Total Clusters, {} Levels",
-        mesh.clusters.len(),
-        level
+        "DAG V2 Build Complete: {clusters} Total Clusters, {level} Levels",
+        clusters = mesh.clusters.len()
     );
 }
 

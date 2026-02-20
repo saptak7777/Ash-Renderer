@@ -116,8 +116,8 @@ impl ResourceRegistry {
             Err(errors) => {
                 if let Some(first) = errors.first() {
                     Err(format!(
-                        "{} errors occurred during cleanup. First error: {first}",
-                        errors.len()
+                        "{count} errors occurred during cleanup. First error: {first}",
+                        count = errors.len()
                     ))
                 } else {
                     Err("Unknown cleanup error".to_string())
@@ -418,8 +418,8 @@ impl ResourceRegistry {
         {
             if !dependents.is_empty() {
                 return Err(ResourceError::InvalidDependency(format!(
-                    "Cannot remove resource {id}: {} dependents exist",
-                    dependents.len()
+                    "Cannot remove resource {id}: {count} dependents exist",
+                    count = dependents.len()
                 )));
             }
         }

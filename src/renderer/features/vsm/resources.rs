@@ -3,6 +3,8 @@
 use ash::vk;
 use std::sync::Arc;
 
+use super::buffer::VsmRequestBuffer;
+use super::data::VsmGlobalInfo;
 use crate::vulkan::Allocator;
 use crate::{AshError, Result};
 
@@ -16,6 +18,7 @@ pub struct VsmConfig {
     /// Page size in pixels (typically 128)
     pub page_size: u32,
     /// Maximum number of page requests per frame
+    // NOTE: This value is passed to analyze.glsl via Specialization Constants as the primary sync mechanism.
     pub max_requests_per_frame: u32,
     /// Enable debug visualization
     pub debug_mode: bool,
@@ -23,6 +26,8 @@ pub struct VsmConfig {
     pub clipmap_levels: u32,
     /// World-space extent of clipmap level 0 (in meters, e.g., 100.0)
     pub clipmap_base_extent: f32,
+    /// Clipmap radius for calculation (often half of extent)
+    pub clipmap_radius: f32,
 }
 
 impl Default for VsmConfig {
@@ -35,6 +40,7 @@ impl Default for VsmConfig {
             debug_mode: false,
             clipmap_levels: 8,
             clipmap_base_extent: 100.0,
+            clipmap_radius: 50.0,
         }
     }
 }
@@ -114,11 +120,16 @@ pub struct PageAllocation {
     pub _padding: [u32; 2],
 }
 
+/// Safe padding for alignment in atomic buffers (Count + Padding)
+use super::buffer::ATOMIC_HEADER_SIZE;
+const _: () = assert!(ATOMIC_HEADER_SIZE == 16);
+const _: () = assert!(ATOMIC_HEADER_SIZE == std::mem::size_of::<[u32; 4]>() as u64);
+
 /// VSM GPU Resources
 pub struct VsmResources {
-    device: Arc<ash::Device>,
-    allocator: Arc<Allocator>,
-    config: VsmConfig,
+    pub device: Arc<ash::Device>,
+    pub allocator: Arc<Allocator>,
+    pub config: VsmConfig,
 
     /// Physical cache texture (R32G32_FLOAT for variance moments: depth, depth^2)
     pub physical_cache: vk::Image,
@@ -128,13 +139,17 @@ pub struct VsmResources {
 
     /// Page table texture (R32_UINT - packed physical coordinates)
     pub page_table: vk::Image,
-    page_table_alloc: Option<vk_mem::Allocation>,
+    pub page_table_alloc: Option<vk_mem::Allocation>,
     pub page_table_view: vk::ImageView,
     pub page_table_sampler: vk::Sampler,
 
-    /// Request buffer (SSBO)
-    pub request_buffer: vk::Buffer,
-    request_buffer_alloc: Option<vk_mem::Allocation>,
+    /// Request buffers (one per frame in flight to avoid CPU/GPU race)
+    pub request_buffers: Vec<VsmRequestBuffer>,
+
+    /// Physical depth buffer (D32_SFLOAT) for shadow rendering
+    pub physical_depth_image: vk::Image,
+    physical_depth_image_alloc: Option<vk_mem::Allocation>,
+    pub physical_depth_view: vk::ImageView,
 
     /// Allocation buffer (SSBO)
     pub allocation_buffer: vk::Buffer,
@@ -143,6 +158,22 @@ pub struct VsmResources {
     /// Metadata uniform buffer
     pub metadata_buffer: vk::Buffer,
     metadata_buffer_alloc: Option<vk_mem::Allocation>,
+
+    /// Bindless indices
+    pub physical_cache_index: u32,
+    pub page_table_index: u32,
+
+    /// Default textures for VSM
+    pub default_uint_texture: crate::renderer::resources::Texture,
+    pub default_array_texture: crate::renderer::resources::Texture,
+
+    /// Descriptor set layout for VSM compute pipelines
+    pub compute_layout: vk::DescriptorSetLayout,
+
+    /// Descriptor pool for VSM compute descriptors
+    pub descriptor_pool: vk::DescriptorPool,
+    /// Descriptor set for VSM compute dispatch
+    pub descriptor_set: vk::DescriptorSet,
 }
 
 impl VsmResources {
@@ -153,7 +184,10 @@ impl VsmResources {
     pub unsafe fn new(
         device: Arc<ash::Device>,
         allocator: Arc<Allocator>,
+        command_pool: vk::CommandPool, // Added for texture creation
+        queue: vk::Queue,              // Added for texture creation
         config: VsmConfig,
+        frames_in_flight: u32,
     ) -> Result<Self> {
         log::info!(
             "Creating VSM resources: virtual={}x{}, physical={}x{}, page_size={}",
@@ -223,6 +257,45 @@ impl VsmResources {
             .create_sampler(&sampler_info, None)
             .map_err(|e| AshError::VulkanError(format!("Failed to create sampler: {e:?}")))?;
 
+        // Create physical depth buffer for Z-testing
+        let depth_info = vk::ImageCreateInfo::default()
+            .image_type(vk::ImageType::TYPE_2D)
+            .format(vk::Format::D32_SFLOAT)
+            .extent(vk::Extent3D {
+                width: config.physical_resolution,
+                height: config.physical_resolution,
+                depth: 1,
+            })
+            .mip_levels(1)
+            .array_layers(1)
+            .samples(vk::SampleCountFlags::TYPE_1)
+            .tiling(vk::ImageTiling::OPTIMAL)
+            .usage(vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT)
+            .sharing_mode(vk::SharingMode::EXCLUSIVE)
+            .initial_layout(vk::ImageLayout::UNDEFINED);
+
+        let (physical_depth_image, physical_depth_image_alloc) = allocator
+            .create_image(&depth_info, vk_mem::MemoryUsage::AutoPreferDevice)
+            .map_err(|e| {
+                AshError::VulkanError(format!("Failed to create physical depth cache: {e:?}"))
+            })?;
+
+        let depth_view_info = vk::ImageViewCreateInfo::default()
+            .image(physical_depth_image)
+            .view_type(vk::ImageViewType::TYPE_2D)
+            .format(vk::Format::D32_SFLOAT)
+            .subresource_range(vk::ImageSubresourceRange {
+                aspect_mask: vk::ImageAspectFlags::DEPTH,
+                base_mip_level: 0,
+                level_count: 1,
+                base_array_layer: 0,
+                layer_count: 1,
+            });
+
+        let physical_depth_view = device
+            .create_image_view(&depth_view_info, None)
+            .map_err(|e| AshError::VulkanError(format!("Failed to create depth view: {e:?}")))?;
+
         // Create page table (R32_UINT texture array for clipmaps)
         let table_res = config.page_table_resolution();
         let array_layers = config.clipmap_levels.max(1); // At least 1 layer
@@ -288,35 +361,53 @@ impl VsmResources {
             })?;
 
         // Create request buffer (SSBO)
+        // Usage: STORAGE_BUFFER | TRANSFER_SRC | TRANSFER_DST (Write by GPU, Read by CPU)
         let request_size = (config.max_requests_per_frame as usize
-            * std::mem::size_of::<PageRequest>()) as vk::DeviceSize;
+            * std::mem::size_of::<PageRequest>()) as vk::DeviceSize
+            + ATOMIC_HEADER_SIZE;
 
-        let (request_buffer, request_buffer_alloc) = allocator
-            .create_buffer(
-                request_size,
-                vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
-                vk_mem::MemoryUsage::AutoPreferDevice,
-            )
-            .map_err(|e| {
-                AshError::VulkanError(format!("Failed to create request buffer: {e:?}"))
-            })?;
+        let mut request_buffers = Vec::with_capacity(frames_in_flight as usize);
+        for _ in 0..frames_in_flight {
+            let (request_handle, request_alloc) = allocator
+                .create_buffer_with_flags(
+                    request_size,
+                    vk::BufferUsageFlags::STORAGE_BUFFER
+                        | vk::BufferUsageFlags::TRANSFER_SRC
+                        | vk::BufferUsageFlags::TRANSFER_DST,
+                    vk_mem::MemoryUsage::AutoPreferHost,
+                    vk_mem::AllocationCreateFlags::HOST_ACCESS_RANDOM,
+                )
+                .map_err(|e| {
+                    AshError::VulkanError(format!("Failed to create request buffer: {e:?}"))
+                })?;
+
+            request_buffers.push(VsmRequestBuffer {
+                buffer: request_handle,
+                allocation: request_alloc,
+                size_bytes: request_size,
+                max_requests: config.max_requests_per_frame,
+            });
+        }
 
         // Create allocation buffer (SSBO)
+        // Usage: STORAGE_BUFFER | TRANSFER_DST (Write by CPU, Read by GPU)
         let alloc_size = (config.physical_page_count() as usize
-            * std::mem::size_of::<PageAllocation>()) as vk::DeviceSize;
+            * std::mem::size_of::<PageAllocation>()) as vk::DeviceSize
+            + ATOMIC_HEADER_SIZE;
 
         let (allocation_buffer, allocation_buffer_alloc) = allocator
-            .create_buffer(
+            .create_buffer_with_flags(
                 alloc_size,
                 vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
-                vk_mem::MemoryUsage::AutoPreferDevice,
+                vk_mem::MemoryUsage::AutoPreferHost,
+                vk_mem::AllocationCreateFlags::HOST_ACCESS_SEQUENTIAL_WRITE,
             )
             .map_err(|e| {
                 AshError::VulkanError(format!("Failed to create allocation buffer: {e:?}"))
             })?;
 
         // Create metadata buffer (CPU-writable for per-frame updates)
-        let metadata_size = std::mem::size_of::<VsmMetadata>() as vk::DeviceSize;
+        let metadata_size = std::mem::size_of::<VsmGlobalInfo>() as vk::DeviceSize;
 
         let (metadata_buffer, metadata_buffer_alloc) = allocator
             .create_buffer_with_flags(
@@ -329,6 +420,233 @@ impl VsmResources {
                 AshError::VulkanError(format!("Failed to create metadata buffer: {e:?}"))
             })?;
 
+        // Create default textures for VSM bindless slots
+        let default_uint_texture = crate::renderer::resources::Texture::create_vsm_default_uint(
+            Arc::clone(&allocator),
+            Arc::clone(&device),
+            command_pool,
+            queue,
+        )?;
+
+        let default_array_texture = crate::renderer::resources::Texture::create_vsm_default_array(
+            Arc::clone(&allocator),
+            Arc::clone(&device),
+            command_pool,
+            queue,
+            config.clipmap_levels,
+        )?;
+
+        // Create compute descriptor set layout
+        let compute_bindings = [
+            // Binding 0: Metadata (Uniform Buffer)
+            vk::DescriptorSetLayoutBinding::default()
+                .binding(0)
+                .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::COMPUTE | vk::ShaderStageFlags::FRAGMENT),
+            // Binding 1: Request Buffer (Storage Buffer)
+            vk::DescriptorSetLayoutBinding::default()
+                .binding(1)
+                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::COMPUTE),
+            // Binding 2: Allocation Buffer (Storage Buffer)
+            vk::DescriptorSetLayoutBinding::default()
+                .binding(2)
+                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::COMPUTE),
+            // Binding 3: Page Table (Storage Image)
+            vk::DescriptorSetLayoutBinding::default()
+                .binding(3)
+                .descriptor_type(vk::DescriptorType::STORAGE_IMAGE)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::COMPUTE | vk::ShaderStageFlags::FRAGMENT),
+            // Binding 4: Physical Cache (Storage Image)
+            vk::DescriptorSetLayoutBinding::default()
+                .binding(4)
+                .descriptor_type(vk::DescriptorType::STORAGE_IMAGE)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::COMPUTE | vk::ShaderStageFlags::FRAGMENT),
+            // Binding 5: Scene Depth Buffer (Combined Image Sampler)
+            vk::DescriptorSetLayoutBinding::default()
+                .binding(5)
+                .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::COMPUTE),
+        ];
+
+        let compute_layout_info =
+            vk::DescriptorSetLayoutCreateInfo::default().bindings(&compute_bindings);
+        let compute_layout = device
+            .create_descriptor_set_layout(&compute_layout_info, None)
+            .map_err(|e| {
+                AshError::VulkanError(format!("Failed to create VSM compute layout: {e}"))
+            })?;
+
+        // Create dedicated descriptor pool for VSM
+        let pool_sizes = [
+            vk::DescriptorPoolSize {
+                ty: vk::DescriptorType::STORAGE_IMAGE,
+                descriptor_count: 2,
+            },
+            vk::DescriptorPoolSize {
+                ty: vk::DescriptorType::STORAGE_BUFFER,
+                descriptor_count: 2,
+            },
+            vk::DescriptorPoolSize {
+                ty: vk::DescriptorType::UNIFORM_BUFFER,
+                descriptor_count: 1,
+            },
+            vk::DescriptorPoolSize {
+                ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+                descriptor_count: 1,
+            },
+        ];
+        let pool_info = vk::DescriptorPoolCreateInfo::default()
+            .max_sets(1)
+            .pool_sizes(&pool_sizes);
+        let descriptor_pool = device
+            .create_descriptor_pool(&pool_info, None)
+            .map_err(|e| {
+                AshError::VulkanError(format!("Failed to create VSM descriptor pool: {e}"))
+            })?;
+
+        // Allocate descriptor set
+        let layouts = [compute_layout];
+        let alloc_info = vk::DescriptorSetAllocateInfo::default()
+            .descriptor_pool(descriptor_pool)
+            .set_layouts(&layouts);
+        let descriptor_set = device.allocate_descriptor_sets(&alloc_info).map_err(|e| {
+            AshError::VulkanError(format!("Failed to allocate VSM descriptor set: {e}"))
+        })?[0];
+
+        // Update descriptor set
+        let metadata_info = [vk::DescriptorBufferInfo::default()
+            .buffer(metadata_buffer)
+            .offset(0)
+            .range(vk::WHOLE_SIZE)];
+        let request_info = [vk::DescriptorBufferInfo::default()
+            .buffer(request_buffers[0].buffer)
+            .offset(0)
+            .range(vk::WHOLE_SIZE)];
+        let allocation_info = [vk::DescriptorBufferInfo::default()
+            .buffer(allocation_buffer)
+            .offset(0)
+            .range(vk::WHOLE_SIZE)];
+        let table_info = [vk::DescriptorImageInfo::default()
+            .image_view(page_table_view)
+            .image_layout(vk::ImageLayout::GENERAL)];
+        let cache_info = [vk::DescriptorImageInfo::default()
+            .image_view(physical_cache_view)
+            .image_layout(vk::ImageLayout::GENERAL)];
+
+        let writes = [
+            vk::WriteDescriptorSet::default()
+                .dst_set(descriptor_set)
+                .dst_binding(0)
+                .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+                .buffer_info(&metadata_info),
+            vk::WriteDescriptorSet::default()
+                .dst_set(descriptor_set)
+                .dst_binding(1)
+                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                .buffer_info(&request_info),
+            vk::WriteDescriptorSet::default()
+                .dst_set(descriptor_set)
+                .dst_binding(2)
+                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                .buffer_info(&allocation_info),
+            vk::WriteDescriptorSet::default()
+                .dst_set(descriptor_set)
+                .dst_binding(3)
+                .descriptor_type(vk::DescriptorType::STORAGE_IMAGE)
+                .image_info(&table_info),
+            vk::WriteDescriptorSet::default()
+                .dst_set(descriptor_set)
+                .dst_binding(4)
+                .descriptor_type(vk::DescriptorType::STORAGE_IMAGE)
+                .image_info(&cache_info),
+        ];
+
+        device.update_descriptor_sets(&writes, &[]);
+
+        // EXPLICIT INITIALIZATION: Clear Page Table and transition to GENERAL layout
+        unsafe {
+            crate::vulkan::utils::execute_single_use(&device, command_pool, queue, |cmd_buffer| {
+                // 1. Transition UNDEFINED -> TRANSFER_DST_OPTIMAL
+                let barrier_start = vk::ImageMemoryBarrier::default()
+                    .old_layout(vk::ImageLayout::UNDEFINED)
+                    .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                    .image(page_table)
+                    .subresource_range(vk::ImageSubresourceRange {
+                        aspect_mask: vk::ImageAspectFlags::COLOR,
+                        base_mip_level: 0,
+                        level_count: 1,
+                        base_array_layer: 0,
+                        layer_count: array_layers,
+                    })
+                    .src_access_mask(vk::AccessFlags::empty())
+                    .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE);
+
+                device.cmd_pipeline_barrier(
+                    cmd_buffer,
+                    vk::PipelineStageFlags::TOP_OF_PIPE,
+                    vk::PipelineStageFlags::TRANSFER,
+                    vk::DependencyFlags::empty(),
+                    &[],
+                    &[],
+                    &[barrier_start],
+                );
+
+                // 2. Clear to INVALID_PAGE sentinel (0xFFFFFFFF)
+                let clear_value = vk::ClearColorValue {
+                    uint32: [0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF],
+                };
+                let range = vk::ImageSubresourceRange {
+                    aspect_mask: vk::ImageAspectFlags::COLOR,
+                    base_mip_level: 0,
+                    level_count: 1,
+                    base_array_layer: 0,
+                    layer_count: array_layers,
+                };
+
+                device.cmd_clear_color_image(
+                    cmd_buffer,
+                    page_table,
+                    vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                    &clear_value,
+                    &[range],
+                );
+
+                // 3. Transition TRANSFER_DST_OPTIMAL -> GENERAL (Used by Compute/Fragment shaders)
+                let barrier_end = vk::ImageMemoryBarrier::default()
+                    .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                    .new_layout(vk::ImageLayout::GENERAL)
+                    .image(page_table)
+                    .subresource_range(vk::ImageSubresourceRange {
+                        aspect_mask: vk::ImageAspectFlags::COLOR,
+                        base_mip_level: 0,
+                        level_count: 1,
+                        base_array_layer: 0,
+                        layer_count: array_layers,
+                    })
+                    .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                    .dst_access_mask(vk::AccessFlags::SHADER_READ | vk::AccessFlags::SHADER_WRITE);
+
+                device.cmd_pipeline_barrier(
+                    cmd_buffer,
+                    vk::PipelineStageFlags::TRANSFER,
+                    vk::PipelineStageFlags::COMPUTE_SHADER
+                        | vk::PipelineStageFlags::FRAGMENT_SHADER,
+                    vk::DependencyFlags::empty(),
+                    &[],
+                    &[],
+                    &[barrier_end],
+                );
+            })?;
+        }
+
         log::info!("VSM resources created successfully");
 
         Ok(Self {
@@ -339,45 +657,147 @@ impl VsmResources {
             physical_cache_alloc: Some(physical_cache_alloc),
             physical_cache_view,
             physical_cache_sampler,
+
+            physical_depth_image,
+            physical_depth_image_alloc: Some(physical_depth_image_alloc),
+            physical_depth_view,
+
             page_table,
             page_table_alloc: Some(page_table_alloc),
             page_table_view,
             page_table_sampler,
-            request_buffer,
-            request_buffer_alloc: Some(request_buffer_alloc),
+            request_buffers,
             allocation_buffer,
             allocation_buffer_alloc: Some(allocation_buffer_alloc),
             metadata_buffer,
             metadata_buffer_alloc: Some(metadata_buffer_alloc),
+            physical_cache_index: u32::MAX, // To be registered
+            page_table_index: u32::MAX,     // To be registered
+            default_uint_texture,
+            default_array_texture,
+            compute_layout,
+            descriptor_pool,
+            descriptor_set,
         })
     }
 
-    /// Update metadata buffer with current configuration
-    pub fn update_metadata(&self, frame_index: u32) -> Result<()> {
-        let metadata = VsmMetadata {
-            virtual_resolution: self.config.virtual_resolution,
-            physical_resolution: self.config.physical_resolution,
-            page_size: self.config.page_size,
-            page_table_resolution: self.config.page_table_resolution(),
-            physical_page_count: self.config.physical_page_count(),
-            frame_index,
-            debug_flags: if self.config.debug_mode { 1 } else { 0 },
-            _padding: 0,
-        };
+    /// Register VSM resources with bindless manager
+    pub fn register_bindless(
+        &mut self,
+        bindless_manager: &mut crate::vulkan::BindlessManager,
+    ) -> Result<()> {
+        self.page_table_index =
+            bindless_manager.add_page_table(self.page_table_view, self.page_table_sampler)?;
+
+        self.physical_cache_index = bindless_manager
+            .add_sampled_image(self.physical_cache_view, self.physical_cache_sampler)?;
+
+        log::info!(
+            "VSM Registered: page_index={}, cache_index={}",
+            self.page_table_index,
+            self.physical_cache_index
+        );
+
+        Ok(())
+    }
+
+    /// Update metadata buffer (Global Info) with current state
+    pub fn update_global_info(&self, global_info: &VsmGlobalInfo) -> Result<()> {
+        let mut alloc = *self
+            .metadata_buffer_alloc
+            .as_ref()
+            .ok_or_else(|| AshError::VulkanError("Metadata buffer not allocated".into()))?;
 
         unsafe {
-            let mut alloc = self.metadata_buffer_alloc.as_ref().unwrap().clone();
             let ptr = self.allocator.vma.map_memory(&mut alloc).map_err(|e| {
                 AshError::VulkanError(format!("Failed to map metadata buffer: {e:?}"))
             })?;
 
             std::ptr::copy_nonoverlapping(
-                &metadata as *const VsmMetadata as *const u8,
+                global_info as *const VsmGlobalInfo as *const u8,
                 ptr,
-                std::mem::size_of::<VsmMetadata>(),
+                std::mem::size_of::<VsmGlobalInfo>(),
             );
 
             self.allocator.vma.unmap_memory(&mut alloc);
+        }
+
+        Ok(())
+    }
+
+    /// Upload new allocations to the GPU buffer
+    pub fn upload_allocations(&self, allocations: &[PageAllocation]) -> Result<()> {
+        if allocations.is_empty() {
+            return Ok(());
+        }
+
+        let mut alloc = *self
+            .allocation_buffer_alloc
+            .as_ref()
+            .ok_or_else(|| AshError::VulkanError("Allocation buffer not allocated".into()))?;
+
+        unsafe {
+            let ptr = self.allocator.vma.map_memory(&mut alloc).map_err(|e| {
+                AshError::VulkanError(format!("Failed to map allocation buffer: {e:?}"))
+            })?;
+
+            // Write count to the first 4 bytes (atomic header)
+            let max_phys = self.config.physical_page_count();
+            if allocations.len() as u32 > max_phys {
+                log::warn!(
+                    "VSM: Allocation count ({}) exceeds physical page budget ({}) - truncating.",
+                    allocations.len(),
+                    max_phys
+                );
+            }
+            let count = (allocations.len() as u32).min(max_phys);
+            *(ptr as *mut u32) = count;
+
+            // Write data starting at ATOMIC_HEADER_SIZE (16 bytes)
+            let data_ptr = ptr.add(ATOMIC_HEADER_SIZE as usize);
+            std::ptr::copy_nonoverlapping(
+                allocations.as_ptr(),
+                data_ptr as *mut PageAllocation,
+                count as usize,
+            );
+
+            self.allocator.vma.unmap_memory(&mut alloc);
+        }
+
+        Ok(())
+    }
+
+    /// Update analysis descriptors with current scene depth and request buffer
+    pub fn update_analysis_descriptors(
+        &self,
+        depth_view: vk::ImageView,
+        frame_index: u32,
+    ) -> Result<()> {
+        let request_buffer_info = [vk::DescriptorBufferInfo::default()
+            .buffer(self.request_buffers[frame_index as usize % self.request_buffers.len()].buffer)
+            .offset(0)
+            .range(vk::WHOLE_SIZE)];
+
+        let depth_info = [vk::DescriptorImageInfo::default()
+            .image_view(depth_view)
+            .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+            .sampler(self.physical_cache_sampler)];
+
+        let writes = [
+            vk::WriteDescriptorSet::default()
+                .dst_set(self.descriptor_set)
+                .dst_binding(2)
+                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                .buffer_info(&request_buffer_info),
+            vk::WriteDescriptorSet::default()
+                .dst_set(self.descriptor_set)
+                .dst_binding(5)
+                .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                .image_info(&depth_info),
+        ];
+
+        unsafe {
+            self.device.update_descriptor_sets(&writes, &[]);
         }
 
         Ok(())
@@ -408,10 +828,11 @@ impl VsmResources {
                 .destroy_buffer(self.allocation_buffer, &mut alloc);
         }
 
-        if let Some(mut alloc) = self.request_buffer_alloc.take() {
-            self.allocator
-                .vma
-                .destroy_buffer(self.request_buffer, &mut alloc);
+        for rb in &mut self.request_buffers {
+            if rb.buffer != vk::Buffer::null() {
+                self.allocator.destroy_buffer(rb.buffer, &mut rb.allocation);
+                rb.buffer = vk::Buffer::null();
+            }
         }
 
         // Destroy page table
@@ -446,6 +867,31 @@ impl VsmResources {
                 .vma
                 .destroy_image(self.physical_cache, &mut alloc);
             self.physical_cache = vk::Image::null();
+        }
+
+        // Destroy physical depth
+        if self.physical_depth_view != vk::ImageView::null() {
+            self.device
+                .destroy_image_view(self.physical_depth_view, None);
+            self.physical_depth_view = vk::ImageView::null();
+        }
+        if let Some(mut alloc) = self.physical_depth_image_alloc.take() {
+            self.allocator
+                .vma
+                .destroy_image(self.physical_depth_image, &mut alloc);
+            self.physical_depth_image = vk::Image::null();
+        }
+
+        if self.compute_layout != vk::DescriptorSetLayout::null() {
+            self.device
+                .destroy_descriptor_set_layout(self.compute_layout, None);
+            self.compute_layout = vk::DescriptorSetLayout::null();
+        }
+
+        if self.descriptor_pool != vk::DescriptorPool::null() {
+            self.device
+                .destroy_descriptor_pool(self.descriptor_pool, None);
+            self.descriptor_pool = vk::DescriptorPool::null();
         }
 
         log::debug!("VSM resources destroyed");

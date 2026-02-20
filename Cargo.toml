@@ -25,7 +25,7 @@ shaderc = { version = "0.10.1", optional = true }
 rspirv-reflect = { version = "0.9", optional = true }
 
 # Math
-glam = { version = "0.31.0", features = ["bytemuck"] }
+glam = { version = "0.32.0", features = ["bytemuck"] }
 
 # Memory
 bytemuck = { version = "1.14", features = ["derive"] }
@@ -44,6 +44,7 @@ image = { version = "0.25", default-features = false, features = [
     "png",
     "jpeg",
     "hdr",
+    "exr",
 ] }
 gltf = { version = "1.4", optional = true }
 intel_tex_2 = "0.5.0"

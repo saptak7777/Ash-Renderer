@@ -240,7 +240,7 @@ impl LightingBuilder<DirectionalSet> {
             ibl_irradiance_index: -1,
             ibl_prefilter_index: -1,
             ibl_brdf_lut_index: -1,
-            ibl_intensity: 0.0,
+            ibl_intensity: 1.0,
         }
     }
 }
@@ -259,7 +259,7 @@ impl LightingPresets {
         ibl_irradiance_index: -1,
         ibl_prefilter_index: -1,
         ibl_brdf_lut_index: -1,
-        ibl_intensity: 0.0,
+        ibl_intensity: 1.0,
     };
 
     pub const INDOOR_LIT: SceneLighting = SceneLighting {
@@ -272,7 +272,7 @@ impl LightingPresets {
         ibl_irradiance_index: -1,
         ibl_prefilter_index: -1,
         ibl_brdf_lut_index: -1,
-        ibl_intensity: 0.0,
+        ibl_intensity: 1.0,
     };
 
     pub const OUTDOOR_DAY: SceneLighting = SceneLighting {
@@ -285,7 +285,7 @@ impl LightingPresets {
         ibl_irradiance_index: -1,
         ibl_prefilter_index: -1,
         ibl_brdf_lut_index: -1,
-        ibl_intensity: 0.0,
+        ibl_intensity: 1.0,
     };
 
     pub const OUTDOOR_NIGHT: SceneLighting = SceneLighting {
@@ -298,7 +298,7 @@ impl LightingPresets {
         ibl_irradiance_index: -1,
         ibl_prefilter_index: -1,
         ibl_brdf_lut_index: -1,
-        ibl_intensity: 0.0,
+        ibl_intensity: 1.0,
     };
 }
 

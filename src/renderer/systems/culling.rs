@@ -76,17 +76,17 @@ impl CullingSystem {
 
                 // Note: IndirectDrawPass::execute_culling also does some internal barriers,
                 // but we explicitly manage the critical ones here for orchestrator clarity.
-                indirect_pass.execute_culling(
-                    cmd,
-                    &scene.occlusion_culling,
-                    resources.current_view_proj,
-                    resources.swapchain_extent.width,
-                    resources.swapchain_extent.height,
-                    0,
-                    scene.occlusion_culling.object_count() as u32,
-                    0,
+                let culling_ctx = crate::renderer::types::CullingContext {
+                    view_proj: resources.current_view_proj,
+                    width: resources.swapchain_extent.width,
+                    height: resources.swapchain_extent.height,
+                    object_offset: 0,
+                    object_count: scene.occlusion_culling.object_count() as u32,
+                    indirect_offset: 0,
                     cluster_buffer_addr,
-                )?;
+                };
+
+                indirect_pass.execute_culling(cmd, &scene.occlusion_culling, &culling_ctx)?;
 
                 // 4. CRITICAL BARRIER: Compute-to-Graphics for Indirect Buffers
                 // Transition DRAW_INDIRECT_BUFFER and COUNT_BUFFER from SHADER_WRITE to INDIRECT_COMMAND_READ

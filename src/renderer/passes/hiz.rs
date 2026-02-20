@@ -899,6 +899,87 @@ impl HiZPass {
         Ok(())
     }
 
+    /// Record all Hi-Z frame commands into `cmd`.
+    ///
+    /// Absorbs the full frame lifecycle:
+    /// 1. Adaptive quality adjustment (based on prior frame GPU timing).
+    /// 2. Depth-pyramid construction (`build_pyramid`).
+    /// 3. Handing the pyramid view+sampler to the `IndirectDrawPass` so the
+    ///    culling compute shader sees fresh data this frame.
+    ///
+    /// # Lock ordering
+    /// Acquires the `IndirectDrawPass` write-lock **after** all Hi-Z work is
+    /// complete, matching the convention established by the old
+    /// `RenderPipeline::execute_hiz_pass`.
+    ///
+    /// # Safety
+    /// `cmd` must be in recording state.
+    pub unsafe fn record_commands(
+        &mut self,
+        cmd: vk::CommandBuffer,
+        depth_image: vk::Image,
+        // Optional profiler timing from the previous frame for adaptive quality.
+        hiz_time_ms: Option<f64>,
+        // Fallback views when the pyramid is not yet initialized.
+        fallback_view: vk::ImageView,
+        fallback_sampler: vk::Sampler,
+        // Optional indirect-draw pass to push updated HiZ descriptors into.
+        indirect_draw_pass: Option<&crate::renderer::vcgs::IndirectDrawPass>,
+    ) -> crate::Result<()> {
+        if !self.initialized {
+            return Ok(());
+        }
+
+        // 1. Adapt quality to last frame's measured GPU cost.
+        if let Some(time_ms) = hiz_time_ms {
+            // Inline the AdaptiveHiZManager logic without the Arc<RwLock<>> dance —
+            // the pass owns its own quality now.
+            let target_ms = 3.0_f64;
+            let margin = 0.5_f64;
+            if time_ms > target_ms + margin && self.quality != HiZQuality::Performance {
+                self.quality = match self.quality {
+                    HiZQuality::Ultra => HiZQuality::Quality,
+                    HiZQuality::Quality => HiZQuality::Balanced,
+                    _ => HiZQuality::Performance,
+                };
+                self.active_mip_count = self.quality.mip_count().min(self.mip_count);
+                log::debug!(
+                    "HiZ adaptive quality downgraded to {:?} ({:.1}ms)",
+                    self.quality,
+                    time_ms
+                );
+            } else if time_ms < target_ms - margin && self.quality != HiZQuality::Ultra {
+                self.quality = match self.quality {
+                    HiZQuality::Performance => HiZQuality::Balanced,
+                    HiZQuality::Balanced => HiZQuality::Quality,
+                    _ => HiZQuality::Ultra,
+                };
+                self.active_mip_count = self.quality.mip_count().min(self.mip_count);
+                log::debug!(
+                    "HiZ adaptive quality upgraded to {:?} ({:.1}ms)",
+                    self.quality,
+                    time_ms
+                );
+            }
+        }
+
+        // 2. Build the hierarchical depth pyramid.
+        self.build_pyramid(cmd, depth_image)?;
+
+        // 3. Push the fresh pyramid view+sampler to the culling pass.
+        let hiz_view = self.hiz_view().unwrap_or(fallback_view);
+        let hiz_sampler = if self.initialized {
+            self.hiz_sampler
+        } else {
+            fallback_sampler
+        };
+        if let Some(indirect) = indirect_draw_pass {
+            indirect.update_hiz_descriptor(hiz_view, hiz_sampler);
+        }
+
+        Ok(())
+    }
+
     /// Get Hi-Z image for culling shader
     pub fn hiz_image(&self) -> vk::Image {
         self.hiz_image
@@ -993,6 +1074,10 @@ impl HiZPass {
         Ok(())
     }
 
+    /// Destroys all Vulkan resources associated with this pass.
+    ///
+    /// # Safety
+    /// The caller must ensure that the GPU is idle and no resources are currently in use.
     pub unsafe fn destroy(&mut self) {
         if self.destroyed {
             return;

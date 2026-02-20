@@ -36,8 +36,8 @@ pub use command::CommandPool;
 pub use command_manager::{CommandBufferContext, CommandBufferManager};
 pub use compute_pipeline::{ComputePipeline, ComputePipelineBuilder};
 pub use descriptor_allocator::DescriptorAllocator;
-pub use descriptor_bindless::BindlessManager;
-pub use descriptor_layout::DescriptorSetLayout;
+pub use descriptor_bindless::{BindlessConfig, BindlessManager};
+pub use descriptor_layout::{DescriptorSetLayout, DescriptorSetLayoutBuilder};
 pub use descriptor_set::DescriptorSet;
 pub use device::VulkanDevice;
 pub use framebuffer::Framebuffer;
@@ -63,10 +63,12 @@ pub fn set_debug_object_name<T: vk::Handle>(
     #[cfg(debug_assertions)]
     if let Some(loader) = loader {
         let c_name = std::ffi::CString::new(name).unwrap_or_default();
-        let mut info = vk::DebugUtilsObjectNameInfoEXT::default();
-        info.object_type = object_type;
-        info.object_handle = vk::Handle::as_raw(handle);
-        info.p_object_name = c_name.as_ptr();
+        let info = vk::DebugUtilsObjectNameInfoEXT {
+            object_type,
+            object_handle: vk::Handle::as_raw(handle),
+            p_object_name: c_name.as_ptr(),
+            ..Default::default()
+        };
         unsafe {
             let _ = loader.set_debug_utils_object_name(&info);
         }

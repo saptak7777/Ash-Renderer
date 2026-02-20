@@ -32,6 +32,9 @@ pub struct GlobalClusterBuffer {
 impl GlobalClusterBuffer {
     /// Create a new global cluster buffer
     ///
+    /// # Safety
+    /// The caller must ensure that the device and allocator are valid.
+    ///
     /// # Arguments
     /// * `capacity_mb` - Buffer capacity in Megabytes
     pub unsafe fn new(
@@ -41,7 +44,7 @@ impl GlobalClusterBuffer {
     ) -> Result<Self> {
         let capacity_bytes = (capacity_mb as u64) * 1024 * 1024;
 
-        log::info!("Creating GlobalClusterBuffer: {} MB", capacity_mb);
+        log::info!("Creating GlobalClusterBuffer: {capacity_mb} MB");
 
         let (buffer, allocation) = allocator.create_buffer_with_flags_and_name(
             capacity_bytes,
@@ -56,7 +59,7 @@ impl GlobalClusterBuffer {
         let address_info = vk::BufferDeviceAddressInfo::default().buffer(buffer);
         let device_address = device.get_buffer_device_address(&address_info);
 
-        log::info!("GlobalClusterBuffer BDA: 0x{:016X}", device_address);
+        log::info!("GlobalClusterBuffer BDA: {device_address:#018X}");
 
         Ok(Self {
             device,
@@ -71,6 +74,10 @@ impl GlobalClusterBuffer {
     }
 
     /// Records a copy of clusters from a staging buffer into the global buffer.
+    ///
+    /// # Safety
+    /// The caller must ensure that the command buffer is in a recording state,
+    /// and that the staging buffer and its offset are valid.
     ///
     /// # Arguments
     /// * `command_buffer` - Command buffer to record the copy command into.
@@ -123,6 +130,10 @@ impl GlobalClusterBuffer {
         self.buffer
     }
 
+    /// Be very careful calling this manually.
+    ///
+    /// # Safety
+    /// The caller must ensure that the GPU is idle and no resources are currently in use.
     pub unsafe fn destroy(&mut self) {
         if self.destroyed {
             return;
