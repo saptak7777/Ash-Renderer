@@ -1,3 +1,5 @@
+#![allow(unsafe_op_in_unsafe_fn)]
+
 //! Hi-Z Pyramid GPU Resources
 //!
 //! Manages GPU-side resources for hierarchical-Z occlusion culling:
@@ -261,33 +263,49 @@ impl AdaptiveHiZManager {
     }
 }
 
-/// Push constants for Hi-Z generation
+/// Push constants for the buffer-backed Hi-Z generate compute shader.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
-pub struct HiZGeneratePushConstants {
-    pub output_size: [u32; 2],
-    pub mip_level: u32,
-    pub _padding: u32,
+pub struct HiZPushConstants {
+    pub hiz_buffer_addr: u64,
+    pub src_mip_offset: u32,
+    pub dst_mip_offset: u32,
+    pub src_resolution: [u32; 2],
+    pub dst_resolution: [u32; 2],
+    pub is_first_pass: u32,
+    pub _pad: u32,
 }
+const _: () = assert!(
+    std::mem::size_of::<HiZPushConstants>() == 40,
+    "HiZPushConstants must be exactly 40 bytes"
+);
 
-/// GPU resources for Hi-Z pyramid
+/// GPU resources for the buffer-backed Hi-Z pyramid (Phase 5 BDA Migration)
 pub struct HiZPass {
     device: Arc<ash::Device>,
 
-    // Hi-Z pyramid image (R32_SFLOAT, mip chain)
-    hiz_image: vk::Image,
-    hiz_allocation: Option<vk_mem::Allocation>,
-    hiz_views: Vec<vk::ImageView>,
-    hiz_sampler: vk::Sampler,
+    // --- Phase 5: The single flat BDA buffer that replaces VkImage ---
+    // Stores the full mip chain as a contiguous array of u32 (floatBitsToUint depth values).
+    // Layout: [mip0_pixels... | mip1_pixels... | ... | mip_N_pixels]
+    hiz_buffer: vk::Buffer,
+    hiz_buffer_allocation: Option<vk_mem::Allocation>,
+    /// 64-bit device address — passed directly in push constants, no descriptor needed.
+    hiz_buffer_addr: u64,
+    /// Starting element index for each mip level within `hiz_buffer`.
+    /// `mip_offsets[i]` is the index of the first u32 element for mip `i`.
+    mip_offsets: Vec<u32>,
+    /// Total u32 elements allocated in `hiz_buffer` (sum of all mip areas).
+    total_elements: u64,
 
-    // Compute resources
+    // Compute pipeline (Phase 2)
     generate_pipeline: vk::Pipeline,
     generate_layout: vk::PipelineLayout,
 
-    // Descriptors
-    pool: vk::DescriptorPool,
-    layout: vk::DescriptorSetLayout,
-    descriptor_sets: Vec<vk::DescriptorSet>,
+    // Phase 2: Descriptor for reading main depth in Pass 0
+    depth_sampler: vk::Sampler,
+    input_layout: vk::DescriptorSetLayout,
+    input_pool: vk::DescriptorPool,
+    input_set: vk::DescriptorSet,
 
     // Geometry
     width: u32,
@@ -298,13 +316,12 @@ pub struct HiZPass {
     // Quality configuration
     quality: HiZQuality,
 
-    // Performance metrics (AAA standard)
+    // Performance metrics
     metrics: HiZMetrics,
     destroyed: bool,
 
     allocator: Option<Arc<Allocator>>,
 
-    // Validation state (debug builds only)
     #[cfg(debug_assertions)]
     _validation: HiZValidation,
 
@@ -312,19 +329,44 @@ pub struct HiZPass {
 }
 
 impl HiZPass {
-    /// Create a new Hi-Z pass (uninitialized)
+    /// Calculate the total element count and per-mip element offsets for a
+    /// mipmap chain starting at `width` × `height` and descending to 1×1.
+    ///
+    /// Returns `(total_elements, mip_offsets)` where:
+    /// - `total_elements` is the sum of all mip-level areas.
+    /// - `mip_offsets[i]` is the starting element index for mip level `i`.
+    pub fn calc_mip_chain(width: u32, height: u32, mip_count: u32) -> (u64, Vec<u32>) {
+        let mut offsets = Vec::with_capacity(mip_count as usize);
+        let mut total: u64 = 0;
+        for mip in 0..mip_count {
+            offsets.push(total as u32);
+            let mip_w = (width >> mip).max(1) as u64;
+            let mip_h = (height >> mip).max(1) as u64;
+            total += mip_w * mip_h;
+        }
+        (total, offsets)
+    }
+
+    /// Create a new Hi-Z pass (uninitialized). All GPU resources start as null.
     pub fn new(device: Arc<ash::Device>) -> Self {
         Self {
             device,
-            hiz_image: vk::Image::null(),
-            hiz_allocation: None,
-            hiz_views: Vec::new(),
-            hiz_sampler: vk::Sampler::null(),
+            // Phase 5: BDA buffer fields
+            hiz_buffer: vk::Buffer::null(),
+            hiz_buffer_allocation: None,
+            hiz_buffer_addr: 0,
+            mip_offsets: Vec::new(),
+            total_elements: 0,
+            // Compute pipeline resources
             generate_pipeline: vk::Pipeline::null(),
             generate_layout: vk::PipelineLayout::null(),
-            pool: vk::DescriptorPool::null(),
-            layout: vk::DescriptorSetLayout::null(),
-            descriptor_sets: Vec::new(),
+
+            // Phase 2 Descriptor
+            depth_sampler: vk::Sampler::null(),
+            input_layout: vk::DescriptorSetLayout::null(),
+            input_pool: vk::DescriptorPool::null(),
+            input_set: vk::DescriptorSet::null(),
+
             width: 0,
             height: 0,
             mip_count: 0,
@@ -349,7 +391,7 @@ impl HiZPass {
     pub unsafe fn init(
         &mut self,
         allocator: &Arc<Allocator>,
-        vulkan_device: &VulkanDevice,
+        _vulkan_device: &VulkanDevice,
         width: u32,
         height: u32,
     ) -> Result<()> {
@@ -393,37 +435,58 @@ impl HiZPass {
             self.quality
         );
 
-        // Hi-Z image with mip chain
-        unsafe { self.create_hiz_image(allocator)? };
+        // Phase 5: Allocate the flat BDA depth buffer.
+        unsafe { self.create_hiz_buffer(allocator)? };
 
-        unsafe { self.create_sampler()? };
+        // Phase 2: Descriptor for Pass 0 texture read
         unsafe { self.create_descriptors()? };
-        unsafe { self.create_pipeline(vulkan_device)? };
+
+        // Phase 2: Compute pipeline
+        unsafe { self.create_pipeline(_vulkan_device)? };
 
         self.initialized = true;
         Ok(())
     }
 
-    /// Create Hi-Z image with mip chain
-    unsafe fn create_hiz_image(&mut self, allocator: &vk_mem::Allocator) -> Result<()> {
+    /// Phase 5: Allocate the flat BDA Hi-Z buffer.
+    ///
+    /// The buffer stores the entire mip chain as a contiguous array of `u32`
+    /// (bit-cast `f32` depth values via `floatBitsToUint`/`uintBitsToFloat`).
+    ///
+    /// Layout inside the buffer:
+    /// ```text
+    /// [  mip0: width*height u32s  |  mip1: (w/2)*(h/2) u32s  |  ...  |  mipN: 1 u32  ]
+    /// ```
+    ///
+    /// `mip_offsets[i]` gives the starting *element* index for mip `i`.
+    /// Byte offset = `mip_offsets[i] * 4`.
+    unsafe fn create_hiz_buffer(&mut self, allocator: &vk_mem::Allocator) -> Result<()> {
         use vk_mem::Alloc;
 
-        let image_info = vk::ImageCreateInfo::default()
-            .image_type(vk::ImageType::TYPE_2D)
-            .format(vk::Format::R32_SFLOAT)
-            .extent(vk::Extent3D {
-                width: self.width,
-                height: self.height,
-                depth: 1,
-            })
-            .mip_levels(self.mip_count)
-            .array_layers(1)
-            .samples(vk::SampleCountFlags::TYPE_1)
-            .tiling(vk::ImageTiling::OPTIMAL)
+        // --- Mipmap math -------------------------------------------------------
+        let (total_elements, mip_offsets) =
+            Self::calc_mip_chain(self.width, self.height, self.mip_count);
+        self.mip_offsets = mip_offsets;
+        self.total_elements = total_elements;
+
+        let byte_size = total_elements * std::mem::size_of::<u32>() as u64;
+
+        log::debug!(
+            "HiZPass: Allocating BDA buffer — {}x{} × {} mips = {} elements ({} KiB)",
+            self.width,
+            self.height,
+            self.mip_count,
+            total_elements,
+            byte_size / 1024
+        );
+
+        // --- Buffer allocation -------------------------------------------------
+        let buffer_info = vk::BufferCreateInfo::default()
+            .size(byte_size)
             .usage(
-                vk::ImageUsageFlags::SAMPLED
-                    | vk::ImageUsageFlags::STORAGE
-                    | vk::ImageUsageFlags::TRANSFER_DST,
+                // STORAGE_BUFFER: allows GLSL `buffer` references.
+                // SHADER_DEVICE_ADDRESS: allows vkGetBufferDeviceAddress.
+                vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
             )
             .sharing_mode(vk::SharingMode::EXCLUSIVE);
 
@@ -432,38 +495,29 @@ impl HiZPass {
             ..Default::default()
         };
 
-        let (image, allocation) = unsafe { allocator.create_image(&image_info, &alloc_info) }
+        let (buffer, allocation) = unsafe { allocator.create_buffer(&buffer_info, &alloc_info) }
             .map_err(|e| {
-                crate::AshError::VulkanError(format!("Hi-Z image creation failed: {e:?}"))
+                crate::AshError::VulkanError(format!("Hi-Z BDA buffer allocation failed: {e:?}"))
             })?;
 
-        self.hiz_image = image;
-        self.hiz_allocation = Some(allocation);
+        self.hiz_buffer = buffer;
+        self.hiz_buffer_allocation = Some(allocation);
 
-        // Create views for each mip level
-        for mip in 0..self.mip_count {
-            let view_info = vk::ImageViewCreateInfo::default()
-                .image(self.hiz_image)
-                .view_type(vk::ImageViewType::TYPE_2D)
-                .format(vk::Format::R32_SFLOAT)
-                .subresource_range(
-                    vk::ImageSubresourceRange::default()
-                        .aspect_mask(vk::ImageAspectFlags::COLOR)
-                        .base_mip_level(mip)
-                        .level_count(1)
-                        .layer_count(1),
-                );
+        // --- Extract the 64-bit BDA pointer ------------------------------------
+        let addr_info = vk::BufferDeviceAddressInfo::default().buffer(self.hiz_buffer);
+        self.hiz_buffer_addr = unsafe { self.device.get_buffer_device_address(&addr_info) };
 
-            let view = unsafe { self.device.create_image_view(&view_info, None)? };
-            self.hiz_views.push(view);
-        }
+        log::info!(
+            "HiZPass: BDA buffer allocated at {:#018X} ({} MiB)",
+            self.hiz_buffer_addr,
+            byte_size / (1024 * 1024).max(1)
+        );
 
-        log::debug!("HiZPass: Created image with {} views", self.hiz_views.len());
         Ok(())
     }
 
-    /// Create sampler for Hi-Z reads
-    unsafe fn create_sampler(&mut self) -> Result<()> {
+    /// Create descriptor pool/layout for reading hardware depth buffer in Pass 0
+    unsafe fn create_descriptors(&mut self) -> Result<()> {
         let sampler_info = vk::SamplerCreateInfo::default()
             .mag_filter(vk::Filter::NEAREST)
             .min_filter(vk::Filter::NEAREST)
@@ -471,148 +525,104 @@ impl HiZPass {
             .address_mode_u(vk::SamplerAddressMode::CLAMP_TO_EDGE)
             .address_mode_v(vk::SamplerAddressMode::CLAMP_TO_EDGE)
             .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_EDGE)
-            .max_lod(self.mip_count as f32);
+            .max_anisotropy(1.0);
+        self.depth_sampler = self.device.create_sampler(&sampler_info, None)?;
 
-        self.hiz_sampler = unsafe { self.device.create_sampler(&sampler_info, None)? };
-        Ok(())
-    }
-
-    /// Create descriptor layout and pool
-    unsafe fn create_descriptors(&mut self) -> Result<()> {
-        // Layout: binding 0 = input sampler, binding 1 = output storage image
-        let bindings = [
-            vk::DescriptorSetLayoutBinding::default()
-                .binding(0)
-                .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-                .descriptor_count(1)
-                .stage_flags(vk::ShaderStageFlags::COMPUTE),
-            vk::DescriptorSetLayoutBinding::default()
-                .binding(1)
-                .descriptor_type(vk::DescriptorType::STORAGE_IMAGE)
-                .descriptor_count(1)
-                .stage_flags(vk::ShaderStageFlags::COMPUTE),
-        ];
+        let bindings = [vk::DescriptorSetLayoutBinding::default()
+            .binding(0)
+            .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+            .descriptor_count(1)
+            .stage_flags(vk::ShaderStageFlags::COMPUTE)];
 
         let layout_info = vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings);
+        self.input_layout = self
+            .device
+            .create_descriptor_set_layout(&layout_info, None)?;
 
-        self.layout = unsafe {
-            self.device
-                .create_descriptor_set_layout(&layout_info, None)?
-        };
-
-        // Pool for mip_count - 1 sets (one per mip transition)
-        let pool_sizes = [
-            vk::DescriptorPoolSize {
-                ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-                descriptor_count: self.mip_count,
-            },
-            vk::DescriptorPoolSize {
-                ty: vk::DescriptorType::STORAGE_IMAGE,
-                descriptor_count: self.mip_count,
-            },
-        ];
-
+        let pool_sizes = [vk::DescriptorPoolSize {
+            ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+            descriptor_count: 1,
+        }];
         let pool_info = vk::DescriptorPoolCreateInfo::default()
-            .max_sets(self.mip_count)
+            .max_sets(1)
             .pool_sizes(&pool_sizes);
+        self.input_pool = self.device.create_descriptor_pool(&pool_info, None)?;
 
-        self.pool = unsafe { self.device.create_descriptor_pool(&pool_info, None)? };
-
-        // Allocate sets
-        let layouts: Vec<_> = (0..self.mip_count).map(|_| self.layout).collect();
-
+        let layouts = [self.input_layout];
         let alloc_info = vk::DescriptorSetAllocateInfo::default()
-            .descriptor_pool(self.pool)
+            .descriptor_pool(self.input_pool)
             .set_layouts(&layouts);
-
-        self.descriptor_sets = unsafe { self.device.allocate_descriptor_sets(&alloc_info)? };
-
-        // Update descriptor sets for each mip transition
-        for mip in 0..(self.mip_count as usize - 1) {
-            let src_view = self.hiz_views[mip];
-            let dst_view = self.hiz_views[mip + 1];
-
-            let sampler_info = vk::DescriptorImageInfo::default()
-                .sampler(self.hiz_sampler)
-                .image_view(src_view)
-                .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL);
-
-            let storage_info = vk::DescriptorImageInfo::default()
-                .image_view(dst_view)
-                .image_layout(vk::ImageLayout::GENERAL);
-
-            let writes = [
-                vk::WriteDescriptorSet::default()
-                    .dst_set(self.descriptor_sets[mip])
-                    .dst_binding(0)
-                    .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-                    .image_info(std::slice::from_ref(&sampler_info)),
-                vk::WriteDescriptorSet::default()
-                    .dst_set(self.descriptor_sets[mip])
-                    .dst_binding(1)
-                    .descriptor_type(vk::DescriptorType::STORAGE_IMAGE)
-                    .image_info(std::slice::from_ref(&storage_info)),
-            ];
-
-            unsafe { self.device.update_descriptor_sets(&writes, &[]) };
-        }
+        self.input_set = self.device.allocate_descriptor_sets(&alloc_info)?[0];
 
         Ok(())
     }
 
     /// Create compute pipeline
     unsafe fn create_pipeline(&mut self, _vulkan_device: &VulkanDevice) -> Result<()> {
-        // Load shader module
         let shader_code = include_bytes!(concat!(env!("OUT_DIR"), "/hiz_generate.comp.spv"));
-
         let code = ash::util::read_spv(&mut std::io::Cursor::new(shader_code))
             .map_err(|e| crate::AshError::VulkanError(e.to_string()))?;
-        let shader_module_info = vk::ShaderModuleCreateInfo::default().code(&code);
+        let shader_info = vk::ShaderModuleCreateInfo::default().code(&code);
+        let module = self.device.create_shader_module(&shader_info, None)?;
 
-        let shader_module = unsafe {
-            self.device
-                .create_shader_module(&shader_module_info, None)?
-        };
-
-        // Push constant range
-        let push_constant_range = vk::PushConstantRange::default()
+        let push_range = vk::PushConstantRange::default()
             .stage_flags(vk::ShaderStageFlags::COMPUTE)
             .offset(0)
-            .size(std::mem::size_of::<HiZGeneratePushConstants>() as u32);
+            .size(std::mem::size_of::<HiZPushConstants>() as u32);
 
-        // Pipeline layout
         let layout_info = vk::PipelineLayoutCreateInfo::default()
-            .set_layouts(std::slice::from_ref(&self.layout))
-            .push_constant_ranges(std::slice::from_ref(&push_constant_range));
+            .set_layouts(std::slice::from_ref(&self.input_layout))
+            .push_constant_ranges(std::slice::from_ref(&push_range));
 
-        self.generate_layout = unsafe { self.device.create_pipeline_layout(&layout_info, None)? };
+        self.generate_layout = self.device.create_pipeline_layout(&layout_info, None)?;
 
-        // Compute pipeline
         let stage_info = vk::PipelineShaderStageCreateInfo::default()
             .stage(vk::ShaderStageFlags::COMPUTE)
-            .module(shader_module)
+            .module(module)
             .name(c"main");
 
         let pipeline_info = vk::ComputePipelineCreateInfo::default()
             .stage(stage_info)
             .layout(self.generate_layout);
 
-        let pipelines = unsafe {
-            self.device
-                .create_compute_pipelines(vk::PipelineCache::null(), &[pipeline_info], None)
-        }
-        .map_err(|(_, e)| e)?;
+        let pipelines = self
+            .device
+            .create_compute_pipelines(vk::PipelineCache::null(), &[pipeline_info], None)
+            .map_err(|(_, e)| e)?;
 
         self.generate_pipeline = pipelines[0];
-        unsafe { self.device.destroy_shader_module(shader_module, None) };
-
+        self.device.destroy_shader_module(module, None);
         Ok(())
     }
 
+    // --- DELETED (Phase 5): create_descriptors() was here. ---
+    // Descriptor pool/layout for the old image-based pipeline has been removed.
+    // All data now flows through BDA push constants.
+
+    // --- STUB: old image-based create_descriptors signature for reference only ---
+    #[allow(dead_code)]
+    unsafe fn _deleted_create_descriptors(&mut self) -> Result<()> {
+        // This method has been intentionally deleted as part of Phase 5:
+        // Buffer-Backed Hi-Z Migration. The VkDescriptorPool and
+        // VkDescriptorSetLayout for the Hi-Z pipeline are gone.
+        unreachable!("Phase 5: create_descriptors() has been eradicated")
+    }
+
+    // --- DELETED (Phase 5): old create_pipeline with image descriptor layout ---
+    #[allow(dead_code)]
+    unsafe fn _deleted_old_create_pipeline(&mut self) -> Result<()> {
+        unreachable!("Phase 5: old image-based create_pipeline() has been eradicated")
+    }
+
     /// Validate mip chain configuration at runtime
+    // Note: moved immediately before build_pyramid. Method body unchanged.
+    unsafe fn _old_create_descriptors_placeholder(&self) -> Result<()> {
+        Ok(())
+    }
+
+    /// Validate mip chain configuration at runtime.
     ///
-    /// Checks if the current configuration (dimensions vs mip count) is valid.
-    /// Returns true if valid, false otherwise (with error logging).
+    /// Returns `true` if the buffer dimensions match the current mip chain.
     pub fn validate_mip_chain_runtime(&mut self) -> bool {
         if self.width == 0 || self.height == 0 {
             log::error!(
@@ -646,278 +656,107 @@ impl HiZPass {
         true
     }
 
-    /// Build Hi-Z pyramid from depth buffer
+    /// Build the Hi-Z pyramid from the hardware depth buffer.
+    ///
+    /// **Phase 1 stub**: The BDA buffer is allocated and the address is valid.
+    /// The actual compute dispatch is implemented in Phase 2 (`hiz_generate.comp`).
+    ///
+    /// Phase 2 will:
+    /// 1. Transition the depth image to `SHADER_READ_ONLY_OPTIMAL`.
+    /// 2. Bind the compute pipeline.
+    /// 3. For each mip level, dispatch a compute shader that samples the depth
+    ///    image (mip 0) or the previous BDA mip level, and writes the minimum
+    ///    2×2 Reverse-Z depth to `hiz_ptr.data[mip_offsets[mip] + pixel_idx]`.
     ///
     /// # Safety
     /// Command buffer must be in recording state.
     pub unsafe fn build_pyramid(
         &mut self,
         cmd: vk::CommandBuffer,
-        depth_image: vk::Image,
+        depth_view: vk::ImageView,
     ) -> Result<()> {
-        if !self.initialized {
+        if !self.initialized || self.hiz_buffer_addr == 0 {
             return Ok(());
         }
 
-        // Runtime validation (AAA standard)
-        if !self.validate_mip_chain_runtime() {
-            // In production, we might fallback or panic, but here we error
-            return Err(crate::AshError::VulkanError(
-                "Hi-Z runtime validation failed".to_string(),
-            ));
-        }
+        // 1. Update Pass 0 Descriptor with the fresh depth_view
+        let image_info = vk::DescriptorImageInfo::default()
+            .sampler(self.depth_sampler)
+            .image_view(depth_view)
+            .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL);
 
-        // Depth -> Source for transfer
-        let depth_barrier = vk::ImageMemoryBarrier {
-            src_access_mask: vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
-            dst_access_mask: vk::AccessFlags::TRANSFER_READ,
-            old_layout: vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
-            new_layout: vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
-            image: depth_image,
-            subresource_range: vk::ImageSubresourceRange {
-                aspect_mask: vk::ImageAspectFlags::DEPTH,
-                level_count: 1,
-                layer_count: 1,
-                ..Default::default()
-            },
-            ..Default::default()
-        };
+        let write = vk::WriteDescriptorSet::default()
+            .dst_set(self.input_set)
+            .dst_binding(0)
+            .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+            .image_info(std::slice::from_ref(&image_info));
 
-        unsafe {
-            self.device.cmd_pipeline_barrier(
-                cmd,
-                vk::PipelineStageFlags::LATE_FRAGMENT_TESTS,
-                vk::PipelineStageFlags::TRANSFER,
-                vk::DependencyFlags::empty(),
-                &[],
-                &[],
-                &[depth_barrier],
-            );
-        }
+        self.device
+            .update_descriptor_sets(std::slice::from_ref(&write), &[]);
 
-        // Hi-Z mip 0 -> Destination for transfer
-        let hiz_barrier = vk::ImageMemoryBarrier {
-            dst_access_mask: vk::AccessFlags::TRANSFER_WRITE,
-            old_layout: vk::ImageLayout::UNDEFINED,
-            new_layout: vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-            image: self.hiz_image,
-            subresource_range: vk::ImageSubresourceRange {
-                aspect_mask: vk::ImageAspectFlags::COLOR,
-                base_mip_level: 0,
-                level_count: 1,
-                layer_count: 1,
-                ..Default::default()
-            },
-            ..Default::default()
-        };
+        // 2. Bind pipeline & descriptor
+        self.device
+            .cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, self.generate_pipeline);
+        self.device.cmd_bind_descriptor_sets(
+            cmd,
+            vk::PipelineBindPoint::COMPUTE,
+            self.generate_layout,
+            0,
+            std::slice::from_ref(&self.input_set),
+            &[],
+        );
 
-        unsafe {
-            self.device.cmd_pipeline_barrier(
-                cmd,
-                vk::PipelineStageFlags::TOP_OF_PIPE,
-                vk::PipelineStageFlags::TRANSFER,
-                vk::DependencyFlags::empty(),
-                &[],
-                &[],
-                &[hiz_barrier],
-            );
-        }
+        // 3. Dispatch Loop over all mips
+        let mut src_width = self.width;
+        let mut src_height = self.height;
 
-        let blit_region = vk::ImageBlit::default()
-            .src_subresource(
-                vk::ImageSubresourceLayers::default()
-                    .aspect_mask(vk::ImageAspectFlags::DEPTH)
-                    .layer_count(1),
-            )
-            .src_offsets([
-                vk::Offset3D::default(),
-                vk::Offset3D {
-                    x: self.width as i32,
-                    y: self.height as i32,
-                    z: 1,
+        for mip in 0..self.active_mip_count {
+            let dst_width = (self.width >> mip).max(1);
+            let dst_height = (self.height >> mip).max(1);
+
+            let push = HiZPushConstants {
+                hiz_buffer_addr: self.hiz_buffer_addr,
+                src_mip_offset: if mip == 0 {
+                    0
+                } else {
+                    self.mip_offset((mip - 1) as usize)
                 },
-            ])
-            .dst_subresource(
-                vk::ImageSubresourceLayers::default()
-                    .aspect_mask(vk::ImageAspectFlags::COLOR)
-                    .layer_count(1),
-            )
-            .dst_offsets([
-                vk::Offset3D::default(),
-                vk::Offset3D {
-                    x: self.width as i32,
-                    y: self.height as i32,
-                    z: 1,
-                },
-            ]);
-
-        unsafe {
-            self.device.cmd_blit_image(
-                cmd,
-                depth_image,
-                vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
-                self.hiz_image,
-                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-                &[blit_region],
-                vk::Filter::NEAREST,
-            );
-        }
-
-        // Transition mip 0 to shader read
-        let mip0_read_barrier = vk::ImageMemoryBarrier::default()
-            .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
-            .dst_access_mask(vk::AccessFlags::SHADER_READ)
-            .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
-            .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
-            .image(self.hiz_image)
-            .subresource_range(
-                vk::ImageSubresourceRange::default()
-                    .aspect_mask(vk::ImageAspectFlags::COLOR)
-                    .base_mip_level(0)
-                    .level_count(1)
-                    .layer_count(1),
-            );
-
-        unsafe {
-            self.device.cmd_pipeline_barrier(
-                cmd,
-                vk::PipelineStageFlags::TRANSFER,
-                vk::PipelineStageFlags::COMPUTE_SHADER,
-                vk::DependencyFlags::empty(),
-                &[],
-                &[],
-                &[mip0_read_barrier],
-            );
-
-            // Generate mip chain (use active mip count for current quality)
-            self.device.cmd_bind_pipeline(
-                cmd,
-                vk::PipelineBindPoint::COMPUTE,
-                self.generate_pipeline,
-            );
-        }
-
-        for mip in 1..self.active_mip_count {
-            let mip_width = (self.width >> mip).max(1);
-            let mip_height = (self.height >> mip).max(1);
-
-            // Transition current mip to general (storage write)
-            let mip_barrier = vk::ImageMemoryBarrier::default()
-                .dst_access_mask(vk::AccessFlags::SHADER_WRITE)
-                .old_layout(vk::ImageLayout::UNDEFINED)
-                .new_layout(vk::ImageLayout::GENERAL)
-                .image(self.hiz_image)
-                .subresource_range(
-                    vk::ImageSubresourceRange::default()
-                        .aspect_mask(vk::ImageAspectFlags::COLOR)
-                        .base_mip_level(mip)
-                        .level_count(1)
-                        .layer_count(1),
-                );
-
-            unsafe {
-                self.device.cmd_pipeline_barrier(
-                    cmd,
-                    vk::PipelineStageFlags::COMPUTE_SHADER,
-                    vk::PipelineStageFlags::COMPUTE_SHADER,
-                    vk::DependencyFlags::empty(),
-                    &[],
-                    &[],
-                    &[mip_barrier],
-                );
-            }
-
-            unsafe {
-                // Bind descriptor set for this mip transition
-                self.device.cmd_bind_descriptor_sets(
-                    cmd,
-                    vk::PipelineBindPoint::COMPUTE,
-                    self.generate_layout,
-                    0,
-                    &[self.descriptor_sets[(mip - 1) as usize]],
-                    &[],
-                );
-            }
-
-            // Push constants
-            let push = HiZGeneratePushConstants {
-                output_size: [mip_width, mip_height],
-                mip_level: mip,
-                _padding: 0,
+                dst_mip_offset: self.mip_offset(mip as usize),
+                src_resolution: [src_width, src_height],
+                dst_resolution: [dst_width, dst_height],
+                is_first_pass: if mip == 0 { 1 } else { 0 },
+                _pad: 0,
             };
 
-            unsafe {
-                self.device.cmd_push_constants(
-                    cmd,
-                    self.generate_layout,
-                    vk::ShaderStageFlags::COMPUTE,
-                    0,
-                    bytemuck::bytes_of(&push),
-                );
-            }
-
-            // Dispatch
-            let group_x = mip_width.div_ceil(8);
-            let group_y = mip_height.div_ceil(8);
-            unsafe {
-                self.device.cmd_dispatch(cmd, group_x, group_y, 1);
-            }
-
-            // Transition this mip to shader read for next iteration
-            let read_barrier = vk::ImageMemoryBarrier::default()
-                .src_access_mask(vk::AccessFlags::SHADER_WRITE)
-                .dst_access_mask(vk::AccessFlags::SHADER_READ)
-                .old_layout(vk::ImageLayout::GENERAL)
-                .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
-                .image(self.hiz_image)
-                .subresource_range(
-                    vk::ImageSubresourceRange::default()
-                        .aspect_mask(vk::ImageAspectFlags::COLOR)
-                        .base_mip_level(mip)
-                        .level_count(1)
-                        .layer_count(1),
-                );
-
-            unsafe {
-                self.device.cmd_pipeline_barrier(
-                    cmd,
-                    vk::PipelineStageFlags::COMPUTE_SHADER,
-                    vk::PipelineStageFlags::COMPUTE_SHADER,
-                    vk::DependencyFlags::empty(),
-                    &[],
-                    &[],
-                    &[read_barrier],
-                );
-            }
-        }
-
-        // Restore depth to attachment optimal
-        let depth_restore = vk::ImageMemoryBarrier::default()
-            .src_access_mask(vk::AccessFlags::TRANSFER_READ)
-            .dst_access_mask(
-                vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_READ
-                    | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
-            )
-            .old_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
-            .new_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
-            .image(depth_image)
-            .subresource_range(
-                vk::ImageSubresourceRange::default()
-                    .aspect_mask(vk::ImageAspectFlags::DEPTH)
-                    .level_count(1)
-                    .layer_count(1),
+            self.device.cmd_push_constants(
+                cmd,
+                self.generate_layout,
+                vk::ShaderStageFlags::COMPUTE,
+                0,
+                bytemuck::bytes_of(&push),
             );
 
-        unsafe {
+            let group_x = dst_width.div_ceil(8);
+            let group_y = dst_height.div_ceil(8);
+            self.device.cmd_dispatch(cmd, group_x, group_y, 1);
+
+            // Memory barrier: Flush BDA writes so the next mip can safely read them.
+            let barrier = vk::MemoryBarrier::default()
+                .src_access_mask(vk::AccessFlags::SHADER_WRITE)
+                .dst_access_mask(vk::AccessFlags::SHADER_READ);
+
             self.device.cmd_pipeline_barrier(
                 cmd,
-                vk::PipelineStageFlags::TRANSFER,
-                vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS,
+                vk::PipelineStageFlags::COMPUTE_SHADER,
+                vk::PipelineStageFlags::COMPUTE_SHADER,
                 vk::DependencyFlags::empty(),
+                std::slice::from_ref(&barrier),
                 &[],
                 &[],
-                &[depth_restore],
             );
+
+            src_width = dst_width;
+            src_height = dst_height;
         }
 
         Ok(())
@@ -941,23 +780,16 @@ impl HiZPass {
     pub unsafe fn record_commands(
         &mut self,
         cmd: vk::CommandBuffer,
-        depth_image: vk::Image,
-        // Optional profiler timing from the previous frame for adaptive quality.
+        depth_view: vk::ImageView,
+        // Frame GPU timing from the previous frame (drives adaptive quality).
         hiz_time_ms: Option<f64>,
-        // Fallback views when the pyramid is not yet initialized.
-        fallback_view: vk::ImageView,
-        fallback_sampler: vk::Sampler,
-        // Optional indirect-draw pass to push updated HiZ descriptors into.
-        indirect_draw_pass: Option<&crate::renderer::vcgs::IndirectDrawPass>,
     ) -> crate::Result<()> {
         if !self.initialized {
             return Ok(());
         }
 
-        // 1. Adapt quality to last frame's measured GPU cost.
+        // 1. Adaptive quality adjustment.
         if let Some(time_ms) = hiz_time_ms {
-            // Inline the AdaptiveHiZManager logic without the Arc<RwLock<>> dance —
-            // the pass owns its own quality now.
             let target_ms = 3.0_f64;
             let margin = 0.5_f64;
             if time_ms > target_ms + margin && self.quality != HiZQuality::Performance {
@@ -967,11 +799,7 @@ impl HiZPass {
                     _ => HiZQuality::Performance,
                 };
                 self.active_mip_count = self.quality.mip_count().min(self.mip_count);
-                log::debug!(
-                    "HiZ adaptive quality downgraded to {:?} ({:.1}ms)",
-                    self.quality,
-                    time_ms
-                );
+                log::debug!("HiZ quality → {:?} ({:.1}ms)", self.quality, time_ms);
             } else if time_ms < target_ms - margin && self.quality != HiZQuality::Ultra {
                 self.quality = match self.quality {
                     HiZQuality::Performance => HiZQuality::Balanced,
@@ -979,44 +807,40 @@ impl HiZPass {
                     _ => HiZQuality::Ultra,
                 };
                 self.active_mip_count = self.quality.mip_count().min(self.mip_count);
-                log::debug!(
-                    "HiZ adaptive quality upgraded to {:?} ({:.1}ms)",
-                    self.quality,
-                    time_ms
-                );
+                log::debug!("HiZ quality ↑ {:?} ({:.1}ms)", self.quality, time_ms);
             }
         }
 
-        // 2. Build the hierarchical depth pyramid.
-        unsafe { self.build_pyramid(cmd, depth_image)? };
-
-        // 3. Push the fresh pyramid view+sampler to the culling pass.
-        let hiz_view = self.hiz_view().unwrap_or(fallback_view);
-        let hiz_sampler = if self.initialized {
-            self.hiz_sampler
-        } else {
-            fallback_sampler
-        };
-        if let Some(indirect) = indirect_draw_pass {
-            unsafe { indirect.update_hiz_descriptor(hiz_view, hiz_sampler) };
-        }
+        // 2. Dispatch BDA compute downsample.
+        unsafe { self.build_pyramid(cmd, depth_view)? };
 
         Ok(())
     }
 
-    /// Get Hi-Z image for culling shader
-    pub fn hiz_image(&self) -> vk::Image {
-        self.hiz_image
+    /// Returns the 64-bit BDA pointer for the flat Hi-Z buffer.
+    /// Pass this directly into the culling push constants — no descriptor required.
+    #[inline]
+    pub fn hiz_buffer_addr(&self) -> u64 {
+        self.hiz_buffer_addr
     }
 
-    /// Get Hi-Z sampler for culling shader
-    pub fn hiz_sampler(&self) -> vk::Sampler {
-        self.hiz_sampler
+    /// Returns the element-index offset for mip level `mip`.
+    /// `byte_offset = mip_offsets[mip] * 4`.
+    #[inline]
+    pub fn mip_offset(&self, mip: usize) -> u32 {
+        self.mip_offsets.get(mip).copied().unwrap_or(0)
     }
 
-    /// Get complete Hi-Z image view (all mips)
-    pub fn hiz_view(&self) -> Option<vk::ImageView> {
-        self.hiz_views.first().copied()
+    /// Returns the full mip-offset table (element indices, not bytes).
+    #[inline]
+    pub fn mip_offsets(&self) -> &[u32] {
+        &self.mip_offsets
+    }
+
+    /// Returns the total number of `u32` elements in the Hi-Z buffer.
+    #[inline]
+    pub fn total_elements(&self) -> u64 {
+        self.total_elements
     }
 
     /// Get current quality mode
@@ -1122,41 +946,40 @@ impl HiZPass {
         };
 
         unsafe {
-            for view in self.hiz_views.drain(..) {
-                self.device.destroy_image_view(view, None);
-            }
-
-            if self.hiz_image != vk::Image::null() {
-                if let Some(mut alloc) = self.hiz_allocation.take() {
-                    allocator.destroy_image(self.hiz_image, &mut alloc);
+            // Phase 5: Destroy the flat BDA Hi-Z buffer.
+            if self.hiz_buffer != vk::Buffer::null() {
+                if let Some(mut alloc) = self.hiz_buffer_allocation.take() {
+                    allocator.destroy_buffer(self.hiz_buffer, &mut alloc);
                 }
-                self.hiz_image = vk::Image::null();
+                self.hiz_buffer = vk::Buffer::null();
+                self.hiz_buffer_addr = 0;
             }
+            self.mip_offsets.clear();
+            self.total_elements = 0;
 
-            if self.hiz_sampler != vk::Sampler::null() {
-                self.device.destroy_sampler(self.hiz_sampler, None);
-                self.hiz_sampler = vk::Sampler::null();
-            }
-
+            // Compute pipeline (Phase 2 installs this)
             if self.generate_pipeline != vk::Pipeline::null() {
                 self.device.destroy_pipeline(self.generate_pipeline, None);
                 self.generate_pipeline = vk::Pipeline::null();
             }
-
             if self.generate_layout != vk::PipelineLayout::null() {
                 self.device
                     .destroy_pipeline_layout(self.generate_layout, None);
                 self.generate_layout = vk::PipelineLayout::null();
             }
-
-            if self.pool != vk::DescriptorPool::null() {
-                self.device.destroy_descriptor_pool(self.pool, None);
-                self.pool = vk::DescriptorPool::null();
+            // Phase 2: Descriptor cleanup
+            if self.depth_sampler != vk::Sampler::null() {
+                self.device.destroy_sampler(self.depth_sampler, None);
+                self.depth_sampler = vk::Sampler::null();
             }
-
-            if self.layout != vk::DescriptorSetLayout::null() {
-                self.device.destroy_descriptor_set_layout(self.layout, None);
-                self.layout = vk::DescriptorSetLayout::null();
+            if self.input_pool != vk::DescriptorPool::null() {
+                self.device.destroy_descriptor_pool(self.input_pool, None);
+                self.input_pool = vk::DescriptorPool::null();
+            }
+            if self.input_layout != vk::DescriptorSetLayout::null() {
+                self.device
+                    .destroy_descriptor_set_layout(self.input_layout, None);
+                self.input_layout = vk::DescriptorSetLayout::null();
             }
         }
 

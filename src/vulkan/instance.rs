@@ -1,6 +1,6 @@
 use ash::{
     Entry, Instance,
-    ext::{debug_utils, validation_features},
+    ext::{debug_utils, swapchain_colorspace, validation_features},
     khr::surface,
     vk,
 };
@@ -58,6 +58,17 @@ impl VulkanInstance {
                 } else {
                     debug!("Optional extension {name:?} not supported by instance.");
                 }
+            }
+
+            // Always try to enable HDR10 color-space support.
+            // VK_EXT_swapchain_colorspace is required for the driver to expose
+            // HDR10_ST2084_EXT surface formats during swapchain format selection.
+            let swapchain_colorspace_name = CStr::from_ptr(swapchain_colorspace::NAME.as_ptr());
+            if available_extension_names.contains(&swapchain_colorspace_name) {
+                extensions.push(swapchain_colorspace::NAME.as_ptr());
+                debug!("VK_EXT_swapchain_colorspace enabled — HDR10 surface formats available.");
+            } else {
+                warn!("VK_EXT_swapchain_colorspace not supported; HDR10 swapchain unavailable.");
             }
 
             if enable_validation {

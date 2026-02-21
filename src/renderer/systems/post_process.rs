@@ -372,6 +372,7 @@ impl PostProcessSystem {
                 swapchain_extent,
                 target_image,
                 target_view,
+                u32::from(ctx.swapchain.is_hdr),
             )?;
         }
 
@@ -385,6 +386,7 @@ impl PostProcessSystem {
         extent: vk::Extent2D,
         target_image: vk::Image,
         target_view: vk::ImageView,
+        is_hdr: u32,
     ) -> Result<()> {
         if self.pipeline.is_none() || self.descriptor_sets.is_empty() {
             return Ok(());
@@ -459,17 +461,17 @@ impl PostProcessSystem {
 
             let push_constants = PostProcessPushConstants {
                 exposure: self.config.exposure,
-                gamma: self.config.gamma,
                 bloom_intensity: if self.config.bloom_enabled {
                     self.config.bloom_intensity
                 } else {
                     0.0
                 },
-                tonemapping_enabled: if self.config.tonemapping_enabled {
-                    1.0
+                tonemapper_type: if self.config.tonemapping_enabled {
+                    1
                 } else {
-                    0.0
+                    0
                 },
+                is_hdr,
             };
 
             self.device.cmd_push_constants(

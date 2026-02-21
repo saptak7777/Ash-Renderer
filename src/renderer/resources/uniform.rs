@@ -188,7 +188,6 @@ impl UniformBuffer {
                     .size(size)
                     .usage(
                         vk::BufferUsageFlags::UNIFORM_BUFFER
-                            | vk::BufferUsageFlags::STORAGE_BUFFER
                             | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
                     )
                     .sharing_mode(vk::SharingMode::EXCLUSIVE),
@@ -346,7 +345,6 @@ impl MaterialBuffer {
                     .size(size)
                     .usage(
                         vk::BufferUsageFlags::UNIFORM_BUFFER
-                            | vk::BufferUsageFlags::STORAGE_BUFFER
                             | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
                     )
                     .sharing_mode(vk::SharingMode::EXCLUSIVE),
@@ -483,8 +481,7 @@ impl InstanceBuffer {
                 &vk::BufferCreateInfo::default()
                     .size(size)
                     .usage(
-                        vk::BufferUsageFlags::STORAGE_BUFFER
-                            | vk::BufferUsageFlags::TRANSFER_DST
+                        vk::BufferUsageFlags::TRANSFER_DST
                             | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
                     )
                     .sharing_mode(vk::SharingMode::EXCLUSIVE),
@@ -605,8 +602,7 @@ impl<T: Copy> StorageBuffer<T> {
                 &vk::BufferCreateInfo::default()
                     .size(size)
                     .usage(
-                        vk::BufferUsageFlags::STORAGE_BUFFER
-                            | vk::BufferUsageFlags::TRANSFER_DST
+                        vk::BufferUsageFlags::TRANSFER_DST
                             | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
                     )
                     .sharing_mode(vk::SharingMode::EXCLUSIVE),

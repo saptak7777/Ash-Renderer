@@ -997,7 +997,7 @@ impl Renderer {
             // Ensure CPU-side buffer writes (uniforms, instance data) are visible to
             // all GPU shader stages before any rendering begins.
             let global_barrier = vk::MemoryBarrier::default()
-                .src_access_mask(vk::AccessFlags::HOST_WRITE)
+                .src_access_mask(vk::AccessFlags::HOST_WRITE | vk::AccessFlags::SHADER_WRITE)
                 .dst_access_mask(
                     vk::AccessFlags::SHADER_READ
                         | vk::AccessFlags::UNIFORM_READ
@@ -1006,7 +1006,7 @@ impl Renderer {
                 );
             self.context.device.device.cmd_pipeline_barrier(
                 command_buffer,
-                vk::PipelineStageFlags::HOST,
+                vk::PipelineStageFlags::HOST | vk::PipelineStageFlags::COMPUTE_SHADER,
                 vk::PipelineStageFlags::ALL_GRAPHICS | vk::PipelineStageFlags::COMPUTE_SHADER,
                 vk::DependencyFlags::empty(),
                 &[global_barrier],
@@ -1026,11 +1026,18 @@ impl Renderer {
                     0,
                 )?;
             }
+            let hiz_buffer_addr = if let Some(ref hiz_arc) = self.systems.pipeline.hiz_pass {
+                hiz_arc.read().unwrap().hiz_buffer_addr()
+            } else {
+                0
+            };
+
             self.systems.culling.execute_culling(
                 cmd_ctx.handle(),
                 &self.context,
                 &self.resources,
                 scene,
+                hiz_buffer_addr,
                 frame_index,
             )?;
 
@@ -1040,7 +1047,7 @@ impl Renderer {
             if let Some(ref db) = self.resources.depth_buffer {
                 self.systems.pipeline.execute_hiz_pass(
                     command_buffer,
-                    db.image(),
+                    db.view(),
                     self.systems.gpu_profiler.as_ref(),
                     self.resources.black_texture.view(),
                     self.resources.black_texture.sampler(),

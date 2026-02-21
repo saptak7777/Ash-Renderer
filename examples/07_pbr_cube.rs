@@ -228,7 +228,7 @@ impl ApplicationHandler for App {
                                 light_distance * (elapsed * 1.5).sin(),
                             ),
                             color: Vec3::new(1.0, 1.0, 1.0), // White light
-                            intensity: 3.0,                  // Reduced from 5.0 to prevent blowout
+                            intensity: 1.5,                  // Halved for AgX (was 3.0 under ACES)
                             radius: 10.0,
                         },
                         PointLight {
@@ -238,7 +238,7 @@ impl ApplicationHandler for App {
                                 light_distance * (elapsed * 2.0 + std::f32::consts::PI).sin(),
                             ),
                             color: Vec3::new(1.0, 0.5, 0.5), // Pale red light
-                            intensity: 4.0,                  // Reduced from 8.0 to prevent blowout
+                            intensity: 2.0,                  // Halved for AgX (was 4.0 under ACES)
                             radius: 10.0,
                         },
                     ];

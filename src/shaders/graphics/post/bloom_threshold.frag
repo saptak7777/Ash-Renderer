@@ -9,10 +9,11 @@ layout(set = 0, binding = 0) uniform sampler2D hdrBuffer;
 
 layout(push_constant) uniform PushConstants {
     float exposure;
-    float gamma;
     float bloomIntensity;
     float threshold;
+    uint  _pad;
 } pc;
+
 
 // Soft threshold to avoid harsh cutoff
 vec3 softThreshold(vec3 color, float threshold, float softKnee) {

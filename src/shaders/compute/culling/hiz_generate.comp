@@ -1,51 +1,73 @@
 #version 450
+#extension GL_EXT_buffer_reference2 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
 
-//! Hi-Z Pyramid Generation Shader
+//! Hi-Z Pyramid Generation Shader (Phase 2 - BDA)
 //!
-//! Generates a hierarchical depth buffer (Hi-Z pyramid) for occlusion culling.
-//! Each mip level contains the maximum depth of 2x2 texels from the previous level.
+//! Generates a hierarchical depth buffer for occlusion culling.
+//! Pass 0 (is_first_pass == 1) reads from the main depth buffer texture.
+//! Passes > 0 read from the previous mip level strictly via BDA buffer.
 
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 
-// Input: Previous mip level (or depth buffer for level 0)
+// Pass 0 input
 layout(set = 0, binding = 0) uniform sampler2D inputDepth;
 
-// Output: Current mip level
-layout(set = 0, binding = 1, r32f) uniform writeonly image2D outputMip;
+// BDA flat buffer definition
+layout(buffer_reference, std430, buffer_reference_align = 4) buffer HiZBuffer {
+    uint data[];
+};
 
-// Push constants
+// Push constants matching Rust exactly (36 bytes + 4 bytes padding = 40 bytes)
 layout(push_constant) uniform PushConstants {
-    uvec2 outputSize;  // Size of output mip level
-    uint mipLevel;     // Current mip level being generated
-    uint _padding;
+    uint64_t hiz_buffer_addr;
+    uint src_mip_offset;
+    uint dst_mip_offset;
+    uvec2 src_resolution;
+    uvec2 dst_resolution;
+    uint is_first_pass;
 } pc;
 
 void main() {
     uvec2 pos = gl_GlobalInvocationID.xy;
-    
-    if (pos.x >= pc.outputSize.x || pos.y >= pc.outputSize.y) {
+    if (pos.x >= pc.dst_resolution.x || pos.y >= pc.dst_resolution.y) {
         return;
     }
-    
-    // Safety: Check for valid texture size to prevent division by zero
-    ivec2 inputSize = textureSize(inputDepth, 0);
-    if (inputSize.x == 0 || inputSize.y == 0) {
-        imageStore(outputMip, ivec2(pos), vec4(0.0, 0.0, 0.0, 0.0));
-        return;
+
+    float minDepth = 1.0; // Reverse-Z: 1.0 is near, 0.0 is far. We min() to find the furthest depth.
+
+    if (pc.is_first_pass == 1) {
+        // --- Pass 0: Read from main texture ---
+        // Safety: Prevent zero div
+        if (pc.src_resolution.x == 0 || pc.src_resolution.y == 0) return;
+
+        vec2 uv = (vec2(pos) * 2.0 + 1.0) / vec2(pc.src_resolution);
+        
+        // gather returns CCW starting from bottom-left
+        vec4 depths = textureGather(inputDepth, uv, 0);
+        minDepth = min(min(depths.x, depths.y), min(depths.z, depths.w));
+    } else {
+        // --- Pass > 0: Read from BDA buffer ---
+        HiZBuffer hiz = HiZBuffer(pc.hiz_buffer_addr);
+        
+        // Source is the previous mip level. We need coordinates for the 2x2 footprint.
+        uint bx = pos.x * 2;
+        uint by = pos.y * 2;
+        
+        uint i00 = pc.src_mip_offset + (by * pc.src_resolution.x) + bx;
+        uint i10 = pc.src_mip_offset + (by * pc.src_resolution.x) + min(bx + 1, pc.src_resolution.x - 1);
+        uint i01 = pc.src_mip_offset + (min(by + 1, pc.src_resolution.y - 1) * pc.src_resolution.x) + bx;
+        uint i11 = pc.src_mip_offset + (min(by + 1, pc.src_resolution.y - 1) * pc.src_resolution.x) + min(bx + 1, pc.src_resolution.x - 1);
+        
+        float d00 = uintBitsToFloat(hiz.data[i00]);
+        float d10 = uintBitsToFloat(hiz.data[i10]);
+        float d01 = uintBitsToFloat(hiz.data[i01]);
+        float d11 = uintBitsToFloat(hiz.data[i11]);
+        
+        minDepth = min(min(d00, d10), min(d01, d11));
     }
     
-    // Calculate UV for sampling (center of 2x2 block in source)
-    vec2 uv = (vec2(pos) * 2.0 + 1.0) / vec2(inputSize);
-    
-    // Sample 4 texels using gather (much faster than 4 texture calls)
-    // textureGather returns values in counter-clockwise order starting from bottom-left
-    vec4 depths = textureGather(inputDepth, uv, 0);
-    
-    // REVERSE-Z: Take MINIMUM depth (furthest from camera = most conservative)
-    // In Reverse-Z: 1.0 = near plane, 0.0 = far plane
-    // We want the furthest point (smallest value, closest to 0.0) to ensure conservative occlusion.
-    // This preserves "holes" (0.0) so we can see through them.
-    float minDepth = min(min(depths.x, depths.y), min(depths.z, depths.w));
-    
-    imageStore(outputMip, ivec2(pos), vec4(minDepth, 0.0, 0.0, 0.0));
+    // Write out the minimum depth to the current mip
+    uint dst_index = pc.dst_mip_offset + (pos.y * pc.dst_resolution.x) + pos.x;
+    HiZBuffer(pc.hiz_buffer_addr).data[dst_index] = floatBitsToUint(minDepth);
 }

@@ -23,7 +23,8 @@ impl CullingSystem {
         context: &Context,
         resources: &Resources,
         scene: &Scene,
-        _frame_index: usize,
+        hiz_buffer_addr: u64,
+        frame_index: usize,
     ) -> Result<()> {
         let indirect_arc = match &self.indirect_draw_pass {
             Some(arc) => arc,
@@ -76,6 +77,11 @@ impl CullingSystem {
 
                 // Note: IndirectDrawPass::execute_culling also does some internal barriers,
                 // but we explicitly manage the critical ones here for orchestrator clarity.
+                let camera_buffer_addr = resources.uniform_buffers[frame_index]
+                    .read()
+                    .unwrap()
+                    .device_address();
+
                 let culling_ctx = crate::renderer::types::CullingContext {
                     view_proj: resources.current_view_proj,
                     width: resources.swapchain_extent.width,
@@ -84,6 +90,8 @@ impl CullingSystem {
                     object_count: scene.occlusion_culling.object_count() as u32,
                     indirect_offset: 0,
                     cluster_buffer_addr,
+                    hiz_buffer_addr,
+                    camera_buffer_addr,
                 };
 
                 indirect_pass.execute_culling(cmd, &scene.occlusion_culling, &culling_ctx)?;

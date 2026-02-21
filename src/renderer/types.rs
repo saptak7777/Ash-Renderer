@@ -249,6 +249,8 @@ pub struct CullingContext {
     pub object_count: u32,
     pub indirect_offset: u32,
     pub cluster_buffer_addr: u64,
+    pub hiz_buffer_addr: u64,
+    pub camera_buffer_addr: u64,
 }
 
 /// Parameters for texture resource creation

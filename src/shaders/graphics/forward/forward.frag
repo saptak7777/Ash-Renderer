@@ -49,14 +49,10 @@ layout(set = 1, binding = 3, r32ui) uniform uimage2DArray u_PageTable;
 layout(set = 1, binding = 4, rg32f) uniform image2D u_PhysicalMemory;
 const uint MAX_LIGHTS_PER_TILE = 256;
 
-// Convert sRGB color to linear space for proper color handling
-vec3 srgb_to_linear(vec3 color) {
-    return mix(
-        color / 12.92,
-        pow((color + 0.055) / 1.055, vec3(2.4)),
-        greaterThan(color, vec3(0.04045))
-    );
-}
+// NOTE: No srgb_to_linear function here.
+// Albedo textures are uploaded as vk::Format::R8G8B8A8_SRGB.
+// The Vulkan sampler automatically linearizes them on read.
+// Any manual conversion here would apply the curve twice, darkening albedo.
 
 
 float SampleVSM(vec3 worldPos) {
@@ -213,8 +209,9 @@ void main() {
     vec4 baseSample = base_color_idx >= 0
         ? texture(global_textures[nonuniformEXT(base_color_idx)], fragUV)
         : vec4(1.0);
-    // Apply sRGB-to-linear conversion only for texture samples (base_color_factor is already linear)
-    vec3 baseSampleLinear = base_color_idx >= 0 ? srgb_to_linear(baseSample.rgb) : baseSample.rgb;
+    // Hardware linearization: R8G8B8A8_SRGB format decodes sRGB→linear on the sampler.
+    // Simply read the texel — no manual conversion needed or permitted.
+    vec3 baseSampleLinear = baseSample.rgb;
     vec3 baseColor = baseSampleLinear * base_color_factor.rgb * fragColor;
 
     // Apply tint from bindless storage buffer if available (Example 06 pattern)

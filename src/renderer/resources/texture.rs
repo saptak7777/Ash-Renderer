@@ -2081,12 +2081,13 @@ impl Texture {
                             horizon_color.lerp(nadir_color, (-dir.y).powf(0.5))
                         };
 
-                        // Gamma correct (approximate linear to sRGB conversion for storage)
-                        let srgb = color.powf(1.0 / 2.2);
-
-                        let r = (srgb.x * 255.0).clamp(0.0, 255.0) as u8;
-                        let g = (srgb.y * 255.0).clamp(0.0, 255.0) as u8;
-                        let b = (srgb.z * 255.0).clamp(0.0, 255.0) as u8;
+                        // Store linear-light values directly.
+                        // The skybox texture feeds into the linear HDR pipeline.
+                        // The post-process AgX pass + OETF applies the final
+                        // transfer function — no pre-encoding belongs here.
+                        let r = (color.x * 255.0).clamp(0.0, 255.0) as u8;
+                        let g = (color.y * 255.0).clamp(0.0, 255.0) as u8;
+                        let b = (color.z * 255.0).clamp(0.0, 255.0) as u8;
 
                         let pixel_index = ((face as u64 * resolution as u64 * resolution as u64)
                             + (y as u64 * resolution as u64)

@@ -1,54 +1,77 @@
-// Output: Current mip level
+// cull_instances.comp — Pure BDA Occlusion Culling Shader (Phase 3)
+//
+// Push constant layout (80 bytes, 48 bytes free vs. 128-byte Vulkan minimum):
+//   screen_params           [f32;4]  @ offset 0
+//   object_count            u32      @ offset 16
+//   hiz_levels              u32      @ offset 20
+//   base_index              u32      @ offset 24
+//   indirect_start          u32      @ offset 28
+//   object_buffer_addr      u64      @ offset 32  (BDA)
+//   cluster_buffer_addr     u64      @ offset 40  (BDA, reserved)
+//   visibility_buffer_addr  u64      @ offset 48  (BDA)
+//   indirect_buffer_addr    u64      @ offset 56  (BDA)
+//   count_buffer_addr       u64      @ offset 64  (BDA)
+//   debug_mode              u32      @ offset 72
+//   _pad                    u32      @ offset 76
 #version 450
-#extension GL_EXT_nonuniform_qualifier : enable
-#extension GL_GOOGLE_include_directive : require
-#extension GL_EXT_buffer_reference2 : require
-#extension GL_EXT_scalar_block_layout : require
+#extension GL_EXT_nonuniform_qualifier                   : enable
+#extension GL_GOOGLE_include_directive                   : require
+#extension GL_EXT_buffer_reference2                      : require
+#extension GL_EXT_scalar_block_layout                    : require
 #extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
 
-//! GPU Occlusion Culling Shader - FULL BDA IMPLEMENTATION
-//!
-//! Tests object bounding boxes against the Hi-Z pyramid and frustum planes.
-//! Generates indirect draw commands for visible objects.
+#define SKIP_PUSH_CONSTANTS
+#define SKIP_GLOBAL_BINDED_RESOURCES
+#include "interop/structures.glsl"
 
 layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 
-// Define this to prevent structures.glsl from defining the standard PushConstants
-// We need custom push constants for this specific compute shader
-#define SKIP_PUSH_CONSTANTS
-#include "interop/structures.glsl"
-
 // ============================================================================
-// DESCRIPTOR SETS
+// DESCRIPTOR SETS — only the Hi-Z sampler and camera UBO remain.
+// Image samplers cannot be BDA. The camera UBO will be converted in Phase 4
+// once the FrameData BDA handoff is wired to the compute pipeline.
 // ============================================================================
 
-// Set 0: Indirect Draw Pass Resources
-layout(set = 0, binding = 1) uniform sampler2D hizPyramid;
-layout(std430, set = 0, binding = 3) writeonly buffer VisibilityFlags {
+// Camera BDA layout
+layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer CameraBuffer {
+    mat4 viewProj;
+};
+
+// No HiZ sampler descriptor here! (Phase 3: BDA only)
+
+// ============================================================================
+// BDA BUFFER REFERENCES
+// ObjectBuffer and IndirectBuffer and CountBuffer come from structures.glsl.
+// VisibilityBuffer is culling-specific.
+// ============================================================================
+
+layout(buffer_reference, scalar) buffer VisibilityBuffer {
     uint visibility[];
 };
-layout(std430, set = 0, binding = 4) writeonly buffer IndirectCommands {
-    IndirectDrawCommand commands[];
-};
-layout(std430, set = 0, binding = 5) writeonly buffer VisibleCount {
-    uint count;
+
+layout(buffer_reference, std430, buffer_reference_align = 4) readonly buffer HiZBuffer {
+    uint data[];
 };
 
 // ============================================================================
-// PUSH CONSTANTS
+// PUSH CONSTANTS — mirrors Rust CullingPushConstants exactly (80 bytes)
 // ============================================================================
 
-layout(push_constant) uniform CullingPushConstants {
-    mat4 viewProj;
-    vec4 screenParams;  // width, height, 1/width, 1/height
-    uint objectCount;
-    uint hizLevels;
-    uint baseIndex;
-    uint indirectStart;
-    uint64_t objectBufferPtr; // BDA Pointer to object data
-    uint debugMode;           // 0=None, 1=LOD, 2=ClusterID
-    uint _padding;
-    uint64_t clusterBufferPtr; // BDA Pointer to cluster data
+layout(push_constant) uniform CullingPC {
+    vec4     screenParams;         // width, height, 1/width, 1/height  @ 0
+    uint     objectCount;          //                                    @ 16
+    uint     hizLevels;            //                                    @ 20
+    uint     baseIndex;            //                                    @ 24
+    uint     indirectStart;        //                                    @ 28
+    uint64_t objectBufferPtr;      // BDA → ObjectBuffer                @ 32
+    uint64_t clusterBufferPtr;     // BDA → (unused in instance pass)   @ 40
+    uint64_t visibilityBufferPtr;  // BDA → VisibilityBuffer            @ 48
+    uint64_t indirectBufferPtr;    // BDA → IndirectBuffer              @ 56
+    uint64_t countBufferPtr;       // BDA → CountBuffer                 @ 64
+    uint64_t hizBufferPtr;         // BDA → HiZBuffer                   @ 72
+    uint     debugMode;            //                                    @ 80
+    uint     _pad;                 //                                    @ 84
+    uint64_t cameraBufferPtr;      // BDA → CameraBuffer                 @ 88
 } pc;
 
 // ============================================================================
@@ -56,64 +79,46 @@ layout(push_constant) uniform CullingPushConstants {
 // ============================================================================
 
 void extractFrustumPlanes(mat4 vp, out vec4 planes[6]) {
-    // Extract planes from view-projection matrix (Row addition/subtraction)
-    // Row 0 = X, Row 1 = Y, Row 2 = Z, Row 3 = W
     vec4 r0 = vec4(vp[0].x, vp[1].x, vp[2].x, vp[3].x);
     vec4 r1 = vec4(vp[0].y, vp[1].y, vp[2].y, vp[3].y);
     vec4 r2 = vec4(vp[0].z, vp[1].z, vp[2].z, vp[3].z);
     vec4 r3 = vec4(vp[0].w, vp[1].w, vp[2].w, vp[3].w);
-
     planes[0] = r3 + r0; // Left
     planes[1] = r3 - r0; // Right
     planes[2] = r3 + r1; // Bottom
     planes[3] = r3 - r1; // Top
-    planes[4] = r2;      // Near (Vulkan [0,1] depth: z >= 0)
-    planes[5] = r3 - r2; // Far
-    
-    // Normalize
+    planes[4] = r2;       // Near (Reverse-Z: z >= 0)
+    planes[5] = r3 - r2;  // Far
     for (int i = 0; i < 6; i++) {
         float len = length(planes[i].xyz);
-        if (len > 0.0001) {
-            planes[i] /= len;
-        }
+        if (len > 0.0001) planes[i] /= len;
     }
 }
 
-bool frustumCull(vec3 center, vec3 extents, vec4 planes[6]) {
+bool frustumCullAABB(vec3 center, vec3 extents, vec4 planes[6]) {
     for (int i = 0; i < 6; i++) {
-        vec3 normal = planes[i].xyz;
-        float dist = planes[i].w;
-        
-        // Positive vertex test
-        vec3 positiveVertex = center + extents * sign(normal);
-        
-        if (dot(normal, positiveVertex) + dist < 0.0) {
-            return true; // Culled
-        }
+        vec3 pv = center + extents * sign(planes[i].xyz);
+        if (dot(planes[i].xyz, pv) + planes[i].w < 0.0) return true;
     }
     return false;
 }
-
-// ============================================================================
-// OCCLUSION CULLING
-// ============================================================================
 
 bool frustumCullSphere(vec3 center, float radius, vec4 planes[6]) {
     for (int i = 0; i < 6; i++) {
-        vec3 normal = planes[i].xyz;
-        float dist = planes[i].w;
-        
-        // Signed distance to plane: dot(N, P) + d
-        // If distance < -radius, the sphere is completely on the negative side (outside)
-        if (dot(normal, center) + dist < -radius) {
-            return true; // Culled
-        }
+        if (dot(planes[i].xyz, center) + planes[i].w < -radius) return true;
     }
     return false;
 }
 
+uint get_mip_offset(uint base_width, uint base_height, uint target_mip) {
+    uint offset = 0;
+    for (uint i = 0; i < target_mip; i++) {
+        offset += max(1u, base_width >> i) * max(1u, base_height >> i);
+    }
+    return offset;
+}
+
 bool occlusionCull(vec3 center, vec3 extents, mat4 vp) {
-    // Transform 8 corners to clip space
     vec3 corners[8] = vec3[8](
         center + vec3(-extents.x, -extents.y, -extents.z),
         center + vec3( extents.x, -extents.y, -extents.z),
@@ -124,49 +129,52 @@ bool occlusionCull(vec3 center, vec3 extents, mat4 vp) {
         center + vec3( extents.x,  extents.y,  extents.z),
         center + vec3(-extents.x,  extents.y,  extents.z)
     );
-    
     vec2 minScreen = vec2(1.0);
     vec2 maxScreen = vec2(0.0);
-    // REVERSE-Z: Track MAXIMUM depth (nearest point to camera)
-    // In Reverse-Z: 1.0 = near, 0.0 = far
-    float maxZ = 0.0;
-    
+    float maxZ = 0.0; // Reverse-Z: near = 1.0
     for (int i = 0; i < 8; i++) {
         vec4 clip = vp * vec4(corners[i], 1.0);
-        
-        if (clip.w <= 0.0) {
-            return false; // Behind camera - conservative visible
-        }
-        
-        vec3 ndc = clip.xyz / clip.w;
+        if (clip.w <= 0.0) return false;
+        vec3 ndc    = clip.xyz / clip.w;
         vec2 screen = ndc.xy * 0.5 + 0.5;
-        
         minScreen = min(minScreen, screen);
         maxScreen = max(maxScreen, screen);
-        // REVERSE-Z: Track maximum (nearest) depth - largest Z value is closest to 1.0 (Near)
         maxZ = max(maxZ, ndc.z);
     }
-    
-    // Clamp screen coordinates to valid range
     minScreen = clamp(minScreen, vec2(0.0), vec2(1.0));
     maxScreen = clamp(maxScreen, vec2(0.0), vec2(1.0));
+    vec2  screenSize = (maxScreen - minScreen) * pc.screenParams.xy;
+    float lod   = clamp(ceil(log2(max(screenSize.x, screenSize.y))), 0.0, float(pc.hizLevels - 1));
+    uint mipLevel = uint(lod);
+
+    uint base_width = uint(pc.screenParams.x);
+    uint base_height = uint(pc.screenParams.y);
+    uint offset = get_mip_offset(base_width, base_height, mipLevel);
     
-    // Calculate Hi-Z mip level
-    vec2 screenSize = (maxScreen - minScreen) * pc.screenParams.xy;
-    float mipLevel = ceil(log2(max(screenSize.x, screenSize.y)));
-    mipLevel = clamp(mipLevel, 0.0, float(pc.hizLevels - 1));
+    uint mip_width = max(1u, base_width >> mipLevel);
+    uint mip_height = max(1u, base_height >> mipLevel);
+
+    vec2 mipSize = vec2(mip_width, mip_height);
+    vec2 pMin = minScreen * mipSize;
+    vec2 pMax = maxScreen * mipSize;
+
+    uint x0 = uint(clamp(floor(pMin.x), 0.0, mipSize.x - 1.0));
+    uint y0 = uint(clamp(floor(pMin.y), 0.0, mipSize.y - 1.0));
+    uint x1 = uint(clamp(ceil(pMax.x), 0.0, mipSize.x - 1.0));
+    uint y1 = uint(clamp(ceil(pMax.y), 0.0, mipSize.y - 1.0));
+
+    if (pc.hizBufferPtr == 0ul) return false;
+    HiZBuffer hiz = HiZBuffer(pc.hizBufferPtr);
     
-    // Safety: Ensure UV is in valid range [0, 1]
-    vec2 sampleUV = clamp((minScreen + maxScreen) * 0.5, vec2(0.0), vec2(1.0));
+    float d00 = uintBitsToFloat(hiz.data[offset + (y0 * mip_width) + x0]);
+    float d10 = uintBitsToFloat(hiz.data[offset + (y0 * mip_width) + x1]);
+    float d01 = uintBitsToFloat(hiz.data[offset + (y1 * mip_width) + x0]);
+    float d11 = uintBitsToFloat(hiz.data[offset + (y1 * mip_width) + x1]);
     
-    // Sample Hi-Z depth
-    // In Reverse-Z High-Z generation, we store the MIN depth (furthest/closest to 0.0)
-    float hizDepth = textureLod(hizPyramid, sampleUV, mipLevel).r;
+    // Reverse-Z: furthest visible point is the minimum float depth
+    float min_fetched_depth = min(min(d00, d10), min(d01, d11));
     
-    // REVERSE-Z: Object is occluded if its nearest point (maxZ) is SMALLER than Hi-Z depth
-    // This means the object's closest point is "behind" (further away/smaller Z) the furthest visible surface.
-    // Visible if ObjectClosest (MaxZ) >= HiZ (Furthest Occluder).
-    return maxZ < hizDepth;
+    return maxZ < min_fetched_depth;
 }
 
 // ============================================================================
@@ -175,31 +183,31 @@ bool occlusionCull(vec3 center, vec3 extents, mat4 vp) {
 
 void main() {
     uint objectIdx = gl_GlobalInvocationID.x;
-    
-    // SAFETY: BDA null pointer check
-    if (pc.objectBufferPtr == 0) {
-        return;
-    }
-    
-    if (objectIdx >= pc.objectCount) {
-        return;
-    }
-    
-    // Fetch object data via BDA Pointer
-    InstanceData obj = ObjectBuffer(pc.objectBufferPtr).objects[pc.baseIndex + objectIdx];
-    
-    // Transform to world space
-    vec3 worldCenter = (obj.model * vec4(obj.bounds_center.xyz, 1.0)).xyz;
-    vec3 worldExtents;
-    float worldRadius = 0.0;
-    
-    bool isSphere = obj.bounds_center.w > 0.5;
+
+    // BDA null-pointer guard
+    if (pc.objectBufferPtr == 0ul || pc.visibilityBufferPtr == 0ul) return;
+    if (objectIdx >= pc.objectCount) return;
+
+    // Instantiate typed handles from raw 64-bit pointers
+    ObjectBuffer     objBuf = ObjectBuffer(pc.objectBufferPtr);
+    VisibilityBuffer visBuf = VisibilityBuffer(pc.visibilityBufferPtr);
+    IndirectBuffer   cmdBuf = IndirectBuffer(pc.indirectBufferPtr);
+    CountBuffer      cntBuf = CountBuffer(pc.countBufferPtr);
+    CameraBuffer     camera = CameraBuffer(pc.cameraBufferPtr);
+
+    // Fetch object data — pure BDA read, no descriptor binding
+    InstanceData obj = objBuf.objects[pc.baseIndex + objectIdx];
+
+    // Transform bounds to world space
+    vec3  worldCenter  = (obj.model * vec4(obj.bounds_center.xyz, 1.0)).xyz;
+    float worldRadius  = 0.0;
+    vec3  worldExtents;
+    bool  isSphere     = obj.bounds_center.w > 0.5;
+
     if (isSphere) {
-        float scale = max(length(obj.model[0].xyz), max(length(obj.model[1].xyz), length(obj.model[2].xyz)));
-        // In Sphere mode, extents.x is Radius
-        worldRadius = obj.bounds_extents.x * scale;
-        // Construct AABB for Occlusion Culling (which expects box)
-        worldExtents = vec3(worldRadius);
+        float scale    = max(length(obj.model[0].xyz), max(length(obj.model[1].xyz), length(obj.model[2].xyz)));
+        worldRadius    = obj.bounds_extents.x * scale;
+        worldExtents   = vec3(worldRadius);
     } else {
         worldExtents = obj.bounds_extents.xyz * vec3(
             length(obj.model[0].xyz),
@@ -207,90 +215,51 @@ void main() {
             length(obj.model[2].xyz)
         );
     }
-    
-    // Frustum culling
-    vec4 frustumPlanes[6];
-    extractFrustumPlanes(pc.viewProj, frustumPlanes);
-    
-    bool culled = false;
-    
-    if (isSphere) {
-         culled = frustumCullSphere(worldCenter, worldRadius, frustumPlanes);
-    } else {
-         culled = frustumCull(worldCenter, worldExtents, frustumPlanes);
-    }
 
-    if (culled) {
-        visibility[objectIdx] = 0;
+    // Frustum culling using camera UBO (Phase 4: will become FrameData BDA)
+    vec4 frustumPlanes[6];
+    extractFrustumPlanes(camera.viewProj, frustumPlanes);
+
+    bool culled = isSphere
+        ? frustumCullSphere(worldCenter, worldRadius, frustumPlanes)
+        : frustumCullAABB(worldCenter, worldExtents, frustumPlanes);
+
+    if (culled) { visBuf.visibility[objectIdx] = 0u; return; }
+
+    // Screen-size culling: reject sub-pixel geometry
+    vec4  clipPos   = camera.viewProj * vec4(worldCenter, 1.0);
+    float clipW     = clipPos.w;
+    float boundRad  = max(worldExtents.x, max(worldExtents.y, worldExtents.z));
+    if (clipW > 0.0001 && (boundRad / clipW) < 0.005) {
+        visBuf.visibility[objectIdx] = 0u;
         return;
     }
 
-    // Screen Size Culling (Safety Net)
-    // Discard tiny clusters to prevent "Performance Valley of Death" during Nanite transition
-    float radius = max(worldExtents.x, max(worldExtents.y, worldExtents.z));
-    vec4 clipPos = pc.viewProj * vec4(worldCenter, 1.0);
-    // Only verify size if in front of camera (w > 0)
-    if (clipPos.w > 0.0) {
-        // Safety: Prevent division by zero or very small values
-        if (abs(clipPos.w) > 0.0001) {
-            // Approximate normalized screen size (radius / depth)
-            // This is a rough metric but sufficient to cull sub-pixel/tiny geometry
-            float normalizedSize = radius / clipPos.w;
-            if (normalizedSize < 0.005) { // < 0.5% of "view cone"
-                 visibility[objectIdx] = 0;
-                 return;
-            }
-        }
-    }
-    
-    // ------------------------------------------------------------------------
-    // Nanite Step 3: Local Selection (The Cut)
-    // ------------------------------------------------------------------------
-    // Check if we are the correct LOD level to render based on error metric
-    // Condition: IsParentErrorHigh? && IsMyErrorLow?
-    
-    float parentError = 1000000.0; // Infinity for root/standard meshes
-    // SAFETY: BDA bounds check required! Check against total object count.
-    if (obj.parent_index != 0xFFFFFFFF && obj.parent_index < pc.objectCount) {
-        // Fetch parent error from the same buffer (via BDA)
-        InstanceData parent = ObjectBuffer(pc.objectBufferPtr).objects[obj.parent_index];
+    // Nanite LOD selection (The Cut)
+    float parentError = 1000000.0;
+    if (obj.parent_index != 0xFFFFFFFFu && obj.parent_index < pc.objectCount) {
+        InstanceData parent = objBuf.objects[obj.parent_index];
         parentError = parent.error_metric;
     }
+    float dist           = max(clipW, 0.0001);
+    float errorThreshold = dist * 0.002;
+    bool  isSelected     = (obj.error_metric <= errorThreshold) && (parentError > errorThreshold);
+    if (!isSelected) { visBuf.visibility[objectIdx] = 0u; return; }
 
-    // Normalized error threshold (increases with distance)
-    // Distance 0 -> Small Threshold (Accept only Low Error / Detail)
-    // Distance Far -> Large Threshold (Accept High Error / Coarse)
-    float dist = clipPos.w;
-    float errorThreshold = dist * 0.002; // Tweak this for transition distance
-    
-    bool isSelected = (obj.error_metric <= errorThreshold) && (parentError > errorThreshold);
-    
-    if (!isSelected) {
-        visibility[objectIdx] = 0;
+    // Hi-Z occlusion culling
+    if (occlusionCull(worldCenter, worldExtents, camera.viewProj)) {
+        visBuf.visibility[objectIdx] = 0u;
         return;
     }
 
-    // ------------------------------------------------------------------------
-    // Occlusion culling
-    // ------------------------------------------------------------------------
-    if (occlusionCull(worldCenter, worldExtents, pc.viewProj)) {
-        visibility[objectIdx] = 0;
-        return;
-    }
-    
-    // Object is visible - generate indirect draw command
-    visibility[objectIdx] = 1;
-    
-    // Atomic increment visible count
-    uint visibleIndex = atomicAdd(count, 1);
-    
-    // Build indirect command directly from InstanceData
+    // VISIBLE — write output via BDA pointers only
+    visBuf.visibility[objectIdx] = 1u;
+    uint slot = atomicAdd(cntBuf.count, 1u);
+
     IndirectDrawCommand cmd;
-    cmd.vertexCount = obj.index_count;
-    cmd.instanceCount = 1;
-    cmd.firstVertex = obj.first_index; // Critical: gl_VertexIndex starts at our index heap offset
+    cmd.vertexCount   = obj.index_count;
+    cmd.instanceCount = 1u;
+    cmd.firstVertex   = obj.first_index;
     cmd.firstInstance = pc.baseIndex + objectIdx;
-    
-    // Write to indirect buffer
-    commands[pc.indirectStart + visibleIndex] = cmd;
+    cmdBuf.commands[pc.indirectStart + slot] = cmd;
 }

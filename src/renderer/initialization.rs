@@ -732,7 +732,7 @@ pub unsafe fn initialize_occlusion_culling(
     device: &vulkan::VulkanDevice,
     alloc: &Arc<vulkan::Allocator>,
     bindless_manager: &mut crate::vulkan::BindlessManager,
-    black_texture: &crate::renderer::resources::Texture,
+    _black_texture: &crate::renderer::resources::Texture,
     extent: vk::Extent2D,
 ) -> RenderPassResult {
     // 1. Create Hi-Z pass
@@ -750,19 +750,9 @@ pub unsafe fn initialize_occlusion_culling(
         )?
     };
 
-    // 3. Link them together
-    let hiz_view = if let Some(view) = hiz.hiz_view() {
-        view
-    } else {
-        black_texture.view()
-    };
-
-    let hiz_sampler = if hiz.is_initialized() {
-        hiz.hiz_sampler()
-    } else {
-        black_texture.sampler()
-    };
-    unsafe { indirect.update_hiz_descriptor(hiz_view, hiz_sampler) };
+    // Phase 5: Hi-Z is now a flat BDA buffer — no image view or sampler to wire up.
+    // The culling pipeline reads the buffer directly via the device address in push constants.
+    // (hiz.hiz_buffer_addr() is queried at dispatch time in execute_culling.)
 
     Ok((Arc::new(RwLock::new(hiz)), Arc::new(RwLock::new(indirect))))
 }

@@ -330,43 +330,76 @@ pub struct IndirectDrawCommand {
 }
 
 /// Occlusion culling push constants
+/// Layout audit (must stay <= 128 bytes, Vulkan minimum guarantee):
+///   screen_params           [f32;4] = 16 bytes @ offset 0
+///   object_count            u32     =  4 bytes @ offset 16
+///   hiz_levels              u32     =  4 bytes @ offset 20
+///   base_index              u32     =  4 bytes @ offset 24
+///   indirect_start          u32     =  4 bytes @ offset 28
+///   object_buffer_addr      u64     =  8 bytes @ offset 32   (BDA)
+///   cluster_buffer_addr     u64     =  8 bytes @ offset 40   (BDA)
+///   visibility_buffer_addr  u64     =  8 bytes @ offset 48   (BDA)
+///   indirect_buffer_addr    u64     =  8 bytes @ offset 56   (BDA)
+///   count_buffer_addr       u64     =  8 bytes @ offset 64   (BDA)
+///   debug_mode              u32     =  4 bytes @ offset 72
+///   _pad                    u32     =  4 bytes @ offset 76
+///   TOTAL = 80 bytes (48 bytes free vs 128-byte minimum) ✅
+///
+/// NOTE: view_proj deliberately removed. Shaders fetch it from the
+/// FrameData UBO via a BDA pointer stored in the graphics push constant block.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct CullingPushConstants {
-    /// View-projection matrix (column-major)
-    pub view_proj: [[f32; 4]; 4],
     /// Screen dimensions (width, height, 1/width, 1/height)
     pub screen_params: [f32; 4],
-    /// Number of objects
+    /// Number of objects to test
     pub object_count: u32,
     /// Hi-Z pyramid levels
     pub hiz_levels: u32,
-    /// Base object index
+    /// Base object index (for sub-range dispatches)
     pub base_index: u32,
-    /// Indirect command start index
-    /// Indirect command start index
+    /// Indirect command start index in the output buffer
     pub indirect_start: u32,
+    /// BDA: object data (InstanceData[]) — read-only input
     pub object_buffer_addr: u64,
-    /// Debug mode (0=None, 1=LOD, 2=ClusterID)
-    pub debug_mode: u32,
-    pub _padding: u32,
-    /// Address of Global Cluster Buffer
+    /// BDA: global cluster hierarchy — read-only input
     pub cluster_buffer_addr: u64,
+    /// BDA: visibility flags[] — write output
+    pub visibility_buffer_addr: u64,
+    /// BDA: IndirectDrawCommand[] — write output
+    pub indirect_buffer_addr: u64,
+    /// BDA: atomic draw counter — read/write
+    pub count_buffer_addr: u64,
+    /// BDA: Hi-Z pyramid — read-only input
+    pub hiz_buffer_addr: u64,
+    /// Debug visualization mode (0=None, 1=LOD, 2=ClusterID)
+    pub debug_mode: u32,
+    pub _pad: u32,
+    /// BDA: Camera uniform buffer — read-only input
+    pub camera_buffer_addr: u64,
 }
 
 impl Default for CullingPushConstants {
     fn default() -> Self {
+        const _: () = assert!(
+            std::mem::size_of::<CullingPushConstants>() <= 128,
+            "CullingPushConstants exceeds 128-byte Vulkan push constant minimum!"
+        );
         Self {
-            view_proj: Mat4::IDENTITY.to_cols_array_2d(),
             screen_params: [1920.0, 1080.0, 1.0 / 1920.0, 1.0 / 1080.0],
             object_count: 0,
             hiz_levels: HIZ_LEVELS as u32,
             base_index: 0,
             indirect_start: 0,
             object_buffer_addr: 0,
-            debug_mode: 0,
-            _padding: 0,
             cluster_buffer_addr: 0,
+            visibility_buffer_addr: 0,
+            indirect_buffer_addr: 0,
+            count_buffer_addr: 0,
+            hiz_buffer_addr: 0,
+            debug_mode: 0,
+            _pad: 0,
+            camera_buffer_addr: 0,
         }
     }
 }
@@ -496,9 +529,8 @@ impl OcclusionCulling {
     }
 
     /// Create push constants
-    pub fn push_constants(&self, view_proj: Mat4, width: u32, height: u32) -> CullingPushConstants {
+    pub fn push_constants(&self, width: u32, height: u32) -> CullingPushConstants {
         CullingPushConstants {
-            view_proj: view_proj.to_cols_array_2d(),
             screen_params: [
                 width as f32,
                 height as f32,
@@ -510,9 +542,14 @@ impl OcclusionCulling {
             base_index: 0,
             indirect_start: 0,
             object_buffer_addr: 0,
-            debug_mode: 0,
-            _padding: 0,
             cluster_buffer_addr: 0,
+            visibility_buffer_addr: 0,
+            indirect_buffer_addr: 0,
+            count_buffer_addr: 0,
+            hiz_buffer_addr: 0,
+            debug_mode: 0,
+            _pad: 0,
+            camera_buffer_addr: 0,
         }
     }
 

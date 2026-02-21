@@ -11,7 +11,10 @@ pub struct SwapchainWrapper {
     pub images: Vec<vk::Image>,
     pub image_views: Vec<vk::ImageView>,
     pub format: vk::Format,
+    pub color_space: vk::ColorSpaceKHR,
     pub extent: vk::Extent2D,
+    // [TEMPORARY_SDR_FALLBACK]: Remove when MSI 27 arrives.
+    pub is_hdr: bool,
     device: Arc<ash::Device>,
     image_views_managed_by_registry: bool,
     headless: bool,
@@ -36,125 +39,137 @@ impl SwapchainWrapper {
         preferred_extent: vk::Extent2D,
         present_mode: vk::PresentModeKHR,
     ) -> Result<Self> {
-        let (swapchain_loader, swapchain, images, image_views, format, extent, headless_memory) =
-            if !headless {
-                let swapchain_loader =
-                    swapchain::Device::new(vk_device.instance.instance(), &vk_device.device);
-                let (swapchain, images, image_views, format, extent) = unsafe {
-                    Self::build_swapchain(
-                        vk_device,
-                        &swapchain_loader,
-                        vk::SwapchainKHR::null(),
-                        present_mode,
-                    )
-                }?;
-                (
-                    Some(swapchain_loader),
-                    swapchain,
-                    images,
-                    image_views,
-                    format,
-                    extent,
-                    Vec::new(),
-                )
-            } else {
-                // Headless mode: Create offscreen images
-                let extent = preferred_extent;
-                let format = vk::Format::R8G8B8A8_UNORM; // Standard format
-                let image_count = 3; // Triple buffering simulation
-
-                let mut images = Vec::new();
-                let mut image_views = Vec::new();
-                let mut memories = Vec::new();
-
-                for _ in 0..image_count {
-                    let create_info = vk::ImageCreateInfo::default()
-                        .image_type(vk::ImageType::TYPE_2D)
-                        .format(format)
-                        .extent(vk::Extent3D {
-                            width: extent.width,
-                            height: extent.height,
-                            depth: 1,
-                        })
-                        .mip_levels(1)
-                        .array_layers(1)
-                        .samples(vk::SampleCountFlags::TYPE_1)
-                        .tiling(vk::ImageTiling::OPTIMAL)
-                        .usage(
-                            vk::ImageUsageFlags::COLOR_ATTACHMENT
-                                | vk::ImageUsageFlags::TRANSFER_SRC,
-                        )
-                        .sharing_mode(vk::SharingMode::EXCLUSIVE)
-                        .initial_layout(vk::ImageLayout::UNDEFINED);
-
-                    let image = unsafe { vk_device.device.create_image(&create_info, None) }
-                        .map_err(|e| {
-                            AshError::VulkanError(format!("Failed to create headless image: {e}"))
-                        })?;
-                    images.push(image);
-
-                    let mem_req = unsafe { vk_device.device.get_image_memory_requirements(image) };
-                    let mem_type_index = find_memory_type(
-                        &vk_device.memory_properties,
-                        mem_req.memory_type_bits,
-                        vk::MemoryPropertyFlags::DEVICE_LOCAL,
-                    )
-                    .ok_or(AshError::VulkanError(
-                        "No suitable memory for headless image".to_string(),
-                    ))?;
-
-                    let alloc_info = vk::MemoryAllocateInfo::default()
-                        .allocation_size(mem_req.size)
-                        .memory_type_index(mem_type_index);
-
-                    let memory = unsafe { vk_device.device.allocate_memory(&alloc_info, None) }
-                        .map_err(|e| {
-                            AshError::VulkanError(format!(
-                                "Failed to allocate headless memory: {e}"
-                            ))
-                        })?;
-                    memories.push(memory);
-
-                    unsafe { vk_device.device.bind_image_memory(image, memory, 0) }.map_err(
-                        |e| AshError::VulkanError(format!("Failed to bind headless memory: {e}")),
-                    )?;
-
-                    let view_info = vk::ImageViewCreateInfo::default()
-                        .image(image)
-                        .view_type(vk::ImageViewType::TYPE_2D)
-                        .format(format)
-                        .subresource_range(vk::ImageSubresourceRange {
-                            aspect_mask: vk::ImageAspectFlags::COLOR,
-                            base_mip_level: 0,
-                            level_count: 1,
-                            base_array_layer: 0,
-                            layer_count: 1,
-                        });
-
-                    let view = unsafe { vk_device.device.create_image_view(&view_info, None) }
-                        .map_err(|e| {
-                            AshError::VulkanError(format!("Failed to create headless view: {e}"))
-                        })?;
-                    image_views.push(view);
-                }
-
-                log::info!(
-                    "Created headless swapchain with {} images ({}x{})",
-                    image_count,
-                    extent.width,
-                    extent.height
-                );
-
-                (
-                    None,
+        let (
+            swapchain_loader,
+            swapchain,
+            images,
+            image_views,
+            format,
+            color_space,
+            is_hdr,
+            extent,
+            headless_memory,
+        ) = if !headless {
+            let swapchain_loader =
+                swapchain::Device::new(vk_device.instance.instance(), &vk_device.device);
+            let (swapchain, images, image_views, format, color_space, is_hdr, extent) = unsafe {
+                Self::build_swapchain(
+                    vk_device,
+                    &swapchain_loader,
                     vk::SwapchainKHR::null(),
-                    images,
-                    image_views,
-                    format,
-                    extent,
-                    memories,
+                    present_mode,
                 )
-            };
+            }?;
+            (
+                Some(swapchain_loader),
+                swapchain,
+                images,
+                image_views,
+                format,
+                color_space,
+                is_hdr,
+                extent,
+                Vec::new(),
+            )
+        } else {
+            // Headless mode: offscreen images use the same 10-bit HDR format as the
+            // windowed pipeline so that headless tests validate the PQ-encoded path.
+            let extent = preferred_extent;
+            let format = vk::Format::A2B10G10R10_UNORM_PACK32;
+            let color_space = vk::ColorSpaceKHR::HDR10_ST2084_EXT;
+            let image_count = 3; // Triple buffering simulation
+
+            let mut images = Vec::new();
+            let mut image_views = Vec::new();
+            let mut memories = Vec::new();
+
+            for _ in 0..image_count {
+                let create_info = vk::ImageCreateInfo::default()
+                    .image_type(vk::ImageType::TYPE_2D)
+                    .format(format)
+                    .extent(vk::Extent3D {
+                        width: extent.width,
+                        height: extent.height,
+                        depth: 1,
+                    })
+                    .mip_levels(1)
+                    .array_layers(1)
+                    .samples(vk::SampleCountFlags::TYPE_1)
+                    .tiling(vk::ImageTiling::OPTIMAL)
+                    .usage(
+                        vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_SRC,
+                    )
+                    .sharing_mode(vk::SharingMode::EXCLUSIVE)
+                    .initial_layout(vk::ImageLayout::UNDEFINED);
+
+                let image =
+                    unsafe { vk_device.device.create_image(&create_info, None) }.map_err(|e| {
+                        AshError::VulkanError(format!("Failed to create headless image: {e}"))
+                    })?;
+                images.push(image);
+
+                let mem_req = unsafe { vk_device.device.get_image_memory_requirements(image) };
+                let mem_type_index = find_memory_type(
+                    &vk_device.memory_properties,
+                    mem_req.memory_type_bits,
+                    vk::MemoryPropertyFlags::DEVICE_LOCAL,
+                )
+                .ok_or(AshError::VulkanError(
+                    "No suitable memory for headless image".to_string(),
+                ))?;
+
+                let alloc_info = vk::MemoryAllocateInfo::default()
+                    .allocation_size(mem_req.size)
+                    .memory_type_index(mem_type_index);
+
+                let memory = unsafe { vk_device.device.allocate_memory(&alloc_info, None) }
+                    .map_err(|e| {
+                        AshError::VulkanError(format!("Failed to allocate headless memory: {e}"))
+                    })?;
+                memories.push(memory);
+
+                unsafe { vk_device.device.bind_image_memory(image, memory, 0) }.map_err(|e| {
+                    AshError::VulkanError(format!("Failed to bind headless memory: {e}"))
+                })?;
+
+                let view_info = vk::ImageViewCreateInfo::default()
+                    .image(image)
+                    .view_type(vk::ImageViewType::TYPE_2D)
+                    .format(format)
+                    .subresource_range(vk::ImageSubresourceRange {
+                        aspect_mask: vk::ImageAspectFlags::COLOR,
+                        base_mip_level: 0,
+                        level_count: 1,
+                        base_array_layer: 0,
+                        layer_count: 1,
+                    });
+
+                let view = unsafe { vk_device.device.create_image_view(&view_info, None) }
+                    .map_err(|e| {
+                        AshError::VulkanError(format!("Failed to create headless view: {e}"))
+                    })?;
+                image_views.push(view);
+            }
+
+            log::info!(
+                "Created headless swapchain with {} images ({}x{})",
+                image_count,
+                extent.width,
+                extent.height
+            );
+
+            (
+                None,
+                vk::SwapchainKHR::null(),
+                images,
+                image_views,
+                format,
+                color_space,
+                true, // headless uses HDR format
+                extent,
+                memories,
+            )
+        };
 
         Ok(Self {
             swapchain_loader,
@@ -162,6 +177,8 @@ impl SwapchainWrapper {
             images,
             image_views,
             format,
+            color_space,
+            is_hdr,
             extent,
             device: Arc::clone(&vk_device.device),
             image_views_managed_by_registry: false,
@@ -182,6 +199,8 @@ impl SwapchainWrapper {
         Vec<vk::Image>,
         Vec<vk::ImageView>,
         vk::Format,
+        vk::ColorSpaceKHR,
+        bool,
         vk::Extent2D,
     )> {
         let surface_loader = vk_device.instance.surface_loader();
@@ -213,14 +232,28 @@ impl SwapchainWrapper {
         }
         .map_err(|e| AshError::SwapchainCreationFailed(format!("{e:?}")))?;
 
-        let format = formats
-            .iter()
-            .find(|f| {
-                f.format == vk::Format::B8G8R8A8_SRGB
-                    && f.color_space == vk::ColorSpaceKHR::SRGB_NONLINEAR
-            })
-            .unwrap_or(&formats[0])
-            .format;
+        // --- Dynamic HDR10 / SDR Format Selection (DEV FALLBACK) ---
+        let hdr10_surface_format = formats.iter().find(|f| {
+            f.format == vk::Format::A2B10G10R10_UNORM_PACK32
+                && f.color_space == vk::ColorSpaceKHR::HDR10_ST2084_EXT
+        });
+
+        let (chosen_format, chosen_color_space, is_hdr) = if let Some(sf) = hdr10_surface_format {
+            log::info!(
+                "Swapchain: HDR10 surface confirmed. Selecting A2B10G10R10_UNORM_PACK32 + HDR10_ST2084_EXT."
+            );
+            (sf.format, sf.color_space, true)
+        } else {
+            log::warn!("[DEV NOTICE] 10-BIT HARDWARE NOT DETECTED. ENGAGING 11-DAY SDR FALLBACK.");
+            let sdr = formats
+                .iter()
+                .find(|f| {
+                    f.format == vk::Format::B8G8R8A8_SRGB
+                        && f.color_space == vk::ColorSpaceKHR::SRGB_NONLINEAR
+                })
+                .unwrap_or(&formats[0]);
+            (sdr.format, sdr.color_space, false)
+        };
 
         let image_count = if capabilities.max_image_count > 0 {
             capabilities
@@ -236,8 +269,8 @@ impl SwapchainWrapper {
         let swapchain_create_info = vk::SwapchainCreateInfoKHR::default()
             .surface(surface)
             .min_image_count(image_count)
-            .image_format(format)
-            .image_color_space(vk::ColorSpaceKHR::SRGB_NONLINEAR)
+            .image_format(chosen_format)
+            .image_color_space(chosen_color_space)
             .image_extent(extent)
             .image_array_layers(1)
             .image_usage(vk::ImageUsageFlags::COLOR_ATTACHMENT)
@@ -261,7 +294,7 @@ impl SwapchainWrapper {
             let create_info = vk::ImageViewCreateInfo::default()
                 .image(image)
                 .view_type(vk::ImageViewType::TYPE_2D)
-                .format(format)
+                .format(chosen_format)
                 .components(vk::ComponentMapping {
                     r: vk::ComponentSwizzle::IDENTITY,
                     g: vk::ComponentSwizzle::IDENTITY,
@@ -282,7 +315,15 @@ impl SwapchainWrapper {
             image_views.push(view);
         }
 
-        Ok((swapchain, images, image_views, format, extent))
+        Ok((
+            swapchain,
+            images,
+            image_views,
+            chosen_format,
+            chosen_color_space,
+            is_hdr,
+            extent,
+        ))
     }
 
     /// Recreates the swapchain, typically after window resize.
@@ -307,7 +348,7 @@ impl SwapchainWrapper {
         }
 
         let loader = self.swapchain_loader.as_ref().unwrap();
-        let (swapchain, images, image_views, format, extent) =
+        let (swapchain, images, image_views, format, color_space, is_hdr, extent) =
             // Reuse current present mode on recreation for now
             unsafe { Self::build_swapchain(vk_device, loader, self.swapchain, vk::PresentModeKHR::FIFO) }?;
 
@@ -315,6 +356,8 @@ impl SwapchainWrapper {
         self.images = images;
         self.image_views = image_views;
         self.format = format;
+        self.color_space = color_space;
+        self.is_hdr = is_hdr;
         self.extent = extent;
 
         Ok(old_swapchain)

@@ -1,94 +1,86 @@
+// cull_clusters.comp — Pure BDA Cluster Culling Shader (Phase 3)
+//
+// Nanite-style two-phase culling: instance-level → cluster-level.
+// All SSBO descriptor bindings demolished. Cluster data, visibility flags, indirect
+// commands, and the draw counter are all accessed via 64-bit BDA pointers packed
+// into the push constant block — matching Rust's CullingPushConstants exactly.
 #version 460
+#extension GL_EXT_buffer_reference2         : require
+#extension GL_EXT_scalar_block_layout       : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
 #extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_GOOGLE_include_directive      : require
 
-// Cluster culling compute shader for Nanite-style rendering
-// Performs two-phase culling: 1) Instance-level, 2) Cluster-level
+// Suppress the global bindless texture/sampler arrays and the graphics push constant.
+// This compute pipeline uses its own dedicated push constant block.
+#define SKIP_PUSH_CONSTANTS
+#define SKIP_GLOBAL_BINDED_RESOURCES
+#include "interop/structures.glsl"
 
 layout(local_size_x = 64) in;
 
 // ============================================================================
-// STRUCTURES (Matching Rust layout)
+// CLUSTER DATA STRUCTURE
+// Mirrors Rust's MeshCluster / cluster upload format.
 // ============================================================================
-
-struct BoundingBox {
-    vec4 center;   // xyz = center, w = padding
-    vec4 extents;  // xyz = half-extents, w = padding
-};
-
-struct ObjectData {
-    BoundingBox bounds;
-    mat4 model;
-    uint drawIndex;
-    uint firstIndex;
-    uint indexCount;
-    int vertexOffset;
-    vec4 color;
-    vec4 custom;
-    uint clusterOffset;
-    uint clusterCount;
-    uint flags;
-    uint _padding;
-};
-
 struct ClusterData {
-    vec4 boundingSphere; // xyz = center (object space), w = radius
-    uvec2 indexRange;    // x = firstIndex, y = indexCount
-    vec2 lodInfo;        // x = errorThreshold, y = parentIndex
-};
-
-struct IndirectCommand {
-    uint indexCount;
-    uint instanceCount;
-    uint firstIndex;
-    int vertexOffset;
-    uint firstInstance;
+    vec4  boundingSphere; // xyz = center (object-space), w = radius
+    uvec2 indexRange;     // x = firstIndex, y = indexCount
+    vec2  lodInfo;        // x = errorThreshold, y = parentClusterIndex (as float)
 };
 
 // ============================================================================
-// BINDINGS (Matching IndirectDrawPass::descriptor_set)
+// BDA BUFFER REFERENCES
+// ObjectBuffer, IndirectBuffer, CountBuffer defined in structures.glsl.
+// VisibilityBuffer and ClusterBuffer are culling-specific.
 // ============================================================================
 
-// 0: Object data
-layout(std430, set = 0, binding = 0) readonly buffer Objects {
-    ObjectData objects[];
-};
-
-// 1: Hi-Z pyramid
-layout(set = 0, binding = 1) uniform sampler2D hizPyramid;
-
-// 2: Draw commands template (unused by cluster cull but kept for binding consistency)
-layout(std430, set = 0, binding = 2) readonly buffer DrawCommandsIn {
-    IndirectCommand _unused[];
-};
-
-// 3: Visibility flags (1 = visible)
-layout(std430, set = 0, binding = 3) buffer Visibility {
+layout(buffer_reference, scalar) buffer VisibilityBuffer {
     uint visible[];
 };
 
-// 4: Indirect draw commands (output)
-layout(std430, set = 0, binding = 4) writeonly buffer IndirectCommands {
-    IndirectCommand commands[];
+layout(buffer_reference, std430, buffer_reference_align = 4) readonly buffer HiZBuffer {
+    uint data[];
 };
 
-// 5: Visible count (atomic)
-layout(std430, set = 0, binding = 5) buffer VisibleCount {
-    uint count;
-} drawCount;
-
-// 6: Cluster data (input)
-layout(std430, set = 0, binding = 6) readonly buffer Clusters {
+layout(buffer_reference, scalar) readonly buffer ClusterBuffer {
     ClusterData clusters[];
 };
 
-// Push constants
-layout(push_constant) uniform PushConstants {
+// ============================================================================
+// DESCRIPTOR SETS
+// Only the Hi-Z sampler remains — image samplers cannot be BDA.
+// ============================================================================
+// No HiZ sampler descriptor here! (Phase 3: BDA only)
+
+// ============================================================================
+// CAMERA UBO (temporary, see Phase 4 note in cull_instances.comp)
+// set=0, binding=0 provides the view-projection matrix until the frame UBO
+// BDA handoff is wired. This is the last non-BDA input in the culling system.
+// ============================================================================
+// Camera BDA layout
+layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer CameraBuffer {
     mat4 viewProj;
-    vec4 screenParams;  // width, height, 1/width, 1/height
-    uint objectCount;
-    uint totalClusterCount;
-    float lodBias;
-    uint _padding[1];
+};
+
+// ============================================================================
+// PUSH CONSTANTS — mirrors Rust CullingPushConstants exactly (80 bytes)
+// ============================================================================
+layout(push_constant) uniform CullingPC {
+    vec4     screenParams;         // width, height, 1/width, 1/height
+    uint     objectCount;
+    uint     totalClusterCount;    // reused `hizLevels` slot for cluster pass
+    uint     baseIndex;
+    uint     indirectStart;
+    uint64_t objectBufferPtr;      // BDA → ObjectBuffer (InstanceData[])
+    uint64_t clusterBufferPtr;     // BDA → ClusterBuffer (ClusterData[])
+    uint64_t visibilityBufferPtr;  // BDA → VisibilityBuffer (uint[])
+    uint64_t indirectBufferPtr;    // BDA → IndirectBuffer (IndirectDrawCommand[])
+    uint64_t countBufferPtr;       // BDA → CountBuffer                @ 64
+    uint64_t hizBufferPtr;         // BDA → HiZBuffer                  @ 72
+    float    lodBias;              // reused `debugMode` slot          @ 80
+    uint     _pad;                 //                                  @ 84
+    uint64_t cameraBufferPtr;      // BDA → CameraBuffer               @ 88
 } pc;
 
 // ============================================================================
@@ -96,27 +88,19 @@ layout(push_constant) uniform PushConstants {
 // ============================================================================
 
 void extractFrustumPlanes(mat4 vp, out vec4 planes[6]) {
-    // Extract planes from view-projection matrix (Row addition/subtraction)
-    // GLSL matrices are column-major, so vp[0] is Column 0. 
-    // We need Rows to extract frustum planes correctly.
     vec4 r0 = vec4(vp[0].x, vp[1].x, vp[2].x, vp[3].x);
     vec4 r1 = vec4(vp[0].y, vp[1].y, vp[2].y, vp[3].y);
     vec4 r2 = vec4(vp[0].z, vp[1].z, vp[2].z, vp[3].z);
     vec4 r3 = vec4(vp[0].w, vp[1].w, vp[2].w, vp[3].w);
-
     planes[0] = r3 + r0; // Left
     planes[1] = r3 - r0; // Right
     planes[2] = r3 + r1; // Bottom
     planes[3] = r3 - r1; // Top
-    planes[4] = r2;      // Near (Vulkan [0,1] depth: z >= 0)
-    planes[5] = r3 - r2; // Far
-    
-    // Normalize planes for distance testing
+    planes[4] = r2;       // Near
+    planes[5] = r3 - r2;  // Far
     for (int i = 0; i < 6; i++) {
         float len = length(planes[i].xyz);
-        if (len > 0.0001) {
-            planes[i] /= len;
-        }
+        if (len > 0.0001) planes[i] /= len;
     }
 }
 
@@ -127,25 +111,71 @@ bool isSphereInFrustum(vec3 center, float radius, vec4 planes[6]) {
     return true;
 }
 
+uint get_mip_offset(uint base_width, uint base_height, uint target_mip) {
+    uint offset = 0;
+    for (uint i = 0; i < target_mip; i++) {
+        offset += max(1u, base_width >> i) * max(1u, base_height >> i);
+    }
+    return offset;
+}
+
 bool isSphereOccluded(vec3 center, float radius) {
-    vec4 clip = pc.viewProj * vec4(center, 1.0);
+    CameraBuffer camera = CameraBuffer(pc.cameraBufferPtr);
+    vec4 clip = camera.viewProj * vec4(center, 1.0);
     if (clip.w <= 0.0) return false;
-    
     vec3 ndc = clip.xyz / clip.w;
+    
+    // Reverse-Z: near is 1.0, far is 0.0
+    if (ndc.z < 0.0) return false;
+
+    // Radius in clip space
+    vec4 rClip = camera.viewProj * vec4(radius, 0.0, 0.0, 0.0);
+    float projRadius = abs(rClip.x / clip.w);
+
     vec2 uv = ndc.xy * 0.5 + 0.5;
     
-    // Choose mip level based on projected radius
-    float projRadius = radius / clip.w;
-    float pixelRadius = projRadius * max(pc.screenParams.x, pc.screenParams.y) * 0.5;
-    float mip = clamp(log2(pixelRadius), 0.0, textureQueryLevels(hizPyramid) - 1.0);
+    // Clamp projective radius
+    projRadius = min(projRadius, 1.0);
     
-    float depth = textureLod(hizPyramid, uv, mip).r;
-    return ndc.z < depth - projRadius;
+    float pixelRadius = projRadius * max(pc.screenParams.x, pc.screenParams.y) * 0.5;
+    float max_mips = ceil(log2(max(pc.screenParams.x, pc.screenParams.y)));
+    float lod  = clamp(log2(pixelRadius), 0.0, max_mips);
+    uint mipLevel = uint(lod);
+
+    uint base_width = uint(pc.screenParams.x);
+    uint base_height = uint(pc.screenParams.y);
+    uint offset = get_mip_offset(base_width, base_height, mipLevel);
+    
+    uint mip_width = max(1u, base_width >> mipLevel);
+    uint mip_height = max(1u, base_height >> mipLevel);
+
+    vec2 mipSize = vec2(mip_width, mip_height);
+    vec2 pMin = clamp(uv - vec2(projRadius), vec2(0.0), vec2(1.0)) * mipSize;
+    vec2 pMax = clamp(uv + vec2(projRadius), vec2(0.0), vec2(1.0)) * mipSize;
+
+    uint x0 = uint(clamp(floor(pMin.x), 0.0, mipSize.x - 1.0));
+    uint y0 = uint(clamp(floor(pMin.y), 0.0, mipSize.y - 1.0));
+    uint x1 = uint(clamp(ceil(pMax.x), 0.0, mipSize.x - 1.0));
+    uint y1 = uint(clamp(ceil(pMax.y), 0.0, mipSize.y - 1.0));
+
+    if (pc.hizBufferPtr == 0ul) return false;
+    HiZBuffer hiz = HiZBuffer(pc.hizBufferPtr);
+    
+    float d00 = uintBitsToFloat(hiz.data[offset + (y0 * mip_width) + x0]);
+    float d10 = uintBitsToFloat(hiz.data[offset + (y0 * mip_width) + x1]);
+    float d01 = uintBitsToFloat(hiz.data[offset + (y1 * mip_width) + x0]);
+    float d11 = uintBitsToFloat(hiz.data[offset + (y1 * mip_width) + x1]);
+    
+    // Reverse-Z: furthest visible point is the minimum float depth
+    float min_fetched_depth = min(min(d00, d10), min(d01, d11));
+    
+    return ndc.z < min_fetched_depth - projRadius;
 }
 
 float calculateScreenError(vec3 center, float threshold) {
-    vec4 clip = pc.viewProj * vec4(center, 1.0);
-    return (threshold / clip.w) * max(pc.screenParams.x, pc.screenParams.y);
+    CameraBuffer camera = CameraBuffer(pc.cameraBufferPtr);
+    vec4 clip = camera.viewProj * vec4(center, 1.0);
+    return (threshold / max(clip.w, 0.0001)) * max(pc.screenParams.x, pc.screenParams.y);
 }
 
 // ============================================================================
@@ -156,61 +186,73 @@ void main() {
     uint clusterIdx = gl_GlobalInvocationID.x;
     if (clusterIdx >= pc.totalClusterCount) return;
 
-    // Find parent object (O(N) search for now, could be optimized if object count is huge)
-    uint objIdx = 0;
-    uint clusterBase = 0;
-    for (uint i = 0; i < pc.objectCount; i++) {
-        uint count = objects[i].clusterCount;
-        if (clusterIdx < clusterBase + count) {
+    // Null-pointer guard
+    if (pc.objectBufferPtr  == 0ul) return;
+    if (pc.clusterBufferPtr == 0ul) return;
+
+    // Instantiate typed BDA handles from raw pointers
+    ObjectBuffer    objBuf  = ObjectBuffer(pc.objectBufferPtr);
+    ClusterBuffer   clsBuf  = ClusterBuffer(pc.clusterBufferPtr);
+    VisibilityBuffer visBuf = VisibilityBuffer(pc.visibilityBufferPtr);
+    IndirectBuffer   cmdBuf = IndirectBuffer(pc.indirectBufferPtr);
+    CountBuffer      cntBuf = CountBuffer(pc.countBufferPtr);
+
+    // --- Find parent object (O(N) scan; acceptable for cluster counts < 65k) ---
+    uint objIdx    = 0u;
+    uint clusterBase = 0u;
+    for (uint i = 0u; i < pc.objectCount; i++) {
+        // InstanceData stores cluster count in `index_count` for cluster-mode meshes.
+        uint cnt = objBuf.objects[i].index_count;
+        if (clusterIdx < clusterBase + cnt) {
             objIdx = i;
             break;
         }
-        clusterBase += count;
+        clusterBase += cnt;
     }
 
-    ObjectData obj = objects[objIdx];
-    
-    // Check if object is enabled
+    InstanceData obj = objBuf.objects[objIdx];
     if ((obj.flags & 1u) == 0u) {
-        visible[clusterIdx] = 0;
+        visBuf.visible[clusterIdx] = 0u;
         return;
     }
 
-    uint localIdx = clusterIdx - clusterBase;
-    ClusterData cluster = clusters[obj.clusterOffset + localIdx];
+    uint localIdx     = clusterIdx - clusterBase;
+    ClusterData cluster = clsBuf.clusters[obj.draw_index + localIdx];
 
     // Transform cluster bounding sphere to world space
-    vec3 worldCenter = (obj.model * vec4(cluster.boundingSphere.xyz, 1.0)).xyz;
+    vec3  worldCenter = (obj.model * vec4(cluster.boundingSphere.xyz, 1.0)).xyz;
     float worldRadius = cluster.boundingSphere.w * length(obj.model[0].xyz);
 
     // 1. Frustum Culling
+    CameraBuffer camera = CameraBuffer(pc.cameraBufferPtr);
     vec4 planes[6];
-    extractFrustumPlanes(pc.viewProj, planes);
+    extractFrustumPlanes(camera.viewProj, planes);
     if (!isSphereInFrustum(worldCenter, worldRadius, planes)) {
-        visible[clusterIdx] = 0;
+        visBuf.visible[clusterIdx] = 0u;
         return;
     }
 
-    // 2. Occlusion Culling
+    // 2. Hi-Z Occlusion Culling
     if (isSphereOccluded(worldCenter, worldRadius)) {
-        visible[clusterIdx] = 0;
+        visBuf.visible[clusterIdx] = 0u;
         return;
     }
 
-    // 3. LOD Selection
+    // 3. LOD Selection (Nanite-style screen-space error)
     float error = calculateScreenError(worldCenter, cluster.lodInfo.x);
     if (error < pc.lodBias) {
-        visible[clusterIdx] = 0;
+        visBuf.visible[clusterIdx] = 0u;
         return;
     }
 
-    // Mark visible and generate command
-    visible[clusterIdx] = 1;
-    uint slot = atomicAdd(drawCount.count, 1);
-    
-    commands[slot].indexCount = cluster.indexRange.y;
-    commands[slot].instanceCount = 1;
-    commands[slot].firstIndex = cluster.indexRange.x;
-    commands[slot].vertexOffset = 0;
-    commands[slot].firstInstance = objIdx;
+    // --- VISIBLE: write output via BDA ---
+    visBuf.visible[clusterIdx] = 1u;
+    uint slot = atomicAdd(cntBuf.count, 1u);
+
+    IndirectDrawCommand cmd;
+    cmd.vertexCount   = cluster.indexRange.y;
+    cmd.instanceCount = 1u;
+    cmd.firstVertex   = cluster.indexRange.x;
+    cmd.firstInstance = objIdx;
+    cmdBuf.commands[slot] = cmd;
 }

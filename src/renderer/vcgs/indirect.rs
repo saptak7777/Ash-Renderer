@@ -39,14 +39,15 @@ pub struct IndirectDrawPass {
     count_buffer: vk::Buffer,
     count_allocation: Option<vk_mem::Allocation>,
 
-    // Compute pipeline for culling
+    // Cull pipeline for culling
     cull_pipeline: vk::Pipeline,
     cull_layout: vk::PipelineLayout,
 
-    // Descriptors
-    pool: vk::DescriptorPool,
-    layout: vk::DescriptorSetLayout,
-    set: vk::DescriptorSet,
+    // Cached BDA pointers (computed at creation, zero-cost to access at runtime)
+    object_buffer_addr: u64,
+    indirect_buffer_addr: u64,
+    visibility_buffer_addr: u64,
+    count_buffer_addr: u64,
 
     initialized: bool,
     destroyed: bool,
@@ -73,9 +74,10 @@ impl IndirectDrawPass {
             count_allocation: None,
             cull_pipeline: vk::Pipeline::null(),
             cull_layout: vk::PipelineLayout::null(),
-            pool: vk::DescriptorPool::null(),
-            layout: vk::DescriptorSetLayout::null(),
-            set: vk::DescriptorSet::null(),
+            object_buffer_addr: 0,
+            indirect_buffer_addr: 0,
+            visibility_buffer_addr: 0,
+            count_buffer_addr: 0,
             initialized: false,
             destroyed: false,
             allocator: None,
@@ -105,7 +107,6 @@ impl IndirectDrawPass {
         let index = bindless_manager.add_storage_buffer(self.object_buffer, 0, vk::WHOLE_SIZE)?;
         self.object_buffer_index = index;
 
-        unsafe { self.create_descriptors() }?;
         unsafe { self.create_pipeline() }?;
 
         self.initialized = true;
@@ -139,9 +140,9 @@ impl IndirectDrawPass {
         };
 
         // Object buffer (CPU writable)
-        let object_info = vk::BufferCreateInfo::default().size(object_size).usage(
-            vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
-        );
+        let object_info = vk::BufferCreateInfo::default()
+            .size(object_size)
+            .usage(vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS);
         let (object_buffer, mut object_alloc) =
             unsafe { allocator.create_buffer(&object_info, &buffer_alloc_info) }
                 .map_err(|e| crate::AshError::VulkanError(format!("Object buffer: {e:?}")))?;
@@ -175,9 +176,7 @@ impl IndirectDrawPass {
 
         // Indirect buffer (GPU only, indirect draw source)
         let indirect_info = vk::BufferCreateInfo::default().size(command_size).usage(
-            vk::BufferUsageFlags::STORAGE_BUFFER
-                | vk::BufferUsageFlags::INDIRECT_BUFFER
-                | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
+            vk::BufferUsageFlags::INDIRECT_BUFFER | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
         );
         let (indirect_buffer, indirect_alloc) =
             unsafe { allocator.create_buffer(&indirect_info, &device_alloc_info) }
@@ -186,9 +185,9 @@ impl IndirectDrawPass {
         self.indirect_allocation = Some(indirect_alloc);
 
         // Visibility buffer (GPU only)
-        let visibility_info = vk::BufferCreateInfo::default().size(visibility_size).usage(
-            vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
-        );
+        let visibility_info = vk::BufferCreateInfo::default()
+            .size(visibility_size)
+            .usage(vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS);
         let (visibility_buffer, visibility_alloc) =
             unsafe { allocator.create_buffer(&visibility_info, &device_alloc_info) }
                 .map_err(|e| crate::AshError::VulkanError(format!("Visibility buffer: {e:?}")))?;
@@ -197,8 +196,7 @@ impl IndirectDrawPass {
 
         // Count buffer (GPU readback)
         let count_info = vk::BufferCreateInfo::default().size(count_size).usage(
-            vk::BufferUsageFlags::STORAGE_BUFFER
-                | vk::BufferUsageFlags::TRANSFER_DST
+            vk::BufferUsageFlags::TRANSFER_DST
                 | vk::BufferUsageFlags::INDIRECT_BUFFER
                 | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
         );
@@ -208,76 +206,41 @@ impl IndirectDrawPass {
         self.count_buffer = count_buffer;
         self.count_allocation = Some(count_alloc);
 
+        // Cache all BDA addresses at creation time — zero-cost access at dispatch.
+        self.object_buffer_addr = unsafe {
+            let info = vk::BufferDeviceAddressInfo::default().buffer(self.object_buffer);
+            self.device.get_buffer_device_address(&info)
+        };
+        self.indirect_buffer_addr = unsafe {
+            let info = vk::BufferDeviceAddressInfo::default().buffer(self.indirect_buffer);
+            self.device.get_buffer_device_address(&info)
+        };
+        self.visibility_buffer_addr = unsafe {
+            let info = vk::BufferDeviceAddressInfo::default().buffer(self.visibility_buffer);
+            self.device.get_buffer_device_address(&info)
+        };
+        self.count_buffer_addr = unsafe {
+            let info = vk::BufferDeviceAddressInfo::default().buffer(self.count_buffer);
+            self.device.get_buffer_device_address(&info)
+        };
+
         log::debug!(
             "IndirectDrawPass: Created buffers (obj={object_size}, cmd={command_size}, vis={visibility_size}, cnt={count_size})"
+        );
+        log::info!(
+            "IndirectDrawPass BDA: obj={:#018X} indirect={:#018X} vis={:#018X} cnt={:#018X}",
+            self.object_buffer_addr,
+            self.indirect_buffer_addr,
+            self.visibility_buffer_addr,
+            self.count_buffer_addr
         );
         Ok(())
     }
 
-    /// Create descriptor layout and pool
-    unsafe fn create_descriptors(&mut self) -> Result<()> {
-        // Bindings match cull_instances.comp
-        let bindings = [
-            // 1: Hi-Z pyramid
-            vk::DescriptorSetLayoutBinding::default()
-                .binding(1)
-                .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-                .descriptor_count(1)
-                .stage_flags(vk::ShaderStageFlags::COMPUTE),
-            // 3: Visibility flags
-            vk::DescriptorSetLayoutBinding::default()
-                .binding(3)
-                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
-                .descriptor_count(1)
-                .stage_flags(vk::ShaderStageFlags::COMPUTE),
-            // 4: Indirect draw commands
-            vk::DescriptorSetLayoutBinding::default()
-                .binding(4)
-                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
-                .descriptor_count(1)
-                .stage_flags(vk::ShaderStageFlags::COMPUTE),
-            // 5: Visible count
-            vk::DescriptorSetLayoutBinding::default()
-                .binding(5)
-                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
-                .descriptor_count(1)
-                .stage_flags(vk::ShaderStageFlags::COMPUTE),
-        ];
-
-        let layout_info = vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings);
-        self.layout = unsafe { self.device.create_descriptor_set_layout(&layout_info, None) }?;
-
-        let pool_sizes = [
-            vk::DescriptorPoolSize {
-                ty: vk::DescriptorType::STORAGE_BUFFER,
-                descriptor_count: 4,
-            },
-            vk::DescriptorPoolSize {
-                ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-                descriptor_count: 1,
-            },
-        ];
-
-        let pool_info = vk::DescriptorPoolCreateInfo::default()
-            .max_sets(1)
-            .pool_sizes(&pool_sizes);
-
-        self.pool = unsafe { self.device.create_descriptor_pool(&pool_info, None) }?;
-
-        let alloc_info = vk::DescriptorSetAllocateInfo::default()
-            .descriptor_pool(self.pool)
-            .set_layouts(std::slice::from_ref(&self.layout));
-
-        let sets = unsafe { self.device.allocate_descriptor_sets(&alloc_info) }?;
-        self.set = sets[0];
-
-        Ok(())
-    }
-
-    /// Create compute pipeline
+    /// Create the compute pipeline. The layout has ZERO descriptor sets.
+    /// All resources are addressed via BDA push constants — no descriptor bindings.
     unsafe fn create_pipeline(&mut self) -> Result<()> {
         let shader_code = include_bytes!(concat!(env!("OUT_DIR"), "/cull_instances.comp.spv"));
-
         let shader_module_info =
             vk::ShaderModuleCreateInfo::default().code(bytemuck::cast_slice(shader_code));
         let shader_module = unsafe { self.device.create_shader_module(&shader_module_info, None) }?;
@@ -287,153 +250,70 @@ impl IndirectDrawPass {
             .offset(0)
             .size(std::mem::size_of::<CullingPushConstants>() as u32);
 
-        // Define layouts: Only Set 0 (Indirect Resources) is needed now. Set 1 (Bindless) is gone.
-        let layouts = [self.layout];
+        // Phase 4: Zero descriptor sets. Pure BDA pipeline.
         let layout_info = vk::PipelineLayoutCreateInfo::default()
-            .set_layouts(&layouts)
+            .set_layouts(&[])
             .push_constant_ranges(std::slice::from_ref(&push_constant_range));
-
         self.cull_layout = unsafe { self.device.create_pipeline_layout(&layout_info, None) }?;
 
         let stage_info = vk::PipelineShaderStageCreateInfo::default()
             .stage(vk::ShaderStageFlags::COMPUTE)
             .module(shader_module)
             .name(c"main");
-
         let pipeline_info = vk::ComputePipelineCreateInfo::default()
             .stage(stage_info)
             .layout(self.cull_layout);
-
         let pipelines = unsafe {
             self.device
                 .create_compute_pipelines(vk::PipelineCache::null(), &[pipeline_info], None)
         }
         .map_err(|(_, e)| e)?;
-
         self.cull_pipeline = pipelines[0];
-        unsafe {
-            self.device.destroy_shader_module(shader_module, None);
-        }
-
+        unsafe { self.device.destroy_shader_module(shader_module, None) };
         log::info!("IndirectDrawPass: Pipeline created successfully");
         Ok(())
     }
 
-    /// Reload compute pipeline with new shader code
+    /// Hot-reload the culling compute pipeline with new SPIR-V bytecode.
     ///
     /// # Safety
-    /// Caller must ensure that the pipeline is not currently in use by the GPU. The provided SPIR-V code must be valid compute shader code.
+    /// Caller must ensure the pipeline is not in flight on the GPU.
     pub unsafe fn reload_pipeline(&mut self, spirv_code: &[u32]) -> Result<()> {
         log::info!("IndirectDrawPass: Reloading pipeline...");
-
-        // Destroy old pipeline
         if self.cull_pipeline != vk::Pipeline::null() {
-            unsafe {
-                self.device.destroy_pipeline(self.cull_pipeline, None);
-            }
+            unsafe { self.device.destroy_pipeline(self.cull_pipeline, None) };
             self.cull_pipeline = vk::Pipeline::null();
         }
         if self.cull_layout != vk::PipelineLayout::null() {
-            unsafe {
-                self.device.destroy_pipeline_layout(self.cull_layout, None);
-            }
+            unsafe { self.device.destroy_pipeline_layout(self.cull_layout, None) };
             self.cull_layout = vk::PipelineLayout::null();
         }
-
-        // Create new shader module
         let shader_module_info = vk::ShaderModuleCreateInfo::default().code(spirv_code);
         let shader_module = unsafe { self.device.create_shader_module(&shader_module_info, None) }?;
-
         let push_constant_range = vk::PushConstantRange::default()
             .stage_flags(vk::ShaderStageFlags::COMPUTE)
             .offset(0)
             .size(std::mem::size_of::<CullingPushConstants>() as u32);
-
-        let layouts = [self.layout];
         let layout_info = vk::PipelineLayoutCreateInfo::default()
-            .set_layouts(&layouts)
+            .set_layouts(&[])
             .push_constant_ranges(std::slice::from_ref(&push_constant_range));
-
         self.cull_layout = unsafe { self.device.create_pipeline_layout(&layout_info, None) }?;
-
         let stage_info = vk::PipelineShaderStageCreateInfo::default()
             .stage(vk::ShaderStageFlags::COMPUTE)
             .module(shader_module)
             .name(c"main");
-
         let pipeline_info = vk::ComputePipelineCreateInfo::default()
             .stage(stage_info)
             .layout(self.cull_layout);
-
         let pipelines = unsafe {
             self.device
                 .create_compute_pipelines(vk::PipelineCache::null(), &[pipeline_info], None)
         }
         .map_err(|(_, e)| e)?;
-
         self.cull_pipeline = pipelines[0];
-        unsafe {
-            self.device.destroy_shader_module(shader_module, None);
-        }
-
+        unsafe { self.device.destroy_shader_module(shader_module, None) };
         log::info!("IndirectDrawPass: Pipeline reloaded successfully");
         Ok(())
-    }
-
-    /// Update descriptors with Hi-Z image
-    ///
-    /// # Safety
-    /// Hi-Z view and sampler must be valid and accurately represent the current frame's occlusion data.
-    pub unsafe fn update_hiz_descriptor(&self, hiz_view: vk::ImageView, hiz_sampler: vk::Sampler) {
-        if !self.initialized {
-            return;
-        }
-
-        // Update buffer descriptors
-
-        let visibility_info = vk::DescriptorBufferInfo::default()
-            .buffer(self.visibility_buffer)
-            .range(vk::WHOLE_SIZE);
-
-        let indirect_info = vk::DescriptorBufferInfo::default()
-            .buffer(self.indirect_buffer)
-            .range(vk::WHOLE_SIZE);
-
-        let count_info = vk::DescriptorBufferInfo::default()
-            .buffer(self.count_buffer)
-            .range(vk::WHOLE_SIZE);
-
-        let hiz_image_info = vk::DescriptorImageInfo::default()
-            .sampler(hiz_sampler)
-            .image_view(hiz_view)
-            .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL);
-
-        let writes = [
-            vk::WriteDescriptorSet::default()
-                .dst_set(self.set)
-                .dst_binding(1)
-                .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-                .image_info(std::slice::from_ref(&hiz_image_info)),
-            vk::WriteDescriptorSet::default()
-                .dst_set(self.set)
-                .dst_binding(3)
-                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
-                .buffer_info(std::slice::from_ref(&visibility_info)),
-            vk::WriteDescriptorSet::default()
-                .dst_set(self.set)
-                .dst_binding(4)
-                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
-                .buffer_info(std::slice::from_ref(&indirect_info)),
-            vk::WriteDescriptorSet::default()
-                .dst_set(self.set)
-                .dst_binding(5)
-                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
-                .buffer_info(std::slice::from_ref(&count_info)),
-        ];
-
-        unsafe {
-            self.device.update_descriptor_sets(&writes, &[]);
-        }
     }
 
     /// Upload object data for culling
@@ -549,29 +429,23 @@ impl IndirectDrawPass {
                 .cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, self.cull_pipeline);
         }
 
-        // Bind descriptors (Set 0)
-        unsafe {
-            self.device.cmd_bind_descriptor_sets(
-                cmd,
-                vk::PipelineBindPoint::COMPUTE,
-                self.cull_layout,
-                0,
-                &[self.set],
-                &[],
-            );
-        }
-
-        // Bindless (Set 1) REMOVED - using BDA now
-
-        // Push constants
-        let mut push = culling.push_constants(ctx.view_proj, ctx.width, ctx.height);
+        // Phase 2+3 BDA Routing: all output buffers routed as raw 64-bit pointers.
+        // No descriptor sets needed — the shader receives raw 64-bit pointers.
+        // Push constants — view_proj removed (Phase 3: shader reads it from FrameData UBO via BDA)
+        let mut push = culling.push_constants(ctx.width, ctx.height);
         push.object_count = ctx.object_count;
         push.base_index = ctx.object_offset;
         push.indirect_start = ctx.indirect_offset;
 
-        // ADDRESS INJECTION: Pass the BDA pointer directly to the shader
-        push.object_buffer_addr = self.object_buffer_address();
+        // Phase 2+3 BDA Routing: all output buffers routed as raw 64-bit pointers.
+        // No descriptor sets needed — the shader receives raw 64-bit pointers.
+        push.object_buffer_addr = self.object_buffer_addr;
         push.cluster_buffer_addr = ctx.cluster_buffer_addr;
+        push.visibility_buffer_addr = self.visibility_buffer_addr;
+        push.indirect_buffer_addr = self.indirect_buffer_addr;
+        push.count_buffer_addr = self.count_buffer_addr;
+        push.hiz_buffer_addr = ctx.hiz_buffer_addr;
+        push.camera_buffer_addr = ctx.camera_buffer_addr;
 
         unsafe {
             self.device.cmd_push_constants(
@@ -631,11 +505,24 @@ impl IndirectDrawPass {
         self.object_buffer_index
     }
 
-    /// Get object buffer device address for BDA pulling
+    /// Get object buffer device address (cached at creation)
     pub fn object_buffer_address(&self) -> u64 {
-        let info = vk::BufferDeviceAddressInfo::default().buffer(self.object_buffer);
-        // SAFETY: Retrieves the device address of the object buffer. Buffer must be valid.
-        unsafe { self.device.get_buffer_device_address(&info) }
+        self.object_buffer_addr
+    }
+
+    /// Get indirect buffer device address (cached at creation)
+    pub fn indirect_buffer_address(&self) -> u64 {
+        self.indirect_buffer_addr
+    }
+
+    /// Get visibility buffer device address (cached at creation)
+    pub fn visibility_buffer_address(&self) -> u64 {
+        self.visibility_buffer_addr
+    }
+
+    /// Get count buffer device address (cached at creation)
+    pub fn count_buffer_address(&self) -> u64 {
+        self.count_buffer_addr
     }
 
     /// Get count buffer for indirect count
@@ -727,17 +614,6 @@ impl IndirectDrawPass {
         if self.cull_layout != vk::PipelineLayout::null() {
             unsafe { self.device.destroy_pipeline_layout(self.cull_layout, None) };
         }
-        if self.pool != vk::DescriptorPool::null() {
-            unsafe {
-                self.device.destroy_descriptor_pool(self.pool, None);
-            }
-        }
-        if self.layout != vk::DescriptorSetLayout::null() {
-            unsafe {
-                self.device.destroy_descriptor_set_layout(self.layout, None);
-            }
-        }
-
         self.initialized = false;
         log::info!("IndirectDrawPass: Resources destroyed");
     }

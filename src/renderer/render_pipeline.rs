@@ -81,10 +81,13 @@ impl RenderPipeline {
     pub fn execute_hiz_pass(
         &self,
         command_buffer: vk::CommandBuffer,
-        depth_image: vk::Image,
+        depth_view: vk::ImageView,
         gpu_profiler: Option<&crate::renderer::diagnostics::GpuProfiler>,
-        black_texture_view: vk::ImageView,
-        black_texture_sampler: vk::Sampler,
+        // NOTE: Phase 5 — fallback_view, fallback_sampler, and indirect_draw_pass
+        // removed. The Hi-Z pyramid is no longer a VkImage with a sampler descriptor.
+        // All data flows through the BDA push-constant address instead.
+        _black_texture_view: vk::ImageView,
+        _black_texture_sampler: vk::Sampler,
     ) -> Result<()> {
         let Some(ref hiz_arc) = self.hiz_pass else {
             return Ok(());
@@ -95,27 +98,13 @@ impl RenderPipeline {
             crate::AshError::VulkanError("Hi-Z pass RwLock poisoned".into())
         })?;
 
-        // Collect prior-frame GPU timing for adaptive quality inside the pass.
         let hiz_time_ms = gpu_profiler
             .map(|p| p.last_extended_timings())
             .filter(|t| t.valid)
             .map(|t| t.hiz_generate_ms as f64);
 
-        // Lock the indirect draw pass so the pyramid view can be registered.
-        let indirect_guard = self
-            .indirect_draw_pass
-            .as_ref()
-            .and_then(|arc| arc.write().ok());
-
         unsafe {
-            hiz.record_commands(
-                command_buffer,
-                depth_image,
-                hiz_time_ms,
-                black_texture_view,
-                black_texture_sampler,
-                indirect_guard.as_deref(),
-            )?;
+            hiz.record_commands(command_buffer, depth_view, hiz_time_ms)?;
 
             // Emit end-of-pass GPU timestamp if profiling is active.
             if let Some(profiler) = gpu_profiler {
@@ -179,7 +168,9 @@ impl RenderPipeline {
                 .store_op(vk::AttachmentStoreOp::STORE)
                 .clear_value(vk::ClearValue {
                     color: vk::ClearColorValue {
-                        float32: [0.1, 0.1, 0.1, 1.0],
+                        // Linear-space dark grey (≈ 0.01 linear ≡ ~0.1 sRGB / 26/255).
+                        // The hardware sRGB OETF on the swapchain converts this on output.
+                        float32: [0.01, 0.01, 0.01, 1.0],
                     },
                 }),
         ];

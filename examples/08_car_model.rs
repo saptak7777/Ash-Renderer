@@ -107,7 +107,7 @@ impl ApplicationHandler for App {
                     .with_directional(
                         Vec3::new(-0.5, -1.0, -0.5).normalize(),
                         Vec3::new(1.0, 0.95, 0.8), // Warm sunlight
-                        5.0,                       // PBR intensity
+                        5.0 * 0.5, // Halved for AgX (no ACES contrast crush compensation needed)
                     )
                     .build();
                 scene.set_lighting(lighting);

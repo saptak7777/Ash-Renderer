@@ -49,9 +49,7 @@ impl GlobalClusterBuffer {
         let (buffer, allocation) = unsafe {
             allocator.create_buffer_with_flags_and_name(
                 capacity_bytes,
-                vk::BufferUsageFlags::STORAGE_BUFFER
-                    | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS
-                    | vk::BufferUsageFlags::TRANSFER_DST,
+                vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS | vk::BufferUsageFlags::TRANSFER_DST,
                 vk_mem::MemoryUsage::AutoPreferDevice,
                 vk_mem::AllocationCreateFlags::empty(),
                 Some("GlobalClusterBuffer".to_string()),
