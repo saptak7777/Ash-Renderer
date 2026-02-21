@@ -4,14 +4,14 @@
 //! Features: GLB loading, proper material registration, HDR post-processing.
 
 use ash_renderer::prelude::*;
+use ash_renderer::renderer::Scene;
 use ash_renderer::renderer::features::ambient_lighting::{AmbientPreset, LightingBuilder};
 use ash_renderer::renderer::resources::gltf_loader;
 use ash_renderer::renderer::resources::uniform::StorageBuffer;
-use ash_renderer::renderer::Scene;
 use glam::{Mat4, Vec3};
 use parking_lot::Mutex;
-use std::sync::mpsc;
 use std::sync::Arc;
+use std::sync::mpsc;
 use std::time::Instant;
 use winit::{
     application::ApplicationHandler,
@@ -318,7 +318,9 @@ impl ApplicationHandler for App {
                                 self.loader_rx = None;
                             }
                             Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                                log::error!("Async Loader: Thread disconnected unexpectedly (Check logs for panics)");
+                                log::error!(
+                                    "Async Loader: Thread disconnected unexpectedly (Check logs for panics)"
+                                );
                                 self.loader_rx = None;
                             }
                             Err(std::sync::mpsc::TryRecvError::Empty) => {}

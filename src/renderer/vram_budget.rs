@@ -52,8 +52,7 @@ impl VramBudget {
             Err(AshError::VramExhausted {
                 requested: size,
                 available,
-                recommendation:
-                    "Reduce texture resolution, disable high-res assets, or free GPU resources.",
+                recommendation: "Reduce texture resolution, disable high-res assets, or free GPU resources.",
             })
         } else {
             Ok(())

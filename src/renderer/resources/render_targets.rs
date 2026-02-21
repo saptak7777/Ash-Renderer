@@ -57,8 +57,9 @@ impl HdrSystem {
             .sharing_mode(vk::SharingMode::EXCLUSIVE)
             .initial_layout(vk::ImageLayout::UNDEFINED);
 
-        let (image, allocation) =
-            allocator.create_image(&image_create_info, vk_mem::MemoryUsage::AutoPreferDevice)?;
+        let (image, allocation) = unsafe {
+            allocator.create_image(&image_create_info, vk_mem::MemoryUsage::AutoPreferDevice)?
+        };
 
         let view_create_info = vk::ImageViewCreateInfo::default()
             .image(image)
@@ -72,8 +73,7 @@ impl HdrSystem {
                 layer_count: 1,
             });
 
-        let view = device
-            .create_image_view(&view_create_info, None)
+        let view = unsafe { device.create_image_view(&view_create_info, None) }
             .map_err(|e| AshError::VulkanError(format!("HDR view creation failed: {e}")))?;
 
         // Create sampler for reading HDR buffer in post-processing
@@ -93,8 +93,7 @@ impl HdrSystem {
             .min_lod(0.0)
             .max_lod(0.0);
 
-        let sampler = device
-            .create_sampler(&sampler_create_info, None)
+        let sampler = unsafe { device.create_sampler(&sampler_create_info, None) }
             .map_err(|e| AshError::VulkanError(format!("HDR sampler creation failed: {e}")))?;
 
         log::info!("HDR System target created successfully");

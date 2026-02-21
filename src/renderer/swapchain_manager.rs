@@ -1,6 +1,6 @@
-use crate::renderer::*;
 use crate::AshError;
 use crate::Result;
+use crate::renderer::*;
 
 pub fn recreate_swapchain_resources(renderer: &mut Renderer, scene: &mut Scene) -> Result<()> {
     log::info!("Starting swapchain recreation...");
@@ -43,7 +43,7 @@ pub fn recreate_swapchain_resources(renderer: &mut Renderer, scene: &mut Scene) 
     }
 
     // Update Forward+ depth descriptor if the system is active
-    if let (Some(ref db), Some(ref fp_lock)) = (
+    if let (Some(db), Some(fp_lock)) = (
         &renderer.resources.depth_buffer,
         &renderer.systems.pipeline.forward_plus,
     ) {

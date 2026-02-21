@@ -1,7 +1,7 @@
-use crate::renderer::resources::texture::TextureData;
 use crate::Result;
+use crate::renderer::resources::texture::TextureData;
 use ash::vk;
-use intel_tex_2::{bc5, bc7, RgSurface, RgbaSurface};
+use intel_tex_2::{RgSurface, RgbaSurface, bc5, bc7};
 
 /// Supported block compression formats.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -60,7 +60,9 @@ impl TextureCompressor {
 
         // BC7 works on 4x4 blocks
         if width % 4 != 0 || height % 4 != 0 {
-            log::warn!("Texture dimensions ({width}x{height}) not multiple of 4. BC7 compression might have artifacts or fail.");
+            log::warn!(
+                "Texture dimensions ({width}x{height}) not multiple of 4. BC7 compression might have artifacts or fail."
+            );
         }
 
         let surface = RgbaSurface {

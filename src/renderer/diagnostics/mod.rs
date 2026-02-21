@@ -22,12 +22,12 @@ mod overlay_pipeline;
 mod overlay_types;
 
 pub use debug_stats::RendererStats;
-pub use font_data::{get_glyph, FONT_8X8, GLYPH_HEIGHT, GLYPH_WIDTH};
+pub use font_data::{FONT_8X8, GLYPH_HEIGHT, GLYPH_WIDTH, get_glyph};
 pub use frame_profiler::FrameProfiler;
 pub use gpu_profiler::{ExtendedGpuTimings, GpuProfiler, TimingScope};
 pub use overlay::DiagnosticsOverlay;
 pub use overlay_pipeline::OverlayPipeline;
-pub use overlay_types::{generate_quad_ndc, pixel_to_ndc, OverlayConfig, TextVertex};
+pub use overlay_types::{OverlayConfig, TextVertex, generate_quad_ndc, pixel_to_ndc};
 
 /// Controls how diagnostics are displayed
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

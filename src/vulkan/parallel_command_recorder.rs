@@ -49,7 +49,7 @@ impl ParallelCommandRecorder {
     {
         // Only parallelize if we have enough passes
         if pass_count < self.parallel_threshold {
-            return self.record_serial(primary_cmd, pass_count, record_fn);
+            return unsafe { self.record_serial(primary_cmd, pass_count, record_fn) };
         }
 
         log::debug!("ParallelCommandRecorder: Recording {pass_count} passes in parallel");
@@ -75,14 +75,12 @@ impl ParallelCommandRecorder {
                             .queue_family_index(self.queue_family)
                             .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER);
 
-                        let pool =
-                            self.device
-                                .create_command_pool(&pool_info, None)
-                                .map_err(|e| {
-                                    AshError::VulkanError(format!(
-                                        "Failed to create thread-local command pool: {e:?}"
-                                    ))
-                                })?;
+                        let pool = unsafe { self.device.create_command_pool(&pool_info, None) }
+                            .map_err(|e| {
+                                AshError::VulkanError(format!(
+                                    "Failed to create thread-local command pool: {e:?}"
+                                ))
+                            })?;
 
                         *pool_opt = Some((pool, Arc::clone(&self.device)));
                     }
@@ -95,8 +93,8 @@ impl ParallelCommandRecorder {
                         .level(vk::CommandBufferLevel::SECONDARY)
                         .command_buffer_count(1);
 
-                    let cmd_buffers =
-                        device.allocate_command_buffers(&alloc_info).map_err(|e| {
+                    let cmd_buffers = unsafe { device.allocate_command_buffers(&alloc_info) }
+                        .map_err(|e| {
                             AshError::VulkanError(format!(
                                 "Failed to allocate secondary command buffer: {e:?}"
                             ))
@@ -109,7 +107,7 @@ impl ParallelCommandRecorder {
                         .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT)
                         .inheritance_info(&inheritance_info);
 
-                    device.begin_command_buffer(cmd, &begin_info).map_err(|e| {
+                    unsafe { device.begin_command_buffer(cmd, &begin_info) }.map_err(|e| {
                         AshError::VulkanError(format!(
                             "Failed to begin secondary command buffer: {e:?}"
                         ))
@@ -120,7 +118,7 @@ impl ParallelCommandRecorder {
                     record_fn_guard(pass_idx, cmd)?;
                     drop(record_fn_guard);
 
-                    device.end_command_buffer(cmd).map_err(|e| {
+                    unsafe { device.end_command_buffer(cmd) }.map_err(|e| {
                         AshError::VulkanError(format!(
                             "Failed to end secondary command buffer: {e:?}"
                         ))
@@ -134,8 +132,10 @@ impl ParallelCommandRecorder {
         let secondary_buffers = secondary_buffers?;
 
         // Execute secondary buffers in primary
-        self.device
-            .cmd_execute_commands(primary_cmd, &secondary_buffers);
+        unsafe {
+            self.device
+                .cmd_execute_commands(primary_cmd, &secondary_buffers)
+        };
 
         log::debug!(
             "ParallelCommandRecorder: Executed {} secondary command buffers",

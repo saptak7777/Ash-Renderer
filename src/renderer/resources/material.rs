@@ -405,7 +405,7 @@ mod tests {
         let handle2 = manager.register_material(&mat2).unwrap();
 
         assert_eq!(handle1, handle2); // Should reuse the same handle
-                                      // Default material at 0, unique mat1 at 1. mat2 is deduplicated to 1.
+        // Default material at 0, unique mat1 at 1. mat2 is deduplicated to 1.
         assert_eq!(manager.materials.len(), 2);
     }
 
@@ -450,8 +450,10 @@ mod tests {
 
         // Verify names
         assert_eq!(manager.materials[h1.index as usize].name, "Test");
-        assert!(manager.materials[h2.index as usize]
-            .name
-            .starts_with("Test_"));
+        assert!(
+            manager.materials[h2.index as usize]
+                .name
+                .starts_with("Test_")
+        );
     }
 }

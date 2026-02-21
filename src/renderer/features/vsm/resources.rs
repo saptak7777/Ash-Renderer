@@ -220,9 +220,9 @@ impl VsmResources {
             .sharing_mode(vk::SharingMode::EXCLUSIVE)
             .initial_layout(vk::ImageLayout::UNDEFINED);
 
-        let (physical_cache, physical_cache_alloc) = allocator
-            .create_image(&cache_info, vk_mem::MemoryUsage::AutoPreferDevice)
-            .map_err(|e| {
+        let (physical_cache, physical_cache_alloc) =
+            unsafe { allocator.create_image(&cache_info, vk_mem::MemoryUsage::AutoPreferDevice) }
+                .map_err(|e| {
                 AshError::VulkanError(format!("Failed to create physical cache: {e:?}"))
             })?;
 
@@ -238,8 +238,7 @@ impl VsmResources {
                 layer_count: 1,
             });
 
-        let physical_cache_view = device
-            .create_image_view(&cache_view_info, None)
+        let physical_cache_view = unsafe { device.create_image_view(&cache_view_info, None) }
             .map_err(|e| AshError::VulkanError(format!("Failed to create cache view: {e:?}")))?;
 
         // Create sampler for physical cache
@@ -253,8 +252,7 @@ impl VsmResources {
             .min_lod(0.0)
             .max_lod(1.0);
 
-        let physical_cache_sampler = device
-            .create_sampler(&sampler_info, None)
+        let physical_cache_sampler = unsafe { device.create_sampler(&sampler_info, None) }
             .map_err(|e| AshError::VulkanError(format!("Failed to create sampler: {e:?}")))?;
 
         // Create physical depth buffer for Z-testing
@@ -274,9 +272,9 @@ impl VsmResources {
             .sharing_mode(vk::SharingMode::EXCLUSIVE)
             .initial_layout(vk::ImageLayout::UNDEFINED);
 
-        let (physical_depth_image, physical_depth_image_alloc) = allocator
-            .create_image(&depth_info, vk_mem::MemoryUsage::AutoPreferDevice)
-            .map_err(|e| {
+        let (physical_depth_image, physical_depth_image_alloc) =
+            unsafe { allocator.create_image(&depth_info, vk_mem::MemoryUsage::AutoPreferDevice) }
+                .map_err(|e| {
                 AshError::VulkanError(format!("Failed to create physical depth cache: {e:?}"))
             })?;
 
@@ -292,8 +290,7 @@ impl VsmResources {
                 layer_count: 1,
             });
 
-        let physical_depth_view = device
-            .create_image_view(&depth_view_info, None)
+        let physical_depth_view = unsafe { device.create_image_view(&depth_view_info, None) }
             .map_err(|e| AshError::VulkanError(format!("Failed to create depth view: {e:?}")))?;
 
         // Create page table (R32_UINT texture array for clipmaps)
@@ -319,9 +316,9 @@ impl VsmResources {
             .sharing_mode(vk::SharingMode::EXCLUSIVE)
             .initial_layout(vk::ImageLayout::UNDEFINED);
 
-        let (page_table, page_table_alloc) = allocator
-            .create_image(&table_info, vk_mem::MemoryUsage::AutoPreferDevice)
-            .map_err(|e| AshError::VulkanError(format!("Failed to create page table: {e:?}")))?;
+        let (page_table, page_table_alloc) =
+            unsafe { allocator.create_image(&table_info, vk_mem::MemoryUsage::AutoPreferDevice) }
+                .map_err(|e| AshError::VulkanError(format!("Failed to create page table: {e:?}")))?;
 
         let table_view_info = vk::ImageViewCreateInfo::default()
             .image(page_table)
@@ -339,8 +336,7 @@ impl VsmResources {
                 layer_count: array_layers,
             });
 
-        let page_table_view = device
-            .create_image_view(&table_view_info, None)
+        let page_table_view = unsafe { device.create_image_view(&table_view_info, None) }
             .map_err(|e| AshError::VulkanError(format!("Failed to create table view: {e:?}")))?;
 
         // Create sampler for page table (nearest neighbor for integer texture)
@@ -354,11 +350,10 @@ impl VsmResources {
             .min_lod(0.0)
             .max_lod(1.0);
 
-        let page_table_sampler = device
-            .create_sampler(&page_table_sampler_info, None)
+        let page_table_sampler = unsafe { device.create_sampler(&page_table_sampler_info, None) }
             .map_err(|e| {
-                AshError::VulkanError(format!("Failed to create page table sampler: {e:?}"))
-            })?;
+            AshError::VulkanError(format!("Failed to create page table sampler: {e:?}"))
+        })?;
 
         // Create request buffer (SSBO)
         // Usage: STORAGE_BUFFER | TRANSFER_SRC | TRANSFER_DST (Write by GPU, Read by CPU)
@@ -368,8 +363,8 @@ impl VsmResources {
 
         let mut request_buffers = Vec::with_capacity(frames_in_flight as usize);
         for _ in 0..frames_in_flight {
-            let (request_handle, request_alloc) = allocator
-                .create_buffer_with_flags(
+            let (request_handle, request_alloc) = unsafe {
+                allocator.create_buffer_with_flags(
                     request_size,
                     vk::BufferUsageFlags::STORAGE_BUFFER
                         | vk::BufferUsageFlags::TRANSFER_SRC
@@ -377,9 +372,10 @@ impl VsmResources {
                     vk_mem::MemoryUsage::AutoPreferHost,
                     vk_mem::AllocationCreateFlags::HOST_ACCESS_RANDOM,
                 )
-                .map_err(|e| {
-                    AshError::VulkanError(format!("Failed to create request buffer: {e:?}"))
-                })?;
+            }
+            .map_err(|e| {
+                AshError::VulkanError(format!("Failed to create request buffer: {e:?}"))
+            })?;
 
             request_buffers.push(VsmRequestBuffer {
                 buffer: request_handle,
@@ -395,30 +391,28 @@ impl VsmResources {
             * std::mem::size_of::<PageAllocation>()) as vk::DeviceSize
             + ATOMIC_HEADER_SIZE;
 
-        let (allocation_buffer, allocation_buffer_alloc) = allocator
-            .create_buffer_with_flags(
+        let (allocation_buffer, allocation_buffer_alloc) = unsafe {
+            allocator.create_buffer_with_flags(
                 alloc_size,
                 vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
                 vk_mem::MemoryUsage::AutoPreferHost,
                 vk_mem::AllocationCreateFlags::HOST_ACCESS_SEQUENTIAL_WRITE,
             )
-            .map_err(|e| {
-                AshError::VulkanError(format!("Failed to create allocation buffer: {e:?}"))
-            })?;
+        }
+        .map_err(|e| AshError::VulkanError(format!("Failed to create allocation buffer: {e:?}")))?;
 
         // Create metadata buffer (CPU-writable for per-frame updates)
         let metadata_size = std::mem::size_of::<VsmGlobalInfo>() as vk::DeviceSize;
 
-        let (metadata_buffer, metadata_buffer_alloc) = allocator
-            .create_buffer_with_flags(
+        let (metadata_buffer, metadata_buffer_alloc) = unsafe {
+            allocator.create_buffer_with_flags(
                 metadata_size,
                 vk::BufferUsageFlags::UNIFORM_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
                 vk_mem::MemoryUsage::AutoPreferHost,
                 vk_mem::AllocationCreateFlags::HOST_ACCESS_SEQUENTIAL_WRITE,
             )
-            .map_err(|e| {
-                AshError::VulkanError(format!("Failed to create metadata buffer: {e:?}"))
-            })?;
+        }
+        .map_err(|e| AshError::VulkanError(format!("Failed to create metadata buffer: {e:?}")))?;
 
         // Create default textures for VSM bindless slots
         let default_uint_texture = crate::renderer::resources::Texture::create_vsm_default_uint(
@@ -478,11 +472,10 @@ impl VsmResources {
 
         let compute_layout_info =
             vk::DescriptorSetLayoutCreateInfo::default().bindings(&compute_bindings);
-        let compute_layout = device
-            .create_descriptor_set_layout(&compute_layout_info, None)
-            .map_err(|e| {
-                AshError::VulkanError(format!("Failed to create VSM compute layout: {e}"))
-            })?;
+        let compute_layout =
+            unsafe { device.create_descriptor_set_layout(&compute_layout_info, None) }.map_err(
+                |e| AshError::VulkanError(format!("Failed to create VSM compute layout: {e}")),
+            )?;
 
         // Create dedicated descriptor pool for VSM
         let pool_sizes = [
@@ -506,9 +499,8 @@ impl VsmResources {
         let pool_info = vk::DescriptorPoolCreateInfo::default()
             .max_sets(1)
             .pool_sizes(&pool_sizes);
-        let descriptor_pool = device
-            .create_descriptor_pool(&pool_info, None)
-            .map_err(|e| {
+        let descriptor_pool =
+            unsafe { device.create_descriptor_pool(&pool_info, None) }.map_err(|e| {
                 AshError::VulkanError(format!("Failed to create VSM descriptor pool: {e}"))
             })?;
 
@@ -517,9 +509,10 @@ impl VsmResources {
         let alloc_info = vk::DescriptorSetAllocateInfo::default()
             .descriptor_pool(descriptor_pool)
             .set_layouts(&layouts);
-        let descriptor_set = device.allocate_descriptor_sets(&alloc_info).map_err(|e| {
-            AshError::VulkanError(format!("Failed to allocate VSM descriptor set: {e}"))
-        })?[0];
+        let descriptor_set =
+            unsafe { device.allocate_descriptor_sets(&alloc_info) }.map_err(|e| {
+                AshError::VulkanError(format!("Failed to allocate VSM descriptor set: {e}"))
+            })?[0];
 
         // Update descriptor set
         let metadata_info = [vk::DescriptorBufferInfo::default()
@@ -569,7 +562,9 @@ impl VsmResources {
                 .image_info(&cache_info),
         ];
 
-        device.update_descriptor_sets(&writes, &[]);
+        unsafe {
+            device.update_descriptor_sets(&writes, &[]);
+        }
 
         // EXPLICIT INITIALIZATION: Clear Page Table and transition to GENERAL layout
         unsafe {
@@ -817,80 +812,106 @@ impl VsmResources {
 
         // Destroy buffers
         if let Some(mut alloc) = self.metadata_buffer_alloc.take() {
-            self.allocator
-                .vma
-                .destroy_buffer(self.metadata_buffer, &mut alloc);
+            unsafe {
+                self.allocator
+                    .vma
+                    .destroy_buffer(self.metadata_buffer, &mut alloc);
+            }
         }
 
         if let Some(mut alloc) = self.allocation_buffer_alloc.take() {
-            self.allocator
-                .vma
-                .destroy_buffer(self.allocation_buffer, &mut alloc);
+            unsafe {
+                self.allocator
+                    .vma
+                    .destroy_buffer(self.allocation_buffer, &mut alloc);
+            }
         }
 
         for rb in &mut self.request_buffers {
             if rb.buffer != vk::Buffer::null() {
-                self.allocator.destroy_buffer(rb.buffer, &mut rb.allocation);
+                unsafe {
+                    self.allocator.destroy_buffer(rb.buffer, &mut rb.allocation);
+                }
                 rb.buffer = vk::Buffer::null();
             }
         }
 
         // Destroy page table
         if self.page_table_sampler != vk::Sampler::null() {
-            self.device.destroy_sampler(self.page_table_sampler, None);
+            unsafe {
+                self.device.destroy_sampler(self.page_table_sampler, None);
+            }
             self.page_table_sampler = vk::Sampler::null();
         }
         if self.page_table_view != vk::ImageView::null() {
-            self.device.destroy_image_view(self.page_table_view, None);
+            unsafe {
+                self.device.destroy_image_view(self.page_table_view, None);
+            }
             self.page_table_view = vk::ImageView::null();
         }
         if let Some(mut alloc) = self.page_table_alloc.take() {
-            self.allocator
-                .vma
-                .destroy_image(self.page_table, &mut alloc);
+            unsafe {
+                self.allocator
+                    .vma
+                    .destroy_image(self.page_table, &mut alloc);
+            }
             self.page_table = vk::Image::null();
         }
 
         // Destroy physical cache
         if self.physical_cache_view != vk::ImageView::null() {
-            self.device
-                .destroy_image_view(self.physical_cache_view, None);
+            unsafe {
+                self.device
+                    .destroy_image_view(self.physical_cache_view, None);
+            }
             self.physical_cache_view = vk::ImageView::null();
         }
         if self.physical_cache_sampler != vk::Sampler::null() {
-            self.device
-                .destroy_sampler(self.physical_cache_sampler, None);
+            unsafe {
+                self.device
+                    .destroy_sampler(self.physical_cache_sampler, None);
+            }
             self.physical_cache_sampler = vk::Sampler::null();
         }
         if let Some(mut alloc) = self.physical_cache_alloc.take() {
-            self.allocator
-                .vma
-                .destroy_image(self.physical_cache, &mut alloc);
+            unsafe {
+                self.allocator
+                    .vma
+                    .destroy_image(self.physical_cache, &mut alloc);
+            }
             self.physical_cache = vk::Image::null();
         }
 
         // Destroy physical depth
         if self.physical_depth_view != vk::ImageView::null() {
-            self.device
-                .destroy_image_view(self.physical_depth_view, None);
+            unsafe {
+                self.device
+                    .destroy_image_view(self.physical_depth_view, None);
+            }
             self.physical_depth_view = vk::ImageView::null();
         }
         if let Some(mut alloc) = self.physical_depth_image_alloc.take() {
-            self.allocator
-                .vma
-                .destroy_image(self.physical_depth_image, &mut alloc);
+            unsafe {
+                self.allocator
+                    .vma
+                    .destroy_image(self.physical_depth_image, &mut alloc);
+            }
             self.physical_depth_image = vk::Image::null();
         }
 
         if self.compute_layout != vk::DescriptorSetLayout::null() {
-            self.device
-                .destroy_descriptor_set_layout(self.compute_layout, None);
+            unsafe {
+                self.device
+                    .destroy_descriptor_set_layout(self.compute_layout, None);
+            }
             self.compute_layout = vk::DescriptorSetLayout::null();
         }
 
         if self.descriptor_pool != vk::DescriptorPool::null() {
-            self.device
-                .destroy_descriptor_pool(self.descriptor_pool, None);
+            unsafe {
+                self.device
+                    .destroy_descriptor_pool(self.descriptor_pool, None);
+            }
             self.descriptor_pool = vk::DescriptorPool::null();
         }
 

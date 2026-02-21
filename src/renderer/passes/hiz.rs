@@ -8,8 +8,8 @@
 use ash::vk;
 use std::sync::Arc;
 
-use crate::vulkan::{Allocator, VulkanDevice};
 use crate::Result;
+use crate::vulkan::{Allocator, VulkanDevice};
 use thiserror::Error;
 
 /// Hi-Z error types (Rust explicit errors)
@@ -394,11 +394,11 @@ impl HiZPass {
         );
 
         // Hi-Z image with mip chain
-        self.create_hiz_image(allocator)?;
+        unsafe { self.create_hiz_image(allocator)? };
 
-        self.create_sampler()?;
-        self.create_descriptors()?;
-        self.create_pipeline(vulkan_device)?;
+        unsafe { self.create_sampler()? };
+        unsafe { self.create_descriptors()? };
+        unsafe { self.create_pipeline(vulkan_device)? };
 
         self.initialized = true;
         Ok(())
@@ -432,12 +432,10 @@ impl HiZPass {
             ..Default::default()
         };
 
-        let (image, allocation) =
-            allocator
-                .create_image(&image_info, &alloc_info)
-                .map_err(|e| {
-                    crate::AshError::VulkanError(format!("Hi-Z image creation failed: {e:?}"))
-                })?;
+        let (image, allocation) = unsafe { allocator.create_image(&image_info, &alloc_info) }
+            .map_err(|e| {
+                crate::AshError::VulkanError(format!("Hi-Z image creation failed: {e:?}"))
+            })?;
 
         self.hiz_image = image;
         self.hiz_allocation = Some(allocation);
@@ -456,7 +454,7 @@ impl HiZPass {
                         .layer_count(1),
                 );
 
-            let view = self.device.create_image_view(&view_info, None)?;
+            let view = unsafe { self.device.create_image_view(&view_info, None)? };
             self.hiz_views.push(view);
         }
 
@@ -475,7 +473,7 @@ impl HiZPass {
             .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_EDGE)
             .max_lod(self.mip_count as f32);
 
-        self.hiz_sampler = self.device.create_sampler(&sampler_info, None)?;
+        self.hiz_sampler = unsafe { self.device.create_sampler(&sampler_info, None)? };
         Ok(())
     }
 
@@ -497,9 +495,10 @@ impl HiZPass {
 
         let layout_info = vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings);
 
-        self.layout = self
-            .device
-            .create_descriptor_set_layout(&layout_info, None)?;
+        self.layout = unsafe {
+            self.device
+                .create_descriptor_set_layout(&layout_info, None)?
+        };
 
         // Pool for mip_count - 1 sets (one per mip transition)
         let pool_sizes = [
@@ -517,7 +516,7 @@ impl HiZPass {
             .max_sets(self.mip_count)
             .pool_sizes(&pool_sizes);
 
-        self.pool = self.device.create_descriptor_pool(&pool_info, None)?;
+        self.pool = unsafe { self.device.create_descriptor_pool(&pool_info, None)? };
 
         // Allocate sets
         let layouts: Vec<_> = (0..self.mip_count).map(|_| self.layout).collect();
@@ -526,7 +525,7 @@ impl HiZPass {
             .descriptor_pool(self.pool)
             .set_layouts(&layouts);
 
-        self.descriptor_sets = self.device.allocate_descriptor_sets(&alloc_info)?;
+        self.descriptor_sets = unsafe { self.device.allocate_descriptor_sets(&alloc_info)? };
 
         // Update descriptor sets for each mip transition
         for mip in 0..(self.mip_count as usize - 1) {
@@ -555,7 +554,7 @@ impl HiZPass {
                     .image_info(std::slice::from_ref(&storage_info)),
             ];
 
-            self.device.update_descriptor_sets(&writes, &[]);
+            unsafe { self.device.update_descriptor_sets(&writes, &[]) };
         }
 
         Ok(())
@@ -570,9 +569,10 @@ impl HiZPass {
             .map_err(|e| crate::AshError::VulkanError(e.to_string()))?;
         let shader_module_info = vk::ShaderModuleCreateInfo::default().code(&code);
 
-        let shader_module = self
-            .device
-            .create_shader_module(&shader_module_info, None)?;
+        let shader_module = unsafe {
+            self.device
+                .create_shader_module(&shader_module_info, None)?
+        };
 
         // Push constant range
         let push_constant_range = vk::PushConstantRange::default()
@@ -585,7 +585,7 @@ impl HiZPass {
             .set_layouts(std::slice::from_ref(&self.layout))
             .push_constant_ranges(std::slice::from_ref(&push_constant_range));
 
-        self.generate_layout = self.device.create_pipeline_layout(&layout_info, None)?;
+        self.generate_layout = unsafe { self.device.create_pipeline_layout(&layout_info, None)? };
 
         // Compute pipeline
         let stage_info = vk::PipelineShaderStageCreateInfo::default()
@@ -597,13 +597,14 @@ impl HiZPass {
             .stage(stage_info)
             .layout(self.generate_layout);
 
-        let pipelines = self
-            .device
-            .create_compute_pipelines(vk::PipelineCache::null(), &[pipeline_info], None)
-            .map_err(|(_, e)| e)?;
+        let pipelines = unsafe {
+            self.device
+                .create_compute_pipelines(vk::PipelineCache::null(), &[pipeline_info], None)
+        }
+        .map_err(|(_, e)| e)?;
 
         self.generate_pipeline = pipelines[0];
-        self.device.destroy_shader_module(shader_module, None);
+        unsafe { self.device.destroy_shader_module(shader_module, None) };
 
         Ok(())
     }
@@ -682,15 +683,17 @@ impl HiZPass {
             ..Default::default()
         };
 
-        self.device.cmd_pipeline_barrier(
-            cmd,
-            vk::PipelineStageFlags::LATE_FRAGMENT_TESTS,
-            vk::PipelineStageFlags::TRANSFER,
-            vk::DependencyFlags::empty(),
-            &[],
-            &[],
-            &[depth_barrier],
-        );
+        unsafe {
+            self.device.cmd_pipeline_barrier(
+                cmd,
+                vk::PipelineStageFlags::LATE_FRAGMENT_TESTS,
+                vk::PipelineStageFlags::TRANSFER,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[],
+                &[depth_barrier],
+            );
+        }
 
         // Hi-Z mip 0 -> Destination for transfer
         let hiz_barrier = vk::ImageMemoryBarrier {
@@ -708,15 +711,17 @@ impl HiZPass {
             ..Default::default()
         };
 
-        self.device.cmd_pipeline_barrier(
-            cmd,
-            vk::PipelineStageFlags::TOP_OF_PIPE,
-            vk::PipelineStageFlags::TRANSFER,
-            vk::DependencyFlags::empty(),
-            &[],
-            &[],
-            &[hiz_barrier],
-        );
+        unsafe {
+            self.device.cmd_pipeline_barrier(
+                cmd,
+                vk::PipelineStageFlags::TOP_OF_PIPE,
+                vk::PipelineStageFlags::TRANSFER,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[],
+                &[hiz_barrier],
+            );
+        }
 
         let blit_region = vk::ImageBlit::default()
             .src_subresource(
@@ -746,15 +751,17 @@ impl HiZPass {
                 },
             ]);
 
-        self.device.cmd_blit_image(
-            cmd,
-            depth_image,
-            vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
-            self.hiz_image,
-            vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-            &[blit_region],
-            vk::Filter::NEAREST,
-        );
+        unsafe {
+            self.device.cmd_blit_image(
+                cmd,
+                depth_image,
+                vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                self.hiz_image,
+                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                &[blit_region],
+                vk::Filter::NEAREST,
+            );
+        }
 
         // Transition mip 0 to shader read
         let mip0_read_barrier = vk::ImageMemoryBarrier::default()
@@ -771,19 +778,24 @@ impl HiZPass {
                     .layer_count(1),
             );
 
-        self.device.cmd_pipeline_barrier(
-            cmd,
-            vk::PipelineStageFlags::TRANSFER,
-            vk::PipelineStageFlags::COMPUTE_SHADER,
-            vk::DependencyFlags::empty(),
-            &[],
-            &[],
-            &[mip0_read_barrier],
-        );
+        unsafe {
+            self.device.cmd_pipeline_barrier(
+                cmd,
+                vk::PipelineStageFlags::TRANSFER,
+                vk::PipelineStageFlags::COMPUTE_SHADER,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[],
+                &[mip0_read_barrier],
+            );
 
-        // Generate mip chain (use active mip count for current quality)
-        self.device
-            .cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, self.generate_pipeline);
+            // Generate mip chain (use active mip count for current quality)
+            self.device.cmd_bind_pipeline(
+                cmd,
+                vk::PipelineBindPoint::COMPUTE,
+                self.generate_pipeline,
+            );
+        }
 
         for mip in 1..self.active_mip_count {
             let mip_width = (self.width >> mip).max(1);
@@ -803,25 +815,29 @@ impl HiZPass {
                         .layer_count(1),
                 );
 
-            self.device.cmd_pipeline_barrier(
-                cmd,
-                vk::PipelineStageFlags::COMPUTE_SHADER,
-                vk::PipelineStageFlags::COMPUTE_SHADER,
-                vk::DependencyFlags::empty(),
-                &[],
-                &[],
-                &[mip_barrier],
-            );
+            unsafe {
+                self.device.cmd_pipeline_barrier(
+                    cmd,
+                    vk::PipelineStageFlags::COMPUTE_SHADER,
+                    vk::PipelineStageFlags::COMPUTE_SHADER,
+                    vk::DependencyFlags::empty(),
+                    &[],
+                    &[],
+                    &[mip_barrier],
+                );
+            }
 
-            // Bind descriptor set for this mip transition
-            self.device.cmd_bind_descriptor_sets(
-                cmd,
-                vk::PipelineBindPoint::COMPUTE,
-                self.generate_layout,
-                0,
-                &[self.descriptor_sets[(mip - 1) as usize]],
-                &[],
-            );
+            unsafe {
+                // Bind descriptor set for this mip transition
+                self.device.cmd_bind_descriptor_sets(
+                    cmd,
+                    vk::PipelineBindPoint::COMPUTE,
+                    self.generate_layout,
+                    0,
+                    &[self.descriptor_sets[(mip - 1) as usize]],
+                    &[],
+                );
+            }
 
             // Push constants
             let push = HiZGeneratePushConstants {
@@ -830,18 +846,22 @@ impl HiZPass {
                 _padding: 0,
             };
 
-            self.device.cmd_push_constants(
-                cmd,
-                self.generate_layout,
-                vk::ShaderStageFlags::COMPUTE,
-                0,
-                bytemuck::bytes_of(&push),
-            );
+            unsafe {
+                self.device.cmd_push_constants(
+                    cmd,
+                    self.generate_layout,
+                    vk::ShaderStageFlags::COMPUTE,
+                    0,
+                    bytemuck::bytes_of(&push),
+                );
+            }
 
             // Dispatch
             let group_x = mip_width.div_ceil(8);
             let group_y = mip_height.div_ceil(8);
-            self.device.cmd_dispatch(cmd, group_x, group_y, 1);
+            unsafe {
+                self.device.cmd_dispatch(cmd, group_x, group_y, 1);
+            }
 
             // Transition this mip to shader read for next iteration
             let read_barrier = vk::ImageMemoryBarrier::default()
@@ -858,15 +878,17 @@ impl HiZPass {
                         .layer_count(1),
                 );
 
-            self.device.cmd_pipeline_barrier(
-                cmd,
-                vk::PipelineStageFlags::COMPUTE_SHADER,
-                vk::PipelineStageFlags::COMPUTE_SHADER,
-                vk::DependencyFlags::empty(),
-                &[],
-                &[],
-                &[read_barrier],
-            );
+            unsafe {
+                self.device.cmd_pipeline_barrier(
+                    cmd,
+                    vk::PipelineStageFlags::COMPUTE_SHADER,
+                    vk::PipelineStageFlags::COMPUTE_SHADER,
+                    vk::DependencyFlags::empty(),
+                    &[],
+                    &[],
+                    &[read_barrier],
+                );
+            }
         }
 
         // Restore depth to attachment optimal
@@ -886,15 +908,17 @@ impl HiZPass {
                     .layer_count(1),
             );
 
-        self.device.cmd_pipeline_barrier(
-            cmd,
-            vk::PipelineStageFlags::TRANSFER,
-            vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS,
-            vk::DependencyFlags::empty(),
-            &[],
-            &[],
-            &[depth_restore],
-        );
+        unsafe {
+            self.device.cmd_pipeline_barrier(
+                cmd,
+                vk::PipelineStageFlags::TRANSFER,
+                vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[],
+                &[depth_restore],
+            );
+        }
 
         Ok(())
     }
@@ -964,7 +988,7 @@ impl HiZPass {
         }
 
         // 2. Build the hierarchical depth pyramid.
-        self.build_pyramid(cmd, depth_image)?;
+        unsafe { self.build_pyramid(cmd, depth_image)? };
 
         // 3. Push the fresh pyramid view+sampler to the culling pass.
         let hiz_view = self.hiz_view().unwrap_or(fallback_view);
@@ -974,7 +998,7 @@ impl HiZPass {
             fallback_sampler
         };
         if let Some(indirect) = indirect_draw_pass {
-            indirect.update_hiz_descriptor(hiz_view, hiz_sampler);
+            unsafe { indirect.update_hiz_descriptor(hiz_view, hiz_sampler) };
         }
 
         Ok(())
@@ -1066,8 +1090,10 @@ impl HiZPass {
             return Ok(());
         }
 
-        self.destroy();
-        self.init(allocator, vulkan_device, width, height)?;
+        unsafe {
+            self.destroy();
+            self.init(allocator, vulkan_device, width, height)?;
+        }
 
         // Final validation after resize (AAA standard)
         let _ = self.validate_mip_chain_runtime();
@@ -1095,41 +1121,43 @@ impl HiZPass {
             return;
         };
 
-        for view in self.hiz_views.drain(..) {
-            self.device.destroy_image_view(view, None);
-        }
-
-        if self.hiz_image != vk::Image::null() {
-            if let Some(mut alloc) = self.hiz_allocation.take() {
-                allocator.destroy_image(self.hiz_image, &mut alloc);
+        unsafe {
+            for view in self.hiz_views.drain(..) {
+                self.device.destroy_image_view(view, None);
             }
-            self.hiz_image = vk::Image::null();
-        }
 
-        if self.hiz_sampler != vk::Sampler::null() {
-            self.device.destroy_sampler(self.hiz_sampler, None);
-            self.hiz_sampler = vk::Sampler::null();
-        }
+            if self.hiz_image != vk::Image::null() {
+                if let Some(mut alloc) = self.hiz_allocation.take() {
+                    allocator.destroy_image(self.hiz_image, &mut alloc);
+                }
+                self.hiz_image = vk::Image::null();
+            }
 
-        if self.generate_pipeline != vk::Pipeline::null() {
-            self.device.destroy_pipeline(self.generate_pipeline, None);
-            self.generate_pipeline = vk::Pipeline::null();
-        }
+            if self.hiz_sampler != vk::Sampler::null() {
+                self.device.destroy_sampler(self.hiz_sampler, None);
+                self.hiz_sampler = vk::Sampler::null();
+            }
 
-        if self.generate_layout != vk::PipelineLayout::null() {
-            self.device
-                .destroy_pipeline_layout(self.generate_layout, None);
-            self.generate_layout = vk::PipelineLayout::null();
-        }
+            if self.generate_pipeline != vk::Pipeline::null() {
+                self.device.destroy_pipeline(self.generate_pipeline, None);
+                self.generate_pipeline = vk::Pipeline::null();
+            }
 
-        if self.pool != vk::DescriptorPool::null() {
-            self.device.destroy_descriptor_pool(self.pool, None);
-            self.pool = vk::DescriptorPool::null();
-        }
+            if self.generate_layout != vk::PipelineLayout::null() {
+                self.device
+                    .destroy_pipeline_layout(self.generate_layout, None);
+                self.generate_layout = vk::PipelineLayout::null();
+            }
 
-        if self.layout != vk::DescriptorSetLayout::null() {
-            self.device.destroy_descriptor_set_layout(self.layout, None);
-            self.layout = vk::DescriptorSetLayout::null();
+            if self.pool != vk::DescriptorPool::null() {
+                self.device.destroy_descriptor_pool(self.pool, None);
+                self.pool = vk::DescriptorPool::null();
+            }
+
+            if self.layout != vk::DescriptorSetLayout::null() {
+                self.device.destroy_descriptor_set_layout(self.layout, None);
+                self.layout = vk::DescriptorSetLayout::null();
+            }
         }
 
         self.initialized = false;

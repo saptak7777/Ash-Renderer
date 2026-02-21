@@ -551,7 +551,9 @@ impl Mesh {
                                 {
                                     texture_data.pixels = compressed;
                                 } else {
-                                    log::warn!("BC7 compression failed for {map_name} on '{mesh_name}', falling back to uncompressed.");
+                                    log::warn!(
+                                        "BC7 compression failed for {map_name} on '{mesh_name}', falling back to uncompressed."
+                                    );
                                     format = CompressionFormat::None.to_vk_format(srgb);
                                 }
                             }
@@ -562,7 +564,9 @@ impl Mesh {
                                     log::debug!("BC5 compressed size: {} bytes", compressed.len());
                                     texture_data.pixels = compressed;
                                 } else {
-                                    log::warn!("BC5 compression failed for {map_name} on '{mesh_name}', falling back to uncompressed.");
+                                    log::warn!(
+                                        "BC5 compression failed for {map_name} on '{mesh_name}', falling back to uncompressed."
+                                    );
                                     format = CompressionFormat::None.to_vk_format(srgb);
                                 }
                             }
@@ -618,65 +622,75 @@ impl Mesh {
             Ok(())
         }
 
-        upload_texture_map(
-            &self.name,
-            "base",
-            &tex_ctx,
-            &mut self.texture,
-            &mut self.texture_data,
-            true, // Albedo = SRGB
-            CompressionFormat::Bc7,
-            vram_budget,
-            compression_enabled,
-        )?;
+        unsafe {
+            upload_texture_map(
+                &self.name,
+                "base",
+                &tex_ctx,
+                &mut self.texture,
+                &mut self.texture_data,
+                true, // Albedo = SRGB
+                CompressionFormat::Bc7,
+                vram_budget,
+                compression_enabled,
+            )?
+        };
 
-        upload_texture_map(
-            &self.name,
-            "normal",
-            &tex_ctx,
-            &mut self.normal_texture,
-            &mut self.normal_texture_data,
-            false, // Normal = Linear
-            CompressionFormat::Bc5,
-            vram_budget,
-            compression_enabled,
-        )?;
+        unsafe {
+            upload_texture_map(
+                &self.name,
+                "normal",
+                &tex_ctx,
+                &mut self.normal_texture,
+                &mut self.normal_texture_data,
+                false, // Normal = Linear
+                CompressionFormat::Bc5,
+                vram_budget,
+                compression_enabled,
+            )?
+        };
 
-        upload_texture_map(
-            &self.name,
-            "metallic_roughness",
-            &tex_ctx,
-            &mut self.metallic_roughness_texture,
-            &mut self.metallic_roughness_texture_data,
-            false, // MR = Linear
-            CompressionFormat::Bc5,
-            vram_budget,
-            compression_enabled,
-        )?;
+        unsafe {
+            upload_texture_map(
+                &self.name,
+                "metallic_roughness",
+                &tex_ctx,
+                &mut self.metallic_roughness_texture,
+                &mut self.metallic_roughness_texture_data,
+                false, // MR = Linear
+                CompressionFormat::Bc5,
+                vram_budget,
+                compression_enabled,
+            )?
+        };
 
-        upload_texture_map(
-            &self.name,
-            "occlusion",
-            &tex_ctx,
-            &mut self.occlusion_texture,
-            &mut self.occlusion_texture_data,
-            false, // Occlusion = Linear
-            CompressionFormat::Bc5,
-            vram_budget,
-            compression_enabled,
-        )?;
+        unsafe {
+            upload_texture_map(
+                &self.name,
+                "occlusion",
+                &tex_ctx,
+                &mut self.occlusion_texture,
+                &mut self.occlusion_texture_data,
+                false, // Occlusion = Linear
+                CompressionFormat::Bc5,
+                vram_budget,
+                compression_enabled,
+            )?
+        };
 
-        upload_texture_map(
-            &self.name,
-            "emissive",
-            &tex_ctx,
-            &mut self.emissive_texture,
-            &mut self.emissive_texture_data,
-            true, // Emissive = SRGB
-            CompressionFormat::Bc7,
-            vram_budget,
-            compression_enabled,
-        )?;
+        unsafe {
+            upload_texture_map(
+                &self.name,
+                "emissive",
+                &tex_ctx,
+                &mut self.emissive_texture,
+                &mut self.emissive_texture_data,
+                true, // Emissive = SRGB
+                CompressionFormat::Bc7,
+                vram_budget,
+                compression_enabled,
+            )?
+        };
 
         Ok(())
     }

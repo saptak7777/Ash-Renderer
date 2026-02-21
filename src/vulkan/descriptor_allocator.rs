@@ -224,7 +224,7 @@ impl DescriptorAllocator {
                 Err(e) => {
                     return Err(AshError::VulkanError(format!(
                         "Failed to allocate descriptor set: {e}"
-                    )))
+                    )));
                 }
             }
         }

@@ -25,39 +25,35 @@ where
         .level(vk::CommandBufferLevel::PRIMARY)
         .command_buffer_count(1);
 
+    let command_buffers = unsafe { device.allocate_command_buffers(&alloc_info) }.map_err(|e| {
+        crate::AshError::VulkanError(format!("Failed to allocate command buffer: {e}"))
+    })?;
+    let command_buffer = command_buffers[0];
+
     unsafe {
-        let command_buffers = device.allocate_command_buffers(&alloc_info).map_err(|e| {
-            crate::AshError::VulkanError(format!("Failed to allocate command buffer: {e}"))
-        })?;
-        let command_buffer = command_buffers[0];
+        device.begin_command_buffer(
+            command_buffer,
+            &vk::CommandBufferBeginInfo::default()
+                .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
+        )
+    }
+    .map_err(|e| crate::AshError::VulkanError(format!("Failed to begin command buffer: {e}")))?;
 
-        device
-            .begin_command_buffer(
-                command_buffer,
-                &vk::CommandBufferBeginInfo::default()
-                    .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
-            )
-            .map_err(|e| {
-                crate::AshError::VulkanError(format!("Failed to begin command buffer: {e}"))
-            })?;
+    recorder(command_buffer);
 
-        recorder(command_buffer);
+    unsafe { device.end_command_buffer(command_buffer) }
+        .map_err(|e| crate::AshError::VulkanError(format!("Failed to end command buffer: {e}")))?;
 
-        device.end_command_buffer(command_buffer).map_err(|e| {
-            crate::AshError::VulkanError(format!("Failed to end command buffer: {e}"))
-        })?;
+    let submit_info =
+        vk::SubmitInfo::default().command_buffers(std::slice::from_ref(&command_buffer));
 
-        let submit_info =
-            vk::SubmitInfo::default().command_buffers(std::slice::from_ref(&command_buffer));
+    unsafe { device.queue_submit(queue, &[submit_info], vk::Fence::null()) }
+        .map_err(|e| crate::AshError::VulkanError(format!("Failed to submit queue: {e}")))?;
 
-        device
-            .queue_submit(queue, &[submit_info], vk::Fence::null())
-            .map_err(|e| crate::AshError::VulkanError(format!("Failed to submit queue: {e}")))?;
+    unsafe { device.queue_wait_idle(queue) }
+        .map_err(|e| crate::AshError::VulkanError(format!("Failed to wait for queue idle: {e}")))?;
 
-        device.queue_wait_idle(queue).map_err(|e| {
-            crate::AshError::VulkanError(format!("Failed to wait for queue idle: {e}"))
-        })?;
-
+    unsafe {
         device.free_command_buffers(command_pool, &command_buffers);
     }
 
@@ -96,18 +92,16 @@ pub unsafe fn begin_single_time_commands(
         .command_pool(command_pool)
         .command_buffer_count(1);
 
-    let command_buffer = device.allocate_command_buffers(&alloc_info).map_err(|e| {
+    let command_buffer = unsafe { device.allocate_command_buffers(&alloc_info) }.map_err(|e| {
         crate::AshError::VulkanError(format!("Failed to allocate command buffer: {e}"))
     })?[0];
 
     let begin_info =
         vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
 
-    device
-        .begin_command_buffer(command_buffer, &begin_info)
-        .map_err(|e| {
-            crate::AshError::VulkanError(format!("Failed to begin command buffer: {e}"))
-        })?;
+    unsafe { device.begin_command_buffer(command_buffer, &begin_info) }.map_err(|e| {
+        crate::AshError::VulkanError(format!("Failed to begin command buffer: {e}"))
+    })?;
 
     Ok(command_buffer)
 }
@@ -122,22 +116,21 @@ pub unsafe fn end_single_time_commands(
     queue: vk::Queue,
     command_buffer: vk::CommandBuffer,
 ) -> crate::Result<()> {
-    device
-        .end_command_buffer(command_buffer)
+    unsafe { device.end_command_buffer(command_buffer) }
         .map_err(|e| crate::AshError::VulkanError(format!("Failed to end command buffer: {e}")))?;
 
     let command_buffers = [command_buffer];
     let submit_info = vk::SubmitInfo::default().command_buffers(&command_buffers);
     let submit_infos = [submit_info];
 
-    device
-        .queue_submit(queue, &submit_infos, vk::Fence::null())
+    unsafe { device.queue_submit(queue, &submit_infos, vk::Fence::null()) }
         .map_err(|e| crate::AshError::VulkanError(format!("Failed to submit queue: {e}")))?;
-    device
-        .queue_wait_idle(queue)
+    unsafe { device.queue_wait_idle(queue) }
         .map_err(|e| crate::AshError::VulkanError(format!("Failed to wait for queue idle: {e}")))?;
 
-    device.free_command_buffers(command_pool, &command_buffers);
+    unsafe {
+        device.free_command_buffers(command_pool, &command_buffers);
+    }
 
     Ok(())
 }
@@ -171,41 +164,38 @@ pub unsafe fn execute_single_use_fenced<F>(
 where
     F: FnOnce(vk::CommandBuffer),
 {
-    let command_buffer = begin_single_time_commands(device, command_pool)?;
+    let command_buffer = unsafe { begin_single_time_commands(device, command_pool) }?;
     f(command_buffer);
 
-    device
-        .end_command_buffer(command_buffer)
+    unsafe { device.end_command_buffer(command_buffer) }
         .map_err(|e| crate::AshError::VulkanError(format!("Failed to end command buffer: {e}")))?;
 
     let fence_info = vk::FenceCreateInfo::default();
-    let fence = device
-        .create_fence(&fence_info, None)
+    let fence = unsafe { device.create_fence(&fence_info, None) }
         .map_err(|e| crate::AshError::VulkanError(format!("Failed to create fence: {e}")))?;
 
     let command_buffers = [command_buffer];
     let submit_info = vk::SubmitInfo::default().command_buffers(&command_buffers);
     let submit_infos = [submit_info];
 
-    device
-        .queue_submit(queue, &submit_infos, fence)
+    unsafe { device.queue_submit(queue, &submit_infos, fence) }
         .map_err(|e| crate::AshError::VulkanError(format!("Failed to submit queue: {e}")))?;
 
-    device
-        .wait_for_fences(&[fence], true, 60_000_000_000)
-        .map_err(|e| {
-            if e == vk::Result::TIMEOUT {
-                crate::AshError::VulkanError(
-                    "GPU timeout (60s) in execute_single_use_fenced. The GPU may have hung."
-                        .to_string(),
-                )
-            } else {
-                crate::AshError::VulkanError(format!("Failed to wait for fence: {e}"))
-            }
-        })?;
+    unsafe { device.wait_for_fences(&[fence], true, 60_000_000_000) }.map_err(|e| {
+        if e == vk::Result::TIMEOUT {
+            crate::AshError::VulkanError(
+                "GPU timeout (60s) in execute_single_use_fenced. The GPU may have hung."
+                    .to_string(),
+            )
+        } else {
+            crate::AshError::VulkanError(format!("Failed to wait for fence: {e}"))
+        }
+    })?;
 
-    device.destroy_fence(fence, None);
-    device.free_command_buffers(command_pool, &command_buffers);
+    unsafe {
+        device.destroy_fence(fence, None);
+        device.free_command_buffers(command_pool, &command_buffers);
+    }
 
     Ok(())
 }

@@ -127,7 +127,7 @@ mod tests {
     #[test]
     fn test_font_data() {
         assert_eq!(FONT_8X8.len(), 95); // 32-126 = 95 chars
-                                        // 'A' should have non-zero rows
+        // 'A' should have non-zero rows
         let a_glyph = get_glyph('A').unwrap();
         assert!(a_glyph.iter().any(|&b| b != 0));
     }

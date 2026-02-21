@@ -5,8 +5,8 @@
 //!
 
 use ash_renderer::prelude::*;
-use ash_renderer::renderer::features::ambient_lighting::{AmbientPreset, LightingBuilder};
 use ash_renderer::renderer::Scene;
+use ash_renderer::renderer::features::ambient_lighting::{AmbientPreset, LightingBuilder};
 use glam::{Mat4, Vec3};
 use std::sync::Arc;
 use winit::{

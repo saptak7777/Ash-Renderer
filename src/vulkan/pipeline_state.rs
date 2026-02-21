@@ -173,39 +173,41 @@ impl PipelineState {
     /// Caller must ensure the command buffer is recording for a compatible pipeline and remains
     /// valid for the duration of the call.
     pub unsafe fn apply(&self, device: &ash::Device, command_buffer: vk::CommandBuffer) {
-        if self.dynamic_blend_constants {
-            device.cmd_set_blend_constants(command_buffer, &self.blend_constants);
-        }
+        unsafe {
+            if self.dynamic_blend_constants {
+                device.cmd_set_blend_constants(command_buffer, &self.blend_constants);
+            }
 
-        if self.dynamic_line_width {
-            device.cmd_set_line_width(command_buffer, self.line_width);
-        }
+            if self.dynamic_line_width {
+                device.cmd_set_line_width(command_buffer, self.line_width);
+            }
 
-        if self.dynamic_depth_bias {
-            device.cmd_set_depth_bias(
-                command_buffer,
-                self.depth_bias_constant,
-                self.depth_bias_clamp,
-                self.depth_bias_slope,
-            );
-        }
+            if self.dynamic_depth_bias {
+                device.cmd_set_depth_bias(
+                    command_buffer,
+                    self.depth_bias_constant,
+                    self.depth_bias_clamp,
+                    self.depth_bias_slope,
+                );
+            }
 
-        if self.dynamic_stencil_reference {
-            device.cmd_set_stencil_reference(
-                command_buffer,
-                vk::StencilFaceFlags::FRONT_AND_BACK,
-                self.stencil_reference,
-            );
-            device.cmd_set_stencil_compare_mask(
-                command_buffer,
-                vk::StencilFaceFlags::FRONT_AND_BACK,
-                self.stencil_compare_mask,
-            );
-            device.cmd_set_stencil_write_mask(
-                command_buffer,
-                vk::StencilFaceFlags::FRONT_AND_BACK,
-                self.stencil_write_mask,
-            );
+            if self.dynamic_stencil_reference {
+                device.cmd_set_stencil_reference(
+                    command_buffer,
+                    vk::StencilFaceFlags::FRONT_AND_BACK,
+                    self.stencil_reference,
+                );
+                device.cmd_set_stencil_compare_mask(
+                    command_buffer,
+                    vk::StencilFaceFlags::FRONT_AND_BACK,
+                    self.stencil_compare_mask,
+                );
+                device.cmd_set_stencil_write_mask(
+                    command_buffer,
+                    vk::StencilFaceFlags::FRONT_AND_BACK,
+                    self.stencil_write_mask,
+                );
+            }
         }
     }
 }

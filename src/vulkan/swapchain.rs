@@ -1,7 +1,7 @@
 use crate::vulkan::utils::find_memory_type;
 use ash::{khr::swapchain, vk};
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use crate::{AshError, Result};
 
@@ -40,12 +40,14 @@ impl SwapchainWrapper {
             if !headless {
                 let swapchain_loader =
                     swapchain::Device::new(vk_device.instance.instance(), &vk_device.device);
-                let (swapchain, images, image_views, format, extent) = Self::build_swapchain(
-                    vk_device,
-                    &swapchain_loader,
-                    vk::SwapchainKHR::null(),
-                    present_mode,
-                )?;
+                let (swapchain, images, image_views, format, extent) = unsafe {
+                    Self::build_swapchain(
+                        vk_device,
+                        &swapchain_loader,
+                        vk::SwapchainKHR::null(),
+                        present_mode,
+                    )
+                }?;
                 (
                     Some(swapchain_loader),
                     swapchain,
@@ -85,15 +87,13 @@ impl SwapchainWrapper {
                         .sharing_mode(vk::SharingMode::EXCLUSIVE)
                         .initial_layout(vk::ImageLayout::UNDEFINED);
 
-                    let image = vk_device
-                        .device
-                        .create_image(&create_info, None)
+                    let image = unsafe { vk_device.device.create_image(&create_info, None) }
                         .map_err(|e| {
                             AshError::VulkanError(format!("Failed to create headless image: {e}"))
                         })?;
                     images.push(image);
 
-                    let mem_req = vk_device.device.get_image_memory_requirements(image);
+                    let mem_req = unsafe { vk_device.device.get_image_memory_requirements(image) };
                     let mem_type_index = find_memory_type(
                         &vk_device.memory_properties,
                         mem_req.memory_type_bits,
@@ -107,9 +107,7 @@ impl SwapchainWrapper {
                         .allocation_size(mem_req.size)
                         .memory_type_index(mem_type_index);
 
-                    let memory = vk_device
-                        .device
-                        .allocate_memory(&alloc_info, None)
+                    let memory = unsafe { vk_device.device.allocate_memory(&alloc_info, None) }
                         .map_err(|e| {
                             AshError::VulkanError(format!(
                                 "Failed to allocate headless memory: {e}"
@@ -117,12 +115,9 @@ impl SwapchainWrapper {
                         })?;
                     memories.push(memory);
 
-                    vk_device
-                        .device
-                        .bind_image_memory(image, memory, 0)
-                        .map_err(|e| {
-                            AshError::VulkanError(format!("Failed to bind headless memory: {e}"))
-                        })?;
+                    unsafe { vk_device.device.bind_image_memory(image, memory, 0) }.map_err(
+                        |e| AshError::VulkanError(format!("Failed to bind headless memory: {e}")),
+                    )?;
 
                     let view_info = vk::ImageViewCreateInfo::default()
                         .image(image)
@@ -136,9 +131,7 @@ impl SwapchainWrapper {
                             layer_count: 1,
                         });
 
-                    let view = vk_device
-                        .device
-                        .create_image_view(&view_info, None)
+                    let view = unsafe { vk_device.device.create_image_view(&view_info, None) }
                         .map_err(|e| {
                             AshError::VulkanError(format!("Failed to create headless view: {e}"))
                         })?;
@@ -194,13 +187,14 @@ impl SwapchainWrapper {
         let surface_loader = vk_device.instance.surface_loader();
         let surface = vk_device.instance.surface();
 
-        let surface_support = surface_loader
-            .get_physical_device_surface_support(
+        let surface_support = unsafe {
+            surface_loader.get_physical_device_surface_support(
                 vk_device.physical_device,
                 vk_device.graphics_queue_family,
                 surface,
             )
-            .map_err(|e| AshError::SwapchainCreationFailed(format!("{e:?}")))?;
+        }
+        .map_err(|e| AshError::SwapchainCreationFailed(format!("{e:?}")))?;
 
         if !surface_support {
             return Err(AshError::SwapchainCreationFailed(
@@ -208,13 +202,16 @@ impl SwapchainWrapper {
             ));
         }
 
-        let capabilities = surface_loader
-            .get_physical_device_surface_capabilities(vk_device.physical_device, surface)
-            .map_err(|e| AshError::SwapchainCreationFailed(format!("{e:?}")))?;
+        let capabilities = unsafe {
+            surface_loader
+                .get_physical_device_surface_capabilities(vk_device.physical_device, surface)
+        }
+        .map_err(|e| AshError::SwapchainCreationFailed(format!("{e:?}")))?;
 
-        let formats = surface_loader
-            .get_physical_device_surface_formats(vk_device.physical_device, surface)
-            .map_err(|e| AshError::SwapchainCreationFailed(format!("{e:?}")))?;
+        let formats = unsafe {
+            surface_loader.get_physical_device_surface_formats(vk_device.physical_device, surface)
+        }
+        .map_err(|e| AshError::SwapchainCreationFailed(format!("{e:?}")))?;
 
         let format = formats
             .iter()
@@ -251,14 +248,12 @@ impl SwapchainWrapper {
             .clipped(true)
             .old_swapchain(old_swapchain);
 
-        let swapchain = swapchain_loader
-            .create_swapchain(&swapchain_create_info, None)
+        let swapchain = unsafe { swapchain_loader.create_swapchain(&swapchain_create_info, None) }
             .map_err(|e| AshError::SwapchainCreationFailed(format!("{e:?}")))?;
 
         log::info!("Swapchain created with {image_count} images");
 
-        let images = swapchain_loader
-            .get_swapchain_images(swapchain)
+        let images = unsafe { swapchain_loader.get_swapchain_images(swapchain) }
             .map_err(|e| AshError::SwapchainCreationFailed(format!("{e:?}")))?;
 
         let mut image_views = Vec::new();
@@ -281,9 +276,7 @@ impl SwapchainWrapper {
                     layer_count: 1,
                 });
 
-            let view = vk_device
-                .device
-                .create_image_view(&create_info, None)
+            let view = unsafe { vk_device.device.create_image_view(&create_info, None) }
                 .map_err(|e| AshError::SwapchainCreationFailed(format!("{e:?}")))?;
 
             image_views.push(view);
@@ -316,7 +309,7 @@ impl SwapchainWrapper {
         let loader = self.swapchain_loader.as_ref().unwrap();
         let (swapchain, images, image_views, format, extent) =
             // Reuse current present mode on recreation for now
-            Self::build_swapchain(vk_device, loader, self.swapchain, vk::PresentModeKHR::FIFO)?;
+            unsafe { Self::build_swapchain(vk_device, loader, self.swapchain, vk::PresentModeKHR::FIFO) }?;
 
         self.swapchain = swapchain;
         self.images = images;
@@ -342,12 +335,14 @@ impl SwapchainWrapper {
             return Ok(index);
         }
 
-        match self.swapchain_loader.as_ref().unwrap().acquire_next_image(
-            self.swapchain,
-            u64::MAX,
-            semaphore,
-            vk::Fence::null(),
-        ) {
+        match unsafe {
+            self.swapchain_loader.as_ref().unwrap().acquire_next_image(
+                self.swapchain,
+                u64::MAX,
+                semaphore,
+                vk::Fence::null(),
+            )
+        } {
             Ok((index, _)) => Ok(index),
             Err(vk::Result::ERROR_OUT_OF_DATE_KHR) | Err(vk::Result::SUBOPTIMAL_KHR) => Err(
                 AshError::SwapchainOutOfDate("acquire_next_image".to_string()),
@@ -384,12 +379,12 @@ impl SwapchainWrapper {
             .swapchains(&swapchains)
             .image_indices(&image_indices);
 
-        match self
-            .swapchain_loader
-            .as_ref()
-            .unwrap()
-            .queue_present(queue, &present_info)
-        {
+        match unsafe {
+            self.swapchain_loader
+                .as_ref()
+                .unwrap()
+                .queue_present(queue, &present_info)
+        } {
             Ok(_) => Ok(()),
             Err(vk::Result::ERROR_OUT_OF_DATE_KHR) | Err(vk::Result::SUBOPTIMAL_KHR) => {
                 Err(AshError::SwapchainOutOfDate("present".to_string()))
@@ -415,10 +410,12 @@ impl SwapchainWrapper {
         if self.headless || handle == vk::SwapchainKHR::null() {
             return;
         }
-        self.swapchain_loader
-            .as_ref()
-            .unwrap()
-            .destroy_swapchain(handle, None);
+        unsafe {
+            self.swapchain_loader
+                .as_ref()
+                .unwrap()
+                .destroy_swapchain(handle, None);
+        }
     }
 }
 

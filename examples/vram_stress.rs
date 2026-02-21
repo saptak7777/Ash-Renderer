@@ -1,9 +1,9 @@
 #![allow(deprecated)]
 use ash_renderer::renderer::Scene;
 use ash_renderer::{
+    Result,
     renderer::{Mesh, Renderer},
     vulkan::WindowSurfaceProvider,
-    Result,
 };
 use std::sync::Arc;
 use winit::{event_loop::EventLoop, window::Window};

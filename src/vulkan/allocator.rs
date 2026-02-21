@@ -32,7 +32,7 @@ impl Allocator {
         );
         create_info.flags = vk_mem::AllocatorCreateFlags::BUFFER_DEVICE_ADDRESS;
 
-        let vma = vk_mem::Allocator::new(create_info)
+        let vma = unsafe { vk_mem::Allocator::new(create_info) }
             .map_err(|e| crate::AshError::VulkanError(format!("VMA init failed: {e:?}")))?;
 
         log::info!("VMA allocator created");
@@ -54,12 +54,14 @@ impl Allocator {
         usage: vk::BufferUsageFlags,
         memory_usage: vk_mem::MemoryUsage,
     ) -> crate::Result<(vk::Buffer, vk_mem::Allocation)> {
-        self.create_buffer_with_flags(
-            size,
-            usage,
-            memory_usage,
-            vk_mem::AllocationCreateFlags::empty(),
-        )
+        unsafe {
+            self.create_buffer_with_flags(
+                size,
+                usage,
+                memory_usage,
+                vk_mem::AllocationCreateFlags::empty(),
+            )
+        }
     }
 
     /// Allocate a GPU buffer with custom VMA allocation flags.
@@ -84,7 +86,7 @@ impl Allocator {
         memory_usage: vk_mem::MemoryUsage,
         flags: vk_mem::AllocationCreateFlags,
     ) -> crate::Result<(vk::Buffer, vk_mem::Allocation)> {
-        self.create_buffer_with_flags_and_name(size, usage, memory_usage, flags, None)
+        unsafe { self.create_buffer_with_flags_and_name(size, usage, memory_usage, flags, None) }
     }
 
     /// Allocate a GPU buffer with custom VMA allocation flags and a debug name.
@@ -170,9 +172,13 @@ impl Allocator {
 
         // Log for debugging
         if let Some(ref n) = name {
-            log::debug!("Creating buffer '{n}': size={size} bytes, usage={usage:?}, memory={memory_usage:?}");
+            log::debug!(
+                "Creating buffer '{n}': size={size} bytes, usage={usage:?}, memory={memory_usage:?}"
+            );
         } else {
-            log::debug!("Creating unnamed buffer: size={size} bytes, usage={usage:?}, memory={memory_usage:?}");
+            log::debug!(
+                "Creating unnamed buffer: size={size} bytes, usage={usage:?}, memory={memory_usage:?}"
+            );
         }
 
         let buffer_info = vk::BufferCreateInfo::default()
@@ -186,10 +192,8 @@ impl Allocator {
             ..Default::default()
         };
 
-        let (buffer, allocation) = self
-            .vma
-            .create_buffer(&buffer_info, &allocation_info)
-            .map_err(|e| {
+        let (buffer, allocation) =
+            unsafe { self.vma.create_buffer(&buffer_info, &allocation_info) }.map_err(|e| {
                 crate::AshError::VulkanError(format!(
                     "Buffer creation failed (size={size}, usage={usage:?}, name={name:?}): {e:?}",
                     name = name.as_deref().unwrap_or("None")
@@ -229,15 +233,16 @@ impl Allocator {
         image_info: &vk::ImageCreateInfo,
         memory_usage: vk_mem::MemoryUsage,
     ) -> crate::Result<(vk::Image, vk_mem::Allocation)> {
-        self.vma
-            .create_image(
+        unsafe {
+            self.vma.create_image(
                 image_info,
                 &vk_mem::AllocationCreateInfo {
                     usage: memory_usage,
                     ..Default::default()
                 },
             )
-            .map_err(|e| crate::AshError::VulkanError(format!("Image creation failed: {e:?}")))
+        }
+        .map_err(|e| crate::AshError::VulkanError(format!("Image creation failed: {e:?}")))
     }
 
     /// Create a Vulkan image and an associated image view in one step.
@@ -251,10 +256,10 @@ impl Allocator {
         view_type: vk::ImageViewType,
         aspect_mask: vk::ImageAspectFlags,
     ) -> crate::Result<(vk::Image, vk::ImageView, vk_mem::Allocation)> {
-        let (image, allocation) = self
-            .vma
-            .create_image(&image_info, &allocation_info)
-            .map_err(|e| crate::AshError::VulkanError(format!("Image creation failed: {e:?}")))?;
+        let (image, allocation) = unsafe { self.vma.create_image(&image_info, &allocation_info) }
+            .map_err(|e| {
+            crate::AshError::VulkanError(format!("Image creation failed: {e:?}"))
+        })?;
 
         let view_info = vk::ImageViewCreateInfo::default()
             .image(image)
@@ -268,11 +273,13 @@ impl Allocator {
                 layer_count: image_info.array_layers,
             });
 
-        let view = match self.device.create_image_view(&view_info, None) {
+        let view = match unsafe { self.device.create_image_view(&view_info, None) } {
             Ok(view) => view,
             Err(e) => {
                 let mut allocation = allocation;
-                self.vma.destroy_image(image, &mut allocation);
+                unsafe {
+                    self.vma.destroy_image(image, &mut allocation);
+                }
                 return Err(crate::AshError::VulkanError(format!(
                     "Image view creation failed: {e:?}"
                 )));
@@ -306,7 +313,9 @@ impl Allocator {
             log::warn!("Destroying untracked buffer: {buffer:?}");
         }
 
-        self.vma.destroy_buffer(buffer, allocation);
+        unsafe {
+            self.vma.destroy_buffer(buffer, allocation);
+        }
     }
 
     /// Print current buffer allocation statistics
@@ -337,8 +346,7 @@ impl Allocator {
         &self,
         allocation: &mut vk_mem::Allocation,
     ) -> crate::Result<*mut u8> {
-        self.vma
-            .map_memory(allocation)
+        unsafe { self.vma.map_memory(allocation) }
             .map_err(|e| crate::AshError::VulkanError(format!("Map memory failed: {e:?}")))
     }
 
@@ -347,7 +355,9 @@ impl Allocator {
     /// # Safety
     /// // SAFETY: Must be called only if mapped.
     pub unsafe fn unmap_allocation(&self, allocation: &mut vk_mem::Allocation) {
-        self.vma.unmap_memory(allocation);
+        unsafe {
+            self.vma.unmap_memory(allocation);
+        }
     }
 
     /// Map an allocation and return an RAII guard.
@@ -359,7 +369,7 @@ impl Allocator {
         allocation: &'a mut vk_mem::Allocation,
         size: u64,
     ) -> crate::Result<MapGuard<'a>> {
-        let ptr = self.map_allocation(allocation)?;
+        let ptr = unsafe { self.map_allocation(allocation) }?;
 
         Ok(MapGuard {
             vma: &self.vma,
@@ -392,7 +402,7 @@ impl<'a> MapGuard<'a> {
     /// // SAFETY: Type T must be compatible with the mapped data.
     pub unsafe fn as_slice<T: Copy>(&self) -> &[T] {
         let count = self.size as usize / std::mem::size_of::<T>();
-        std::slice::from_raw_parts(self.ptr as *const T, count)
+        unsafe { std::slice::from_raw_parts(self.ptr as *const T, count) }
     }
 
     /// Access mapped memory as a mutable slice of a specific type.
@@ -401,7 +411,7 @@ impl<'a> MapGuard<'a> {
     /// // SAFETY: Type T must be compatible with the mapped data.
     pub unsafe fn as_mut_slice_t<T: Copy>(&mut self) -> &mut [T] {
         let count = self.size as usize / std::mem::size_of::<T>();
-        std::slice::from_raw_parts_mut(self.ptr as *mut T, count)
+        unsafe { std::slice::from_raw_parts_mut(self.ptr as *mut T, count) }
     }
 
     /// Copy data from a slice into the mapped memory.

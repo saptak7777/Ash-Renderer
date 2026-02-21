@@ -145,9 +145,8 @@ impl VsmShadowPass {
             .subpasses(&subpasses)
             .dependencies(&dependencies);
 
-        let render_pass = device
-            .create_render_pass(&render_pass_info, None)
-            .map_err(|e| {
+        let render_pass =
+            unsafe { device.create_render_pass(&render_pass_info, None) }.map_err(|e| {
                 AshError::VulkanError(format!("VSM render pass creation failed: {e:?}"))
             })?;
 
@@ -169,9 +168,9 @@ impl VsmShadowPass {
             .sharing_mode(vk::SharingMode::EXCLUSIVE)
             .initial_layout(vk::ImageLayout::UNDEFINED);
 
-        let (depth_image, depth_image_alloc) = allocator
-            .create_image(&depth_info, vk_mem::MemoryUsage::AutoPreferDevice)
-            .map_err(|e| {
+        let (depth_image, depth_image_alloc) =
+            unsafe { allocator.create_image(&depth_info, vk_mem::MemoryUsage::AutoPreferDevice) }
+                .map_err(|e| {
                 AshError::VulkanError(format!("Failed to create VSM depth buffer: {e:?}"))
             })?;
 
@@ -187,9 +186,8 @@ impl VsmShadowPass {
                 layer_count: 1,
             });
 
-        let depth_view = device
-            .create_image_view(&depth_view_info, None)
-            .map_err(|e| {
+        let depth_view =
+            unsafe { device.create_image_view(&depth_view_info, None) }.map_err(|e| {
                 AshError::VulkanError(format!("Failed to create VSM depth view: {e:?}"))
             })?;
 
@@ -203,9 +201,8 @@ impl VsmShadowPass {
             .height(physical_res)
             .layers(1);
 
-        let framebuffer = device
-            .create_framebuffer(&framebuffer_info, None)
-            .map_err(|e| {
+        let framebuffer =
+            unsafe { device.create_framebuffer(&framebuffer_info, None) }.map_err(|e| {
                 AshError::VulkanError(format!("VSM framebuffer creation failed: {e:?}"))
             })?;
 
@@ -256,9 +253,7 @@ impl VsmShadowPass {
             .set_layouts(&layouts)
             .push_constant_ranges(std::slice::from_ref(&push_constant_range));
 
-        let pipeline_layout = self
-            .device
-            .create_pipeline_layout(&layout_info, None)
+        let pipeline_layout = unsafe { self.device.create_pipeline_layout(&layout_info, None) }
             .map_err(|e| {
                 AshError::VulkanError(format!("Shadow pipeline layout creation failed: {e:?}"))
             })?;
@@ -267,25 +262,25 @@ impl VsmShadowPass {
         let vert_code = include_bytes!(concat!(env!("OUT_DIR"), "/shadow.vert.spv"));
         let frag_code = include_bytes!(concat!(env!("OUT_DIR"), "/shadow.frag.spv"));
 
-        let vert_module = self
-            .device
-            .create_shader_module(
+        let vert_module = unsafe {
+            self.device.create_shader_module(
                 &vk::ShaderModuleCreateInfo::default().code(bytemuck::cast_slice(vert_code)),
                 None,
             )
-            .map_err(|e| {
-                AshError::VulkanError(format!("Shadow vertex shader creation failed: {e:?}"))
-            })?;
+        }
+        .map_err(|e| {
+            AshError::VulkanError(format!("Shadow vertex shader creation failed: {e:?}"))
+        })?;
 
-        let frag_module = self
-            .device
-            .create_shader_module(
+        let frag_module = unsafe {
+            self.device.create_shader_module(
                 &vk::ShaderModuleCreateInfo::default().code(bytemuck::cast_slice(frag_code)),
                 None,
             )
-            .map_err(|e| {
-                AshError::VulkanError(format!("Shadow fragment shader creation failed: {e:?}"))
-            })?;
+        }
+        .map_err(|e| {
+            AshError::VulkanError(format!("Shadow fragment shader creation failed: {e:?}"))
+        })?;
 
         let entry_point = c"main";
 
@@ -361,16 +356,17 @@ impl VsmShadowPass {
             .render_pass(self.render_pass)
             .subpass(0);
 
-        let pipelines = self
-            .device
-            .create_graphics_pipelines(vk::PipelineCache::null(), &[pipeline_info], None)
-            .map_err(|e| {
-                AshError::VulkanError(format!("Shadow pipeline creation failed: {e:?}"))
-            })?;
+        let pipelines = unsafe {
+            self.device
+                .create_graphics_pipelines(vk::PipelineCache::null(), &[pipeline_info], None)
+        }
+        .map_err(|e| AshError::VulkanError(format!("Shadow pipeline creation failed: {e:?}")))?;
 
         // Cleanup shader modules
-        self.device.destroy_shader_module(vert_module, None);
-        self.device.destroy_shader_module(frag_module, None);
+        unsafe {
+            self.device.destroy_shader_module(vert_module, None);
+            self.device.destroy_shader_module(frag_module, None);
+        }
 
         self.shadow_pipeline = Some(pipelines[0]);
         self.shadow_pipeline_layout = Some(pipeline_layout);
@@ -439,16 +435,19 @@ impl VsmShadowPass {
                 layer_count: 1,
             });
 
-        self.device.cmd_pipeline_barrier(
-            cmd,
-            vk::PipelineStageFlags::FRAGMENT_SHADER | vk::PipelineStageFlags::LATE_FRAGMENT_TESTS,
-            vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT
-                | vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS,
-            vk::DependencyFlags::empty(),
-            &[],
-            &[],
-            &[cache_barrier, depth_barrier],
-        );
+        unsafe {
+            self.device.cmd_pipeline_barrier(
+                cmd,
+                vk::PipelineStageFlags::FRAGMENT_SHADER
+                    | vk::PipelineStageFlags::LATE_FRAGMENT_TESTS,
+                vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT
+                    | vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[],
+                &[cache_barrier, depth_barrier],
+            );
+        }
 
         // 2. Begin Dynamic Rendering
         let color_attachment = vk::RenderingAttachmentInfo::default()
@@ -476,34 +475,42 @@ impl VsmShadowPass {
             .color_attachments(&color_attachments)
             .depth_attachment(&depth_attachment);
 
-        self.device.cmd_begin_rendering(cmd, &rendering_info);
+        unsafe {
+            self.device.cmd_begin_rendering(cmd, &rendering_info);
+        }
 
         // 3. Bind Pipeline
         if let Some(pipeline) = self.shadow_pipeline {
-            self.device
-                .cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, pipeline);
+            unsafe {
+                self.device
+                    .cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, pipeline);
+            }
         }
 
         // 4. Bind Bindless Descriptor Set (Set 1)
         if let Some(layout) = self.shadow_pipeline_layout {
-            self.device.cmd_bind_descriptor_sets(
-                cmd,
-                vk::PipelineBindPoint::GRAPHICS,
-                layout,
-                1, // Set 1
-                &[info.bindless_descriptor_set],
-                &[],
-            );
+            unsafe {
+                self.device.cmd_bind_descriptor_sets(
+                    cmd,
+                    vk::PipelineBindPoint::GRAPHICS,
+                    layout,
+                    1, // Set 1
+                    &[info.bindless_descriptor_set],
+                    &[],
+                );
+            }
 
             // 5. Push BDA pointers (Static for all pages)
             let bda_push = [info.vertex_addr, info.index_addr];
-            self.device.cmd_push_constants(
-                cmd,
-                layout,
-                vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
-                0, // Offset 0
-                bytemuck::bytes_of(&bda_push),
-            );
+            unsafe {
+                self.device.cmd_push_constants(
+                    cmd,
+                    layout,
+                    vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                    0, // Offset 0
+                    bytemuck::bytes_of(&bda_push),
+                );
+            }
         }
 
         // 6. Iterate over pages
@@ -532,8 +539,10 @@ impl VsmShadowPass {
                 },
             };
 
-            self.device.cmd_set_viewport(cmd, 0, &[viewport]);
-            self.device.cmd_set_scissor(cmd, 0, &[scissor]);
+            unsafe {
+                self.device.cmd_set_viewport(cmd, 0, &[viewport]);
+                self.device.cmd_set_scissor(cmd, 0, &[scissor]);
+            }
 
             // Clear just this tile's depth
             let clear_attachment = vk::ClearAttachment::default()
@@ -550,27 +559,33 @@ impl VsmShadowPass {
                 .base_array_layer(0)
                 .layer_count(1);
 
-            self.device
-                .cmd_clear_attachments(cmd, &[clear_attachment], &[clear_rect]);
+            unsafe {
+                self.device
+                    .cmd_clear_attachments(cmd, &[clear_attachment], &[clear_rect]);
+            }
 
             // Push constants (Matrix)
             let matrix = page.mvp.to_cols_array_2d();
             let matrix_bytes = bytemuck::bytes_of(&matrix);
             if let Some(layout) = self.shadow_pipeline_layout {
-                self.device.cmd_push_constants(
-                    cmd,
-                    layout,
-                    vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
-                    64, // Offset 64 for Light Space Matrix in ShadowPushConstants
-                    matrix_bytes,
-                );
+                unsafe {
+                    self.device.cmd_push_constants(
+                        cmd,
+                        layout,
+                        vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                        64, // Offset 64 for Light Space Matrix in ShadowPushConstants
+                        matrix_bytes,
+                    );
+                }
             }
 
             // Draw call
             scene_draw_fn(cmd);
         }
 
-        self.device.cmd_end_rendering(cmd);
+        unsafe {
+            self.device.cmd_end_rendering(cmd);
+        }
 
         // 5. Transition Back
         let back_cache_barrier = vk::ImageMemoryBarrier::default()
@@ -587,15 +602,17 @@ impl VsmShadowPass {
                 layer_count: 1,
             });
 
-        self.device.cmd_pipeline_barrier(
-            cmd,
-            vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
-            vk::PipelineStageFlags::FRAGMENT_SHADER,
-            vk::DependencyFlags::empty(),
-            &[],
-            &[],
-            &[back_cache_barrier],
-        );
+        unsafe {
+            self.device.cmd_pipeline_barrier(
+                cmd,
+                vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                vk::PipelineStageFlags::FRAGMENT_SHADER,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[],
+                &[back_cache_barrier],
+            );
+        }
     }
 
     /// Destroy resources
@@ -610,32 +627,34 @@ impl VsmShadowPass {
 
         log::debug!("Destroying VSM shadow pass");
 
-        if let Some(pipeline) = self.shadow_pipeline.take() {
-            self.device.destroy_pipeline(pipeline, None);
-        }
+        unsafe {
+            if let Some(pipeline) = self.shadow_pipeline.take() {
+                self.device.destroy_pipeline(pipeline, None);
+            }
 
-        if let Some(layout) = self.shadow_pipeline_layout.take() {
-            self.device.destroy_pipeline_layout(layout, None);
-        }
+            if let Some(layout) = self.shadow_pipeline_layout.take() {
+                self.device.destroy_pipeline_layout(layout, None);
+            }
 
-        if self.framebuffer != vk::Framebuffer::null() {
-            self.device.destroy_framebuffer(self.framebuffer, None);
-            self.framebuffer = vk::Framebuffer::null();
-        }
+            if self.framebuffer != vk::Framebuffer::null() {
+                self.device.destroy_framebuffer(self.framebuffer, None);
+                self.framebuffer = vk::Framebuffer::null();
+            }
 
-        // Destroy depth buffer
-        if self.depth_view != vk::ImageView::null() {
-            self.device.destroy_image_view(self.depth_view, None);
-            self.depth_view = vk::ImageView::null();
-        }
-        if let Some(mut alloc) = self.depth_image_alloc.take() {
-            allocator.vma.destroy_image(self.depth_image, &mut alloc);
-            self.depth_image = vk::Image::null();
-        }
+            // Destroy depth buffer
+            if self.depth_view != vk::ImageView::null() {
+                self.device.destroy_image_view(self.depth_view, None);
+                self.depth_view = vk::ImageView::null();
+            }
+            if let Some(mut alloc) = self.depth_image_alloc.take() {
+                allocator.vma.destroy_image(self.depth_image, &mut alloc);
+                self.depth_image = vk::Image::null();
+            }
 
-        if self.render_pass != vk::RenderPass::null() {
-            self.device.destroy_render_pass(self.render_pass, None);
-            self.render_pass = vk::RenderPass::null();
+            if self.render_pass != vk::RenderPass::null() {
+                self.device.destroy_render_pass(self.render_pass, None);
+                self.render_pass = vk::RenderPass::null();
+            }
         }
 
         log::debug!("VSM shadow pass destroyed");

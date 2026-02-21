@@ -5,9 +5,9 @@
 //! using standard uniforms.
 use ash::vk;
 use ash_renderer::prelude::*;
+use ash_renderer::renderer::Scene;
 use ash_renderer::renderer::features::ambient_lighting::{AmbientPreset, LightingBuilder};
 use ash_renderer::renderer::resources::uniform::StorageBuffer;
-use ash_renderer::renderer::Scene;
 use glam::{Mat4, Vec3, Vec4};
 use std::sync::Arc;
 use std::time::Instant;
@@ -207,7 +207,7 @@ impl ApplicationHandler for App {
                             0.1, // Near Plane
                         );
                         proj.y_axis.y *= -1.0; // Vulkan Y-flip
-                                               // Dynamic Lighting
+                        // Dynamic Lighting
                         let light_angle = time * 0.5;
                         let light_dir =
                             Vec3::new(-light_angle.cos(), -1.0, -light_angle.sin()).normalize();

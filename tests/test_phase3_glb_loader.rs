@@ -1,7 +1,7 @@
 //! Test Phase 3: GLB Loader Enhancement with submesh tracking
 
-use ash_renderer::renderer::resources::mesh::{Mesh, SubmeshDescriptor};
 use ash_renderer::renderer::MaterialHandle;
+use ash_renderer::renderer::resources::mesh::{Mesh, SubmeshDescriptor};
 
 #[test]
 fn test_phase3_glb_loader() {
@@ -57,8 +57,10 @@ fn test_phase3_glb_loader() {
 
         // Simulate the debug logging from GLB loader
         println!("📝 Debug log would show:");
-        println!("   Loaded GLB primitive 'test_primitive': metallic={:.2}, roughness={:.2}, emissive={:?}",
-                props.metallic_factor, props.roughness_factor, props.emissive_factor);
+        println!(
+            "   Loaded GLB primitive 'test_primitive': metallic={:.2}, roughness={:.2}, emissive={:?}",
+            props.metallic_factor, props.roughness_factor, props.emissive_factor
+        );
     }
 
     // Test that we can handle multiple submeshes (future multi-material support)

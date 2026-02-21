@@ -290,44 +290,46 @@ impl IblProcessor {
                 None => return,
             };
 
-            self.transition_to_general(cmd, env_img, 1, 6);
-            self.transition_to_general(cmd, irr_img, 1, 6);
-            self.transition_to_general(cmd, pref_img, prefilter_mips, 6);
-            self.transition_to_general(cmd, brdf_img, 1, 1);
+            unsafe {
+                self.transition_to_general(cmd, env_img, 1, 6);
+                self.transition_to_general(cmd, irr_img, 1, 6);
+                self.transition_to_general(cmd, pref_img, prefilter_mips, 6);
+                self.transition_to_general(cmd, brdf_img, 1, 1);
 
-            // A. Equirect -> Cubemap
-            if let Err(e) = self.dispatch_equirect(cmd, equirect_hdr, &env_cubemap) {
-                dispatch_result = Err(e);
-                return;
+                // A. Equirect -> Cubemap
+                if let Err(e) = self.dispatch_equirect(cmd, equirect_hdr, &env_cubemap) {
+                    dispatch_result = Err(e);
+                    return;
+                }
+
+                // Transition Env Map to SHADER_READ for sampling
+                self.transition_to_read(cmd, env_img, 1, 6);
+
+                // B. Irradiance Convolution
+                if let Err(e) = self.dispatch_irradiance(cmd, &env_cubemap, &irradiance_map) {
+                    dispatch_result = Err(e);
+                    return;
+                }
+
+                // C. Specular Prefilter
+                if let Err(e) =
+                    self.dispatch_prefilter(cmd, &env_cubemap, &prefilter_map, prefilter_mips)
+                {
+                    dispatch_result = Err(e);
+                    return;
+                }
+
+                // D. BRDF LUT
+                if let Err(e) = self.dispatch_brdf(cmd, &brdf_lut) {
+                    dispatch_result = Err(e);
+                    return;
+                }
+
+                // Final transitions
+                self.transition_to_read(cmd, irradiance_map.image.unwrap(), 1, 6);
+                self.transition_to_read(cmd, prefilter_map.image.unwrap(), prefilter_mips, 6);
+                self.transition_to_read(cmd, brdf_lut.image.unwrap(), 1, 1);
             }
-
-            // Transition Env Map to SHADER_READ for sampling
-            self.transition_to_read(cmd, env_img, 1, 6);
-
-            // B. Irradiance Convolution
-            if let Err(e) = self.dispatch_irradiance(cmd, &env_cubemap, &irradiance_map) {
-                dispatch_result = Err(e);
-                return;
-            }
-
-            // C. Specular Prefilter
-            if let Err(e) =
-                self.dispatch_prefilter(cmd, &env_cubemap, &prefilter_map, prefilter_mips)
-            {
-                dispatch_result = Err(e);
-                return;
-            }
-
-            // D. BRDF LUT
-            if let Err(e) = self.dispatch_brdf(cmd, &brdf_lut) {
-                dispatch_result = Err(e);
-                return;
-            }
-
-            // Final transitions
-            self.transition_to_read(cmd, irradiance_map.image.unwrap(), 1, 6);
-            self.transition_to_read(cmd, prefilter_map.image.unwrap(), prefilter_mips, 6);
-            self.transition_to_read(cmd, brdf_lut.image.unwrap(), 1, 1);
         })?;
 
         dispatch_result?;
@@ -345,31 +347,35 @@ impl IblProcessor {
         input: &Texture,
         output: &Texture,
     ) -> Result<()> {
-        let set = self.allocate_and_update(
-            self.compute_dsl,
-            input.view.unwrap(),
-            input.sampler.unwrap(),
-            vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-            output.view.unwrap(),
-            vk::ImageLayout::GENERAL,
-        )?;
+        let set = unsafe {
+            self.allocate_and_update(
+                self.compute_dsl,
+                input.view.unwrap(),
+                input.sampler.unwrap(),
+                vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                output.view.unwrap(),
+                vk::ImageLayout::GENERAL,
+            )?
+        };
 
-        self.device.cmd_bind_pipeline(
-            cmd,
-            vk::PipelineBindPoint::COMPUTE,
-            self.equirect_to_cubemap_pipeline.handle(),
-        );
-        self.device.cmd_bind_descriptor_sets(
-            cmd,
-            vk::PipelineBindPoint::COMPUTE,
-            self.equirect_to_cubemap_pipeline.layout(),
-            0,
-            &[set],
-            &[],
-        );
+        unsafe {
+            self.device.cmd_bind_pipeline(
+                cmd,
+                vk::PipelineBindPoint::COMPUTE,
+                self.equirect_to_cubemap_pipeline.handle(),
+            );
+            self.device.cmd_bind_descriptor_sets(
+                cmd,
+                vk::PipelineBindPoint::COMPUTE,
+                self.equirect_to_cubemap_pipeline.layout(),
+                0,
+                &[set],
+                &[],
+            );
 
-        let res = output.image.map(|_img| 1024).unwrap_or(1024);
-        self.device.cmd_dispatch(cmd, res / 32, res / 32, 6);
+            let res = output.image.map(|_img| 1024).unwrap_or(1024);
+            self.device.cmd_dispatch(cmd, res / 32, res / 32, 6);
+        }
         Ok(())
     }
 
@@ -379,30 +385,34 @@ impl IblProcessor {
         input: &Texture,
         output: &Texture,
     ) -> Result<()> {
-        let set = self.allocate_and_update(
-            self.compute_dsl,
-            input.view.unwrap(),
-            input.sampler.unwrap(),
-            vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-            output.view.unwrap(),
-            vk::ImageLayout::GENERAL,
-        )?;
+        let set = unsafe {
+            self.allocate_and_update(
+                self.compute_dsl,
+                input.view.unwrap(),
+                input.sampler.unwrap(),
+                vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                output.view.unwrap(),
+                vk::ImageLayout::GENERAL,
+            )?
+        };
 
-        self.device.cmd_bind_pipeline(
-            cmd,
-            vk::PipelineBindPoint::COMPUTE,
-            self.irradiance_pipeline.handle(),
-        );
-        self.device.cmd_bind_descriptor_sets(
-            cmd,
-            vk::PipelineBindPoint::COMPUTE,
-            self.irradiance_pipeline.layout(),
-            0,
-            &[set],
-            &[],
-        );
+        unsafe {
+            self.device.cmd_bind_pipeline(
+                cmd,
+                vk::PipelineBindPoint::COMPUTE,
+                self.irradiance_pipeline.handle(),
+            );
+            self.device.cmd_bind_descriptor_sets(
+                cmd,
+                vk::PipelineBindPoint::COMPUTE,
+                self.irradiance_pipeline.layout(),
+                0,
+                &[set],
+                &[],
+            );
 
-        self.device.cmd_dispatch(cmd, 1, 1, 6);
+            self.device.cmd_dispatch(cmd, 1, 1, 6);
+        }
         Ok(())
     }
 
@@ -413,11 +423,13 @@ impl IblProcessor {
         output: &Texture,
         mips: u32,
     ) -> Result<()> {
-        self.device.cmd_bind_pipeline(
-            cmd,
-            vk::PipelineBindPoint::COMPUTE,
-            self.prefilter_pipeline.handle(),
-        );
+        unsafe {
+            self.device.cmd_bind_pipeline(
+                cmd,
+                vk::PipelineBindPoint::COMPUTE,
+                self.prefilter_pipeline.handle(),
+            );
+        }
 
         for mip in 0..mips {
             // Create temporary view for the specific mip level for storage write
@@ -432,80 +444,88 @@ impl IblProcessor {
                     base_array_layer: 0,
                     layer_count: 6,
                 });
-            let mip_view = self.device.create_image_view(&view_info, None)?;
+            let mip_view = unsafe { self.device.create_image_view(&view_info, None)? };
 
-            let set = self.allocate_and_update(
-                self.compute_dsl,
-                input.view.unwrap(),
-                input.sampler.unwrap(),
-                vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-                mip_view,
-                vk::ImageLayout::GENERAL,
-            )?;
+            let set = unsafe {
+                self.allocate_and_update(
+                    self.compute_dsl,
+                    input.view.unwrap(),
+                    input.sampler.unwrap(),
+                    vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                    mip_view,
+                    vk::ImageLayout::GENERAL,
+                )?
+            };
 
-            self.device.cmd_bind_descriptor_sets(
-                cmd,
-                vk::PipelineBindPoint::COMPUTE,
-                self.prefilter_pipeline.layout(),
-                0,
-                &[set],
-                &[],
-            );
+            unsafe {
+                self.device.cmd_bind_descriptor_sets(
+                    cmd,
+                    vk::PipelineBindPoint::COMPUTE,
+                    self.prefilter_pipeline.layout(),
+                    0,
+                    &[set],
+                    &[],
+                );
 
-            let roughness = mip as f32 / (mips - 1) as f32;
-            self.device.cmd_push_constants(
-                cmd,
-                self.prefilter_pipeline.layout(),
-                vk::ShaderStageFlags::COMPUTE,
-                0,
-                bytemuck::bytes_of(&roughness),
-            );
+                let roughness = mip as f32 / (mips - 1) as f32;
+                self.device.cmd_push_constants(
+                    cmd,
+                    self.prefilter_pipeline.layout(),
+                    vk::ShaderStageFlags::COMPUTE,
+                    0,
+                    bytemuck::bytes_of(&roughness),
+                );
 
-            let mip_res = (128u32 >> mip).max(1);
-            self.device
-                .cmd_dispatch(cmd, mip_res.div_ceil(32), mip_res.div_ceil(32), 6);
+                let mip_res = (128u32 >> mip).max(1);
+                self.device
+                    .cmd_dispatch(cmd, mip_res.div_ceil(32), mip_res.div_ceil(32), 6);
 
-            self.device.destroy_image_view(mip_view, None);
+                self.device.destroy_image_view(mip_view, None);
+            }
         }
 
         Ok(())
     }
 
     unsafe fn dispatch_brdf(&self, cmd: vk::CommandBuffer, output: &Texture) -> Result<()> {
-        let set = self.device.allocate_descriptor_sets(
-            &vk::DescriptorSetAllocateInfo::default()
-                .descriptor_pool(self.compute_pool)
-                .set_layouts(&[self.brdf_dsl]),
-        )?[0];
+        let set = unsafe {
+            self.device.allocate_descriptor_sets(
+                &vk::DescriptorSetAllocateInfo::default()
+                    .descriptor_pool(self.compute_pool)
+                    .set_layouts(&[self.brdf_dsl]),
+            )?[0]
+        };
 
         let image_info = vk::DescriptorImageInfo::default()
             .image_view(output.view.unwrap())
             .image_layout(vk::ImageLayout::GENERAL);
 
-        self.device.update_descriptor_sets(
-            &[vk::WriteDescriptorSet::default()
-                .dst_set(set)
-                .dst_binding(0)
-                .descriptor_type(vk::DescriptorType::STORAGE_IMAGE)
-                .image_info(&[image_info])],
-            &[],
-        );
+        unsafe {
+            self.device.update_descriptor_sets(
+                &[vk::WriteDescriptorSet::default()
+                    .dst_set(set)
+                    .dst_binding(0)
+                    .descriptor_type(vk::DescriptorType::STORAGE_IMAGE)
+                    .image_info(&[image_info])],
+                &[],
+            );
 
-        self.device.cmd_bind_pipeline(
-            cmd,
-            vk::PipelineBindPoint::COMPUTE,
-            self.brdf_pipeline.handle(),
-        );
-        self.device.cmd_bind_descriptor_sets(
-            cmd,
-            vk::PipelineBindPoint::COMPUTE,
-            self.brdf_pipeline.layout(),
-            0,
-            &[set],
-            &[],
-        );
+            self.device.cmd_bind_pipeline(
+                cmd,
+                vk::PipelineBindPoint::COMPUTE,
+                self.brdf_pipeline.handle(),
+            );
+            self.device.cmd_bind_descriptor_sets(
+                cmd,
+                vk::PipelineBindPoint::COMPUTE,
+                self.brdf_pipeline.layout(),
+                0,
+                &[set],
+                &[],
+            );
 
-        self.device.cmd_dispatch(cmd, 512 / 16, 512 / 16, 1);
+            self.device.cmd_dispatch(cmd, 512 / 16, 512 / 16, 1);
+        }
         Ok(())
     }
 
@@ -518,11 +538,13 @@ impl IblProcessor {
         storage_view: vk::ImageView,
         storage_layout: vk::ImageLayout,
     ) -> Result<vk::DescriptorSet> {
-        let set = self.device.allocate_descriptor_sets(
-            &vk::DescriptorSetAllocateInfo::default()
-                .descriptor_pool(self.compute_pool)
-                .set_layouts(&[layout]),
-        )?[0];
+        let set = unsafe {
+            self.device.allocate_descriptor_sets(
+                &vk::DescriptorSetAllocateInfo::default()
+                    .descriptor_pool(self.compute_pool)
+                    .set_layouts(&[layout]),
+            )?[0]
+        };
 
         let sampler_info = vk::DescriptorImageInfo::default()
             .image_view(sampler_view)
@@ -533,21 +555,23 @@ impl IblProcessor {
             .image_view(storage_view)
             .image_layout(storage_layout);
 
-        self.device.update_descriptor_sets(
-            &[
-                vk::WriteDescriptorSet::default()
-                    .dst_set(set)
-                    .dst_binding(0)
-                    .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-                    .image_info(&[sampler_info]),
-                vk::WriteDescriptorSet::default()
-                    .dst_set(set)
-                    .dst_binding(1)
-                    .descriptor_type(vk::DescriptorType::STORAGE_IMAGE)
-                    .image_info(&[storage_info]),
-            ],
-            &[],
-        );
+        unsafe {
+            self.device.update_descriptor_sets(
+                &[
+                    vk::WriteDescriptorSet::default()
+                        .dst_set(set)
+                        .dst_binding(0)
+                        .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                        .image_info(&[sampler_info]),
+                    vk::WriteDescriptorSet::default()
+                        .dst_set(set)
+                        .dst_binding(1)
+                        .descriptor_type(vk::DescriptorType::STORAGE_IMAGE)
+                        .image_info(&[storage_info]),
+                ],
+                &[],
+            );
+        }
 
         Ok(set)
     }
@@ -559,18 +583,20 @@ impl IblProcessor {
         mips: u32,
         layers: u32,
     ) {
-        self.transition_layout(
-            cmd,
-            ImageLayoutTransitionInfo {
-                image,
-                old_layout: vk::ImageLayout::UNDEFINED,
-                new_layout: vk::ImageLayout::GENERAL,
-                src_access: vk::AccessFlags::empty(),
-                dst_access: vk::AccessFlags::SHADER_WRITE,
-                mips,
-                layers,
-            },
-        );
+        unsafe {
+            self.transition_layout(
+                cmd,
+                ImageLayoutTransitionInfo {
+                    image,
+                    old_layout: vk::ImageLayout::UNDEFINED,
+                    new_layout: vk::ImageLayout::GENERAL,
+                    src_access: vk::AccessFlags::empty(),
+                    dst_access: vk::AccessFlags::SHADER_WRITE,
+                    mips,
+                    layers,
+                },
+            );
+        }
     }
 
     unsafe fn transition_to_read(
@@ -580,18 +606,20 @@ impl IblProcessor {
         mips: u32,
         layers: u32,
     ) {
-        self.transition_layout(
-            cmd,
-            ImageLayoutTransitionInfo {
-                image,
-                old_layout: vk::ImageLayout::GENERAL,
-                new_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-                src_access: vk::AccessFlags::SHADER_WRITE,
-                dst_access: vk::AccessFlags::SHADER_READ,
-                mips,
-                layers,
-            },
-        );
+        unsafe {
+            self.transition_layout(
+                cmd,
+                ImageLayoutTransitionInfo {
+                    image,
+                    old_layout: vk::ImageLayout::GENERAL,
+                    new_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                    src_access: vk::AccessFlags::SHADER_WRITE,
+                    dst_access: vk::AccessFlags::SHADER_READ,
+                    mips,
+                    layers,
+                },
+            );
+        }
     }
 
     /// Transitions a texture layout using a pipeline barrier.
@@ -613,15 +641,17 @@ impl IblProcessor {
                 layer_count: info.layers,
             });
 
-        self.device.cmd_pipeline_barrier(
-            cmd,
-            vk::PipelineStageFlags::COMPUTE_SHADER,
-            vk::PipelineStageFlags::COMPUTE_SHADER,
-            vk::DependencyFlags::empty(),
-            &[],
-            &[],
-            &[barrier],
-        );
+        unsafe {
+            self.device.cmd_pipeline_barrier(
+                cmd,
+                vk::PipelineStageFlags::COMPUTE_SHADER,
+                vk::PipelineStageFlags::COMPUTE_SHADER,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[],
+                &[barrier],
+            );
+        }
     }
 }
 

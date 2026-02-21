@@ -1,7 +1,7 @@
 //! Test Phase 2: Multi-material foundation data structures
 
-use ash_renderer::renderer::resources::mesh::{Mesh, SubmeshDescriptor};
 use ash_renderer::renderer::MaterialHandle;
+use ash_renderer::renderer::resources::mesh::{Mesh, SubmeshDescriptor};
 
 #[test]
 fn test_phase2_foundation() {

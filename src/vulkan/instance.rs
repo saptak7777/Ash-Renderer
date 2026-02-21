@@ -1,7 +1,8 @@
 use ash::{
+    Entry, Instance,
     ext::{debug_utils, validation_features},
     khr::surface,
-    vk, Entry, Instance,
+    vk,
 };
 use log::{debug, warn};
 use std::ffi::CStr;
@@ -68,7 +69,9 @@ impl VulkanInstance {
                 if available_extension_names.contains(&validation_features_name) {
                     extensions.push(validation_features::NAME.as_ptr());
                 } else {
-                    warn!("VK_EXT_validation_features not supported; GPU-assisted validation disabled.");
+                    warn!(
+                        "VK_EXT_validation_features not supported; GPU-assisted validation disabled."
+                    );
                 }
             }
 
@@ -234,7 +237,7 @@ unsafe extern "system" fn debug_callback(
     _user_data: *mut std::ffi::c_void,
 ) -> vk::Bool32 {
     let message = if !callback_data.is_null() {
-        CStr::from_ptr((*callback_data).p_message)
+        unsafe { CStr::from_ptr((*callback_data).p_message) }
             .to_string_lossy()
             .into_owned()
     } else {

@@ -126,8 +126,8 @@ impl<T: std::fmt::Debug> std::fmt::Debug for SafeResource<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     #[test]
     fn test_cleanup_on_drop() {

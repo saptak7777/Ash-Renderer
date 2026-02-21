@@ -109,6 +109,7 @@ layout(buffer_reference, scalar) readonly buffer TransformBuffer {
 };
 
 // Set 0: Unified Bindless consolidated resources
+#ifndef SKIP_GLOBAL_BINDED_RESOURCES
 layout(set = 0, binding = 0) uniform sampler2D global_textures[];
 layout(set = 0, binding = 1) uniform usampler2DArray global_page_tables[];
 layout(set = 0, binding = 2) uniform samplerCube global_cubemaps[];
@@ -120,6 +121,7 @@ layout(set = 0, binding = 3, rgba16f) uniform image2D global_storage_images[];
 layout(set = 0, binding = 4, std430) readonly buffer BindlessBuffer {
     vec4 data[];
 } bindless_buffers[];
+#endif
 
 layout(buffer_reference, scalar) writeonly buffer IndirectBuffer {
     IndirectDrawCommand commands[];

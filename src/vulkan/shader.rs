@@ -87,11 +87,11 @@ impl ShaderReflection {
                     .iter()
                     .map(|(binding_idx, binding_info)| {
                         let desc_type = convert_descriptor_type(binding_info.ty);
-                        let descriptor_count = match binding_info.binding_count {
-                            rspirv_reflect::BindingCount::One => 1,
-                            rspirv_reflect::BindingCount::StaticSized(n) => n,
+                        let descriptor_count: u32 = match binding_info.binding_count {
+                            rspirv_reflect::BindingCount::One => 1u32,
+                            rspirv_reflect::BindingCount::StaticSized(n) => n as u32,
                             rspirv_reflect::BindingCount::Unbounded => {
-                                max_unbounded_count.unwrap_or(1024)
+                                max_unbounded_count.unwrap_or(1024u32)
                             }
                         };
 
@@ -105,7 +105,7 @@ impl ShaderReflection {
                         vk::DescriptorSetLayoutBinding {
                             binding: *binding_idx,
                             descriptor_type: desc_type,
-                            descriptor_count: descriptor_count as u32,
+                            descriptor_count,
                             stage_flags: stage,
                             ..Default::default()
                         }
@@ -135,7 +135,9 @@ impl ShaderReflection {
         stage: vk::ShaderStageFlags,
         _max_unbounded_count: Option<u32>,
     ) -> Result<Self> {
-        log::warn!("ShaderReflection::reflect called without shader_reflection feature enabled - returning empty reflection");
+        log::warn!(
+            "ShaderReflection::reflect called without shader_reflection feature enabled - returning empty reflection"
+        );
         Ok(Self {
             stage,
             ..Default::default()

@@ -598,7 +598,7 @@ impl TaaPass {
         motion_view: vk::ImageView,
         push: &TaaPushConstants,
     ) -> Result<()> {
-        self.resolve(cmd, color_view, depth_view, motion_view, push)?;
+        unsafe { self.resolve(cmd, color_view, depth_view, motion_view, push)? };
         Ok(())
     }
 
@@ -646,15 +646,17 @@ impl TaaPass {
                 layer_count: 1,
             });
 
-        self.device.cmd_pipeline_barrier(
-            cmd,
-            vk::PipelineStageFlags::TOP_OF_PIPE,
-            vk::PipelineStageFlags::COMPUTE_SHADER,
-            vk::DependencyFlags::empty(),
-            &[],
-            &[],
-            &[write_barrier],
-        );
+        unsafe {
+            self.device.cmd_pipeline_barrier(
+                cmd,
+                vk::PipelineStageFlags::TOP_OF_PIPE,
+                vk::PipelineStageFlags::COMPUTE_SHADER,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[],
+                &[write_barrier],
+            );
+        }
 
         // ── Transition read history image to SHADER_READ_ONLY_OPTIMAL ─────────
         let read_barrier = vk::ImageMemoryBarrier::default()
@@ -673,15 +675,17 @@ impl TaaPass {
 
         // Only apply the read barrier after the first frame (frame 0 has no prior write).
         if self.frame_index > 0 {
-            self.device.cmd_pipeline_barrier(
-                cmd,
-                vk::PipelineStageFlags::COMPUTE_SHADER,
-                vk::PipelineStageFlags::COMPUTE_SHADER,
-                vk::DependencyFlags::empty(),
-                &[],
-                &[],
-                &[read_barrier],
-            );
+            unsafe {
+                self.device.cmd_pipeline_barrier(
+                    cmd,
+                    vk::PipelineStageFlags::COMPUTE_SHADER,
+                    vk::PipelineStageFlags::COMPUTE_SHADER,
+                    vk::DependencyFlags::empty(),
+                    &[],
+                    &[],
+                    &[read_barrier],
+                );
+            }
         }
 
         // ── Update descriptor set for this frame's slot ───────────────────────
@@ -691,32 +695,38 @@ impl TaaPass {
         //   binding 2 = depth
         //   binding 3 = motion
         //   binding 4 = history (read_idx, SHADER_READ_ONLY_OPTIMAL)
-        self.update_descriptor_sets(write_idx, color_view, depth_view, motion_view);
-        // Patch binding 4 (history read) to point to the read slot.
-        self.update_history_read_binding(write_idx, self.history_views[read_idx]);
+        unsafe {
+            self.update_descriptor_sets(write_idx, color_view, depth_view, motion_view);
+            // Patch binding 4 (history read) to point to the read slot.
+            self.update_history_read_binding(write_idx, self.history_views[read_idx]);
+        }
 
         // ── Bind and dispatch ─────────────────────────────────────────────────
-        self.device
-            .cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, self.pipeline);
-        self.device.cmd_bind_descriptor_sets(
-            cmd,
-            vk::PipelineBindPoint::COMPUTE,
-            self.pipeline_layout,
-            0,
-            &[self.descriptor_sets[write_idx]],
-            &[],
-        );
-        self.device.cmd_push_constants(
-            cmd,
-            self.pipeline_layout,
-            vk::ShaderStageFlags::COMPUTE,
-            0,
-            bytemuck::bytes_of(push),
-        );
+        unsafe {
+            self.device
+                .cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, self.pipeline);
+            self.device.cmd_bind_descriptor_sets(
+                cmd,
+                vk::PipelineBindPoint::COMPUTE,
+                self.pipeline_layout,
+                0,
+                &[self.descriptor_sets[write_idx]],
+                &[],
+            );
+            self.device.cmd_push_constants(
+                cmd,
+                self.pipeline_layout,
+                vk::ShaderStageFlags::COMPUTE,
+                0,
+                bytemuck::bytes_of(push),
+            );
+        }
 
         let groups_x = self.width.div_ceil(8);
         let groups_y = self.height.div_ceil(8);
-        self.device.cmd_dispatch(cmd, groups_x, groups_y, 1);
+        unsafe {
+            self.device.cmd_dispatch(cmd, groups_x, groups_y, 1);
+        }
 
         // ── Transition write image to SHADER_READ_ONLY for the tonemapper ─────
         let post_barrier = vk::ImageMemoryBarrier::default()
@@ -733,15 +743,17 @@ impl TaaPass {
                 layer_count: 1,
             });
 
-        self.device.cmd_pipeline_barrier(
-            cmd,
-            vk::PipelineStageFlags::COMPUTE_SHADER,
-            vk::PipelineStageFlags::FRAGMENT_SHADER,
-            vk::DependencyFlags::empty(),
-            &[],
-            &[],
-            &[post_barrier],
-        );
+        unsafe {
+            self.device.cmd_pipeline_barrier(
+                cmd,
+                vk::PipelineStageFlags::COMPUTE_SHADER,
+                vk::PipelineStageFlags::FRAGMENT_SHADER,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[],
+                &[post_barrier],
+            );
+        }
 
         self.frame_index += 1;
         Ok(self.history_views[write_idx])
@@ -769,7 +781,7 @@ impl TaaPass {
             .address_mode_v(vk::SamplerAddressMode::CLAMP_TO_EDGE)
             .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_EDGE)
             .max_lod(vk::LOD_CLAMP_NONE);
-        self.sampler = self.device.create_sampler(&info, None)?;
+        self.sampler = unsafe { self.device.create_sampler(&info, None)? };
         Ok(())
     }
 
@@ -800,8 +812,7 @@ impl TaaPass {
                 ..Default::default()
             };
 
-            let (img, allocation) = allocator
-                .create_image(&image_info, &alloc_info)
+            let (img, allocation) = unsafe { allocator.create_image(&image_info, &alloc_info) }
                 .map_err(|e| AshError::VulkanError(format!("TAA history image {i}: {e:?}")))?;
 
             self.history_images[i] = img;
@@ -817,7 +828,7 @@ impl TaaPass {
                         .level_count(1)
                         .layer_count(1),
                 );
-            self.history_views[i] = self.device.create_image_view(&view_info, None)?;
+            self.history_views[i] = unsafe { self.device.create_image_view(&view_info, None)? };
         }
         Ok(())
     }
@@ -858,9 +869,10 @@ impl TaaPass {
         ];
 
         let layout_info = vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings);
-        self.descriptor_set_layout = self
-            .device
-            .create_descriptor_set_layout(&layout_info, None)?;
+        self.descriptor_set_layout = unsafe {
+            self.device
+                .create_descriptor_set_layout(&layout_info, None)?
+        };
         Ok(())
     }
 
@@ -880,14 +892,14 @@ impl TaaPass {
             .pool_sizes(&pool_sizes)
             .max_sets(2);
 
-        self.descriptor_pool = self.device.create_descriptor_pool(&pool_info, None)?;
+        self.descriptor_pool = unsafe { self.device.create_descriptor_pool(&pool_info, None)? };
 
         let layouts = [self.descriptor_set_layout; 2];
         let alloc_info = vk::DescriptorSetAllocateInfo::default()
             .descriptor_pool(self.descriptor_pool)
             .set_layouts(&layouts);
 
-        let sets = self.device.allocate_descriptor_sets(&alloc_info)?;
+        let sets = unsafe { self.device.allocate_descriptor_sets(&alloc_info)? };
         self.descriptor_sets[0] = sets[0];
         self.descriptor_sets[1] = sets[1];
         Ok(())
@@ -898,7 +910,7 @@ impl TaaPass {
         let spv = ash::util::read_spv(&mut std::io::Cursor::new(shader_code))
             .map_err(|e| AshError::VulkanError(format!("TAA SPV parse: {e}")))?;
         let module_info = vk::ShaderModuleCreateInfo::default().code(&spv);
-        let shader_module = self.device.create_shader_module(&module_info, None)?;
+        let shader_module = unsafe { self.device.create_shader_module(&module_info, None)? };
 
         let push_range = vk::PushConstantRange::default()
             .stage_flags(vk::ShaderStageFlags::COMPUTE)
@@ -909,7 +921,7 @@ impl TaaPass {
             .set_layouts(std::slice::from_ref(&self.descriptor_set_layout))
             .push_constant_ranges(std::slice::from_ref(&push_range));
 
-        self.pipeline_layout = self.device.create_pipeline_layout(&layout_info, None)?;
+        self.pipeline_layout = unsafe { self.device.create_pipeline_layout(&layout_info, None)? };
 
         let stage = vk::PipelineShaderStageCreateInfo::default()
             .stage(vk::ShaderStageFlags::COMPUTE)
@@ -920,13 +932,14 @@ impl TaaPass {
             .stage(stage)
             .layout(self.pipeline_layout);
 
-        let pipelines = self
-            .device
-            .create_compute_pipelines(vk::PipelineCache::null(), &[pipeline_info], None)
-            .map_err(|(_, e)| e)?;
+        let pipelines = unsafe {
+            self.device
+                .create_compute_pipelines(vk::PipelineCache::null(), &[pipeline_info], None)
+        }
+        .map_err(|(_, e)| e)?;
         self.pipeline = pipelines[0];
 
-        self.device.destroy_shader_module(shader_module, None);
+        unsafe { self.device.destroy_shader_module(shader_module, None) };
         Ok(())
     }
 
@@ -997,7 +1010,7 @@ impl TaaPass {
             .collect();
 
         if !valid_writes.is_empty() {
-            self.device.update_descriptor_sets(&valid_writes, &[]);
+            unsafe { self.device.update_descriptor_sets(&valid_writes, &[]) };
         }
     }
 
@@ -1017,7 +1030,7 @@ impl TaaPass {
             .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
             .image_info(std::slice::from_ref(&history_info));
 
-        self.device.update_descriptor_sets(&[write], &[]);
+        unsafe { self.device.update_descriptor_sets(&[write], &[]) };
     }
 
     /// Free all GPU resources. Called by `destroy_resources` (pub) and by `init` on resize.
@@ -1025,40 +1038,42 @@ impl TaaPass {
     /// # Safety
     /// The caller must ensure that the GPU is idle and no resources are currently in use.
     pub unsafe fn destroy_resources(&mut self, allocator: &vk_mem::Allocator) {
-        if self.pipeline != vk::Pipeline::null() {
-            self.device.destroy_pipeline(self.pipeline, None);
-            self.pipeline = vk::Pipeline::null();
-        }
-        if self.pipeline_layout != vk::PipelineLayout::null() {
-            self.device
-                .destroy_pipeline_layout(self.pipeline_layout, None);
-            self.pipeline_layout = vk::PipelineLayout::null();
-        }
-        if self.descriptor_pool != vk::DescriptorPool::null() {
-            self.device
-                .destroy_descriptor_pool(self.descriptor_pool, None);
-            self.descriptor_pool = vk::DescriptorPool::null();
-        }
-        if self.descriptor_set_layout != vk::DescriptorSetLayout::null() {
-            self.device
-                .destroy_descriptor_set_layout(self.descriptor_set_layout, None);
-            self.descriptor_set_layout = vk::DescriptorSetLayout::null();
-        }
-        for i in 0..2 {
-            if self.history_views[i] != vk::ImageView::null() {
-                self.device.destroy_image_view(self.history_views[i], None);
-                self.history_views[i] = vk::ImageView::null();
+        unsafe {
+            if self.pipeline != vk::Pipeline::null() {
+                self.device.destroy_pipeline(self.pipeline, None);
+                self.pipeline = vk::Pipeline::null();
             }
-            if self.history_images[i] != vk::Image::null() {
-                if let Some(mut alloc) = self.history_allocs[i].take() {
-                    allocator.destroy_image(self.history_images[i], &mut alloc);
-                    self.history_images[i] = vk::Image::null();
+            if self.pipeline_layout != vk::PipelineLayout::null() {
+                self.device
+                    .destroy_pipeline_layout(self.pipeline_layout, None);
+                self.pipeline_layout = vk::PipelineLayout::null();
+            }
+            if self.descriptor_pool != vk::DescriptorPool::null() {
+                self.device
+                    .destroy_descriptor_pool(self.descriptor_pool, None);
+                self.descriptor_pool = vk::DescriptorPool::null();
+            }
+            if self.descriptor_set_layout != vk::DescriptorSetLayout::null() {
+                self.device
+                    .destroy_descriptor_set_layout(self.descriptor_set_layout, None);
+                self.descriptor_set_layout = vk::DescriptorSetLayout::null();
+            }
+            for i in 0..2 {
+                if self.history_views[i] != vk::ImageView::null() {
+                    self.device.destroy_image_view(self.history_views[i], None);
+                    self.history_views[i] = vk::ImageView::null();
+                }
+                if self.history_images[i] != vk::Image::null() {
+                    if let Some(mut alloc) = self.history_allocs[i].take() {
+                        allocator.destroy_image(self.history_images[i], &mut alloc);
+                        self.history_images[i] = vk::Image::null();
+                    }
                 }
             }
-        }
-        if self.sampler != vk::Sampler::null() {
-            self.device.destroy_sampler(self.sampler, None);
-            self.sampler = vk::Sampler::null();
+            if self.sampler != vk::Sampler::null() {
+                self.device.destroy_sampler(self.sampler, None);
+                self.sampler = vk::Sampler::null();
+            }
         }
 
         self.initialized = false;

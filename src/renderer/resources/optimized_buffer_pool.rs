@@ -224,9 +224,10 @@ impl BufferPool {
             log::debug!("Allocating new buffer '{n}' (class {class_index}, {actual_size} bytes)");
         }
 
-        let (buffer, allocation) =
+        let (buffer, allocation) = unsafe {
             self.allocator
-                .create_buffer(actual_size, usage, memory_usage)?;
+                .create_buffer(actual_size, usage, memory_usage)?
+        };
 
         self.total_allocations.fetch_add(1, Ordering::Relaxed);
         self.total_allocated_bytes

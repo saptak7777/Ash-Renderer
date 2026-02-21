@@ -1,8 +1,8 @@
 use ash::vk;
 use std::sync::Arc;
 
-use crate::vulkan::SwapchainWrapper as Swapchain;
 use crate::Result;
+use crate::vulkan::SwapchainWrapper as Swapchain;
 
 /// Specialized queue wrapper for rendering setup and submission.
 /// Also manages per-frame synchronization and command buffers.

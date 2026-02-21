@@ -23,7 +23,7 @@ pub use clipmap_manager::{ClipmapLevel, ClipmapManager};
 pub use compute_pipelines::VsmComputePipelines;
 pub use data::{VsmGlobalInfo, VsmLightData, VsmPageData};
 pub use manager::{
-    default_vsm_config, high_quality_vsm_config, performance_vsm_config, VsmManager, VsmShadowArgs,
+    VsmManager, VsmShadowArgs, default_vsm_config, high_quality_vsm_config, performance_vsm_config,
 };
 pub use page_manager::PageManager;
 pub use resources::{PageAllocation, VsmConfig, VsmResources};

@@ -35,7 +35,9 @@ pub enum AshError {
     #[error("Feature not initialized: {0}")]
     FeatureNotInitialized(String),
     /// GPU memory budget exceeded.
-    #[error("VRAM exhausted: requested {requested} bytes, but only {available} bytes available in budget")]
+    #[error(
+        "VRAM exhausted: requested {requested} bytes, but only {available} bytes available in budget"
+    )]
     VramExhausted {
         requested: ash::vk::DeviceSize,
         available: ash::vk::DeviceSize,

@@ -69,12 +69,14 @@ impl CommandList {
             _ => {
                 return Err(crate::AshError::VulkanError(format!(
                     "Unsupported pipeline bind point: {bind_point:?}"
-                )))
+                )));
             }
         }
 
-        self.device
-            .cmd_bind_pipeline(self.cmd, bind_point, pipeline);
+        unsafe {
+            self.device
+                .cmd_bind_pipeline(self.cmd, bind_point, pipeline);
+        }
         Ok(())
     }
 
@@ -96,14 +98,16 @@ impl CommandList {
             self.state.bound_descriptor_sets[set_index] = Some(set);
         }
 
-        self.device.cmd_bind_descriptor_sets(
-            self.cmd,
-            bind_point,
-            layout,
-            first_set,
-            descriptor_sets,
-            &[],
-        );
+        unsafe {
+            self.device.cmd_bind_descriptor_sets(
+                self.cmd,
+                bind_point,
+                layout,
+                first_set,
+                descriptor_sets,
+                &[],
+            );
+        }
         Ok(())
     }
 
@@ -116,8 +120,10 @@ impl CommandList {
         if self.state.bound_compute_pipeline.is_none() {
             log::warn!("Dispatching without bound compute pipeline");
         }
-        self.device
-            .cmd_dispatch(self.cmd, group_count_x, group_count_y, group_count_z);
+        unsafe {
+            self.device
+                .cmd_dispatch(self.cmd, group_count_x, group_count_y, group_count_z);
+        }
     }
 
     /// Inserts a pipeline barrier (simplified API).
@@ -131,15 +137,17 @@ impl CommandList {
         dst_stage: vk::PipelineStageFlags,
         image_barriers: &[vk::ImageMemoryBarrier],
     ) {
-        self.device.cmd_pipeline_barrier(
-            self.cmd,
-            src_stage,
-            dst_stage,
-            vk::DependencyFlags::empty(),
-            &[],
-            &[],
-            image_barriers,
-        );
+        unsafe {
+            self.device.cmd_pipeline_barrier(
+                self.cmd,
+                src_stage,
+                dst_stage,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[],
+                image_barriers,
+            );
+        }
     }
 
     /// Pushes constants to the pipeline.
@@ -155,8 +163,10 @@ impl CommandList {
         data: &T,
     ) {
         let bytes = bytemuck::bytes_of(data);
-        self.device
-            .cmd_push_constants(self.cmd, layout, stage_flags, offset, bytes);
+        unsafe {
+            self.device
+                .cmd_push_constants(self.cmd, layout, stage_flags, offset, bytes);
+        }
     }
 
     /// Binds an index buffer.
@@ -173,8 +183,10 @@ impl CommandList {
         if self.state.bound_graphics_pipeline.is_none() {
             log::warn!("Binding index buffer without bound graphics pipeline");
         }
-        self.device
-            .cmd_bind_index_buffer(self.cmd, buffer, offset, index_type);
+        unsafe {
+            self.device
+                .cmd_bind_index_buffer(self.cmd, buffer, offset, index_type);
+        }
     }
 
     /// Returns the current bound compute pipeline (if any)

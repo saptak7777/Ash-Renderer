@@ -49,39 +49,45 @@ impl GBuffer {
 
         // 1. Create Normal Buffer
         let normal_format = vk::Format::R16G16B16A16_SFLOAT;
-        let (normal_image, normal_allocation) = Self::create_image(
-            &allocator,
-            width,
-            height,
-            normal_format,
-            vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::SAMPLED,
-        )?;
+        let (normal_image, normal_allocation) = unsafe {
+            Self::create_image(
+                &allocator,
+                width,
+                height,
+                normal_format,
+                vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::SAMPLED,
+            )?
+        };
 
-        let normal_view = Self::create_view(&device, normal_image, normal_format)?;
+        let normal_view = unsafe { Self::create_view(&device, normal_image, normal_format)? };
 
         // 2. Create Albedo Buffer
         let albedo_format = vk::Format::R8G8B8A8_UNORM;
-        let (albedo_image, albedo_allocation) = Self::create_image(
-            &allocator,
-            width,
-            height,
-            albedo_format,
-            vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::SAMPLED,
-        )?;
+        let (albedo_image, albedo_allocation) = unsafe {
+            Self::create_image(
+                &allocator,
+                width,
+                height,
+                albedo_format,
+                vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::SAMPLED,
+            )?
+        };
 
-        let albedo_view = Self::create_view(&device, albedo_image, albedo_format)?;
+        let albedo_view = unsafe { Self::create_view(&device, albedo_image, albedo_format)? };
 
         // 3. Create Motion Buffer
         let motion_format = vk::Format::R16G16_SFLOAT;
-        let (motion_image, motion_allocation) = Self::create_image(
-            &allocator,
-            width,
-            height,
-            motion_format,
-            vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::SAMPLED,
-        )?;
+        let (motion_image, motion_allocation) = unsafe {
+            Self::create_image(
+                &allocator,
+                width,
+                height,
+                motion_format,
+                vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::SAMPLED,
+            )?
+        };
 
-        let motion_view = Self::create_view(&device, motion_image, motion_format)?;
+        let motion_view = unsafe { Self::create_view(&device, motion_image, motion_format)? };
 
         Ok(Self {
             device,
@@ -122,8 +128,7 @@ impl GBuffer {
             .samples(vk::SampleCountFlags::TYPE_1)
             .sharing_mode(vk::SharingMode::EXCLUSIVE);
 
-        allocator
-            .create_image(&image_info, vk_mem::MemoryUsage::AutoPreferDevice)
+        unsafe { allocator.create_image(&image_info, vk_mem::MemoryUsage::AutoPreferDevice) }
             .map_err(|e| AshError::VulkanError(format!("G-Buffer image creation failed: {e:?}")))
     }
 
@@ -144,8 +149,7 @@ impl GBuffer {
                 layer_count: 1,
             });
 
-        device
-            .create_image_view(&view_info, None)
+        unsafe { device.create_image_view(&view_info, None) }
             .map_err(|e| AshError::VulkanError(format!("G-Buffer view creation failed: {e:?}")))
     }
 

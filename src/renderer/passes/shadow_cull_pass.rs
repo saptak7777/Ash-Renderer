@@ -1,6 +1,6 @@
+use crate::Result;
 use crate::renderer::vcgs::IndirectDrawCommand;
 use crate::vulkan::Allocator;
-use crate::Result;
 use ash::vk;
 use std::sync::Arc;
 
@@ -131,27 +131,31 @@ impl ShadowCullPass {
         let count_buffer_size = (clipmap_levels as usize * 4) as vk::DeviceSize;
 
         for i in 0..frame_count {
-            let (indirect_buffer, indirect_alloc) = allocator.create_buffer_with_flags_and_name(
-                command_buffer_size,
-                vk::BufferUsageFlags::STORAGE_BUFFER
-                    | vk::BufferUsageFlags::INDIRECT_BUFFER
-                    | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS
-                    | vk::BufferUsageFlags::TRANSFER_DST,
-                vk_mem::MemoryUsage::AutoPreferDevice,
-                vk_mem::AllocationCreateFlags::empty(),
-                Some(format!("Shadow Indirect Buffer {i}")),
-            )?;
+            let (indirect_buffer, indirect_alloc) = unsafe {
+                allocator.create_buffer_with_flags_and_name(
+                    command_buffer_size,
+                    vk::BufferUsageFlags::STORAGE_BUFFER
+                        | vk::BufferUsageFlags::INDIRECT_BUFFER
+                        | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS
+                        | vk::BufferUsageFlags::TRANSFER_DST,
+                    vk_mem::MemoryUsage::AutoPreferDevice,
+                    vk_mem::AllocationCreateFlags::empty(),
+                    Some(format!("Shadow Indirect Buffer {i}")),
+                )
+            }?;
 
-            let (count_buffer, count_alloc) = allocator.create_buffer_with_flags_and_name(
-                count_buffer_size,
-                vk::BufferUsageFlags::STORAGE_BUFFER
-                    | vk::BufferUsageFlags::INDIRECT_BUFFER
-                    | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS
-                    | vk::BufferUsageFlags::TRANSFER_DST,
-                vk_mem::MemoryUsage::AutoPreferDevice,
-                vk_mem::AllocationCreateFlags::empty(),
-                Some(format!("Shadow Count Buffer {i}")),
-            )?;
+            let (count_buffer, count_alloc) = unsafe {
+                allocator.create_buffer_with_flags_and_name(
+                    count_buffer_size,
+                    vk::BufferUsageFlags::STORAGE_BUFFER
+                        | vk::BufferUsageFlags::INDIRECT_BUFFER
+                        | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS
+                        | vk::BufferUsageFlags::TRANSFER_DST,
+                    vk_mem::MemoryUsage::AutoPreferDevice,
+                    vk_mem::AllocationCreateFlags::empty(),
+                    Some(format!("Shadow Count Buffer {i}")),
+                )
+            }?;
 
             self.indirect_buffers.push(indirect_buffer);
             self.indirect_allocs.push(indirect_alloc);
@@ -170,12 +174,16 @@ impl ShadowCullPass {
         let indirect_buffer = self.indirect_buffers[info.frame_index];
         let count_buffer = self.count_buffers[info.frame_index];
 
-        let indirect_ptr = self.device.get_buffer_device_address(
-            &vk::BufferDeviceAddressInfo::default().buffer(indirect_buffer),
-        );
-        let count_ptr = self.device.get_buffer_device_address(
-            &vk::BufferDeviceAddressInfo::default().buffer(count_buffer),
-        );
+        let indirect_ptr = unsafe {
+            self.device.get_buffer_device_address(
+                &vk::BufferDeviceAddressInfo::default().buffer(indirect_buffer),
+            )
+        };
+        let count_ptr = unsafe {
+            self.device.get_buffer_device_address(
+                &vk::BufferDeviceAddressInfo::default().buffer(count_buffer),
+            )
+        };
 
         let level_count_ptr = count_ptr + (info.clipmap_level as u64 * 4);
         let max_objects_per_level = self.max_commands / self.clipmap_levels;
@@ -191,19 +199,23 @@ impl ShadowCullPass {
             count_buffer_ptr: level_count_ptr,
         };
 
-        self.device
-            .cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, self.pipeline);
-        self.device.cmd_push_constants(
-            cmd,
-            self.layout,
-            vk::ShaderStageFlags::COMPUTE,
-            0,
-            bytemuck::bytes_of(&push_constants),
-        );
+        unsafe {
+            self.device
+                .cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, self.pipeline);
+            self.device.cmd_push_constants(
+                cmd,
+                self.layout,
+                vk::ShaderStageFlags::COMPUTE,
+                0,
+                bytemuck::bytes_of(&push_constants),
+            );
+        }
 
         let group_count = info.object_count.div_ceil(64);
         if group_count > 0 {
-            self.device.cmd_dispatch(cmd, group_count, 1, 1);
+            unsafe {
+                self.device.cmd_dispatch(cmd, group_count, 1, 1);
+            }
         }
     }
 
@@ -220,15 +232,19 @@ impl ShadowCullPass {
         // Robust cleanup: Drain both vectors fully even if counts mismatch to avoid GPU leaks
         while !self.indirect_buffers.is_empty() || !self.indirect_allocs.is_empty() {
             match (self.indirect_buffers.pop(), self.indirect_allocs.pop()) {
-                (Some(buffer), Some(mut alloc)) => allocator.destroy_buffer(buffer, &mut alloc),
+                (Some(buffer), Some(mut alloc)) => unsafe {
+                    allocator.destroy_buffer(buffer, &mut alloc)
+                },
                 (Some(_buffer), None) => {
                     log::error!(
                         "ShadowCullPass: Orphan indirect buffer detected during cleanup! GPU leak."
                     );
                 }
                 (None, Some(mut alloc)) => {
-                    log::error!("ShadowCullPass: Orphan indirect allocation detected during cleanup! VMA leak.");
-                    allocator.destroy_buffer(vk::Buffer::null(), &mut alloc); // Try to free the allocation at least
+                    log::error!(
+                        "ShadowCullPass: Orphan indirect allocation detected during cleanup! VMA leak."
+                    );
+                    unsafe { allocator.destroy_buffer(vk::Buffer::null(), &mut alloc) }; // Try to free the allocation at least
                 }
                 (None, None) => break,
             }
@@ -236,24 +252,30 @@ impl ShadowCullPass {
 
         while !self.count_buffers.is_empty() || !self.count_allocs.is_empty() {
             match (self.count_buffers.pop(), self.count_allocs.pop()) {
-                (Some(buffer), Some(mut alloc)) => allocator.destroy_buffer(buffer, &mut alloc),
+                (Some(buffer), Some(mut alloc)) => unsafe {
+                    allocator.destroy_buffer(buffer, &mut alloc)
+                },
                 (Some(_buffer), None) => {
                     log::error!(
                         "ShadowCullPass: Orphan count buffer detected during cleanup! GPU leak."
                     );
                 }
                 (None, Some(mut alloc)) => {
-                    log::error!("ShadowCullPass: Orphan count allocation detected during cleanup! VMA leak.");
-                    allocator.destroy_buffer(vk::Buffer::null(), &mut alloc);
+                    log::error!(
+                        "ShadowCullPass: Orphan count allocation detected during cleanup! VMA leak."
+                    );
+                    unsafe { allocator.destroy_buffer(vk::Buffer::null(), &mut alloc) };
                 }
                 (None, None) => break,
             }
         }
-        if self.pipeline != vk::Pipeline::null() {
-            self.device.destroy_pipeline(self.pipeline, None);
-        }
-        if self.layout != vk::PipelineLayout::null() {
-            self.device.destroy_pipeline_layout(self.layout, None);
+        unsafe {
+            if self.pipeline != vk::Pipeline::null() {
+                self.device.destroy_pipeline(self.pipeline, None);
+            }
+            if self.layout != vk::PipelineLayout::null() {
+                self.device.destroy_pipeline_layout(self.layout, None);
+            }
         }
     }
 }

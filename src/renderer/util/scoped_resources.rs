@@ -3,7 +3,7 @@
 //! These wrappers automatically clean up Vulkan resources when they go out of scope,
 //! preventing resource leaks even on early returns or panics.
 
-use ash::{vk, Device};
+use ash::{Device, vk};
 use std::ops::Deref;
 use std::sync::Arc;
 
@@ -24,7 +24,7 @@ impl ScopedImageView {
         device: Arc<Device>,
         create_info: &vk::ImageViewCreateInfo,
     ) -> Result<Self, vk::Result> {
-        let view = device.create_image_view(create_info, None)?;
+        let view = unsafe { device.create_image_view(create_info, None)? };
         Ok(Self { view, device })
     }
 
@@ -69,7 +69,7 @@ impl ScopedBuffer {
         device: Arc<Device>,
         create_info: &vk::BufferCreateInfo,
     ) -> Result<Self, vk::Result> {
-        let buffer = device.create_buffer(create_info, None)?;
+        let buffer = unsafe { device.create_buffer(create_info, None)? };
         Ok(Self { buffer, device })
     }
 
@@ -114,7 +114,7 @@ impl ScopedImage {
         device: Arc<Device>,
         create_info: &vk::ImageCreateInfo,
     ) -> Result<Self, vk::Result> {
-        let image = device.create_image(create_info, None)?;
+        let image = unsafe { device.create_image(create_info, None)? };
         Ok(Self { image, device })
     }
 

@@ -1,13 +1,13 @@
 use crate::renderer::{
+    DepthBuffer as DepthBufferType, RendererConfig, Texture as TextureType, TextureInitContext,
     assets::AssetManager,
     context::Context,
     initialization,
     instancing::{BatchKey, InstancingManager},
     resource_registry::ResourceId,
-    vram_budget, DepthBuffer as DepthBufferType, RendererConfig, Texture as TextureType,
-    TextureInitContext,
+    vram_budget,
 };
-use crate::{vulkan, AshError};
+use crate::{AshError, vulkan};
 use ash::vk;
 use glam::Mat4;
 use std::collections::HashMap;
@@ -60,7 +60,7 @@ pub use safe_resource::SafeResource;
 pub use texture::{Texture, TextureData, TextureDesc};
 pub use texture_compressor::{CompressionFormat, TextureCompressor};
 pub use thread_safe_pool::{PoolStats, PooledResource, ThreadSafeResourcePool};
-pub use transform::{Camera, TemporalCamera, Transform, TransformHandle, TransformSystem, MVP};
+pub use transform::{Camera, MVP, TemporalCamera, Transform, TransformHandle, TransformSystem};
 pub use uniform::{InstanceBuffer, MvpMatrices, UniformBuffer};
 
 extern crate image as image_crate;
@@ -167,7 +167,9 @@ impl Resources {
             if !context.device.sample_rate_shading_supported
                 && pipeline_cfg.sample_shading.enabled()
             {
-                log::warn!("Sample rate shading requested but not supported by hardware. Falling back to disabled.");
+                log::warn!(
+                    "Sample rate shading requested but not supported by hardware. Falling back to disabled."
+                );
                 pipeline_cfg.sample_shading =
                     crate::renderer::types::SampleShadingQuality::Disabled;
             }

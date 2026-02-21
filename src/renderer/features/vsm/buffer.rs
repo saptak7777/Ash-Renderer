@@ -1,7 +1,7 @@
 //! VSM Buffer Abstractions
 
-use crate::vulkan::Allocator;
 use crate::Result;
+use crate::vulkan::Allocator;
 use ash::vk;
 
 /// VSM Request Buffer - Stores page requests from the GPU

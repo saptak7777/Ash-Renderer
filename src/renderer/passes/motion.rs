@@ -7,8 +7,8 @@
 use ash::vk;
 use std::sync::Arc;
 
-use crate::vulkan::VulkanDevice;
 use crate::Result;
+use crate::vulkan::VulkanDevice;
 
 /// Motion vector rendering pass
 pub struct MotionVectorPass {
@@ -44,7 +44,7 @@ impl MotionVectorPass {
             return Ok(());
         }
 
-        self.create_pipeline(vulkan_device, motion_format)?;
+        unsafe { self.create_pipeline(vulkan_device, motion_format)? };
 
         self.initialized = true;
         log::info!("MotionVectorPass initialized");
@@ -62,15 +62,21 @@ impl MotionVectorPass {
 
         let vert_spv = ash::util::read_spv(&mut std::io::Cursor::new(vert_code))
             .map_err(|e| crate::AshError::VulkanError(format!("Failed to read vert spv: {e}")))?;
-        let vert_module = self
-            .device
-            .create_shader_module(&vk::ShaderModuleCreateInfo::default().code(&vert_spv), None)?;
+        let vert_module = unsafe {
+            self.device.create_shader_module(
+                &vk::ShaderModuleCreateInfo::default().code(&vert_spv),
+                None,
+            )?
+        };
 
         let frag_spv = ash::util::read_spv(&mut std::io::Cursor::new(frag_code))
             .map_err(|e| crate::AshError::VulkanError(format!("Failed to read frag spv: {e}")))?;
-        let frag_module = self
-            .device
-            .create_shader_module(&vk::ShaderModuleCreateInfo::default().code(&frag_spv), None)?;
+        let frag_module = unsafe {
+            self.device.create_shader_module(
+                &vk::ShaderModuleCreateInfo::default().code(&frag_spv),
+                None,
+            )?
+        };
 
         // Push constant range for ObjectMotionData
         let push_constant_range = vk::PushConstantRange::default()
@@ -81,7 +87,7 @@ impl MotionVectorPass {
         let layout_info = vk::PipelineLayoutCreateInfo::default()
             .push_constant_ranges(std::slice::from_ref(&push_constant_range));
 
-        self.pipeline_layout = self.device.create_pipeline_layout(&layout_info, None)?;
+        self.pipeline_layout = unsafe { self.device.create_pipeline_layout(&layout_info, None)? };
 
         let vertex_input = vk::PipelineVertexInputStateCreateInfo::default();
 
@@ -145,19 +151,22 @@ impl MotionVectorPass {
 
         let pipeline_info = pipeline_info.push_next(&mut rendering_info);
 
-        let pipelines = self
-            .device
-            .create_graphics_pipelines(
-                vk::PipelineCache::null(),
-                std::slice::from_ref(&pipeline_info),
-                None,
-            )
-            .map_err(|(_, e)| e)?;
+        let pipelines = unsafe {
+            self.device
+                .create_graphics_pipelines(
+                    vk::PipelineCache::null(),
+                    std::slice::from_ref(&pipeline_info),
+                    None,
+                )
+                .map_err(|(_, e)| e)?
+        };
 
         self.pipeline = pipelines[0];
 
-        self.device.destroy_shader_module(vert_module, None);
-        self.device.destroy_shader_module(frag_module, None);
+        unsafe {
+            self.device.destroy_shader_module(vert_module, None);
+            self.device.destroy_shader_module(frag_module, None);
+        }
 
         log::info!("MotionVectorPass: Pipeline created");
         Ok(())
@@ -180,15 +189,17 @@ impl MotionVectorPass {
             return;
         }
 
-        if self.pipeline != vk::Pipeline::null() {
-            self.device.destroy_pipeline(self.pipeline, None);
-            self.pipeline = vk::Pipeline::null();
-        }
+        unsafe {
+            if self.pipeline != vk::Pipeline::null() {
+                self.device.destroy_pipeline(self.pipeline, None);
+                self.pipeline = vk::Pipeline::null();
+            }
 
-        if self.pipeline_layout != vk::PipelineLayout::null() {
-            self.device
-                .destroy_pipeline_layout(self.pipeline_layout, None);
-            self.pipeline_layout = vk::PipelineLayout::null();
+            if self.pipeline_layout != vk::PipelineLayout::null() {
+                self.device
+                    .destroy_pipeline_layout(self.pipeline_layout, None);
+                self.pipeline_layout = vk::PipelineLayout::null();
+            }
         }
 
         self.initialized = false;

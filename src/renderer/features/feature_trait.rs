@@ -1,4 +1,4 @@
-use ash::{vk, Device};
+use ash::{Device, vk};
 use log::{debug, trace};
 use std::any::{Any, TypeId};
 use std::collections::HashMap;
@@ -81,7 +81,7 @@ impl FeatureManager {
     pub unsafe fn render(&self, ctx: &FeatureRenderContext<'_>) {
         for type_id in &self.render_order {
             if let Some(feature) = self.features.get(type_id) {
-                feature.render(ctx);
+                unsafe { feature.render(ctx) };
             }
         }
     }

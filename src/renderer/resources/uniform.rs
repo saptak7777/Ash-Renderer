@@ -182,9 +182,8 @@ impl UniformBuffer {
     ) -> crate::Result<Self> {
         let size = std::mem::size_of::<MvpMatrices>() as u64;
 
-        let (buffer, mut allocation) = allocator
-            .vma
-            .create_buffer(
+        let (buffer, mut allocation) = unsafe {
+            allocator.vma.create_buffer(
                 &vk::BufferCreateInfo::default()
                     .size(size)
                     .usage(
@@ -202,14 +201,15 @@ impl UniformBuffer {
                     ..Default::default()
                 },
             )
-            .map_err(|e| {
-                crate::AshError::VulkanError(format!("Failed to create uniform buffer: {e}"))
-            })?;
+        }
+        .map_err(|e| {
+            crate::AshError::VulkanError(format!("Failed to create uniform buffer: {e}"))
+        })?;
 
         let data = MvpMatrices::default();
 
         {
-            let mut guard = allocator.map_allocation_guarded(&mut allocation, size)?;
+            let mut guard = unsafe { allocator.map_allocation_guarded(&mut allocation, size) }?;
             guard.copy_from_slice(&[data]);
         }
 
@@ -238,9 +238,10 @@ impl UniformBuffer {
         let size = std::mem::size_of::<MvpMatrices>() as u64;
 
         {
-            let mut guard = self
-                .allocator
-                .map_allocation_guarded(&mut self.allocation, size)?;
+            let mut guard = unsafe {
+                self.allocator
+                    .map_allocation_guarded(&mut self.allocation, size)
+            }?;
 
             guard.copy_from_slice(&[self.data]);
         }
@@ -339,9 +340,8 @@ impl MaterialBuffer {
     ) -> crate::Result<Self> {
         let size = std::mem::size_of::<MaterialUniform>() as u64;
 
-        let (buffer, mut allocation) = allocator
-            .vma
-            .create_buffer(
+        let (buffer, mut allocation) = unsafe {
+            allocator.vma.create_buffer(
                 &vk::BufferCreateInfo::default()
                     .size(size)
                     .usage(
@@ -356,14 +356,15 @@ impl MaterialBuffer {
                     ..Default::default()
                 },
             )
-            .map_err(|e| {
-                crate::AshError::VulkanError(format!("Failed to create material buffer: {e}"))
-            })?;
+        }
+        .map_err(|e| {
+            crate::AshError::VulkanError(format!("Failed to create material buffer: {e}"))
+        })?;
 
         let data = MaterialUniform::default();
 
         {
-            let mut guard = allocator.map_allocation_guarded(&mut allocation, size)?;
+            let mut guard = unsafe { allocator.map_allocation_guarded(&mut allocation, size) }?;
             guard.copy_from_slice(&[data]);
         }
 
@@ -392,9 +393,10 @@ impl MaterialBuffer {
         let size = std::mem::size_of::<MaterialUniform>() as u64;
 
         {
-            let mut guard = self
-                .allocator
-                .map_allocation_guarded(&mut self.allocation, size)?;
+            let mut guard = unsafe {
+                self.allocator
+                    .map_allocation_guarded(&mut self.allocation, size)
+            }?;
 
             guard.copy_from_slice(&[self.data]);
         }
@@ -476,9 +478,8 @@ impl InstanceBuffer {
     ) -> crate::Result<Self> {
         let size = (capacity * std::mem::size_of::<CullObjectData>()) as u64;
 
-        let (buffer, allocation) = allocator
-            .vma
-            .create_buffer(
+        let (buffer, allocation) = unsafe {
+            allocator.vma.create_buffer(
                 &vk::BufferCreateInfo::default()
                     .size(size)
                     .usage(
@@ -494,9 +495,10 @@ impl InstanceBuffer {
                     ..Default::default()
                 },
             )
-            .map_err(|e| {
-                crate::AshError::VulkanError(format!("Failed to create instance buffer: {e}"))
-            })?;
+        }
+        .map_err(|e| {
+            crate::AshError::VulkanError(format!("Failed to create instance buffer: {e}"))
+        })?;
 
         log::info!("Created instance buffer (capacity: {capacity}, size: {size} bytes)");
 
@@ -523,9 +525,10 @@ impl InstanceBuffer {
 
         let size = std::mem::size_of_val(data) as u64;
         {
-            let mut guard = self
-                .allocator
-                .map_allocation_guarded(&mut self.allocation, size)?;
+            let mut guard = unsafe {
+                self.allocator
+                    .map_allocation_guarded(&mut self.allocation, size)
+            }?;
             guard.copy_from_slice(data);
         }
 
@@ -597,9 +600,8 @@ impl<T: Copy> StorageBuffer<T> {
     ) -> crate::Result<Self> {
         let size = (capacity * std::mem::size_of::<T>()) as u64;
 
-        let (buffer, allocation) = allocator
-            .vma
-            .create_buffer(
+        let (buffer, allocation) = unsafe {
+            allocator.vma.create_buffer(
                 &vk::BufferCreateInfo::default()
                     .size(size)
                     .usage(
@@ -615,11 +617,10 @@ impl<T: Copy> StorageBuffer<T> {
                     ..Default::default()
                 },
             )
-            .map_err(|e| {
-                crate::AshError::VulkanError(format!(
-                    "Failed to create storage buffer '{name}': {e}"
-                ))
-            })?;
+        }
+        .map_err(|e| {
+            crate::AshError::VulkanError(format!("Failed to create storage buffer '{name}': {e}"))
+        })?;
 
         log::debug!("Created storage buffer '{name}' (capacity: {capacity}, size: {size} bytes)");
 
@@ -653,9 +654,10 @@ impl<T: Copy> StorageBuffer<T> {
 
         let size = std::mem::size_of_val(data) as u64;
         {
-            let mut guard = self
-                .allocator
-                .map_allocation_guarded(&mut self.allocation, size)?;
+            let mut guard = unsafe {
+                self.allocator
+                    .map_allocation_guarded(&mut self.allocation, size)
+            }?;
             guard.copy_from_slice(data);
         }
 
@@ -704,15 +706,21 @@ impl<T: Copy> StorageBuffer<T> {
 
         if mapped_ptr.is_null() {
             // Unlikely with current allocation flags
-            let mut guard = self.allocator.map_allocation_guarded(
-                &mut self.allocation,
-                (self.capacity * element_size) as u64,
-            )?;
+            let mut guard = unsafe {
+                self.allocator.map_allocation_guarded(
+                    &mut self.allocation,
+                    (self.capacity * element_size) as u64,
+                )
+            }?;
             let base = guard.as_mut_ptr() as *mut T;
-            std::ptr::write(base.add(index), *element);
+            unsafe {
+                std::ptr::write(base.add(index), *element);
+            }
         } else {
             let base = mapped_ptr as *mut T;
-            std::ptr::write(base.add(index), *element);
+            unsafe {
+                std::ptr::write(base.add(index), *element);
+            }
         }
 
         // --- Lead Engineer Fix: Aligned Flush Range ---
@@ -761,10 +769,11 @@ impl<T: Copy> StorageBuffer<T> {
     /// Caller must ensure that the buffer is host-visible. GPU-side writes to this buffer must have completed before reading.
     pub unsafe fn read_all(&mut self) -> crate::Result<Vec<T>> {
         let size = (self.capacity * std::mem::size_of::<T>()) as u64;
-        let guard = self
-            .allocator
-            .map_allocation_guarded(&mut self.allocation, size)?;
-        Ok(guard.as_slice::<T>().to_vec())
+        let guard = unsafe {
+            self.allocator
+                .map_allocation_guarded(&mut self.allocation, size)
+        }?;
+        Ok(unsafe { guard.as_slice::<T>().to_vec() })
     }
 
     /// Read a single element from the buffer at the specified index
@@ -784,7 +793,7 @@ impl<T: Copy> StorageBuffer<T> {
             "Buffer should be persistently mapped"
         );
         let base = mapped_ptr as *const T;
-        std::ptr::read(base.add(index))
+        unsafe { std::ptr::read(base.add(index)) }
     }
 
     /// Get current capacity

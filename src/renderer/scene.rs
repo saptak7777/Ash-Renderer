@@ -1,16 +1,16 @@
 use crate::renderer::features::{DirectionalLight, PointLight, SceneLighting, SpotLight};
-use crate::renderer::resources::uniform::{MaterialUniform, StorageBuffer};
 use crate::renderer::resources::DualHeapGeometryBuffer;
 use crate::renderer::resources::TransformSystem;
-use crate::renderer::vcgs::culling::CullObjectData;
+use crate::renderer::resources::uniform::{MaterialUniform, StorageBuffer};
 use crate::renderer::vcgs::OcclusionCulling;
+use crate::renderer::vcgs::culling::CullObjectData;
 use crate::renderer::*;
 use crate::vulkan::Allocator;
 use crate::{AshError, Result};
 use ash::vk;
 use std::collections::HashSet;
 use std::sync::{Arc, RwLock}; // Removed Mutex
-                              // Added AshError
+// Added AshError
 
 pub type BindlessDescriptorSet = crate::vulkan::BindlessManager;
 pub type CpuMesh = crate::renderer::resources::Mesh;
@@ -118,7 +118,9 @@ impl Scene {
         } = info;
         // 0. Strict check for cluster buffer
         if self.global_cluster_buffer.is_none() {
-            return Err(AshError::vulkan("Critical: Global Cluster Buffer missing during mesh upload. Ensure scene.global_cluster_buffer is assigned."));
+            return Err(AshError::vulkan(
+                "Critical: Global Cluster Buffer missing during mesh upload. Ensure scene.global_cluster_buffer is assigned.",
+            ));
         }
 
         let key = mesh.name.clone();

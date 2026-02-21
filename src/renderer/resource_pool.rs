@@ -113,35 +113,39 @@ impl ResourcePool {
             .sharing_mode(vk::SharingMode::EXCLUSIVE)
             .initial_layout(vk::ImageLayout::UNDEFINED);
 
-        let (image, view, allocation) = self.allocator.create_image_with_view(
-            image_info,
-            vk_mem::AllocationCreateInfo {
-                usage: vk_mem::MemoryUsage::AutoPreferDevice,
-                ..Default::default()
-            },
-            vk::ImageViewType::TYPE_2D,
-            vk::ImageAspectFlags::COLOR,
-        )?;
+        let (image, view, allocation) = unsafe {
+            self.allocator.create_image_with_view(
+                image_info,
+                vk_mem::AllocationCreateInfo {
+                    usage: vk_mem::MemoryUsage::AutoPreferDevice,
+                    ..Default::default()
+                },
+                vk::ImageViewType::TYPE_2D,
+                vk::ImageAspectFlags::COLOR,
+            )?
+        };
 
-        let image_handle = ImageHandle::new_with_allocation(
-            Arc::clone(&self.device),
-            image,
-            view,
-            Some(allocation),
-            Some(Arc::clone(&self.allocator)),
-            ImageCreateInfo {
-                width: extent.width,
-                height: extent.height,
-                format,
-                mip_levels,
-                layers: 1,
-                name: Some(format!(
-                    "transient_{width}x{height}",
-                    width = extent.width,
-                    height = extent.height
-                )),
-            },
-        )?;
+        let image_handle = unsafe {
+            ImageHandle::new_with_allocation(
+                Arc::clone(&self.device),
+                image,
+                view,
+                Some(allocation),
+                Some(Arc::clone(&self.allocator)),
+                ImageCreateInfo {
+                    width: extent.width,
+                    height: extent.height,
+                    format,
+                    mip_levels,
+                    layers: 1,
+                    name: Some(format!(
+                        "transient_{width}x{height}",
+                        width = extent.width,
+                        height = extent.height
+                    )),
+                },
+            )?
+        };
 
         Ok(image_handle)
     }

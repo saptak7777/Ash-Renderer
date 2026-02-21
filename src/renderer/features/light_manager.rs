@@ -236,10 +236,12 @@ impl LightManager {
 
         // Allocate light buffers for all frames
         for frame_idx in 0..self.frame_count {
-            let (light_buffer, light_allocation) = allocator
-                .vma
-                .create_buffer(&light_buffer_info, &light_alloc_info)
-                .expect("LightManager: Light buffer allocation failed during initialization");
+            let (light_buffer, light_allocation) = unsafe {
+                allocator
+                    .vma
+                    .create_buffer(&light_buffer_info, &light_alloc_info)
+            }
+            .expect("LightManager: Light buffer allocation failed during initialization");
 
             let device_address = unsafe {
                 let address_info = vk::BufferDeviceAddressInfo::default().buffer(light_buffer);
@@ -275,10 +277,12 @@ impl LightManager {
 
         // Allocate tile buffers for all frames
         for frame_idx in 0..self.frame_count {
-            let (tile_buffer, tile_allocation) = allocator
-                .vma
-                .create_buffer(&tile_buffer_info, &tile_alloc_info)
-                .expect("LightManager: Tile buffer allocation failed");
+            let (tile_buffer, tile_allocation) = unsafe {
+                allocator
+                    .vma
+                    .create_buffer(&tile_buffer_info, &tile_alloc_info)
+            }
+            .expect("LightManager: Tile buffer allocation failed");
 
             // Zero out the tile buffer to prevent garbage data
             let tile_mapped = allocator
@@ -286,7 +290,9 @@ impl LightManager {
                 .get_allocation_info(&tile_allocation)
                 .mapped_data;
             if !tile_mapped.is_null() {
-                std::ptr::write_bytes(tile_mapped as *mut u8, 0, tile_buffer_size as usize);
+                unsafe {
+                    std::ptr::write_bytes(tile_mapped as *mut u8, 0, tile_buffer_size as usize);
+                }
             }
 
             let device_address = unsafe {
@@ -351,9 +357,11 @@ impl LightManager {
         // Destroy old buffers if they exist
         for frame_idx in 0..self.frame_count {
             if let Some(mut old_tile_buffer) = self.tile_buffers[frame_idx].take() {
-                allocator
-                    .vma
-                    .destroy_buffer(old_tile_buffer.buffer, &mut old_tile_buffer.allocation);
+                unsafe {
+                    allocator
+                        .vma
+                        .destroy_buffer(old_tile_buffer.buffer, &mut old_tile_buffer.allocation);
+                }
             }
         }
 
@@ -373,14 +381,16 @@ impl LightManager {
         };
 
         for frame_idx in 0..self.frame_count {
-            let (tile_buffer, tile_allocation) = allocator
-                .vma
-                .create_buffer(&tile_buffer_info, &tile_alloc_info)
-                .map_err(|e| {
-                    crate::AshError::VulkanError(format!(
-                        "LightManager: Tile buffer recreation failed: {e:?}"
-                    ))
-                })?;
+            let (tile_buffer, tile_allocation) = unsafe {
+                allocator
+                    .vma
+                    .create_buffer(&tile_buffer_info, &tile_alloc_info)
+            }
+            .map_err(|e| {
+                crate::AshError::VulkanError(format!(
+                    "LightManager: Tile buffer recreation failed: {e:?}"
+                ))
+            })?;
 
             // Zero out the tile buffer to prevent garbage data
             let tile_mapped = allocator
@@ -388,7 +398,9 @@ impl LightManager {
                 .get_allocation_info(&tile_allocation)
                 .mapped_data;
             if !tile_mapped.is_null() {
-                std::ptr::write_bytes(tile_mapped as *mut u8, 0, new_tile_buffer_size as usize);
+                unsafe {
+                    std::ptr::write_bytes(tile_mapped as *mut u8, 0, new_tile_buffer_size as usize);
+                }
             }
 
             let device_address = unsafe {
@@ -439,11 +451,13 @@ impl LightManager {
         if !mapped_ptr.is_null() {
             // Memory is mapped with HOST_ACCESS_SEQUENTIAL_WRITE.
             // copy_nonoverlapping is used here as we're initializing the entire buffer segment.
-            std::ptr::copy_nonoverlapping(
-                lights.as_ptr() as *const u8,
-                mapped_ptr as *mut u8,
-                data_size,
-            );
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    lights.as_ptr() as *const u8,
+                    mapped_ptr as *mut u8,
+                    data_size,
+                );
+            }
         }
 
         self.dirty = false;
@@ -490,14 +504,18 @@ impl LightManager {
     pub unsafe fn destroy_buffers(&mut self, allocator: &Allocator) {
         for frame_idx in 0..self.frame_count {
             if let Some(mut light_buffer) = self.light_buffers[frame_idx].take() {
-                allocator
-                    .vma
-                    .destroy_buffer(light_buffer.buffer, &mut light_buffer.allocation);
+                unsafe {
+                    allocator
+                        .vma
+                        .destroy_buffer(light_buffer.buffer, &mut light_buffer.allocation);
+                }
             }
             if let Some(mut tile_buffer) = self.tile_buffers[frame_idx].take() {
-                allocator
-                    .vma
-                    .destroy_buffer(tile_buffer.buffer, &mut tile_buffer.allocation);
+                unsafe {
+                    allocator
+                        .vma
+                        .destroy_buffer(tile_buffer.buffer, &mut tile_buffer.allocation);
+                }
             }
         }
         log::info!(

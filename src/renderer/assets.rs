@@ -1,7 +1,7 @@
-use crate::renderer::vram_budget::VramBudget;
-use crate::renderer::{resources, Texture, TextureInitContext};
-use crate::vulkan::{Allocator, BindlessManager};
 use crate::Result;
+use crate::renderer::vram_budget::VramBudget;
+use crate::renderer::{Texture, TextureInitContext, resources};
+use crate::vulkan::{Allocator, BindlessManager};
 use ash::vk;
 use std::collections::HashMap;
 use std::sync::Arc;

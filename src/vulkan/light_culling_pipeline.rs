@@ -93,9 +93,8 @@ impl LightCullingPipeline {
 
         let layout_info = vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings);
 
-        let descriptor_set_layout = device
-            .create_descriptor_set_layout(&layout_info, None)
-            .map_err(|e| {
+        let descriptor_set_layout =
+            unsafe { device.create_descriptor_set_layout(&layout_info, None) }.map_err(|e| {
                 AshError::VulkanError(format!("Failed to create descriptor set layout: {e}"))
             })?;
 
@@ -119,8 +118,7 @@ impl LightCullingPipeline {
             .pool_sizes(&pool_sizes)
             .max_sets(1);
 
-        let descriptor_pool = device
-            .create_descriptor_pool(&pool_info, None)
+        let descriptor_pool = unsafe { device.create_descriptor_pool(&pool_info, None) }
             .map_err(|e| AshError::VulkanError(format!("Failed to create descriptor pool: {e}")))?;
 
         // Allocate descriptor set
@@ -128,35 +126,42 @@ impl LightCullingPipeline {
             .descriptor_pool(descriptor_pool)
             .set_layouts(std::slice::from_ref(&descriptor_set_layout));
 
-        let descriptor_sets = device.allocate_descriptor_sets(&alloc_info).map_err(|e| {
-            AshError::VulkanError(format!("Failed to allocate descriptor sets: {e}"))
-        })?;
+        let descriptor_sets =
+            unsafe { device.allocate_descriptor_sets(&alloc_info) }.map_err(|e| {
+                AshError::VulkanError(format!("Failed to allocate descriptor sets: {e}"))
+            })?;
 
         let descriptor_set = descriptor_sets[0];
 
         // Create buffers using VMA (consistent with rest of engine)
         // Light buffer (host-visible for CPU uploads)
-        let (light_buffer, light_buffer_alloc) = allocator.create_buffer_with_flags(
-            light_buffer_size as u64,
-            vk::BufferUsageFlags::STORAGE_BUFFER,
-            vk_mem::MemoryUsage::AutoPreferHost,
-            vk_mem::AllocationCreateFlags::HOST_ACCESS_SEQUENTIAL_WRITE,
-        )?;
+        let (light_buffer, light_buffer_alloc) = unsafe {
+            allocator.create_buffer_with_flags(
+                light_buffer_size as u64,
+                vk::BufferUsageFlags::STORAGE_BUFFER,
+                vk_mem::MemoryUsage::AutoPreferHost,
+                vk_mem::AllocationCreateFlags::HOST_ACCESS_SEQUENTIAL_WRITE,
+            )
+        }?;
 
         // Tile buffer (device-local for GPU-only access)
-        let (tile_buffer, tile_buffer_alloc) = allocator.create_buffer(
-            tile_buffer_size as u64,
-            vk::BufferUsageFlags::STORAGE_BUFFER,
-            vk_mem::MemoryUsage::AutoPreferDevice,
-        )?;
+        let (tile_buffer, tile_buffer_alloc) = unsafe {
+            allocator.create_buffer(
+                tile_buffer_size as u64,
+                vk::BufferUsageFlags::STORAGE_BUFFER,
+                vk_mem::MemoryUsage::AutoPreferDevice,
+            )
+        }?;
 
         // Camera buffer (host-visible for CPU uploads)
-        let (camera_buffer, camera_buffer_alloc) = allocator.create_buffer_with_flags(
-            camera_buffer_size as u64,
-            vk::BufferUsageFlags::UNIFORM_BUFFER,
-            vk_mem::MemoryUsage::AutoPreferHost,
-            vk_mem::AllocationCreateFlags::HOST_ACCESS_SEQUENTIAL_WRITE,
-        )?;
+        let (camera_buffer, camera_buffer_alloc) = unsafe {
+            allocator.create_buffer_with_flags(
+                camera_buffer_size as u64,
+                vk::BufferUsageFlags::UNIFORM_BUFFER,
+                vk_mem::MemoryUsage::AutoPreferHost,
+                vk_mem::AllocationCreateFlags::HOST_ACCESS_SEQUENTIAL_WRITE,
+            )
+        }?;
 
         // Update descriptor set
         let light_buffer_info = vk::DescriptorBufferInfo {
@@ -206,7 +211,7 @@ impl LightCullingPipeline {
                 .buffer_info(std::slice::from_ref(&camera_buffer_info)),
         ];
 
-        device.update_descriptor_sets(&writes, &[]);
+        unsafe { device.update_descriptor_sets(&writes, &[]) };
 
         // Create push constant range
         let push_constant_range = vk::PushConstantRange {
@@ -216,11 +221,13 @@ impl LightCullingPipeline {
         };
 
         // Create compute pipeline
-        let pipeline = ComputePipeline::builder(Arc::clone(&device))
-            .with_shader(shader_module)
-            .add_set_layout(descriptor_set_layout)
-            .add_push_constant(push_constant_range)
-            .build()?;
+        let pipeline = unsafe {
+            ComputePipeline::builder(Arc::clone(&device))
+                .with_shader(shader_module)
+                .add_set_layout(descriptor_set_layout)
+                .add_push_constant(push_constant_range)
+                .build()
+        }?;
 
         log::info!("Light culling pipeline created ({tiles_x}x{tiles_y} tiles)");
 
@@ -245,19 +252,19 @@ impl LightCullingPipeline {
     /// # Safety
     /// Memory mapping requires external synchronization and valid buffer.
     pub unsafe fn upload_lights(&mut self, lights: &[GpuLight]) -> Result<()> {
-        let data_ptr = self
-            .allocator
-            .vma
-            .map_memory(&mut self.light_buffer_alloc)
+        let data_ptr = unsafe { self.allocator.vma.map_memory(&mut self.light_buffer_alloc) }
             .map_err(|e| AshError::VulkanError(format!("Failed to map memory: {e:?}")))?;
 
-        let slice =
-            std::slice::from_raw_parts_mut(data_ptr as *mut GpuLight, lights.len().min(MAX_LIGHTS));
+        let slice = unsafe {
+            std::slice::from_raw_parts_mut(data_ptr as *mut GpuLight, lights.len().min(MAX_LIGHTS))
+        };
         slice.copy_from_slice(&lights[..slice.len()]);
 
-        self.allocator
-            .vma
-            .unmap_memory(&mut self.light_buffer_alloc);
+        unsafe {
+            self.allocator
+                .vma
+                .unmap_memory(&mut self.light_buffer_alloc);
+        }
         Ok(())
     }
 
@@ -265,17 +272,22 @@ impl LightCullingPipeline {
     /// # Safety
     /// Memory mapping requires external synchronization and valid buffer.
     pub unsafe fn upload_camera(&mut self, camera: &CullingCameraData) -> Result<()> {
-        let data_ptr = self
-            .allocator
-            .vma
-            .map_memory(&mut self.camera_buffer_alloc)
+        let data_ptr = unsafe { self.allocator.vma.map_memory(&mut self.camera_buffer_alloc) }
             .map_err(|e| AshError::VulkanError(format!("Failed to map memory: {e:?}")))?;
 
-        std::ptr::copy_nonoverlapping(camera as *const _, data_ptr as *mut CullingCameraData, 1);
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                camera as *const _,
+                data_ptr as *mut CullingCameraData,
+                1,
+            );
+        }
 
-        self.allocator
-            .vma
-            .unmap_memory(&mut self.camera_buffer_alloc);
+        unsafe {
+            self.allocator
+                .vma
+                .unmap_memory(&mut self.camera_buffer_alloc);
+        }
         Ok(())
     }
 
@@ -289,32 +301,40 @@ impl LightCullingPipeline {
         tiles_y: u32,
         push_constants: &LightCullingPushConstants,
     ) {
-        self.device.cmd_bind_pipeline(
-            command_buffer,
-            vk::PipelineBindPoint::COMPUTE,
-            self.pipeline.handle(),
-        );
+        unsafe {
+            self.device.cmd_bind_pipeline(
+                command_buffer,
+                vk::PipelineBindPoint::COMPUTE,
+                self.pipeline.handle(),
+            );
+        }
 
-        self.device.cmd_bind_descriptor_sets(
-            command_buffer,
-            vk::PipelineBindPoint::COMPUTE,
-            self.pipeline.layout(),
-            0,
-            &[self.descriptor_set],
-            &[],
-        );
+        unsafe {
+            self.device.cmd_bind_descriptor_sets(
+                command_buffer,
+                vk::PipelineBindPoint::COMPUTE,
+                self.pipeline.layout(),
+                0,
+                &[self.descriptor_set],
+                &[],
+            );
+        }
 
         let pc_bytes = bytemuck::bytes_of(push_constants);
-        self.device.cmd_push_constants(
-            command_buffer,
-            self.pipeline.layout(),
-            vk::ShaderStageFlags::COMPUTE,
-            0,
-            pc_bytes,
-        );
+        unsafe {
+            self.device.cmd_push_constants(
+                command_buffer,
+                self.pipeline.layout(),
+                vk::ShaderStageFlags::COMPUTE,
+                0,
+                pc_bytes,
+            );
+        }
 
-        self.device
-            .cmd_dispatch(command_buffer, tiles_x, tiles_y, 1);
+        unsafe {
+            self.device
+                .cmd_dispatch(command_buffer, tiles_x, tiles_y, 1);
+        }
 
         // Memory barrier to ensure tile buffer writes are visible to fragment shader
         let barrier = vk::BufferMemoryBarrier::default()
@@ -324,15 +344,17 @@ impl LightCullingPipeline {
             .offset(0)
             .size(vk::WHOLE_SIZE);
 
-        self.device.cmd_pipeline_barrier(
-            command_buffer,
-            vk::PipelineStageFlags::COMPUTE_SHADER,
-            vk::PipelineStageFlags::FRAGMENT_SHADER,
-            vk::DependencyFlags::empty(),
-            &[],
-            &[barrier],
-            &[],
-        );
+        unsafe {
+            self.device.cmd_pipeline_barrier(
+                command_buffer,
+                vk::PipelineStageFlags::COMPUTE_SHADER,
+                vk::PipelineStageFlags::FRAGMENT_SHADER,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[barrier],
+                &[],
+            );
+        }
     }
 
     /// Get tile buffer for fragment shader binding

@@ -44,9 +44,10 @@ impl TransferContext {
             .queue_family_index(transfer_queue_family)
             .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER);
 
-        let command_pool = device.create_command_pool(&pool_info, None).map_err(|e| {
-            AshError::VulkanError(format!("Failed to create transfer command pool: {e:?}"))
-        })?;
+        let command_pool =
+            unsafe { device.create_command_pool(&pool_info, None) }.map_err(|e| {
+                AshError::VulkanError(format!("Failed to create transfer command pool: {e:?}"))
+            })?;
 
         // Create timeline semaphore for synchronization
         let mut timeline_info = vk::SemaphoreTypeCreateInfo::default()
@@ -55,8 +56,7 @@ impl TransferContext {
 
         let semaphore_info = vk::SemaphoreCreateInfo::default().push_next(&mut timeline_info);
 
-        let timeline_semaphore = device
-            .create_semaphore(&semaphore_info, None)
+        let timeline_semaphore = unsafe { device.create_semaphore(&semaphore_info, None) }
             .map_err(|e| {
                 AshError::VulkanError(format!("Failed to create timeline semaphore: {e:?}"))
             })?;
@@ -90,10 +90,8 @@ impl TransferContext {
         let size = std::mem::size_of_val(data) as vk::DeviceSize;
 
         // Create staging buffer
-        let (staging_buffer, mut staging_alloc) = self
-            .allocator
-            .vma
-            .create_buffer(
+        let (staging_buffer, mut staging_alloc) = unsafe {
+            self.allocator.vma.create_buffer(
                 &vk::BufferCreateInfo::default()
                     .size(size)
                     .usage(vk::BufferUsageFlags::TRANSFER_SRC)
@@ -104,20 +102,22 @@ impl TransferContext {
                     ..Default::default()
                 },
             )
-            .map_err(|e| {
-                AshError::VulkanError(format!("Failed to create staging buffer: {e:?}"))
-            })?;
+        }
+        .map_err(|e| AshError::VulkanError(format!("Failed to create staging buffer: {e:?}")))?;
 
         // Copy data to staging
         {
-            let mut guard = self
-                .allocator
-                .map_allocation_guarded(&mut staging_alloc, size)?;
-            std::ptr::copy_nonoverlapping(
-                data.as_ptr() as *const u8,
-                guard.as_mut_ptr(),
-                size as usize,
-            );
+            let mut guard = unsafe {
+                self.allocator
+                    .map_allocation_guarded(&mut staging_alloc, size)
+            }?;
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    data.as_ptr() as *const u8,
+                    guard.as_mut_ptr(),
+                    size as usize,
+                );
+            }
         }
 
         // Allocate command buffer
@@ -126,10 +126,8 @@ impl TransferContext {
             .level(vk::CommandBufferLevel::PRIMARY)
             .command_buffer_count(1);
 
-        let cmd_buffers = self
-            .device
-            .allocate_command_buffers(&alloc_info)
-            .map_err(|e| {
+        let cmd_buffers =
+            unsafe { self.device.allocate_command_buffers(&alloc_info) }.map_err(|e| {
                 AshError::VulkanError(format!("Failed to allocate command buffer: {e:?}"))
             })?;
         let cmd = cmd_buffers[0];
@@ -138,8 +136,7 @@ impl TransferContext {
         let begin_info = vk::CommandBufferBeginInfo::default()
             .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
 
-        self.device
-            .begin_command_buffer(cmd, &begin_info)
+        unsafe { self.device.begin_command_buffer(cmd, &begin_info) }
             .map_err(|e| AshError::VulkanError(format!("Failed to begin command buffer: {e:?}")))?;
 
         let copy_region = vk::BufferCopy::default()
@@ -147,11 +144,12 @@ impl TransferContext {
             .dst_offset(0)
             .size(size);
 
-        self.device
-            .cmd_copy_buffer(cmd, staging_buffer, dst_buffer, &[copy_region]);
+        unsafe {
+            self.device
+                .cmd_copy_buffer(cmd, staging_buffer, dst_buffer, &[copy_region]);
+        }
 
-        self.device
-            .end_command_buffer(cmd)
+        unsafe { self.device.end_command_buffer(cmd) }
             .map_err(|e| AshError::VulkanError(format!("Failed to end command buffer: {e:?}")))?;
 
         // Increment timeline value
@@ -171,9 +169,11 @@ impl TransferContext {
             .signal_semaphores(&semaphores)
             .push_next(&mut timeline_submit_info);
 
-        self.device
-            .queue_submit(self.transfer_queue, &[submit_info], vk::Fence::null())
-            .map_err(|e| AshError::VulkanError(format!("Failed to submit transfer: {e:?}")))?;
+        unsafe {
+            self.device
+                .queue_submit(self.transfer_queue, &[submit_info], vk::Fence::null())
+        }
+        .map_err(|e| AshError::VulkanError(format!("Failed to submit transfer: {e:?}")))?;
 
         // Track operation for cleanup
         self.pending_operations

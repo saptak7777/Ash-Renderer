@@ -2,7 +2,7 @@ use ash::vk;
 use std::sync::Arc;
 
 use crate::renderer::types::TextureInitContext;
-use crate::{vulkan, AshError, Result};
+use crate::{AshError, Result, vulkan};
 
 /// CPU-side texture data ready for GPU upload (RGBA8)
 #[derive(Clone, Debug)]
@@ -95,17 +95,23 @@ impl Texture {
         }
 
         // 1. Create Staging Buffer and upload data
-        let (staging_buffer, mut staging_alloc) = allocator.create_buffer_with_flags(
-            image_size,
-            vk::BufferUsageFlags::TRANSFER_SRC,
-            vk_mem::MemoryUsage::AutoPreferHost,
-            vk_mem::AllocationCreateFlags::HOST_ACCESS_SEQUENTIAL_WRITE,
-        )?;
+        let (staging_buffer, mut staging_alloc) = unsafe {
+            allocator.create_buffer_with_flags(
+                image_size,
+                vk::BufferUsageFlags::TRANSFER_SRC,
+                vk_mem::MemoryUsage::AutoPreferHost,
+                vk_mem::AllocationCreateFlags::HOST_ACCESS_SEQUENTIAL_WRITE,
+            )?
+        };
 
         {
-            let guard = allocator.vma.map_memory(&mut staging_alloc)?;
-            std::ptr::copy_nonoverlapping(data.as_ptr(), guard, data.len());
-            allocator.vma.unmap_memory(&mut staging_alloc);
+            let guard = unsafe { allocator.vma.map_memory(&mut staging_alloc)? };
+            unsafe {
+                std::ptr::copy_nonoverlapping(data.as_ptr(), guard, data.len());
+            }
+            unsafe {
+                allocator.vma.unmap_memory(&mut staging_alloc);
+            }
         }
 
         // 2. Create Cubemap Image
@@ -127,7 +133,7 @@ impl Texture {
             .initial_layout(vk::ImageLayout::UNDEFINED);
 
         let (image, allocation) =
-            allocator.create_image(&image_info, vk_mem::MemoryUsage::AutoPreferDevice)?;
+            unsafe { allocator.create_image(&image_info, vk_mem::MemoryUsage::AutoPreferDevice)? };
 
         let bytes_per_pixel = match format {
             vk::Format::R32G32B32A32_SFLOAT => 16,
@@ -136,100 +142,102 @@ impl Texture {
             _ => {
                 return Err(crate::AshError::VulkanError(format!(
                     "Unsupported texture format for bytes_per_pixel calculation: {format:?}"
-                )))
+                )));
             }
         };
 
         // 3. Transition to Transfer Destiny and Copy
-        vulkan::utils::execute_single_use_fenced(&device, command_pool, queue, |cmd| {
-            // Transition ALL layers and mips to TRANSFER_DST_OPTIMAL
-            let layout_barrier = vk::ImageMemoryBarrier::default()
-                .src_access_mask(vk::AccessFlags::empty())
-                .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE)
-                .old_layout(vk::ImageLayout::UNDEFINED)
-                .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
-                .image(image)
-                .subresource_range(
-                    vk::ImageSubresourceRange::default()
-                        .aspect_mask(vk::ImageAspectFlags::COLOR)
-                        .base_mip_level(0)
-                        .level_count(mip_levels)
-                        .base_array_layer(0)
-                        .layer_count(6),
+        unsafe {
+            vulkan::utils::execute_single_use_fenced(&device, command_pool, queue, |cmd| {
+                // Transition ALL layers and mips to TRANSFER_DST_OPTIMAL
+                let layout_barrier = vk::ImageMemoryBarrier::default()
+                    .src_access_mask(vk::AccessFlags::empty())
+                    .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                    .old_layout(vk::ImageLayout::UNDEFINED)
+                    .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                    .image(image)
+                    .subresource_range(
+                        vk::ImageSubresourceRange::default()
+                            .aspect_mask(vk::ImageAspectFlags::COLOR)
+                            .base_mip_level(0)
+                            .level_count(mip_levels)
+                            .base_array_layer(0)
+                            .layer_count(6),
+                    );
+
+                device.cmd_pipeline_barrier(
+                    cmd,
+                    vk::PipelineStageFlags::TOP_OF_PIPE,
+                    vk::PipelineStageFlags::TRANSFER,
+                    vk::DependencyFlags::empty(),
+                    &[],
+                    &[],
+                    &[layout_barrier],
                 );
 
-            device.cmd_pipeline_barrier(
-                cmd,
-                vk::PipelineStageFlags::TOP_OF_PIPE,
-                vk::PipelineStageFlags::TRANSFER,
-                vk::DependencyFlags::empty(),
-                &[],
-                &[],
-                &[layout_barrier],
-            );
+                // Copy all mips and faces
+                let mut regions = Vec::new();
+                let mut offset = 0;
+                // Note: bytes_per_pixel is calculated outside closure for correctness
+                for mip in 0..mip_levels {
+                    let mip_res = (resolution >> mip).max(1);
+                    let face_size = (mip_res * mip_res * bytes_per_pixel) as u64;
 
-            // Copy all mips and faces
-            let mut regions = Vec::new();
-            let mut offset = 0;
-            // Note: bytes_per_pixel is calculated outside closure for correctness
-            for mip in 0..mip_levels {
-                let mip_res = (resolution >> mip).max(1);
-                let face_size = (mip_res * mip_res * bytes_per_pixel) as u64;
-
-                for face in 0..6 {
-                    let region = vk::BufferImageCopy::default()
-                        .buffer_offset(offset)
-                        .image_subresource(
-                            vk::ImageSubresourceLayers::default()
-                                .aspect_mask(vk::ImageAspectFlags::COLOR)
-                                .mip_level(mip)
-                                .base_array_layer(face)
-                                .layer_count(1),
-                        )
-                        .image_extent(vk::Extent3D {
-                            width: mip_res,
-                            height: mip_res,
-                            depth: 1,
-                        });
-                    regions.push(region);
-                    offset += face_size;
+                    for face in 0..6 {
+                        let region = vk::BufferImageCopy::default()
+                            .buffer_offset(offset)
+                            .image_subresource(
+                                vk::ImageSubresourceLayers::default()
+                                    .aspect_mask(vk::ImageAspectFlags::COLOR)
+                                    .mip_level(mip)
+                                    .base_array_layer(face)
+                                    .layer_count(1),
+                            )
+                            .image_extent(vk::Extent3D {
+                                width: mip_res,
+                                height: mip_res,
+                                depth: 1,
+                            });
+                        regions.push(region);
+                        offset += face_size;
+                    }
                 }
-            }
 
-            device.cmd_copy_buffer_to_image(
-                cmd,
-                staging_buffer,
-                image,
-                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-                &regions,
-            );
-
-            // Transition to SHADER_READ_ONLY_OPTIMAL
-            let read_barrier = vk::ImageMemoryBarrier::default()
-                .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
-                .dst_access_mask(vk::AccessFlags::SHADER_READ)
-                .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
-                .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
-                .image(image)
-                .subresource_range(
-                    vk::ImageSubresourceRange::default()
-                        .aspect_mask(vk::ImageAspectFlags::COLOR)
-                        .base_mip_level(0)
-                        .level_count(mip_levels)
-                        .base_array_layer(0)
-                        .layer_count(6),
+                device.cmd_copy_buffer_to_image(
+                    cmd,
+                    staging_buffer,
+                    image,
+                    vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                    &regions,
                 );
 
-            device.cmd_pipeline_barrier(
-                cmd,
-                vk::PipelineStageFlags::TRANSFER,
-                vk::PipelineStageFlags::FRAGMENT_SHADER,
-                vk::DependencyFlags::empty(),
-                &[],
-                &[],
-                &[read_barrier],
-            );
-        })?;
+                // Transition to SHADER_READ_ONLY_OPTIMAL
+                let read_barrier = vk::ImageMemoryBarrier::default()
+                    .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                    .dst_access_mask(vk::AccessFlags::SHADER_READ)
+                    .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                    .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+                    .image(image)
+                    .subresource_range(
+                        vk::ImageSubresourceRange::default()
+                            .aspect_mask(vk::ImageAspectFlags::COLOR)
+                            .base_mip_level(0)
+                            .level_count(mip_levels)
+                            .base_array_layer(0)
+                            .layer_count(6),
+                    );
+
+                device.cmd_pipeline_barrier(
+                    cmd,
+                    vk::PipelineStageFlags::TRANSFER,
+                    vk::PipelineStageFlags::FRAGMENT_SHADER,
+                    vk::DependencyFlags::empty(),
+                    &[],
+                    &[],
+                    &[read_barrier],
+                );
+            })?
+        };
 
         // 4. Create View and Sampler
         let view_info = vk::ImageViewCreateInfo::default()
@@ -245,7 +253,7 @@ impl Texture {
                     .layer_count(6),
             );
 
-        let view = device.create_image_view(&view_info, None)?;
+        let view = unsafe { device.create_image_view(&view_info, None) }?;
 
         let sampler_info = vk::SamplerCreateInfo::default()
             .mag_filter(vk::Filter::LINEAR)
@@ -259,7 +267,7 @@ impl Texture {
             .anisotropy_enable(true)
             .max_anisotropy(16.0);
 
-        let sampler = device.create_sampler(&sampler_info, None)?;
+        let sampler = unsafe { device.create_sampler(&sampler_info, None) }?;
 
         if let Some(name) = name {
             vulkan::set_debug_object_name(
@@ -317,12 +325,14 @@ impl Texture {
         };
 
         // Staging buffer
-        let (staging_buffer, mut staging_alloc) = allocator.create_buffer_with_flags(
-            image_size,
-            vk::BufferUsageFlags::TRANSFER_SRC,
-            vk_mem::MemoryUsage::AutoPreferHost,
-            vk_mem::AllocationCreateFlags::HOST_ACCESS_SEQUENTIAL_WRITE,
-        )?;
+        let (staging_buffer, mut staging_alloc) = unsafe {
+            allocator.create_buffer_with_flags(
+                image_size,
+                vk::BufferUsageFlags::TRANSFER_SRC,
+                vk_mem::MemoryUsage::AutoPreferHost,
+                vk_mem::AllocationCreateFlags::HOST_ACCESS_SEQUENTIAL_WRITE,
+            )?
+        };
 
         {
             let mut guard =
@@ -360,7 +370,7 @@ impl Texture {
             .initial_layout(vk::ImageLayout::UNDEFINED);
 
         let (image, allocation) =
-            allocator.create_image(&image_info, vk_mem::MemoryUsage::AutoPreferDevice)?;
+            unsafe { allocator.create_image(&image_info, vk_mem::MemoryUsage::AutoPreferDevice)? };
 
         // Execute upload and mipmap generation
         vulkan::utils::execute_single_use(device.as_ref(), command_pool, queue, |cmd| {
@@ -379,15 +389,17 @@ impl Texture {
                     layer_count: 1,
                 });
 
-            device.cmd_pipeline_barrier(
-                cmd,
-                vk::PipelineStageFlags::TOP_OF_PIPE,
-                vk::PipelineStageFlags::TRANSFER,
-                vk::DependencyFlags::empty(),
-                &[],
-                &[],
-                &[barrier],
-            );
+            unsafe {
+                device.cmd_pipeline_barrier(
+                    cmd,
+                    vk::PipelineStageFlags::TOP_OF_PIPE,
+                    vk::PipelineStageFlags::TRANSFER,
+                    vk::DependencyFlags::empty(),
+                    &[],
+                    &[],
+                    &[barrier],
+                );
+            }
 
             let region = vk::BufferImageCopy {
                 buffer_offset: 0,
@@ -407,13 +419,15 @@ impl Texture {
                 },
             };
 
-            device.cmd_copy_buffer_to_image(
-                cmd,
-                staging_buffer,
-                image,
-                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-                &[region],
-            );
+            unsafe {
+                device.cmd_copy_buffer_to_image(
+                    cmd,
+                    staging_buffer,
+                    image,
+                    vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                    &[region],
+                );
+            }
 
             // Generate Mipmaps
             let mut mip_width = data.width as i32;
@@ -438,15 +452,17 @@ impl Texture {
                         layer_count: 1,
                     });
 
-                device.cmd_pipeline_barrier(
-                    cmd,
-                    vk::PipelineStageFlags::TRANSFER,
-                    vk::PipelineStageFlags::TRANSFER,
-                    vk::DependencyFlags::empty(),
-                    &[],
-                    &[],
-                    &[barrier_src],
-                );
+                unsafe {
+                    device.cmd_pipeline_barrier(
+                        cmd,
+                        vk::PipelineStageFlags::TRANSFER,
+                        vk::PipelineStageFlags::TRANSFER,
+                        vk::DependencyFlags::empty(),
+                        &[],
+                        &[],
+                        &[barrier_src],
+                    );
+                }
 
                 let blit = vk::ImageBlit {
                     src_offsets: [
@@ -479,15 +495,17 @@ impl Texture {
                     },
                 };
 
-                device.cmd_blit_image(
-                    cmd,
-                    image,
-                    vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
-                    image,
-                    vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-                    &[blit],
-                    vk::Filter::LINEAR,
-                );
+                unsafe {
+                    device.cmd_blit_image(
+                        cmd,
+                        image,
+                        vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                        image,
+                        vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                        &[blit],
+                        vk::Filter::LINEAR,
+                    );
+                }
 
                 // Transition i-1 to SHADER_READ_ONLY
                 let barrier_done = vk::ImageMemoryBarrier::default()
@@ -504,15 +522,17 @@ impl Texture {
                         layer_count: 1,
                     });
 
-                device.cmd_pipeline_barrier(
-                    cmd,
-                    vk::PipelineStageFlags::TRANSFER,
-                    vk::PipelineStageFlags::FRAGMENT_SHADER,
-                    vk::DependencyFlags::empty(),
-                    &[],
-                    &[],
-                    &[barrier_done],
-                );
+                unsafe {
+                    device.cmd_pipeline_barrier(
+                        cmd,
+                        vk::PipelineStageFlags::TRANSFER,
+                        vk::PipelineStageFlags::FRAGMENT_SHADER,
+                        vk::DependencyFlags::empty(),
+                        &[],
+                        &[],
+                        &[barrier_done],
+                    );
+                }
 
                 mip_width = next_width;
                 mip_height = next_height;
@@ -533,21 +553,25 @@ impl Texture {
                     layer_count: 1,
                 });
 
-            device.cmd_pipeline_barrier(
-                cmd,
-                vk::PipelineStageFlags::TRANSFER,
-                vk::PipelineStageFlags::FRAGMENT_SHADER,
-                vk::DependencyFlags::empty(),
-                &[],
-                &[],
-                &[barrier_last],
-            );
+            unsafe {
+                device.cmd_pipeline_barrier(
+                    cmd,
+                    vk::PipelineStageFlags::TRANSFER,
+                    vk::PipelineStageFlags::FRAGMENT_SHADER,
+                    vk::DependencyFlags::empty(),
+                    &[],
+                    &[],
+                    &[barrier_last],
+                );
+            }
         })?;
 
         // Cleanup staging buffer
-        allocator
-            .vma
-            .destroy_buffer(staging_buffer, &mut staging_alloc);
+        unsafe {
+            allocator
+                .vma
+                .destroy_buffer(staging_buffer, &mut staging_alloc);
+        }
 
         // Create image view
         let view_info = vk::ImageViewCreateInfo::default()
@@ -562,7 +586,7 @@ impl Texture {
                 layer_count: 1,
             });
 
-        let image_view = device.create_image_view(&view_info, None)?;
+        let image_view = unsafe { device.create_image_view(&view_info, None) }?;
 
         // Create sampler
         let sampler_info = vk::SamplerCreateInfo::default()
@@ -581,7 +605,7 @@ impl Texture {
             .min_lod(0.0)
             .max_lod(mip_levels as f32); // Full Range
 
-        let sampler = device.create_sampler(&sampler_info, None)?;
+        let sampler = unsafe { device.create_sampler(&sampler_info, None) }?;
 
         if let Some(label) = name {
             vulkan::set_debug_object_name(
@@ -632,12 +656,14 @@ impl Texture {
         let queue = ctx.queue;
         let image_size = raw_data.len() as vk::DeviceSize;
 
-        let (staging_buffer, mut staging_alloc) = allocator.create_buffer_with_flags(
-            image_size,
-            vk::BufferUsageFlags::TRANSFER_SRC,
-            vk_mem::MemoryUsage::AutoPreferHost,
-            vk_mem::AllocationCreateFlags::HOST_ACCESS_SEQUENTIAL_WRITE,
-        )?;
+        let (staging_buffer, mut staging_alloc) = unsafe {
+            allocator.create_buffer_with_flags(
+                image_size,
+                vk::BufferUsageFlags::TRANSFER_SRC,
+                vk_mem::MemoryUsage::AutoPreferHost,
+                vk_mem::AllocationCreateFlags::HOST_ACCESS_SEQUENTIAL_WRITE,
+            )?
+        };
 
         unsafe {
             let mut guard = allocator.map_allocation_guarded(&mut staging_alloc, image_size)?;
@@ -667,7 +693,7 @@ impl Texture {
             .initial_layout(vk::ImageLayout::UNDEFINED);
 
         let (image, allocation) =
-            allocator.create_image(&image_info, vk_mem::MemoryUsage::AutoPreferDevice)?;
+            unsafe { allocator.create_image(&image_info, vk_mem::MemoryUsage::AutoPreferDevice)? };
 
         // Single move
         vulkan::utils::execute_single_use(device.as_ref(), command_pool, queue, |cmd| {
@@ -685,15 +711,17 @@ impl Texture {
                     layer_count: 1,
                 });
 
-            device.cmd_pipeline_barrier(
-                cmd,
-                vk::PipelineStageFlags::TOP_OF_PIPE,
-                vk::PipelineStageFlags::TRANSFER,
-                vk::DependencyFlags::empty(),
-                &[],
-                &[],
-                &[barrier_start],
-            );
+            unsafe {
+                device.cmd_pipeline_barrier(
+                    cmd,
+                    vk::PipelineStageFlags::TOP_OF_PIPE,
+                    vk::PipelineStageFlags::TRANSFER,
+                    vk::DependencyFlags::empty(),
+                    &[],
+                    &[],
+                    &[barrier_start],
+                );
+            }
 
             let region = vk::BufferImageCopy {
                 buffer_offset: 0,
@@ -713,13 +741,15 @@ impl Texture {
                 },
             };
 
-            device.cmd_copy_buffer_to_image(
-                cmd,
-                staging_buffer,
-                image,
-                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-                &[region],
-            );
+            unsafe {
+                device.cmd_copy_buffer_to_image(
+                    cmd,
+                    staging_buffer,
+                    image,
+                    vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                    &[region],
+                );
+            }
 
             let barrier_end = vk::ImageMemoryBarrier::default()
                 .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
@@ -735,20 +765,24 @@ impl Texture {
                     layer_count: 1,
                 });
 
-            device.cmd_pipeline_barrier(
-                cmd,
-                vk::PipelineStageFlags::TRANSFER,
-                vk::PipelineStageFlags::FRAGMENT_SHADER,
-                vk::DependencyFlags::empty(),
-                &[],
-                &[],
-                &[barrier_end],
-            );
+            unsafe {
+                device.cmd_pipeline_barrier(
+                    cmd,
+                    vk::PipelineStageFlags::TRANSFER,
+                    vk::PipelineStageFlags::FRAGMENT_SHADER,
+                    vk::DependencyFlags::empty(),
+                    &[],
+                    &[],
+                    &[barrier_end],
+                );
+            }
         })?;
 
-        allocator
-            .vma
-            .destroy_buffer(staging_buffer, &mut staging_alloc);
+        unsafe {
+            allocator
+                .vma
+                .destroy_buffer(staging_buffer, &mut staging_alloc);
+        }
 
         let view_info = vk::ImageViewCreateInfo::default()
             .image(image)
@@ -762,7 +796,7 @@ impl Texture {
                 layer_count: 1,
             });
 
-        let view = device.create_image_view(&view_info, None)?;
+        let view = unsafe { device.create_image_view(&view_info, None) }?;
 
         let sampler_info = vk::SamplerCreateInfo::default()
             .mag_filter(vk::Filter::LINEAR)
@@ -774,7 +808,7 @@ impl Texture {
             .min_lod(0.0)
             .max_lod(info.mip_levels as f32);
 
-        let sampler = device.create_sampler(&sampler_info, None)?;
+        let sampler = unsafe { device.create_sampler(&sampler_info, None) }?;
 
         if let Some(label) = info.name {
             log::info!(
@@ -829,12 +863,14 @@ impl Texture {
         let mip_levels = mips.len() as u32;
 
         // Staging buffer
-        let (staging_buffer, mut staging_alloc) = allocator.create_buffer_with_flags(
-            total_size as vk::DeviceSize,
-            vk::BufferUsageFlags::TRANSFER_SRC,
-            vk_mem::MemoryUsage::AutoPreferHost,
-            vk_mem::AllocationCreateFlags::HOST_ACCESS_SEQUENTIAL_WRITE,
-        )?;
+        let (staging_buffer, mut staging_alloc) = unsafe {
+            allocator.create_buffer_with_flags(
+                total_size as vk::DeviceSize,
+                vk::BufferUsageFlags::TRANSFER_SRC,
+                vk_mem::MemoryUsage::AutoPreferHost,
+                vk_mem::AllocationCreateFlags::HOST_ACCESS_SEQUENTIAL_WRITE,
+            )?
+        };
 
         {
             let mut guard = unsafe {
@@ -874,7 +910,7 @@ impl Texture {
             .initial_layout(vk::ImageLayout::UNDEFINED);
 
         let (image, allocation) =
-            allocator.create_image(&image_info, vk_mem::MemoryUsage::AutoPreferDevice)?;
+            unsafe { allocator.create_image(&image_info, vk_mem::MemoryUsage::AutoPreferDevice)? };
 
         // Upload
         vulkan::utils::execute_single_use(device.as_ref(), command_pool, queue, |cmd| {
@@ -893,15 +929,17 @@ impl Texture {
                     layer_count: 1,
                 });
 
-            device.cmd_pipeline_barrier(
-                cmd,
-                vk::PipelineStageFlags::TOP_OF_PIPE,
-                vk::PipelineStageFlags::TRANSFER,
-                vk::DependencyFlags::empty(),
-                &[],
-                &[],
-                &[barrier],
-            );
+            unsafe {
+                device.cmd_pipeline_barrier(
+                    cmd,
+                    vk::PipelineStageFlags::TOP_OF_PIPE,
+                    vk::PipelineStageFlags::TRANSFER,
+                    vk::DependencyFlags::empty(),
+                    &[],
+                    &[],
+                    &[barrier],
+                );
+            }
 
             // Copy regions
             let mut regions = Vec::with_capacity(mip_levels as usize);
@@ -938,13 +976,15 @@ impl Texture {
                 }
             }
 
-            device.cmd_copy_buffer_to_image(
-                cmd,
-                staging_buffer,
-                image,
-                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-                &regions,
-            );
+            unsafe {
+                device.cmd_copy_buffer_to_image(
+                    cmd,
+                    staging_buffer,
+                    image,
+                    vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                    &regions,
+                );
+            }
 
             // Transition to SHADER_READ_ONLY
             let barrier_done = vk::ImageMemoryBarrier::default()
@@ -961,21 +1001,25 @@ impl Texture {
                     layer_count: 1,
                 });
 
-            device.cmd_pipeline_barrier(
-                cmd,
-                vk::PipelineStageFlags::TRANSFER,
-                vk::PipelineStageFlags::FRAGMENT_SHADER,
-                vk::DependencyFlags::empty(),
-                &[],
-                &[],
-                &[barrier_done],
-            );
+            unsafe {
+                device.cmd_pipeline_barrier(
+                    cmd,
+                    vk::PipelineStageFlags::TRANSFER,
+                    vk::PipelineStageFlags::FRAGMENT_SHADER,
+                    vk::DependencyFlags::empty(),
+                    &[],
+                    &[],
+                    &[barrier_done],
+                );
+            }
         })?;
 
         // Cleanup staging
-        allocator
-            .vma
-            .destroy_buffer(staging_buffer, &mut staging_alloc);
+        unsafe {
+            allocator
+                .vma
+                .destroy_buffer(staging_buffer, &mut staging_alloc);
+        }
 
         // View & Sampler
         let view_info = vk::ImageViewCreateInfo::default()
@@ -990,7 +1034,7 @@ impl Texture {
                 layer_count: 1,
             });
 
-        let image_view = device.create_image_view(&view_info, None)?;
+        let image_view = unsafe { device.create_image_view(&view_info, None)? };
 
         let sampler_info = vk::SamplerCreateInfo::default()
             .mag_filter(vk::Filter::LINEAR)
@@ -1008,7 +1052,7 @@ impl Texture {
             .min_lod(0.0)
             .max_lod(info.mip_levels as f32);
 
-        let sampler = device.create_sampler(&sampler_info, None)?;
+        let sampler = unsafe { device.create_sampler(&sampler_info, None)? };
 
         if let Some(label) = info.name {
             log::info!(

@@ -10,8 +10,8 @@
 use ash::vk;
 use std::sync::Arc;
 
-use crate::vulkan::VulkanDevice;
 use crate::Result;
+use crate::vulkan::VulkanDevice;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -603,22 +603,24 @@ impl VsrPass {
         self.render_w = rw;
         self.render_h = rh;
 
-        self.create_motion_image(alloc).map_err(VsrError::Vulkan)?;
-        self.create_history_images(alloc)
-            .map_err(VsrError::Vulkan)?;
-        self.create_metrics_buffers(alloc)
-            .map_err(VsrError::Vulkan)?;
-        self.create_sampler().map_err(VsrError::Vulkan)?;
-        self.create_descriptors(bindless_manager)
-            .map_err(VsrError::Vulkan)?;
-        self.create_pipeline(bindless_manager)
-            .map_err(VsrError::Vulkan)?;
+        unsafe {
+            self.create_motion_image(alloc).map_err(VsrError::Vulkan)?;
+            self.create_history_images(alloc)
+                .map_err(VsrError::Vulkan)?;
+            self.create_metrics_buffers(alloc)
+                .map_err(VsrError::Vulkan)?;
+            self.create_sampler().map_err(VsrError::Vulkan)?;
+            self.create_descriptors(bindless_manager)
+                .map_err(VsrError::Vulkan)?;
+            self.create_pipeline(bindless_manager)
+                .map_err(VsrError::Vulkan)?;
 
-        // Create sharpening resources
-        self.create_sharpening_resources(alloc)
-            .map_err(VsrError::Vulkan)?;
-        self.create_sharpening_pipeline(bindless_manager)
-            .map_err(VsrError::Vulkan)?;
+            // Create sharpening resources
+            self.create_sharpening_resources(alloc)
+                .map_err(VsrError::Vulkan)?;
+            self.create_sharpening_pipeline(bindless_manager)
+                .map_err(VsrError::Vulkan)?;
+        }
 
         self.initialized = true;
         Ok(())
@@ -641,8 +643,7 @@ impl VsrPass {
             ..Default::default()
         };
 
-        let (buffer, allocation) = alloc
-            .create_buffer(&buffer_info, &alloc_info)
+        let (buffer, allocation) = unsafe { alloc.create_buffer(&buffer_info, &alloc_info) }
             .map_err(|e| crate::AshError::VulkanError(format!("Metrics buffer: {e:?}")))?;
 
         self.metrics_buffer = buffer;
@@ -650,7 +651,7 @@ impl VsrPass {
 
         // Get BDA Address
         let addr_info = vk::BufferDeviceAddressInfo::default().buffer(buffer);
-        self.metrics_ptr = self.device.get_buffer_device_address(&addr_info);
+        self.metrics_ptr = unsafe { self.device.get_buffer_device_address(&addr_info) };
 
         let readback_info = vk::BufferCreateInfo::default()
             .size(buffer_size as u64)
@@ -664,9 +665,9 @@ impl VsrPass {
             ..Default::default()
         };
 
-        let (readback_buffer, readback_allocation) = alloc
-            .create_buffer(&readback_info, &readback_alloc_info)
-            .map_err(|e| crate::AshError::VulkanError(format!("Readback buffer: {e:?}")))?;
+        let (readback_buffer, readback_allocation) =
+            unsafe { alloc.create_buffer(&readback_info, &readback_alloc_info) }
+                .map_err(|e| crate::AshError::VulkanError(format!("Readback buffer: {e:?}")))?;
 
         self.metrics_readback_buffer = readback_buffer;
         self.metrics_readback_alloc = Some(readback_allocation);
@@ -695,8 +696,7 @@ impl VsrPass {
             ..Default::default()
         };
 
-        let (img, allocation) = alloc
-            .create_image(&info, &alloc_info)
+        let (img, allocation) = unsafe { alloc.create_image(&info, &alloc_info) }
             .map_err(|e| crate::AshError::VulkanError(format!("Motion image: {e:?}")))?;
 
         self.motion_img = img;
@@ -713,7 +713,7 @@ impl VsrPass {
                     .layer_count(1),
             );
 
-        self.motion_v = self.device.create_image_view(&view_info, None)?;
+        self.motion_v = unsafe { self.device.create_image_view(&view_info, None)? };
         Ok(())
     }
 
@@ -744,8 +744,7 @@ impl VsrPass {
                 ..Default::default()
             };
 
-            let (img, allocation) = alloc
-                .create_image(&info, &alloc_info)
+            let (img, allocation) = unsafe { alloc.create_image(&info, &alloc_info) }
                 .map_err(|e| crate::AshError::VulkanError(format!("History image {i}: {e:?}")))?;
 
             self.history_imgs[i] = img;
@@ -762,7 +761,7 @@ impl VsrPass {
                         .layer_count(1),
                 );
 
-            self.history_vs[i] = self.device.create_image_view(&view_info, None)?;
+            self.history_vs[i] = unsafe { self.device.create_image_view(&view_info, None)? };
         }
         Ok(())
     }
@@ -789,8 +788,7 @@ impl VsrPass {
             ..Default::default()
         };
 
-        let (img, allocation) = alloc
-            .create_image(&info, &alloc_info)
+        let (img, allocation) = unsafe { alloc.create_image(&info, &alloc_info) }
             .map_err(|e| crate::AshError::VulkanError(format!("Sharpened image: {e:?}")))?;
 
         self.sharpened_img = img;
@@ -807,7 +805,7 @@ impl VsrPass {
                     .layer_count(1),
             );
 
-        self.sharpened_v = self.device.create_image_view(&view_info, None)?;
+        self.sharpened_v = unsafe { self.device.create_image_view(&view_info, None)? };
 
         Ok(())
     }
@@ -821,7 +819,7 @@ impl VsrPass {
             .address_mode_v(vk::SamplerAddressMode::CLAMP_TO_EDGE)
             .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_EDGE);
 
-        self.sampler = self.device.create_sampler(&info, None)?;
+        self.sampler = unsafe { self.device.create_sampler(&info, None)? };
         Ok(())
     }
 
@@ -892,9 +890,10 @@ impl VsrPass {
         let shader_code = include_bytes!(concat!(env!("OUT_DIR"), "/vsr_upscale.comp.spv"));
         let shader_module_info =
             vk::ShaderModuleCreateInfo::default().code(bytemuck::cast_slice(shader_code));
-        let shader_module = self
-            .device
-            .create_shader_module(&shader_module_info, None)?;
+        let shader_module = unsafe {
+            self.device
+                .create_shader_module(&shader_module_info, None)?
+        };
 
         let push_constant_range = vk::PushConstantRange::default()
             .stage_flags(vk::ShaderStageFlags::COMPUTE)
@@ -906,7 +905,7 @@ impl VsrPass {
             .set_layouts(std::slice::from_ref(&bindless_layout))
             .push_constant_ranges(std::slice::from_ref(&push_constant_range));
 
-        self.upscale_layout = self.device.create_pipeline_layout(&layout_info, None)?;
+        self.upscale_layout = unsafe { self.device.create_pipeline_layout(&layout_info, None)? };
 
         let stage_info = vk::PipelineShaderStageCreateInfo::default()
             .stage(vk::ShaderStageFlags::COMPUTE)
@@ -916,13 +915,16 @@ impl VsrPass {
         let pipeline_info = vk::ComputePipelineCreateInfo::default()
             .stage(stage_info)
             .layout(self.upscale_layout);
-        let pipelines = self
-            .device
-            .create_compute_pipelines(vk::PipelineCache::null(), &[pipeline_info], None)
-            .map_err(|(_, e)| e)?;
+        let pipelines = unsafe {
+            self.device
+                .create_compute_pipelines(vk::PipelineCache::null(), &[pipeline_info], None)
+                .map_err(|(_, e)| e)?
+        };
         self.upscale_pl = pipelines[0];
 
-        self.device.destroy_shader_module(shader_module, None);
+        unsafe {
+            self.device.destroy_shader_module(shader_module, None);
+        }
         Ok(())
     }
 
@@ -934,9 +936,10 @@ impl VsrPass {
         let spv_code = ash::util::read_spv(&mut std::io::Cursor::new(shader_code))
             .map_err(|e| crate::AshError::VulkanError(e.to_string()))?;
         let shader_module_info = vk::ShaderModuleCreateInfo::default().code(&spv_code);
-        let shader_module = self
-            .device
-            .create_shader_module(&shader_module_info, None)?;
+        let shader_module = unsafe {
+            self.device
+                .create_shader_module(&shader_module_info, None)?
+        };
 
         let push_constant_range = vk::PushConstantRange::default()
             .stage_flags(vk::ShaderStageFlags::COMPUTE)
@@ -948,7 +951,7 @@ impl VsrPass {
             .set_layouts(std::slice::from_ref(&bindless_layout))
             .push_constant_ranges(std::slice::from_ref(&push_constant_range));
 
-        self.sharpen_layout = self.device.create_pipeline_layout(&layout_info, None)?;
+        self.sharpen_layout = unsafe { self.device.create_pipeline_layout(&layout_info, None)? };
 
         let stage_info = vk::PipelineShaderStageCreateInfo::default()
             .stage(vk::ShaderStageFlags::COMPUTE)
@@ -958,13 +961,16 @@ impl VsrPass {
         let pipeline_info = vk::ComputePipelineCreateInfo::default()
             .stage(stage_info)
             .layout(self.sharpen_layout);
-        let pipelines = self
-            .device
-            .create_compute_pipelines(vk::PipelineCache::null(), &[pipeline_info], None)
-            .map_err(|(_, e)| e)?;
+        let pipelines = unsafe {
+            self.device
+                .create_compute_pipelines(vk::PipelineCache::null(), &[pipeline_info], None)
+                .map_err(|(_, e)| e)?
+        };
         self.sharpen_pl = pipelines[0];
 
-        self.device.destroy_shader_module(shader_module, None);
+        unsafe {
+            self.device.destroy_shader_module(shader_module, None);
+        }
         Ok(())
     }
 
@@ -1005,12 +1011,14 @@ impl VsrPass {
             .dst_offset(0)
             .size(std::mem::size_of::<u32>() as u64 * 4);
 
-        self.device.cmd_copy_buffer(
-            cmd,
-            self.metrics_buffer,
-            self.metrics_readback_buffer,
-            &[region],
-        );
+        unsafe {
+            self.device.cmd_copy_buffer(
+                cmd,
+                self.metrics_buffer,
+                self.metrics_readback_buffer,
+                &[region],
+            );
+        }
 
         // We assume the caller handles the fence/wait before actually reading the data
         // or we use host mapping if it's already finished.
@@ -1029,7 +1037,7 @@ impl VsrPass {
 
             // Safety: The caller MUST ensure the command buffer has finished execution (e.g. via fence wait)
             // before this method is called to avoid reading stale or incomplete data.
-            let data = std::slice::from_raw_parts(ptr as *const u32, 4);
+            let data = unsafe { std::slice::from_raw_parts(ptr as *const u32, 4) };
             let rejection_rate = data[0] as f32 / 1000.0;
             let avg_blend_weight = data[1] as f32 / 1000.0;
             let ghosting_score = data[2] as f32 / 1000.0;
@@ -1065,16 +1073,18 @@ impl VsrPass {
         inputs: VsrInputs,
         velocity_threshold: f32,
     ) -> Result<(), VsrError> {
-        self.upscale_with_config(
-            cmd,
-            inputs,
-            &VsrUpscaleConfig {
-                velocity_threshold,
-                history_weight: self.config.history_weight(),
-                clamping_gamma: self.config.clamping_gamma(),
-                anti_ghosting: self.config.anti_ghosting,
-            },
-        )
+        unsafe {
+            self.upscale_with_config(
+                cmd,
+                inputs,
+                &VsrUpscaleConfig {
+                    velocity_threshold,
+                    history_weight: self.config.history_weight(),
+                    clamping_gamma: self.config.clamping_gamma(),
+                    anti_ghosting: self.config.anti_ghosting,
+                },
+            )
+        }
     }
 
     /// Upscale with custom configuration overrides
@@ -1226,7 +1236,7 @@ impl VsrPass {
         upscale_config: &VsrUpscaleConfig,
         sharpen_config: Option<&SharpenConfig>,
     ) -> Result<(), VsrError> {
-        self.upscale_with_sharpening(cmd, inputs, upscale_config, sharpen_config)?;
+        unsafe { self.upscale_with_sharpening(cmd, inputs, upscale_config, sharpen_config)? };
         self.next_frame();
         Ok(())
     }
@@ -1243,13 +1253,13 @@ impl VsrPass {
         sharpen_config: Option<&SharpenConfig>,
     ) -> Result<VsrOutput, VsrError> {
         // 1. Perform upscale
-        self.upscale_with_config(cmd, inputs, upscale_config)?;
+        unsafe { self.upscale_with_config(cmd, inputs, upscale_config)? };
 
         // 2. Perform sharpening if requested
         let mut output = VsrOutput::Raw;
         if let Some(config) = sharpen_config {
             if config.strength >= 0.01 {
-                self.apply_sharpening(cmd, config)?;
+                unsafe { self.apply_sharpening(cmd, config)? };
                 output = VsrOutput::Sharpened;
             }
         }
@@ -1281,7 +1291,7 @@ impl VsrPass {
             return Err(VsrError::SharpeningNotInitialized);
         }
 
-        self.apply_sharpening_unsafe(cmd, config)
+        unsafe { self.apply_sharpening_unsafe(cmd, config) }
     }
 
     unsafe fn apply_sharpening_unsafe(
@@ -1319,44 +1329,48 @@ impl VsrPass {
                 ),
         ];
 
-        self.device.cmd_pipeline_barrier(
-            cmd,
-            vk::PipelineStageFlags::COMPUTE_SHADER,
-            vk::PipelineStageFlags::COMPUTE_SHADER,
-            vk::DependencyFlags::empty(),
-            &[],
-            &[],
-            &barriers,
-        );
+        unsafe {
+            self.device.cmd_pipeline_barrier(
+                cmd,
+                vk::PipelineStageFlags::COMPUTE_SHADER,
+                vk::PipelineStageFlags::COMPUTE_SHADER,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[],
+                &barriers,
+            );
 
-        // Bind pipeline and dispatch
-        self.device
-            .cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, self.sharpen_pl);
+            // Bind pipeline and dispatch
+            self.device
+                .cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, self.sharpen_pl);
 
-        // Bind Unified Set 0
-        self.device.cmd_bind_descriptor_sets(
-            cmd,
-            vk::PipelineBindPoint::COMPUTE,
-            self.sharpen_layout,
-            0,
-            &self.analysis_descriptor_sets,
-            &[],
-        );
+            // Bind Unified Set 0
+            self.device.cmd_bind_descriptor_sets(
+                cmd,
+                vk::PipelineBindPoint::COMPUTE,
+                self.sharpen_layout,
+                0,
+                &self.analysis_descriptor_sets,
+                &[],
+            );
+        }
 
         let pc = SharpenPushConstants::from_config(config);
         pc.validate()?;
 
-        self.device.cmd_push_constants(
-            cmd,
-            self.sharpen_layout,
-            vk::ShaderStageFlags::COMPUTE,
-            0,
-            bytemuck::bytes_of(&pc),
-        );
+        unsafe {
+            self.device.cmd_push_constants(
+                cmd,
+                self.sharpen_layout,
+                vk::ShaderStageFlags::COMPUTE,
+                0,
+                bytemuck::bytes_of(&pc),
+            );
 
-        let gx = self.display_w.div_ceil(8);
-        let gy = self.display_h.div_ceil(8);
-        self.device.cmd_dispatch(cmd, gx, gy, 1);
+            let gx = self.display_w.div_ceil(8);
+            let gy = self.display_h.div_ceil(8);
+            self.device.cmd_dispatch(cmd, gx, gy, 1);
+        }
 
         Ok(())
     }
@@ -1423,38 +1437,40 @@ impl VsrPass {
         }
         self.destroyed = true;
 
-        self.device.destroy_image_view(self.motion_v, None);
-        if let Some(mut a) = self.motion_alloc.take() {
-            allocator.destroy_image(self.motion_img, &mut a);
-        }
-
-        for i in 0..2 {
-            self.device.destroy_image_view(self.history_vs[i], None);
-            if let Some(mut a) = self.history_allocs[i].take() {
-                allocator.destroy_image(self.history_imgs[i], &mut a);
+        unsafe {
+            self.device.destroy_image_view(self.motion_v, None);
+            if let Some(mut a) = self.motion_alloc.take() {
+                allocator.destroy_image(self.motion_img, &mut a);
             }
-        }
 
-        self.device.destroy_sampler(self.sampler, None);
-        self.device.destroy_pipeline(self.upscale_pl, None);
-        self.device
-            .destroy_pipeline_layout(self.upscale_layout, None);
+            for i in 0..2 {
+                self.device.destroy_image_view(self.history_vs[i], None);
+                if let Some(mut a) = self.history_allocs[i].take() {
+                    allocator.destroy_image(self.history_imgs[i], &mut a);
+                }
+            }
 
-        if let Some(mut a) = self.metrics_alloc.take() {
-            allocator.destroy_buffer(self.metrics_buffer, &mut a);
-        }
-        if let Some(mut a) = self.metrics_readback_alloc.take() {
-            allocator.destroy_buffer(self.metrics_readback_buffer, &mut a);
-        }
+            self.device.destroy_sampler(self.sampler, None);
+            self.device.destroy_pipeline(self.upscale_pl, None);
+            self.device
+                .destroy_pipeline_layout(self.upscale_layout, None);
 
-        // Sharpening cleanup
-        self.device.destroy_image_view(self.sharpened_v, None);
-        if let Some(mut a) = self.sharpened_alloc.take() {
-            allocator.destroy_image(self.sharpened_img, &mut a);
+            if let Some(mut a) = self.metrics_alloc.take() {
+                allocator.destroy_buffer(self.metrics_buffer, &mut a);
+            }
+            if let Some(mut a) = self.metrics_readback_alloc.take() {
+                allocator.destroy_buffer(self.metrics_readback_buffer, &mut a);
+            }
+
+            // Sharpening cleanup
+            self.device.destroy_image_view(self.sharpened_v, None);
+            if let Some(mut a) = self.sharpened_alloc.take() {
+                allocator.destroy_image(self.sharpened_img, &mut a);
+            }
+            self.device.destroy_pipeline(self.sharpen_pl, None);
+            self.device
+                .destroy_pipeline_layout(self.sharpen_layout, None);
         }
-        self.device.destroy_pipeline(self.sharpen_pl, None);
-        self.device
-            .destroy_pipeline_layout(self.sharpen_layout, None);
 
         self.initialized = false;
     }

@@ -27,13 +27,15 @@ impl DepthBuffer {
         width: u32,
         height: u32,
     ) -> crate::Result<Self> {
-        Self::with_sample_count(
-            device,
-            allocator,
-            width,
-            height,
-            vk::SampleCountFlags::TYPE_1,
-        )
+        unsafe {
+            Self::with_sample_count(
+                device,
+                allocator,
+                width,
+                height,
+                vk::SampleCountFlags::TYPE_1,
+            )
+        }
     }
 
     /// Creates a new depth buffer with the given dimensions and sample count
@@ -68,8 +70,9 @@ impl DepthBuffer {
             .sharing_mode(vk::SharingMode::EXCLUSIVE)
             .initial_layout(vk::ImageLayout::UNDEFINED);
 
-        let (image, allocation) =
-            allocator.create_image(&image_create_info, vk_mem::MemoryUsage::AutoPreferDevice)?;
+        let (image, allocation) = unsafe {
+            allocator.create_image(&image_create_info, vk_mem::MemoryUsage::AutoPreferDevice)?
+        };
 
         // Create image view
         let view_create_info = vk::ImageViewCreateInfo::default()
@@ -84,7 +87,7 @@ impl DepthBuffer {
                 layer_count: 1,
             });
 
-        let view = device.create_image_view(&view_create_info, None)?;
+        let view = unsafe { device.create_image_view(&view_create_info, None)? };
 
         // Create depth sampler
         let sampler_info = vk::SamplerCreateInfo::default()
@@ -98,7 +101,7 @@ impl DepthBuffer {
             .max_lod(vk::LOD_CLAMP_NONE)
             .border_color(vk::BorderColor::FLOAT_OPAQUE_WHITE);
 
-        let sampler = device.create_sampler(&sampler_info, None)?;
+        let sampler = unsafe { device.create_sampler(&sampler_info, None)? };
 
         log::info!("Depth buffer created successfully");
 

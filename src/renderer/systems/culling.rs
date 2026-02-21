@@ -1,7 +1,7 @@
+use crate::Result;
 use crate::renderer::{
     context::Context, resources::Resources, scene::Scene, vcgs::IndirectDrawPass,
 };
-use crate::Result;
 use ash::vk;
 use std::sync::{Arc, RwLock};
 

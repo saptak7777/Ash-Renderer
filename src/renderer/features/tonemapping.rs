@@ -3,7 +3,7 @@
 //! Applies HDR to LDR tonemapping with configurable operators.
 
 use super::{FeatureFrameContext, FeatureRenderContext, RenderFeature};
-use ash::{vk, Device};
+use ash::{Device, vk};
 
 /// Tonemapping operator selection
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -121,12 +121,12 @@ impl TonemappingFeature {
         let vert_spv = ash::util::read_spv(&mut std::io::Cursor::new(vert_code))
             .map_err(|e| crate::AshError::VulkanError(format!("Tone map vert: {e}")))?;
         let vert_info = vk::ShaderModuleCreateInfo::default().code(&vert_spv);
-        let vert_module = device.create_shader_module(&vert_info, None)?;
+        let vert_module = unsafe { device.create_shader_module(&vert_info, None)? };
 
         let frag_spv = ash::util::read_spv(&mut std::io::Cursor::new(frag_code))
             .map_err(|e| crate::AshError::VulkanError(format!("Tone map frag: {e}")))?;
         let frag_info = vk::ShaderModuleCreateInfo::default().code(&frag_spv);
-        let frag_module = device.create_shader_module(&frag_info, None)?;
+        let frag_module = unsafe { device.create_shader_module(&frag_info, None)? };
 
         // Create descriptor set layout (3 sampled images: HDR, Bloom, SSGI)
         let bindings = [
@@ -150,7 +150,7 @@ impl TonemappingFeature {
         let descriptor_layout_info =
             vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings);
         let descriptor_set_layout =
-            device.create_descriptor_set_layout(&descriptor_layout_info, None)?;
+            unsafe { device.create_descriptor_set_layout(&descriptor_layout_info, None)? };
         self.descriptor_set_layout = Some(descriptor_set_layout);
 
         // Push constants for tonemapping parameters
@@ -172,7 +172,8 @@ impl TonemappingFeature {
             .set_layouts(std::slice::from_ref(&descriptor_set_layout))
             .push_constant_ranges(std::slice::from_ref(&push_constant_range));
 
-        let pipeline_layout = device.create_pipeline_layout(&pipeline_layout_info, None)?;
+        let pipeline_layout =
+            unsafe { device.create_pipeline_layout(&pipeline_layout_info, None)? };
         self.pipeline_layout = Some(pipeline_layout);
 
         // Create render pass (output to swapchain format)
@@ -198,7 +199,7 @@ impl TonemappingFeature {
             .attachments(std::slice::from_ref(&attachment))
             .subpasses(std::slice::from_ref(&subpass));
 
-        let render_pass = device.create_render_pass(&render_pass_info, None)?;
+        let render_pass = unsafe { device.create_render_pass(&render_pass_info, None)? };
         self.render_pass = Some(render_pass);
 
         // Create pipeline
@@ -266,19 +267,23 @@ impl TonemappingFeature {
             .render_pass(render_pass)
             .subpass(0);
 
-        let pipelines = device
-            .create_graphics_pipelines(
-                vk::PipelineCache::null(),
-                std::slice::from_ref(&pipeline_info),
-                None,
-            )
-            .map_err(|(_, e)| e)?;
+        let pipelines = unsafe {
+            device
+                .create_graphics_pipelines(
+                    vk::PipelineCache::null(),
+                    std::slice::from_ref(&pipeline_info),
+                    None,
+                )
+                .map_err(|(_, e)| e)?
+        };
 
         self.pipeline = Some(pipelines[0]);
 
         // Cleanup shader modules
-        device.destroy_shader_module(vert_module, None);
-        device.destroy_shader_module(frag_module, None);
+        unsafe {
+            device.destroy_shader_module(vert_module, None);
+            device.destroy_shader_module(frag_module, None);
+        }
 
         log::info!(
             "Tonemapping pipeline created (operator: {:?})",

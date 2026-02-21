@@ -64,15 +64,19 @@ impl OverlayPipeline {
             .subpasses(&subpasses)
             .dependencies(&dependencies);
 
-        let render_pass = device
-            .create_render_pass(&render_pass_info, None)
-            .map_err(|e| AshError::VulkanError(format!("Overlay render pass failed: {e}")))?;
+        let render_pass = unsafe {
+            device
+                .create_render_pass(&render_pass_info, None)
+                .map_err(|e| AshError::VulkanError(format!("Overlay render pass failed: {e}")))?
+        };
 
         // Create pipeline layout (no descriptors, no push constants)
         let pipeline_layout_info = vk::PipelineLayoutCreateInfo::default();
-        let pipeline_layout = device
-            .create_pipeline_layout(&pipeline_layout_info, None)
-            .map_err(|e| AshError::VulkanError(format!("Overlay layout failed: {e}")))?;
+        let pipeline_layout = unsafe {
+            device
+                .create_pipeline_layout(&pipeline_layout_info, None)
+                .map_err(|e| AshError::VulkanError(format!("Overlay layout failed: {e}")))?
+        };
 
         log::info!("[OverlayPipeline] Overlay pipeline created");
 

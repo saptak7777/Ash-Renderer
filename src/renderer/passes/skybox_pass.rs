@@ -1,7 +1,7 @@
 use crate::{
-    renderer::{model_renderer::UploadedMesh, ResourceId, ResourceRegistry},
-    vulkan::{self, CommandBufferContext, MultisampleConfig},
     AshError, Result,
+    renderer::{ResourceId, ResourceRegistry, model_renderer::UploadedMesh},
+    vulkan::{self, CommandBufferContext, MultisampleConfig},
 };
 use ash::vk;
 use std::sync::Arc;
@@ -173,14 +173,16 @@ impl SkyboxPass {
         cmd_ctx.bind_pipeline(vk::PipelineBindPoint::GRAPHICS, pipeline.pipeline);
 
         let sets = [bindless_set];
-        device.device.cmd_bind_descriptor_sets(
-            cmd_ctx.handle(),
-            vk::PipelineBindPoint::GRAPHICS,
-            layout.handle(),
-            0,
-            &sets,
-            &[],
-        );
+        unsafe {
+            device.device.cmd_bind_descriptor_sets(
+                cmd_ctx.handle(),
+                vk::PipelineBindPoint::GRAPHICS,
+                layout.handle(),
+                0,
+                &sets,
+                &[],
+            );
+        }
 
         let vertex_ptr = self.mesh.vertex_heap_address.unwrap_or(0);
 
@@ -199,16 +201,18 @@ impl SkyboxPass {
             vertex_heap_ptr: vertex_ptr,
         };
 
-        device.device.cmd_push_constants(
-            cmd_ctx.handle(),
-            layout.handle(),
-            vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
-            0,
-            bytemuck::bytes_of(&push),
-        );
+        unsafe {
+            device.device.cmd_push_constants(
+                cmd_ctx.handle(),
+                layout.handle(),
+                vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                0,
+                bytemuck::bytes_of(&push),
+            );
 
-        // Draw skybox (36 vertices for a cube, no index buffer needed)
-        device.device.cmd_draw(cmd_ctx.handle(), 36, 1, 0, 0);
+            // Draw skybox (36 vertices for a cube, no index buffer needed)
+            device.device.cmd_draw(cmd_ctx.handle(), 36, 1, 0, 0);
+        }
 
         Ok(())
     }

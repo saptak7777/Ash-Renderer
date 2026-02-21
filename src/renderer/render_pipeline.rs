@@ -1,9 +1,9 @@
 use crate::{
-    renderer::{
-        features::vsm::VsmManager, passes::hiz::HiZPass, systems::post_process::PostProcessSystem,
-        vcgs::IndirectDrawPass, DrawItem, ForwardPlusIntegration, Resources, Scene,
-    },
     Result,
+    renderer::{
+        DrawItem, ForwardPlusIntegration, Resources, Scene, features::vsm::VsmManager,
+        passes::hiz::HiZPass, systems::post_process::PostProcessSystem, vcgs::IndirectDrawPass,
+    },
 };
 use ash::vk;
 use std::sync::{Arc, RwLock};
@@ -171,16 +171,18 @@ impl RenderPipeline {
             return Ok(());
         }
 
-        let mut color_attachments = vec![vk::RenderingAttachmentInfo::default()
-            .image_view(ctx.color_view)
-            .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
-            .load_op(vk::AttachmentLoadOp::CLEAR)
-            .store_op(vk::AttachmentStoreOp::STORE)
-            .clear_value(vk::ClearValue {
-                color: vk::ClearColorValue {
-                    float32: [0.1, 0.1, 0.1, 1.0],
-                },
-            })];
+        let mut color_attachments = vec![
+            vk::RenderingAttachmentInfo::default()
+                .image_view(ctx.color_view)
+                .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                .load_op(vk::AttachmentLoadOp::CLEAR)
+                .store_op(vk::AttachmentStoreOp::STORE)
+                .clear_value(vk::ClearValue {
+                    color: vk::ClearColorValue {
+                        float32: [0.1, 0.1, 0.1, 1.0],
+                    },
+                }),
+        ];
 
         // G-Buffer Attachments: Clear to transparent black
         let gbuffer_clear = vk::ClearValue {
@@ -424,11 +426,11 @@ impl RenderPipeline {
         scene: &Scene,
         _frame_index: usize,
     ) -> Result<()> {
+        use crate::AshError;
+        use crate::renderer::MaterialHandle;
         use crate::renderer::model_renderer::{
             DrawContext, IndirectDrawCountParams, MaterialPushConstants,
         };
-        use crate::renderer::MaterialHandle;
-        use crate::AshError;
 
         let pipeline_handle = self
             .main_graphics_pipeline

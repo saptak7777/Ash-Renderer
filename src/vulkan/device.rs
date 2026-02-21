@@ -1,4 +1,4 @@
-use ash::{khr::swapchain, vk, Device};
+use ash::{Device, khr::swapchain, vk};
 use std::collections::HashSet;
 use std::ffi::CStr;
 use std::sync::Arc;
@@ -165,7 +165,10 @@ impl VulkanDevice {
                 sample_rate_shading_supported,
                 memory_properties,
                 properties: device_properties,
-                properties12: std::mem::transmute(properties12), // Transmute to 'static for storage
+                properties12: std::mem::transmute::<
+                    vk::PhysicalDeviceVulkan12Properties<'_>,
+                    vk::PhysicalDeviceVulkan12Properties<'static>,
+                >(properties12), // Transmute to 'static for storage
                 headless,
                 debug_utils,
             })

@@ -4,7 +4,7 @@
 //! Implements industry-standard dual-filtering bloom with firefly suppression.
 
 use super::{FeatureFrameContext, FeatureRenderContext, RenderFeature};
-use ash::{vk, Device};
+use ash::{Device, vk};
 
 /// Push constants for bloom shaders, corresponding to the GLSL layout.
 #[repr(C)]
@@ -292,28 +292,29 @@ impl BloomFeature {
             crate::AshError::VulkanError(format!("Failed to parse vertex shader: {e}"))
         })?;
         let vert_info = vk::ShaderModuleCreateInfo::default().code(&vert_spv);
-        let vert_module = device.create_shader_module(&vert_info, None)?;
+        let vert_module = unsafe { device.create_shader_module(&vert_info, None)? };
 
         let prefilter_spv = ash::util::read_spv(&mut std::io::Cursor::new(prefilter_frag_code))
             .map_err(|e| {
                 crate::AshError::VulkanError(format!("Failed to parse bloom prefilter shader: {e}"))
             })?;
         let prefilter_info = vk::ShaderModuleCreateInfo::default().code(&prefilter_spv);
-        let prefilter_frag_module = device.create_shader_module(&prefilter_info, None)?;
+        let prefilter_frag_module = unsafe { device.create_shader_module(&prefilter_info, None)? };
 
         let downsample_spv = ash::util::read_spv(&mut std::io::Cursor::new(downsample_frag_code))
             .map_err(|e| {
             crate::AshError::VulkanError(format!("Failed to parse bloom downsample shader: {e}"))
         })?;
         let downsample_info = vk::ShaderModuleCreateInfo::default().code(&downsample_spv);
-        let downsample_frag_module = device.create_shader_module(&downsample_info, None)?;
+        let downsample_frag_module =
+            unsafe { device.create_shader_module(&downsample_info, None)? };
 
         let upsample_spv = ash::util::read_spv(&mut std::io::Cursor::new(upsample_frag_code))
             .map_err(|e| {
                 crate::AshError::VulkanError(format!("Failed to parse bloom upsample shader: {e}"))
             })?;
         let upsample_info = vk::ShaderModuleCreateInfo::default().code(&upsample_spv);
-        let upsample_frag_module = device.create_shader_module(&upsample_info, None)?;
+        let upsample_frag_module = unsafe { device.create_shader_module(&upsample_info, None)? };
 
         // Create descriptor set layout (1 sampled image)
         let bindings = [vk::DescriptorSetLayoutBinding::default()
@@ -325,7 +326,7 @@ impl BloomFeature {
         let descriptor_layout_info =
             vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings);
         let descriptor_set_layout =
-            device.create_descriptor_set_layout(&descriptor_layout_info, None)?;
+            unsafe { device.create_descriptor_set_layout(&descriptor_layout_info, None)? };
         self.descriptor_set_layout = Some(descriptor_set_layout);
 
         // Create pipeline layout with push constants
@@ -338,7 +339,8 @@ impl BloomFeature {
             .set_layouts(std::slice::from_ref(&descriptor_set_layout))
             .push_constant_ranges(std::slice::from_ref(&push_constant_range));
 
-        let pipeline_layout = device.create_pipeline_layout(&pipeline_layout_info, None)?;
+        let pipeline_layout =
+            unsafe { device.create_pipeline_layout(&pipeline_layout_info, None)? };
         self.pipeline_layout = Some(pipeline_layout);
 
         // Create render pass (single color attachment, no depth)
@@ -364,7 +366,7 @@ impl BloomFeature {
             .attachments(std::slice::from_ref(&attachment))
             .subpasses(std::slice::from_ref(&subpass));
 
-        let render_pass = device.create_render_pass(&render_pass_info, None)?;
+        let render_pass = unsafe { device.create_render_pass(&render_pass_info, None)? };
         self.render_pass = Some(render_pass);
 
         // Common pipeline state (fullscreen triangle, no vertex input)
@@ -506,19 +508,22 @@ impl BloomFeature {
 
         // Create all pipelines
         let pipeline_infos = [prefilter_info, downsample_info, upsample_info];
-        let pipelines = device
-            .create_graphics_pipelines(vk::PipelineCache::null(), &pipeline_infos, None)
-            .map_err(|(_, e)| e)?;
+        let pipelines = unsafe {
+            device.create_graphics_pipelines(vk::PipelineCache::null(), &pipeline_infos, None)
+        }
+        .map_err(|(_, e)| e)?;
 
         self.prefilter_pipeline = Some(pipelines[0]);
         self.downsample_pipeline = Some(pipelines[1]);
         self.upsample_pipeline = Some(pipelines[2]);
 
         // Cleanup shader modules
-        device.destroy_shader_module(vert_module, None);
-        device.destroy_shader_module(prefilter_frag_module, None);
-        device.destroy_shader_module(downsample_frag_module, None);
-        device.destroy_shader_module(upsample_frag_module, None);
+        unsafe {
+            device.destroy_shader_module(vert_module, None);
+            device.destroy_shader_module(prefilter_frag_module, None);
+            device.destroy_shader_module(downsample_frag_module, None);
+            device.destroy_shader_module(upsample_frag_module, None);
+        }
 
         log::info!("Bloom pipelines created");
         Ok(())

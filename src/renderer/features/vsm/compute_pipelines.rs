@@ -3,8 +3,8 @@
 use ash::vk;
 use std::sync::Arc;
 
-use crate::vulkan::ComputePipeline;
 use crate::Result;
+use crate::vulkan::ComputePipeline;
 
 /// VSM compute pipeline manager
 pub struct VsmComputePipelines {
@@ -30,32 +30,39 @@ impl VsmComputePipelines {
 
         // 1. Clear Pipeline
         let clear_shader = include_bytes!(concat!(env!("OUT_DIR"), "/clear.glsl.spv"));
-        let clear_module = device
-            .create_shader_module(
-                &vk::ShaderModuleCreateInfo::default().code(bytemuck::cast_slice(clear_shader)),
-                None,
-            )
-            .map_err(|e| {
-                crate::AshError::VulkanError(format!("Failed to create clear shader: {e}"))
-            })?;
+        let clear_module = unsafe {
+            device
+                .create_shader_module(
+                    &vk::ShaderModuleCreateInfo::default().code(bytemuck::cast_slice(clear_shader)),
+                    None,
+                )
+                .map_err(|e| {
+                    crate::AshError::VulkanError(format!("Failed to create clear shader: {e}"))
+                })?
+        };
 
-        let clear = ComputePipeline::builder(Arc::clone(&device))
-            .add_set_layout(descriptor_layout)
-            .with_shader(clear_module)
-            .with_entry_point("main")
-            .build()?;
-        device.destroy_shader_module(clear_module, None);
+        let clear = unsafe {
+            ComputePipeline::builder(Arc::clone(&device))
+                .add_set_layout(descriptor_layout)
+                .with_shader(clear_module)
+                .with_entry_point("main")
+                .build()?
+        };
+        unsafe { device.destroy_shader_module(clear_module, None) };
 
         // 2. Analyze Pipeline
         let analyze_shader = include_bytes!(concat!(env!("OUT_DIR"), "/analyze.glsl.spv"));
-        let analyze_module = device
-            .create_shader_module(
-                &vk::ShaderModuleCreateInfo::default().code(bytemuck::cast_slice(analyze_shader)),
-                None,
-            )
-            .map_err(|e| {
-                crate::AshError::VulkanError(format!("Failed to create analyze shader: {e}"))
-            })?;
+        let analyze_module = unsafe {
+            device
+                .create_shader_module(
+                    &vk::ShaderModuleCreateInfo::default()
+                        .code(bytemuck::cast_slice(analyze_shader)),
+                    None,
+                )
+                .map_err(|e| {
+                    crate::AshError::VulkanError(format!("Failed to create analyze shader: {e}"))
+                })?
+        };
 
         let spec_data = max_requests.to_ne_bytes();
         let spec_map = [vk::SpecializationMapEntry::default()
@@ -66,31 +73,38 @@ impl VsmComputePipelines {
             .map_entries(&spec_map)
             .data(&spec_data);
 
-        let analyze = ComputePipeline::builder(Arc::clone(&device))
-            .add_set_layout(descriptor_layout)
-            .with_shader(analyze_module)
-            .with_entry_point("main")
-            .with_specialization(spec_info)
-            .build()?;
-        device.destroy_shader_module(analyze_module, None);
+        let analyze = unsafe {
+            ComputePipeline::builder(Arc::clone(&device))
+                .add_set_layout(descriptor_layout)
+                .with_shader(analyze_module)
+                .with_entry_point("main")
+                .with_specialization(spec_info)
+                .build()?
+        };
+        unsafe { device.destroy_shader_module(analyze_module, None) };
 
         // 3. Allocate Pipeline
         let allocate_shader = include_bytes!(concat!(env!("OUT_DIR"), "/allocate.glsl.spv"));
-        let allocate_module = device
-            .create_shader_module(
-                &vk::ShaderModuleCreateInfo::default().code(bytemuck::cast_slice(allocate_shader)),
-                None,
-            )
-            .map_err(|e| {
-                crate::AshError::VulkanError(format!("Failed to create allocate shader: {e}"))
-            })?;
+        let allocate_module = unsafe {
+            device
+                .create_shader_module(
+                    &vk::ShaderModuleCreateInfo::default()
+                        .code(bytemuck::cast_slice(allocate_shader)),
+                    None,
+                )
+                .map_err(|e| {
+                    crate::AshError::VulkanError(format!("Failed to create allocate shader: {e}"))
+                })?
+        };
 
-        let allocate = ComputePipeline::builder(Arc::clone(&device))
-            .add_set_layout(descriptor_layout)
-            .with_shader(allocate_module)
-            .with_entry_point("main")
-            .build()?;
-        device.destroy_shader_module(allocate_module, None);
+        let allocate = unsafe {
+            ComputePipeline::builder(Arc::clone(&device))
+                .add_set_layout(descriptor_layout)
+                .with_shader(allocate_module)
+                .with_entry_point("main")
+                .build()?
+        };
+        unsafe { device.destroy_shader_module(allocate_module, None) };
 
         log::info!("VSM compute pipelines loaded successfully");
 

@@ -36,7 +36,7 @@ impl ImageHandle {
         image_view: vk::ImageView,
         info: ImageCreateInfo,
     ) -> crate::Result<Self> {
-        Self::new_with_allocation(device, image, image_view, None, None, info)
+        unsafe { Self::new_with_allocation(device, image, image_view, None, None, info) }
     }
 
     /// Creates a new image handle with VMA allocation.
@@ -134,7 +134,7 @@ impl ImageHandle {
             _ => {
                 return Err(crate::AshError::VulkanError(
                     "Cannot read back image without allocator".to_string(),
-                ))
+                ));
             }
         };
 
@@ -147,7 +147,7 @@ impl ImageHandle {
                 return Err(crate::AshError::VulkanError(format!(
                     "Unsupported readback format: {:?}",
                     self.format
-                )))
+                )));
             }
         };
 

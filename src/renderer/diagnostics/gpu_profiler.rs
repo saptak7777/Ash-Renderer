@@ -8,8 +8,8 @@
 
 use std::sync::Arc;
 
-use ash::vk;
 use ash::Device;
+use ash::vk;
 
 use super::GpuTimings;
 
@@ -173,7 +173,9 @@ impl GpuProfiler {
                 .query_count(MAX_TIMESTAMPS);
 
             for pool in &mut query_pools {
-                *pool = device.create_query_pool(&create_info, None)?;
+                unsafe {
+                    *pool = device.create_query_pool(&create_info, None)?;
+                }
             }
 
             log::info!(
@@ -215,11 +217,13 @@ impl GpuProfiler {
         let pool = self.query_pools[self.current_pool];
 
         // Reset queries for this frame
-        self.device
-            .cmd_reset_query_pool(cmd, pool, 0, MAX_TIMESTAMPS);
+        unsafe {
+            self.device
+                .cmd_reset_query_pool(cmd, pool, 0, MAX_TIMESTAMPS);
+        }
 
         // Write start timestamp
-        self.write_timestamp(cmd, TimingScope::FrameStart);
+        unsafe { self.write_timestamp(cmd, TimingScope::FrameStart) };
         self.total_frames += 1;
     }
 
@@ -233,12 +237,14 @@ impl GpuProfiler {
         }
 
         let pool = self.query_pools[self.current_pool];
-        self.device.cmd_write_timestamp(
-            cmd,
-            vk::PipelineStageFlags::BOTTOM_OF_PIPE,
-            pool,
-            scope.index(),
-        );
+        unsafe {
+            self.device.cmd_write_timestamp(
+                cmd,
+                vk::PipelineStageFlags::BOTTOM_OF_PIPE,
+                pool,
+                scope.index(),
+            );
+        }
     }
 
     /// End frame and collect results from previous frame's pool (non-blocking)

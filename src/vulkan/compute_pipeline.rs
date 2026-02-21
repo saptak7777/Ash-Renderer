@@ -33,11 +33,12 @@ impl ComputePipeline {
             .stage(stage)
             .layout(layout);
 
-        let pipelines = device
-            .create_compute_pipelines(vk::PipelineCache::null(), &[create_info], None)
-            .map_err(|(_, e)| {
-                AshError::VulkanError(format!("Failed to create compute pipeline: {e}"))
-            })?;
+        let pipelines = unsafe {
+            device.create_compute_pipelines(vk::PipelineCache::null(), &[create_info], None)
+        }
+        .map_err(|(_, e)| {
+            AshError::VulkanError(format!("Failed to create compute pipeline: {e}"))
+        })?;
 
         let pipeline = pipelines[0];
 
@@ -150,9 +151,7 @@ impl<'a> ComputePipelineBuilder<'a> {
                 .set_layouts(&self.set_layouts)
                 .push_constant_ranges(&self.push_constant_ranges);
 
-            let layout = self
-                .device
-                .create_pipeline_layout(&layout_info, None)
+            let layout = unsafe { self.device.create_pipeline_layout(&layout_info, None) }
                 .map_err(|e| {
                     AshError::VulkanError(format!("Failed to create pipeline layout: {e}"))
                 })?;
@@ -172,12 +171,13 @@ impl<'a> ComputePipelineBuilder<'a> {
             .stage(stage)
             .layout(layout);
 
-        let pipelines = self
-            .device
-            .create_compute_pipelines(vk::PipelineCache::null(), &[create_info], None)
-            .map_err(|(_, e)| {
-                AshError::VulkanError(format!("Failed to create compute pipeline: {e}"))
-            })?;
+        let pipelines = unsafe {
+            self.device
+                .create_compute_pipelines(vk::PipelineCache::null(), &[create_info], None)
+        }
+        .map_err(|(_, e)| {
+            AshError::VulkanError(format!("Failed to create compute pipeline: {e}"))
+        })?;
 
         let pipeline = pipelines[0];
 

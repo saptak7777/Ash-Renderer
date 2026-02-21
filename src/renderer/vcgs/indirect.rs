@@ -7,9 +7,9 @@ use ash::vk;
 use std::sync::Arc;
 
 use super::culling::{CullObjectData, CullingPushConstants, OcclusionCulling};
+use crate::Result;
 use crate::vulkan::descriptor_bindless::BindlessManager;
 use crate::vulkan::{Allocator, VulkanDevice};
-use crate::Result;
 
 /// Maximum objects per frame for indirect drawing
 pub const MAX_INDIRECT_OBJECTS: usize = 1_048_576; // 1M clusters
@@ -99,14 +99,14 @@ impl IndirectDrawPass {
             return Ok(());
         }
 
-        self.create_buffers(vma_allocator, max_objects)?;
+        unsafe { self.create_buffers(vma_allocator, max_objects) }?;
 
         // Register object buffer with BindlessManager
         let index = bindless_manager.add_storage_buffer(self.object_buffer, 0, vk::WHOLE_SIZE)?;
         self.object_buffer_index = index;
 
-        self.create_descriptors()?;
-        self.create_pipeline()?;
+        unsafe { self.create_descriptors() }?;
+        unsafe { self.create_pipeline() }?;
 
         self.initialized = true;
         Ok(())
@@ -142,9 +142,9 @@ impl IndirectDrawPass {
         let object_info = vk::BufferCreateInfo::default().size(object_size).usage(
             vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
         );
-        let (object_buffer, mut object_alloc) = allocator
-            .create_buffer(&object_info, &buffer_alloc_info)
-            .map_err(|e| crate::AshError::VulkanError(format!("Object buffer: {e:?}")))?;
+        let (object_buffer, mut object_alloc) =
+            unsafe { allocator.create_buffer(&object_info, &buffer_alloc_info) }
+                .map_err(|e| crate::AshError::VulkanError(format!("Object buffer: {e:?}")))?;
 
         // SAFETY: BDA requires initialized memory. Zero it out to prevent wild pointers.
         // SAFETY: Directly mapping memory and writing zero bytes to ensure
@@ -161,7 +161,7 @@ impl IndirectDrawPass {
 
         // Check address alignment
         let info = vk::BufferDeviceAddressInfo::default().buffer(object_buffer);
-        let addr = self.device.get_buffer_device_address(&info);
+        let addr = unsafe { self.device.get_buffer_device_address(&info) };
         log::info!(
             "IndirectDrawPass: Object Buffer Address = {addr:#x} (Aligned: {aligned})",
             aligned = addr % 16 == 0
@@ -179,9 +179,9 @@ impl IndirectDrawPass {
                 | vk::BufferUsageFlags::INDIRECT_BUFFER
                 | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
         );
-        let (indirect_buffer, indirect_alloc) = allocator
-            .create_buffer(&indirect_info, &device_alloc_info)
-            .map_err(|e| crate::AshError::VulkanError(format!("Indirect buffer: {e:?}")))?;
+        let (indirect_buffer, indirect_alloc) =
+            unsafe { allocator.create_buffer(&indirect_info, &device_alloc_info) }
+                .map_err(|e| crate::AshError::VulkanError(format!("Indirect buffer: {e:?}")))?;
         self.indirect_buffer = indirect_buffer;
         self.indirect_allocation = Some(indirect_alloc);
 
@@ -189,9 +189,9 @@ impl IndirectDrawPass {
         let visibility_info = vk::BufferCreateInfo::default().size(visibility_size).usage(
             vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
         );
-        let (visibility_buffer, visibility_alloc) = allocator
-            .create_buffer(&visibility_info, &device_alloc_info)
-            .map_err(|e| crate::AshError::VulkanError(format!("Visibility buffer: {e:?}")))?;
+        let (visibility_buffer, visibility_alloc) =
+            unsafe { allocator.create_buffer(&visibility_info, &device_alloc_info) }
+                .map_err(|e| crate::AshError::VulkanError(format!("Visibility buffer: {e:?}")))?;
         self.visibility_buffer = visibility_buffer;
         self.visibility_allocation = Some(visibility_alloc);
 
@@ -202,9 +202,9 @@ impl IndirectDrawPass {
                 | vk::BufferUsageFlags::INDIRECT_BUFFER
                 | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
         );
-        let (count_buffer, count_alloc) = allocator
-            .create_buffer(&count_info, &buffer_alloc_info)
-            .map_err(|e| crate::AshError::VulkanError(format!("Count buffer: {e:?}")))?;
+        let (count_buffer, count_alloc) =
+            unsafe { allocator.create_buffer(&count_info, &buffer_alloc_info) }
+                .map_err(|e| crate::AshError::VulkanError(format!("Count buffer: {e:?}")))?;
         self.count_buffer = count_buffer;
         self.count_allocation = Some(count_alloc);
 
@@ -245,9 +245,7 @@ impl IndirectDrawPass {
         ];
 
         let layout_info = vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings);
-        self.layout = self
-            .device
-            .create_descriptor_set_layout(&layout_info, None)?;
+        self.layout = unsafe { self.device.create_descriptor_set_layout(&layout_info, None) }?;
 
         let pool_sizes = [
             vk::DescriptorPoolSize {
@@ -264,13 +262,13 @@ impl IndirectDrawPass {
             .max_sets(1)
             .pool_sizes(&pool_sizes);
 
-        self.pool = self.device.create_descriptor_pool(&pool_info, None)?;
+        self.pool = unsafe { self.device.create_descriptor_pool(&pool_info, None) }?;
 
         let alloc_info = vk::DescriptorSetAllocateInfo::default()
             .descriptor_pool(self.pool)
             .set_layouts(std::slice::from_ref(&self.layout));
 
-        let sets = self.device.allocate_descriptor_sets(&alloc_info)?;
+        let sets = unsafe { self.device.allocate_descriptor_sets(&alloc_info) }?;
         self.set = sets[0];
 
         Ok(())
@@ -282,9 +280,7 @@ impl IndirectDrawPass {
 
         let shader_module_info =
             vk::ShaderModuleCreateInfo::default().code(bytemuck::cast_slice(shader_code));
-        let shader_module = self
-            .device
-            .create_shader_module(&shader_module_info, None)?;
+        let shader_module = unsafe { self.device.create_shader_module(&shader_module_info, None) }?;
 
         let push_constant_range = vk::PushConstantRange::default()
             .stage_flags(vk::ShaderStageFlags::COMPUTE)
@@ -297,7 +293,7 @@ impl IndirectDrawPass {
             .set_layouts(&layouts)
             .push_constant_ranges(std::slice::from_ref(&push_constant_range));
 
-        self.cull_layout = self.device.create_pipeline_layout(&layout_info, None)?;
+        self.cull_layout = unsafe { self.device.create_pipeline_layout(&layout_info, None) }?;
 
         let stage_info = vk::PipelineShaderStageCreateInfo::default()
             .stage(vk::ShaderStageFlags::COMPUTE)
@@ -308,13 +304,16 @@ impl IndirectDrawPass {
             .stage(stage_info)
             .layout(self.cull_layout);
 
-        let pipelines = self
-            .device
-            .create_compute_pipelines(vk::PipelineCache::null(), &[pipeline_info], None)
-            .map_err(|(_, e)| e)?;
+        let pipelines = unsafe {
+            self.device
+                .create_compute_pipelines(vk::PipelineCache::null(), &[pipeline_info], None)
+        }
+        .map_err(|(_, e)| e)?;
 
         self.cull_pipeline = pipelines[0];
-        self.device.destroy_shader_module(shader_module, None);
+        unsafe {
+            self.device.destroy_shader_module(shader_module, None);
+        }
 
         log::info!("IndirectDrawPass: Pipeline created successfully");
         Ok(())
@@ -329,19 +328,21 @@ impl IndirectDrawPass {
 
         // Destroy old pipeline
         if self.cull_pipeline != vk::Pipeline::null() {
-            self.device.destroy_pipeline(self.cull_pipeline, None);
+            unsafe {
+                self.device.destroy_pipeline(self.cull_pipeline, None);
+            }
             self.cull_pipeline = vk::Pipeline::null();
         }
         if self.cull_layout != vk::PipelineLayout::null() {
-            self.device.destroy_pipeline_layout(self.cull_layout, None);
+            unsafe {
+                self.device.destroy_pipeline_layout(self.cull_layout, None);
+            }
             self.cull_layout = vk::PipelineLayout::null();
         }
 
         // Create new shader module
         let shader_module_info = vk::ShaderModuleCreateInfo::default().code(spirv_code);
-        let shader_module = self
-            .device
-            .create_shader_module(&shader_module_info, None)?;
+        let shader_module = unsafe { self.device.create_shader_module(&shader_module_info, None) }?;
 
         let push_constant_range = vk::PushConstantRange::default()
             .stage_flags(vk::ShaderStageFlags::COMPUTE)
@@ -353,7 +354,7 @@ impl IndirectDrawPass {
             .set_layouts(&layouts)
             .push_constant_ranges(std::slice::from_ref(&push_constant_range));
 
-        self.cull_layout = self.device.create_pipeline_layout(&layout_info, None)?;
+        self.cull_layout = unsafe { self.device.create_pipeline_layout(&layout_info, None) }?;
 
         let stage_info = vk::PipelineShaderStageCreateInfo::default()
             .stage(vk::ShaderStageFlags::COMPUTE)
@@ -364,13 +365,16 @@ impl IndirectDrawPass {
             .stage(stage_info)
             .layout(self.cull_layout);
 
-        let pipelines = self
-            .device
-            .create_compute_pipelines(vk::PipelineCache::null(), &[pipeline_info], None)
-            .map_err(|(_, e)| e)?;
+        let pipelines = unsafe {
+            self.device
+                .create_compute_pipelines(vk::PipelineCache::null(), &[pipeline_info], None)
+        }
+        .map_err(|(_, e)| e)?;
 
         self.cull_pipeline = pipelines[0];
-        self.device.destroy_shader_module(shader_module, None);
+        unsafe {
+            self.device.destroy_shader_module(shader_module, None);
+        }
 
         log::info!("IndirectDrawPass: Pipeline reloaded successfully");
         Ok(())
@@ -427,7 +431,9 @@ impl IndirectDrawPass {
                 .buffer_info(std::slice::from_ref(&count_info)),
         ];
 
-        self.device.update_descriptor_sets(&writes, &[]);
+        unsafe {
+            self.device.update_descriptor_sets(&writes, &[]);
+        }
     }
 
     /// Upload object data for culling
@@ -468,8 +474,10 @@ impl IndirectDrawPass {
                     )));
                 }
 
-                let dest = (info.mapped_data as *mut CullObjectData).add(offset);
-                std::ptr::copy_nonoverlapping(objects.as_ptr(), dest, objects.len());
+                let dest = unsafe { (info.mapped_data as *mut CullObjectData).add(offset) };
+                unsafe {
+                    std::ptr::copy_nonoverlapping(objects.as_ptr(), dest, objects.len());
+                }
 
                 // CRITICAL FIX: Flush memory to ensure GPU visibility on non-coherent heaps
                 allocator.flush_allocation(
@@ -510,7 +518,9 @@ impl IndirectDrawPass {
         }
 
         // Reset count buffer
-        self.device.cmd_fill_buffer(cmd, self.count_buffer, 0, 4, 0);
+        unsafe {
+            self.device.cmd_fill_buffer(cmd, self.count_buffer, 0, 4, 0);
+        }
 
         // Barrier for fill
         let barrier = vk::BufferMemoryBarrier {
@@ -521,29 +531,35 @@ impl IndirectDrawPass {
             ..Default::default()
         };
 
-        self.device.cmd_pipeline_barrier(
-            cmd,
-            vk::PipelineStageFlags::TRANSFER,
-            vk::PipelineStageFlags::COMPUTE_SHADER,
-            vk::DependencyFlags::empty(),
-            &[],
-            &[barrier],
-            &[],
-        );
+        unsafe {
+            self.device.cmd_pipeline_barrier(
+                cmd,
+                vk::PipelineStageFlags::TRANSFER,
+                vk::PipelineStageFlags::COMPUTE_SHADER,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[barrier],
+                &[],
+            );
+        }
 
         // Bind pipeline
-        self.device
-            .cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, self.cull_pipeline);
+        unsafe {
+            self.device
+                .cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, self.cull_pipeline);
+        }
 
         // Bind descriptors (Set 0)
-        self.device.cmd_bind_descriptor_sets(
-            cmd,
-            vk::PipelineBindPoint::COMPUTE,
-            self.cull_layout,
-            0,
-            &[self.set],
-            &[],
-        );
+        unsafe {
+            self.device.cmd_bind_descriptor_sets(
+                cmd,
+                vk::PipelineBindPoint::COMPUTE,
+                self.cull_layout,
+                0,
+                &[self.set],
+                &[],
+            );
+        }
 
         // Bindless (Set 1) REMOVED - using BDA now
 
@@ -557,17 +573,21 @@ impl IndirectDrawPass {
         push.object_buffer_addr = self.object_buffer_address();
         push.cluster_buffer_addr = ctx.cluster_buffer_addr;
 
-        self.device.cmd_push_constants(
-            cmd,
-            self.cull_layout,
-            vk::ShaderStageFlags::COMPUTE,
-            0,
-            bytemuck::bytes_of(&push),
-        );
+        unsafe {
+            self.device.cmd_push_constants(
+                cmd,
+                self.cull_layout,
+                vk::ShaderStageFlags::COMPUTE,
+                0,
+                bytemuck::bytes_of(&push),
+            );
+        }
 
         // Dispatch: 64 threads per workgroup
         let group_count = ctx.object_count.div_ceil(64);
-        self.device.cmd_dispatch(cmd, group_count, 1, 1);
+        unsafe {
+            self.device.cmd_dispatch(cmd, group_count, 1, 1);
+        }
 
         // Barrier for indirect read
         // Barriers for Indirect Draw & Count Read
@@ -587,15 +607,17 @@ impl IndirectDrawPass {
             ..Default::default()
         };
 
-        self.device.cmd_pipeline_barrier(
-            cmd,
-            vk::PipelineStageFlags::COMPUTE_SHADER,
-            vk::PipelineStageFlags::DRAW_INDIRECT,
-            vk::DependencyFlags::empty(),
-            &[],
-            &[indirect_barrier, count_barrier],
-            &[],
-        );
+        unsafe {
+            self.device.cmd_pipeline_barrier(
+                cmd,
+                vk::PipelineStageFlags::COMPUTE_SHADER,
+                vk::PipelineStageFlags::DRAW_INDIRECT,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[indirect_barrier, count_barrier],
+                &[],
+            );
+        }
 
         Ok(())
     }
@@ -646,7 +668,7 @@ impl IndirectDrawPass {
             let info = allocator.get_allocation_info(alloc);
             if !info.mapped_data.is_null() {
                 let ptr = info.mapped_data as *const u32;
-                return *ptr;
+                return unsafe { *ptr };
             }
         }
 
@@ -676,32 +698,44 @@ impl IndirectDrawPass {
 
         // Destroy buffers
         if let Some(mut alloc) = self.object_allocation.take() {
-            allocator.destroy_buffer(self.object_buffer, &mut alloc);
+            unsafe {
+                allocator.destroy_buffer(self.object_buffer, &mut alloc);
+            }
         }
         // if let Some(mut alloc) = self.template_allocation.take() {
         //     allocator.destroy_buffer(self.template_buffer, &mut alloc);
         // }
         if let Some(mut alloc) = self.indirect_allocation.take() {
-            allocator.destroy_buffer(self.indirect_buffer, &mut alloc);
+            unsafe {
+                allocator.destroy_buffer(self.indirect_buffer, &mut alloc);
+            }
         }
         if let Some(mut alloc) = self.visibility_allocation.take() {
-            allocator.destroy_buffer(self.visibility_buffer, &mut alloc);
+            unsafe {
+                allocator.destroy_buffer(self.visibility_buffer, &mut alloc);
+            }
         }
         if let Some(mut alloc) = self.count_allocation.take() {
-            allocator.destroy_buffer(self.count_buffer, &mut alloc);
+            unsafe {
+                allocator.destroy_buffer(self.count_buffer, &mut alloc);
+            }
         }
 
         if self.cull_pipeline != vk::Pipeline::null() {
-            self.device.destroy_pipeline(self.cull_pipeline, None);
+            unsafe { self.device.destroy_pipeline(self.cull_pipeline, None) };
         }
         if self.cull_layout != vk::PipelineLayout::null() {
-            self.device.destroy_pipeline_layout(self.cull_layout, None);
+            unsafe { self.device.destroy_pipeline_layout(self.cull_layout, None) };
         }
         if self.pool != vk::DescriptorPool::null() {
-            self.device.destroy_descriptor_pool(self.pool, None);
+            unsafe {
+                self.device.destroy_descriptor_pool(self.pool, None);
+            }
         }
         if self.layout != vk::DescriptorSetLayout::null() {
-            self.device.destroy_descriptor_set_layout(self.layout, None);
+            unsafe {
+                self.device.destroy_descriptor_set_layout(self.layout, None);
+            }
         }
 
         self.initialized = false;

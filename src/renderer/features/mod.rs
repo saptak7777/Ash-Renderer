@@ -23,5 +23,5 @@ pub use lighting::{DirectionalLight, LightingConfig, LightingFeature, PointLight
 pub use post_processing::{PostProcessingConfig, PostProcessingFeature};
 pub use tonemapping::{TonemapOperator, TonemappingConfig, TonemappingFeature};
 pub use vsm::{
-    default_vsm_config, high_quality_vsm_config, performance_vsm_config, VsmConfig, VsmManager,
+    VsmConfig, VsmManager, default_vsm_config, high_quality_vsm_config, performance_vsm_config,
 };

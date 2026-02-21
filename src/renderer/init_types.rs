@@ -1,7 +1,7 @@
 use crate::renderer::resource_registry::ResourceId;
 use crate::renderer::resources::{
-    uniform::{StorageBuffer, UniformBuffer},
     DepthBuffer, Texture,
+    uniform::{StorageBuffer, UniformBuffer},
 };
 use crate::vulkan;
 use ash::vk;

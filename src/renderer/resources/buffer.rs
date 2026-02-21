@@ -25,14 +25,16 @@ impl BufferHandle {
         memory_usage: vk_mem::MemoryUsage,
         name: Option<String>,
     ) -> crate::Result<Self> {
-        Self::new_with_flags(
-            allocator,
-            size,
-            usage,
-            memory_usage,
-            vk_mem::AllocationCreateFlags::empty(),
-            name,
-        )
+        unsafe {
+            Self::new_with_flags(
+                allocator,
+                size,
+                usage,
+                memory_usage,
+                vk_mem::AllocationCreateFlags::empty(),
+                name,
+            )
+        }
     }
 
     /// Creates a new GPU buffer with custom allocation flags.
@@ -55,7 +57,8 @@ impl BufferHandle {
             log::info!("Creating buffer ({size}B)");
         }
 
-        let (buffer, allocation) = allocator.create_buffer_with_flags(size, usage, memory_usage, flags)?;
+        let (buffer, allocation) =
+            unsafe { allocator.create_buffer_with_flags(size, usage, memory_usage, flags)? };
 
         Ok(Self {
             buffer,

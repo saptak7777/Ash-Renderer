@@ -5,23 +5,23 @@ pub mod post_process;
 use crate::renderer::features::AutoRotateFeature;
 use crate::renderer::systems::culling::CullingSystem;
 use crate::renderer::{
+    HdrSystem, PipelineCache,
     context::Context,
     diagnostics::{DiagnosticsOverlay, DiagnosticsState, FrameProfiler, GpuProfiler},
     features::FeatureManager,
     frame::Frame,
     passes::{
+        SkyboxPass,
         motion::MotionVectorPass,
         temporal_aa::{ConfigMetrics, TaaConfig},
         vsr::{VsrConfig, VsrPass},
-        SkyboxPass,
     },
     render_pipeline::RenderPipeline,
     resource_registry::ResourceId,
     resources::Resources,
     types::{DebugMode, RendererConfig},
-    HdrSystem, PipelineCache,
 };
-use crate::{vulkan, AshError, Result};
+use crate::{AshError, Result, vulkan};
 use ash::vk;
 use std::sync::{Arc, RwLock};
 
@@ -188,7 +188,7 @@ impl Systems {
 
         // Initialize with G-Buffer motion format
         let motion_format = vk::Format::R16G16_SFLOAT;
-        motion_pass.init(&context.device, motion_format)?;
+        unsafe { motion_pass.init(&context.device, motion_format)? };
 
         self.motion_pass = Some(motion_pass);
 

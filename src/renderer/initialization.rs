@@ -1,21 +1,20 @@
+use crate::AshError;
+use crate::Result;
 use crate::renderer::init_types::*;
 use crate::renderer::model_renderer::{DRAW_PUSH_FRAGMENT_BYTES, DRAW_PUSH_VERTEX_BYTES};
 use crate::renderer::resource_registry::ResourceRegistry;
 use crate::renderer::resources::material::MAX_MATERIALS;
 use crate::renderer::resources::{
-    self,
+    self, Texture, TextureData,
     uniform::{StorageBuffer, UniformBuffer},
-    Texture, TextureData,
 };
-use crate::renderer::{types::*, TextureInitContext};
+use crate::renderer::{TextureInitContext, types::*};
 use crate::vulkan;
-use crate::AshError;
-use crate::Result;
 use ash::vk;
 
+use crate::renderer::passes::SkyboxInitContext;
 use crate::renderer::passes::hiz::HiZPass;
 use crate::renderer::passes::vsr::{VsrPass, VsrQuality};
-use crate::renderer::passes::SkyboxInitContext;
 use crate::renderer::vcgs::IndirectDrawPass;
 use std::sync::{Arc, RwLock};
 use std::thread;
@@ -44,14 +43,17 @@ pub unsafe fn create_swapchain_data(
     extent: vk::Extent2D,
     present_mode: vk::PresentModeKHR,
 ) -> Result<SwapchainData> {
-    let swapchain = vulkan::SwapchainWrapper::new(device, device.headless, extent, present_mode)?;
+    let swapchain =
+        unsafe { vulkan::SwapchainWrapper::new(device, device.headless, extent, present_mode)? };
 
-    let depth_buffer = resources::DepthBuffer::new(
-        Arc::clone(&device.device),
-        Arc::clone(alloc),
-        swapchain.extent.width,
-        swapchain.extent.height,
-    )?;
+    let depth_buffer = unsafe {
+        resources::DepthBuffer::new(
+            Arc::clone(&device.device),
+            Arc::clone(alloc),
+            swapchain.extent.width,
+            swapchain.extent.height,
+        )?
+    };
 
     Ok(SwapchainData {
         swapchain,
@@ -74,7 +76,7 @@ pub unsafe fn init_swapchain<S: vulkan::SurfaceProvider>(
     let extent = vk::Extent2D { width, height };
 
     log::info!("Creating Swapchain & Frame Resources");
-    let mut data = create_swapchain_data(device, alloc, extent, present_mode)?;
+    let mut data = unsafe { create_swapchain_data(device, alloc, extent, present_mode)? };
 
     let mut swapchain_image_view_ids = Vec::with_capacity(data.swapchain.image_views.len());
     for &view in &data.swapchain.image_views {
@@ -231,7 +233,7 @@ pub unsafe fn init_pipelines(info: PipelineInitInfo<'_>) -> Result<PipelineData>
         pipeline_cache,
     } = info;
 
-    let (layout, layout_id, pipeline, pipeline_id) =
+    let (layout, layout_id, pipeline, pipeline_id) = unsafe {
         create_main_pipeline(MainPipelineCreateDesc {
             device,
             resources,
@@ -241,7 +243,8 @@ pub unsafe fn init_pipelines(info: PipelineInitInfo<'_>) -> Result<PipelineData>
             pipeline_cfg,
             depth_format,
             pipeline_cache,
-        })?;
+        })?
+    };
 
     Ok(PipelineData {
         layout,
@@ -268,7 +271,7 @@ pub unsafe fn init_resources(
     for _ in 0..frame_count {
         let mut buffer =
             // SAFETY: We provide a valid allocator and device. The buffer size is determined strictly by `UniformBuffer::new` logic.
-            UniformBuffer::new(Arc::clone(alloc), Arc::clone(&device.device))?;
+            unsafe { UniformBuffer::new(Arc::clone(alloc), Arc::clone(&device.device))? };
         {
             let matrices = buffer.matrices_mut();
             matrices.set_view(
@@ -278,7 +281,7 @@ pub unsafe fn init_resources(
             );
             matrices.set_projection(std::f32::consts::PI / 4.0, aspect, 0.5, 1000.0);
         }
-        buffer.update()?;
+        unsafe { buffer.update()? };
         uniform_buffers.push(buffer);
     }
 
@@ -334,12 +337,14 @@ pub unsafe fn init_resources(
     let dummy_black_2d = Texture::create_default_black(&tex_ctx)?;
 
     // Initialize material storage buffer (Bindless-ready)
-    let mut material_storage_buffer = StorageBuffer::<resources::uniform::MaterialUniform>::new(
-        Arc::clone(alloc),
-        Arc::clone(&device.device),
-        MAX_MATERIALS as usize,
-        "material_storage_buffer",
-    )?;
+    let mut material_storage_buffer = unsafe {
+        StorageBuffer::<resources::uniform::MaterialUniform>::new(
+            Arc::clone(alloc),
+            Arc::clone(&device.device),
+            MAX_MATERIALS as usize,
+            "material_storage_buffer",
+        )?
+    };
 
     // Reserve Index 0 as the "Magenta Error Material" (AAA Pattern)
     // This ensures that any mesh missing a material index shows up bright magenta.
@@ -358,17 +363,18 @@ pub unsafe fn init_resources(
     // Initialize instance buffers for GPU culling/instancing
     let mut instance_buffers = Vec::with_capacity(frame_count);
     for _ in 0..frame_count {
-        let buffer = resources::InstanceBuffer::new(
-            Arc::clone(alloc),
-            Arc::clone(&device.device),
-            crate::renderer::vcgs::MAX_CULLABLE_OBJECTS,
-        )?;
+        let buffer = unsafe {
+            resources::InstanceBuffer::new(
+                Arc::clone(alloc),
+                Arc::clone(&device.device),
+                crate::renderer::vcgs::MAX_CULLABLE_OBJECTS,
+            )?
+        };
         instance_buffers.push(buffer);
     }
 
-    let post_sampler = device
-        .device
-        .create_sampler(
+    let post_sampler = unsafe {
+        device.device.create_sampler(
             &vk::SamplerCreateInfo::default()
                 .mag_filter(vk::Filter::LINEAR)
                 .min_filter(vk::Filter::LINEAR)
@@ -378,7 +384,8 @@ pub unsafe fn init_resources(
                 .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_EDGE),
             None,
         )
-        .map_err(|e| AshError::VulkanError(format!("Failed to create post_sampler: {e}")))?;
+    }
+    .map_err(|e| AshError::VulkanError(format!("Failed to create post_sampler: {e}")))?;
 
     Ok(RendererResources {
         uniform_buffers,
@@ -412,12 +419,14 @@ pub unsafe fn init_core_infrastructure(
 
     let buffer_pool = Arc::new(resources::BufferPool::new(Arc::clone(alloc)));
 
-    let geometry_buffer = Arc::new(resources::DualHeapGeometryBuffer::new(
-        Arc::clone(&device.device),
-        Arc::clone(alloc),
-        256, // 256MB for vertices
-        128, // 128MB for indices
-    )?);
+    let geometry_buffer = Arc::new(unsafe {
+        resources::DualHeapGeometryBuffer::new(
+            Arc::clone(&device.device),
+            Arc::clone(alloc),
+            256, // 256MB for vertices
+            128, // 128MB for indices
+        )?
+    });
 
     let model_renderer = crate::renderer::model_renderer::ModelRenderer::new(
         Arc::clone(alloc),
@@ -440,7 +449,7 @@ pub unsafe fn init_core_infrastructure(
     )?;
 
     let renderer_resources =
-        init_resources(alloc, device, upload_command_pool, frame_count, aspect)?;
+        unsafe { init_resources(alloc, device, upload_command_pool, frame_count, aspect)? };
 
     Ok(CoreInfrastructure {
         buffer_pool,
@@ -492,29 +501,35 @@ pub unsafe fn init_rendering_passes(cfg: RenderingPassesConfig) -> Result<Render
     } = cfg;
     log::info!("Initializing Rendering Passes...");
 
-    let gbuffer = crate::renderer::GBuffer::new(
-        Arc::clone(&device.device),
-        Arc::clone(alloc),
-        swapchain_extent.width,
-        swapchain_extent.height,
-    )?;
+    let gbuffer = unsafe {
+        crate::renderer::GBuffer::new(
+            Arc::clone(&device.device),
+            Arc::clone(alloc),
+            swapchain_extent.width,
+            swapchain_extent.height,
+        )?
+    };
 
     let mut hiz_pass = crate::renderer::passes::hiz::HiZPass::new(Arc::clone(&device.device));
-    hiz_pass.init(
-        alloc,
-        device,
-        swapchain_extent.width,
-        swapchain_extent.height,
-    )?;
+    unsafe {
+        hiz_pass.init(
+            alloc,
+            device,
+            swapchain_extent.width,
+            swapchain_extent.height,
+        )?
+    };
 
     let mut indirect_draw_pass =
         crate::renderer::vcgs::IndirectDrawPass::new(Arc::clone(&device.device));
-    indirect_draw_pass.init(
-        alloc,
-        device,
-        bindless_manager,
-        crate::renderer::vcgs::MAX_INDIRECT_OBJECTS,
-    )?;
+    unsafe {
+        indirect_draw_pass.init(
+            alloc,
+            device,
+            bindless_manager,
+            crate::renderer::vcgs::MAX_INDIRECT_OBJECTS,
+        )?
+    };
 
     // Register GBuffer indices
     let gbuffer_indices = GBufferIndices {
@@ -546,16 +561,18 @@ pub unsafe fn init_rendering_passes(cfg: RenderingPassesConfig) -> Result<Render
     let mut skybox_pass = crate::renderer::passes::SkyboxPass::new(skybox_mesh, skybox_index);
 
     // ── Initialize Skybox GPU Resources ───────────────────────────
-    skybox_pass.init(SkyboxInitContext {
-        device,
-        resources,
-        color_format: swapchain_format,
-        extent: swapchain_extent,
-        pipeline_cache,
-        depth_format,
-        multisample_config,
-        set_layouts,
-    })?;
+    unsafe {
+        skybox_pass.init(SkyboxInitContext {
+            device,
+            resources,
+            color_format: swapchain_format,
+            extent: swapchain_extent,
+            pipeline_cache,
+            depth_format,
+            multisample_config,
+            set_layouts,
+        })?
+    };
 
     Ok(RenderingPasses {
         gbuffer: Some(gbuffer),
@@ -580,18 +597,22 @@ pub unsafe fn init_lighting_system(
 ) -> Result<LightingSystem> {
     log::info!("Initializing Lighting System...");
 
-    let global_cluster_buffer = crate::renderer::resources::GlobalClusterBuffer::new(
-        Arc::clone(&device.device),
-        Arc::clone(alloc),
-        64, // 64MB capacity
-    )?;
+    let global_cluster_buffer = unsafe {
+        crate::renderer::resources::GlobalClusterBuffer::new(
+            Arc::clone(&device.device),
+            Arc::clone(alloc),
+            64, // 64MB capacity
+        )?
+    };
 
-    let mut forward_plus = crate::renderer::ForwardPlusIntegration::new(
-        Arc::clone(&device.device),
-        alloc,
-        frame_count,
-    )?;
-    forward_plus.init(alloc);
+    let mut forward_plus = unsafe {
+        crate::renderer::ForwardPlusIntegration::new(
+            Arc::clone(&device.device),
+            alloc,
+            frame_count,
+        )?
+    };
+    unsafe { forward_plus.init(alloc) };
     forward_plus.on_resize(extent.width, extent.height);
 
     // VSM is now handled directly by Renderer and registers itself.
@@ -649,11 +670,9 @@ pub unsafe fn create_vsm_compute_layout(device: &ash::Device) -> Result<vk::Desc
 
     let compute_layout_info =
         vk::DescriptorSetLayoutCreateInfo::default().bindings(&compute_bindings);
-    device
-        .create_descriptor_set_layout(&compute_layout_info, None)
-        .map_err(|e| {
-            AshError::VulkanError(format!("Failed to create VSM compute layout helper: {e}"))
-        })
+    unsafe { device.create_descriptor_set_layout(&compute_layout_info, None) }.map_err(|e| {
+        AshError::VulkanError(format!("Failed to create VSM compute layout helper: {e}"))
+    })
 }
 
 pub fn init_post_processing(
@@ -718,16 +737,18 @@ pub unsafe fn initialize_occlusion_culling(
 ) -> RenderPassResult {
     // 1. Create Hi-Z pass
     let mut hiz = HiZPass::new(Arc::clone(&device.device));
-    hiz.init(alloc, device, extent.width, extent.height)?;
+    unsafe { hiz.init(alloc, device, extent.width, extent.height)? };
 
     // 2. Create Indirect Draw pass
     let mut indirect = IndirectDrawPass::new(Arc::clone(&device.device));
-    indirect.init(
-        alloc,
-        device,
-        bindless_manager,
-        crate::renderer::vcgs::MAX_INDIRECT_OBJECTS,
-    )?;
+    unsafe {
+        indirect.init(
+            alloc,
+            device,
+            bindless_manager,
+            crate::renderer::vcgs::MAX_INDIRECT_OBJECTS,
+        )?
+    };
 
     // 3. Link them together
     let hiz_view = if let Some(view) = hiz.hiz_view() {
@@ -741,7 +762,7 @@ pub unsafe fn initialize_occlusion_culling(
     } else {
         black_texture.sampler()
     };
-    indirect.update_hiz_descriptor(hiz_view, hiz_sampler);
+    unsafe { indirect.update_hiz_descriptor(hiz_view, hiz_sampler) };
 
     Ok((Arc::new(RwLock::new(hiz)), Arc::new(RwLock::new(indirect))))
 }
@@ -759,14 +780,16 @@ pub unsafe fn initialize_vsr_pass(
     quality: VsrQuality,
 ) -> Result<VsrPass> {
     let mut vsr = VsrPass::new(Arc::clone(&device.device));
-    vsr.init(
-        &alloc.vma,
-        device,
-        bindless_manager,
-        extent.width,
-        extent.height,
-        quality,
-    )
+    unsafe {
+        vsr.init(
+            &alloc.vma,
+            device,
+            bindless_manager,
+            extent.width,
+            extent.height,
+            quality,
+        )
+    }
     .map_err(|e| AshError::VulkanError(format!("VSR init failed: {e}")))?;
 
     Ok(vsr)

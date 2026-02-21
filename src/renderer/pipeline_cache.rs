@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use ash::{vk, Device};
+use ash::{Device, vk};
 
 use crate::{AshError, Result};
 

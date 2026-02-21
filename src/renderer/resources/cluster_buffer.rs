@@ -5,8 +5,8 @@
 
 use ash::vk;
 use std::sync::{
-    atomic::{AtomicU64, Ordering},
     Arc, Mutex,
+    atomic::{AtomicU64, Ordering},
 };
 
 use crate::renderer::vcgs::culling::CullObjectData;
@@ -46,18 +46,20 @@ impl GlobalClusterBuffer {
 
         log::info!("Creating GlobalClusterBuffer: {capacity_mb} MB");
 
-        let (buffer, allocation) = allocator.create_buffer_with_flags_and_name(
-            capacity_bytes,
-            vk::BufferUsageFlags::STORAGE_BUFFER
-                | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS
-                | vk::BufferUsageFlags::TRANSFER_DST,
-            vk_mem::MemoryUsage::AutoPreferDevice,
-            vk_mem::AllocationCreateFlags::empty(),
-            Some("GlobalClusterBuffer".to_string()),
-        )?;
+        let (buffer, allocation) = unsafe {
+            allocator.create_buffer_with_flags_and_name(
+                capacity_bytes,
+                vk::BufferUsageFlags::STORAGE_BUFFER
+                    | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS
+                    | vk::BufferUsageFlags::TRANSFER_DST,
+                vk_mem::MemoryUsage::AutoPreferDevice,
+                vk_mem::AllocationCreateFlags::empty(),
+                Some("GlobalClusterBuffer".to_string()),
+            )?
+        };
 
         let address_info = vk::BufferDeviceAddressInfo::default().buffer(buffer);
-        let device_address = device.get_buffer_device_address(&address_info);
+        let device_address = unsafe { device.get_buffer_device_address(&address_info) };
 
         log::info!("GlobalClusterBuffer BDA: {device_address:#018X}");
 
@@ -115,8 +117,10 @@ impl GlobalClusterBuffer {
             .size(size);
 
         // Record the copy command
-        self.device
-            .cmd_copy_buffer(command_buffer, staging_buffer, self.buffer, &[region]);
+        unsafe {
+            self.device
+                .cmd_copy_buffer(command_buffer, staging_buffer, self.buffer, &[region]);
+        }
 
         // Return the start index (base index in the global cluster array)
         Ok((dst_offset / element_size) as u32)
@@ -141,7 +145,9 @@ impl GlobalClusterBuffer {
         self.destroyed = true;
 
         if let Ok(mut alloc) = self.allocation.lock() {
-            self.allocator.destroy_buffer(self.buffer, &mut alloc);
+            unsafe {
+                self.allocator.destroy_buffer(self.buffer, &mut alloc);
+            }
         }
         log::info!("GlobalClusterBuffer destroyed");
     }

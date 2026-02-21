@@ -4,8 +4,8 @@
 
 use ash::vk;
 use ash_renderer::prelude::*;
-use ash_renderer::renderer::resources::gltf_loader;
 use ash_renderer::renderer::Scene;
+use ash_renderer::renderer::resources::gltf_loader;
 use glam::{Mat4, Vec3};
 use std::sync::Arc;
 use std::time::Instant;
@@ -123,8 +123,8 @@ impl ApplicationHandler for App {
                                         }
                                         Ok(handle) => {
                                             log::info!(
-                                            "Registered mesh '{mesh_name}' with handle {handle}"
-                                        );
+                                                "Registered mesh '{mesh_name}' with handle {handle}"
+                                            );
 
                                             // Check if material was registered
                                             let mat_handle =
@@ -135,8 +135,8 @@ impl ApplicationHandler for App {
                                                     .is_handle_valid(mat_handle)
                                                 {
                                                     log::info!(
-                                                    "✅ Material registered for mesh '{mesh_name}' (handle {mat_handle:?})"
-                                                );
+                                                        "✅ Material registered for mesh '{mesh_name}' (handle {mat_handle:?})"
+                                                    );
                                                     // Upload the automatically registered material to GPU
                                                     let material = scene
                                                         .material_manager
@@ -145,10 +145,12 @@ impl ApplicationHandler for App {
                                                     let _ =
                                                         scene.register_material(&material).unwrap();
                                                     log::info!(
-                                                    "✅ Material uploaded to GPU: {mat_handle:?}"
-                                                );
+                                                        "✅ Material uploaded to GPU: {mat_handle:?}"
+                                                    );
                                                 } else {
-                                                    log::warn!("❌ No material registered for mesh '{mesh_name}' (handle {mat_handle:?})");
+                                                    log::warn!(
+                                                        "❌ No material registered for mesh '{mesh_name}' (handle {mat_handle:?})"
+                                                    );
                                                 }
                                             }
                                         }

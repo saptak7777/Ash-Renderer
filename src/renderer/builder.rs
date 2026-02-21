@@ -1,7 +1,7 @@
+use crate::Result;
+use crate::renderer::Renderer;
 use crate::renderer::passes::vsr::VsrConfig;
 use crate::renderer::types::RendererConfig;
-use crate::renderer::Renderer;
-use crate::Result;
 use ash::vk;
 
 /// Fluent builder for the [`Renderer`].

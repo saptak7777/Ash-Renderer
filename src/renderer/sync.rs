@@ -70,7 +70,9 @@ impl<'a> Drop for InstancingRestoreGuard<'a> {
                 self.resources.instancing_guard_active = false;
             }
         } else {
-            log::error!("InstancingRestoreGuard dropped without restoration - this indicates a logic bug or a botched move!");
+            log::error!(
+                "InstancingRestoreGuard dropped without restoration - this indicates a logic bug or a botched move!"
+            );
         }
     }
 }

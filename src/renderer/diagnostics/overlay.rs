@@ -3,9 +3,9 @@
 //! Generates vertices for debug text display using an embedded bitmap font.
 //! The overlay is rendered in screen space with semi-transparent background.
 
-use super::font_data::{get_glyph, GLYPH_HEIGHT, GLYPH_WIDTH};
-use super::overlay_types::{generate_quad_ndc, pixel_to_ndc, OverlayConfig, TextVertex};
 use super::DiagnosticsState;
+use super::font_data::{GLYPH_HEIGHT, GLYPH_WIDTH, get_glyph};
+use super::overlay_types::{OverlayConfig, TextVertex, generate_quad_ndc, pixel_to_ndc};
 
 /// Parameters for rasterizing a single glyph
 struct GlyphRasterContext<'a> {

@@ -1,4 +1,4 @@
-use ash::{vk, Entry, Instance};
+use ash::{Entry, Instance, vk};
 #[cfg(target_os = "macos")]
 use raw_window_handle::{HasDisplayHandle, RawDisplayHandle};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -48,17 +48,14 @@ impl SurfaceProvider for HeadlessSurfaceProvider {
     }
 
     unsafe fn create_surface(&self, entry: &Entry, instance: &Instance) -> Result<vk::SurfaceKHR> {
-        let available_extensions = entry
-            .enumerate_instance_extension_properties(None)
+        let available_extensions = unsafe { entry.enumerate_instance_extension_properties(None) }
             .map_err(|e| {
-                AshError::DeviceInitFailed(format!(
-                    "Failed to enumerate instance extensions: {e:?}"
-                ))
-            })?;
+            AshError::DeviceInitFailed(format!("Failed to enumerate instance extensions: {e:?}"))
+        })?;
 
         let has_headless = available_extensions.iter().any(|ext| {
-            std::ffi::CStr::from_ptr(ext.extension_name.as_ptr())
-                == ash::ext::headless_surface::NAME
+            let name = unsafe { std::ffi::CStr::from_ptr(ext.extension_name.as_ptr()) };
+            name == ash::ext::headless_surface::NAME
         });
 
         if !has_headless {
@@ -71,11 +68,9 @@ impl SurfaceProvider for HeadlessSurfaceProvider {
         let headless_loader = ash::ext::headless_surface::Instance::new(entry, instance);
         let create_info = vk::HeadlessSurfaceCreateInfoEXT::default();
 
-        headless_loader
-            .create_headless_surface(&create_info, None)
-            .map_err(|e| {
-                AshError::DeviceInitFailed(format!("Failed to create headless surface: {e:?}"))
-            })
+        unsafe { headless_loader.create_headless_surface(&create_info, None) }.map_err(|e| {
+            AshError::DeviceInitFailed(format!("Failed to create headless surface: {e:?}"))
+        })
     }
 
     fn physical_size(&self) -> (u32, u32) {
@@ -122,7 +117,7 @@ impl<'a> SurfaceProvider for WindowSurfaceProvider<'a> {
     }
 
     unsafe fn create_surface(&self, entry: &Entry, instance: &Instance) -> Result<vk::SurfaceKHR> {
-        create_surface_impl(entry, instance, self.window)
+        unsafe { create_surface_impl(entry, instance, self.window) }
     }
 
     fn physical_size(&self) -> (u32, u32) {
@@ -150,8 +145,7 @@ unsafe fn create_surface_impl(
                 .hwnd(hwnd as vk::HWND)
                 .hinstance(hinstance as vk::HINSTANCE);
 
-            win32_surface_loader
-                .create_win32_surface(&create_info, None)
+            unsafe { win32_surface_loader.create_win32_surface(&create_info, None) }
                 .map_err(|e| AshError::VulkanError(format!("{e:?}")))
         }
         _ => Err(AshError::DeviceInitFailed(
@@ -174,8 +168,7 @@ unsafe fn create_surface_impl(
             let create_info = vk::WaylandSurfaceCreateInfoKHR::default()
                 .display(handle.display.as_ptr())
                 .surface(handle.surface.as_ptr());
-            wayland_surface_loader
-                .create_wayland_surface(&create_info, None)
+            unsafe { wayland_surface_loader.create_wayland_surface(&create_info, None) }
                 .map_err(|e| AshError::VulkanError(format!("{e:?}")))
         }
         Ok(RawWindowHandle::Xlib(handle)) => {
@@ -188,8 +181,7 @@ unsafe fn create_surface_impl(
                         .unwrap_or(std::ptr::null_mut()) as *mut _,
                 )
                 .window(handle.window);
-            xlib_surface_loader
-                .create_xlib_surface(&create_info, None)
+            unsafe { xlib_surface_loader.create_xlib_surface(&create_info, None) }
                 .map_err(|e| AshError::VulkanError(format!("{e:?}")))
         }
         _ => Err(AshError::DeviceInitFailed(
@@ -218,8 +210,7 @@ unsafe fn create_surface_impl(
             let layer_ptr = layer as *const vk::CAMetalLayer;
 
             let create_info = vk::MetalSurfaceCreateInfoEXT::default().layer(layer_ptr);
-            metal_surface_loader
-                .create_metal_surface(&create_info, None)
+            unsafe { metal_surface_loader.create_metal_surface(&create_info, None) }
                 .map_err(|e| AshError::VulkanError(format!("{e:?}")))
         }
         _ => Err(AshError::DeviceInitFailed(

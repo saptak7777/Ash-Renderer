@@ -57,8 +57,8 @@ pub use passes::fullscreen::FullscreenPass;
 pub use passes::hiz::HiZPass;
 pub use passes::motion::MotionVectorPass;
 pub use passes::temporal_aa::{
-    detect_config_change, ConfigChangeType, ConfigMetrics, ConfigMetricsReport,
-    ConfigValidationError, SharpeningMode, TaaConfig, Validate,
+    ConfigChangeType, ConfigMetrics, ConfigMetricsReport, ConfigValidationError, SharpeningMode,
+    TaaConfig, Validate, detect_config_change,
 };
 pub use passes::vsr::{SharpenConfig, VsrConfig, VsrInputs, VsrPass, VsrQuality, VsrUpscaleConfig};
 

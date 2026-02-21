@@ -3,8 +3,8 @@
 //! Demonstrates loading a GLTF/GLB model using the renderer's gltf_loader utility.
 
 use ash_renderer::prelude::*;
-use ash_renderer::renderer::resources::gltf_loader;
 use ash_renderer::renderer::Scene;
+use ash_renderer::renderer::resources::gltf_loader;
 use glam::{Mat4, Vec3};
 use std::sync::Arc;
 use std::time::Instant;

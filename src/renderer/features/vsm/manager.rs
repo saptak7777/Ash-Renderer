@@ -86,14 +86,16 @@ impl VsmManager {
         log::info!("Creating VSM manager with {frame_count} frames");
 
         // Create resources
-        let resources = VsmResources::new(
-            Arc::clone(&device),
-            Arc::clone(&allocator),
-            command_pool,
-            queue,
-            config.clone(),
-            frame_count,
-        )?;
+        let resources = unsafe {
+            VsmResources::new(
+                Arc::clone(&device),
+                Arc::clone(&allocator),
+                command_pool,
+                queue,
+                config.clone(),
+                frame_count,
+            )?
+        };
 
         // Create page manager
         let page_manager = PageManager::new(
@@ -105,14 +107,16 @@ impl VsmManager {
 
         // Create shadow pass
         let shadow_pass =
-            VsmShadowPass::new(Arc::clone(&device), Arc::clone(&allocator), &resources)?;
+            unsafe { VsmShadowPass::new(Arc::clone(&device), Arc::clone(&allocator), &resources)? };
 
         // Create compute pipelines
-        let compute_pipelines = VsmComputePipelines::new(
-            Arc::clone(&device),
-            resources.compute_layout,
-            config.max_requests_per_frame,
-        )?;
+        let compute_pipelines = unsafe {
+            VsmComputePipelines::new(
+                Arc::clone(&device),
+                resources.compute_layout,
+                config.max_requests_per_frame,
+            )?
+        };
 
         // Create shadow cull pass
         let shadow_cull_pass = ShadowCullPass::new(
@@ -623,17 +627,20 @@ impl VsmManager {
 
         // 1. Dispatch Shadow Culling for the light view
         // We use clipmap level 0 for the generic shadow culling pass for now.
-        inner.shadow_cull_pass.cull_shadows(
-            args.cmd,
-            crate::renderer::passes::ShadowCullInfo {
-                frame_index: self.current_frame as usize % inner.resources.request_buffers.len(),
-                view_proj: args.light_view_proj,
-                object_count: args.object_count,
-                base_index: 0,
-                clipmap_level: 0,
-                object_buffer_ptr: args.object_addr,
-            },
-        );
+        unsafe {
+            inner.shadow_cull_pass.cull_shadows(
+                args.cmd,
+                crate::renderer::passes::ShadowCullInfo {
+                    frame_index: self.current_frame as usize
+                        % inner.resources.request_buffers.len(),
+                    view_proj: args.light_view_proj,
+                    object_count: args.object_count,
+                    base_index: 0,
+                    clipmap_level: 0,
+                    object_buffer_ptr: args.object_addr,
+                },
+            );
+        }
 
         // Barrier to ensure culling results are visible to indirect draw
         let cull_barrier = vk::BufferMemoryBarrier::default()
@@ -646,28 +653,32 @@ impl VsmManager {
             .offset(0)
             .size(vk::WHOLE_SIZE);
 
-        self.device.cmd_pipeline_barrier(
-            args.cmd,
-            vk::PipelineStageFlags::COMPUTE_SHADER,
-            vk::PipelineStageFlags::DRAW_INDIRECT,
-            vk::DependencyFlags::empty(),
-            &[],
-            &[cull_barrier],
-            &[],
-        );
+        unsafe {
+            self.device.cmd_pipeline_barrier(
+                args.cmd,
+                vk::PipelineStageFlags::COMPUTE_SHADER,
+                vk::PipelineStageFlags::DRAW_INDIRECT,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[cull_barrier],
+                &[],
+            );
+        }
 
         // 2. Render pages
-        inner.shadow_pass.render_pages(
-            args.cmd,
-            super::shadow_pass::ShadowPageRenderInfo {
-                resources: &inner.resources,
-                bindless_descriptor_set: args.bindless_set,
-                vertex_addr: args.vertex_addr,
-                index_addr: args.index_addr,
-                pages: &pages,
-            },
-            scene_draw_fn,
-        );
+        unsafe {
+            inner.shadow_pass.render_pages(
+                args.cmd,
+                super::shadow_pass::ShadowPageRenderInfo {
+                    resources: &inner.resources,
+                    bindless_descriptor_set: args.bindless_set,
+                    vertex_addr: args.vertex_addr,
+                    index_addr: args.index_addr,
+                    pages: &pages,
+                },
+                scene_draw_fn,
+            );
+        }
 
         Ok(())
     }
@@ -692,11 +703,19 @@ impl VsmManager {
         if let Some(mut inner) = self.inner.take() {
             log::debug!("Destroying VSM manager");
 
-            inner.shadow_pass.destroy(&self.allocator);
-            inner.shadow_cull_pass.destroy(&self.allocator);
-            inner.compute_pipelines.destroy();
+            unsafe {
+                inner.shadow_pass.destroy(&self.allocator);
+            }
+            unsafe {
+                inner.shadow_cull_pass.destroy(&self.allocator);
+            }
+            unsafe {
+                inner.compute_pipelines.destroy();
+            }
 
-            inner.resources.destroy();
+            unsafe {
+                inner.resources.destroy();
+            }
 
             log::debug!("VSM manager destroyed");
         }

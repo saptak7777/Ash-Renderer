@@ -58,9 +58,9 @@ impl FullscreenPass {
 
         let layout_info = vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings);
 
-        let descriptor_set_layout = device
-            .create_descriptor_set_layout(&layout_info, None)
-            .map_err(|e| AshError::VulkanError(format!("Descriptor layout failed: {e}")))?;
+        let descriptor_set_layout =
+            unsafe { device.create_descriptor_set_layout(&layout_info, None) }
+                .map_err(|e| AshError::VulkanError(format!("Descriptor layout failed: {e}")))?;
 
         // Create push constant range for post-process parameters
         let push_constant_range = vk::PushConstantRange {
@@ -74,8 +74,7 @@ impl FullscreenPass {
             .set_layouts(std::slice::from_ref(&descriptor_set_layout))
             .push_constant_ranges(std::slice::from_ref(&push_constant_range));
 
-        let pipeline_layout = device
-            .create_pipeline_layout(&pipeline_layout_info, None)
+        let pipeline_layout = unsafe { device.create_pipeline_layout(&pipeline_layout_info, None) }
             .map_err(|e| AshError::VulkanError(format!("Pipeline layout failed: {e}")))?;
 
         log::info!("Fullscreen pass created successfully");

@@ -1,6 +1,6 @@
 use std::{collections::HashMap, sync::Arc};
 
-use ash::{vk, Device};
+use ash::{Device, vk};
 use bytemuck::{Pod, Zeroable};
 
 use crate::renderer::resources::global_geometry_buffer::DualHeapGeometryBuffer;
@@ -334,13 +334,15 @@ impl ModelRenderer {
 
         let push_bytes = bytemuck::bytes_of(&push);
 
-        self.device.cmd_push_constants(
-            ctx.command_buffer,
-            ctx.pipeline_layout,
-            vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
-            0,
-            push_bytes,
-        );
+        unsafe {
+            self.device.cmd_push_constants(
+                ctx.command_buffer,
+                ctx.pipeline_layout,
+                vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                0,
+                push_bytes,
+            )
+        };
 
         // Software Index Pulling:
         // We use cmd_draw to drive gl_VertexIndex as an iterator into the index heap.
@@ -348,21 +350,25 @@ impl ModelRenderer {
         let first_vertex = (ctx.uploaded.index_offset.unwrap_or(0) / 4) as u32;
 
         if ctx.uploaded.has_indices() {
-            self.device.cmd_draw(
-                ctx.command_buffer,
-                ctx.uploaded.index_count(),
-                instance_count,
-                first_vertex,
-                first_instance,
-            );
+            unsafe {
+                self.device.cmd_draw(
+                    ctx.command_buffer,
+                    ctx.uploaded.index_count(),
+                    instance_count,
+                    first_vertex,
+                    first_instance,
+                )
+            };
         } else {
-            self.device.cmd_draw(
-                ctx.command_buffer,
-                ctx.uploaded.vertex_count(),
-                instance_count,
-                0,
-                first_instance,
-            );
+            unsafe {
+                self.device.cmd_draw(
+                    ctx.command_buffer,
+                    ctx.uploaded.vertex_count(),
+                    instance_count,
+                    0,
+                    first_instance,
+                )
+            };
         }
     }
 
@@ -411,24 +417,28 @@ impl ModelRenderer {
 
         let push_bytes = bytemuck::bytes_of(&push);
 
-        self.device.cmd_push_constants(
-            ctx.command_buffer,
-            ctx.pipeline_layout,
-            vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
-            0,
-            push_bytes,
-        );
+        unsafe {
+            self.device.cmd_push_constants(
+                ctx.command_buffer,
+                ctx.pipeline_layout,
+                vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                0,
+                push_bytes,
+            )
+        };
 
         // Software Index Pulling (Phase 1): Always use non-indexed indirect draw
-        self.device.cmd_draw_indirect_count(
-            ctx.command_buffer,
-            params.indirect_buffer,
-            params.indirect_offset,
-            params.count_buffer,
-            params.count_offset,
-            params.max_draw_count,
-            params.stride,
-        );
+        unsafe {
+            self.device.cmd_draw_indirect_count(
+                ctx.command_buffer,
+                params.indirect_buffer,
+                params.indirect_offset,
+                params.count_buffer,
+                params.count_offset,
+                params.max_draw_count,
+                params.stride,
+            )
+        };
     }
 
     /// Draw multiple instances using indirect count buffer
@@ -473,24 +483,28 @@ impl ModelRenderer {
 
         let push_bytes = bytemuck::bytes_of(&push);
 
-        self.device.cmd_push_constants(
-            ctx.command_buffer,
-            ctx.pipeline_layout,
-            vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
-            0,
-            push_bytes,
-        );
+        unsafe {
+            self.device.cmd_push_constants(
+                ctx.command_buffer,
+                ctx.pipeline_layout,
+                vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                0,
+                push_bytes,
+            )
+        };
 
         // Software Index Pulling (Phase 1): Always use non-indexed indirect draw
-        self.device.cmd_draw_indirect_count(
-            ctx.command_buffer,
-            params.indirect_buffer,
-            params.indirect_offset,
-            params.count_buffer,
-            params.count_offset,
-            params.max_draw_count,
-            params.stride,
-        );
+        unsafe {
+            self.device.cmd_draw_indirect_count(
+                ctx.command_buffer,
+                params.indirect_buffer,
+                params.indirect_offset,
+                params.count_buffer,
+                params.count_offset,
+                params.max_draw_count,
+                params.stride,
+            )
+        };
     }
     /// Public method to upload a mesh directly (used for internal meshes like Skybox)
     pub fn upload_mesh_data(
@@ -557,7 +571,7 @@ impl ModelRenderer {
         // Direct streaming write to GPU buffer
         // This avoids read-modify-write stalls and ensures the material is available
         // immediately for the next indirect draw call.
-        buffer.write_element_at(id as usize, &mat_uniform)?;
+        unsafe { buffer.write_element_at(id as usize, &mat_uniform)? };
 
         log::debug!("Material registered at slot {id}: {}", material.name);
 

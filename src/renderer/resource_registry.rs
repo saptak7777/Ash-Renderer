@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock, Weak};
 use std::time::Instant;
 
-use ash::{vk, Device};
+use ash::{Device, vk};
 use log::{error, info, trace, warn};
 use thiserror::Error;
 use uuid::Uuid;

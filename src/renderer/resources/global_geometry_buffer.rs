@@ -5,8 +5,8 @@
 
 use ash::vk;
 use std::sync::{
-    atomic::{AtomicU64, Ordering},
     Arc, Mutex,
+    atomic::{AtomicU64, Ordering},
 };
 
 use crate::vulkan::Allocator;
@@ -81,37 +81,41 @@ impl DualHeapGeometryBuffer {
         );
 
         // Create Vertex Heap with BDA support
-        let (vertex_heap, vertex_allocation) = allocator.create_buffer_with_flags_and_name(
-            vertex_capacity,
-            vk::BufferUsageFlags::STORAGE_BUFFER
-                | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS
-                | vk::BufferUsageFlags::TRANSFER_DST,
-            vk_mem::MemoryUsage::AutoPreferDevice,
-            vk_mem::AllocationCreateFlags::empty(), // GPU-only memory, no CPU access needed
-            Some("Vertex Heap (BDA)".to_string()),
-        )?;
+        let (vertex_heap, vertex_allocation) = unsafe {
+            allocator.create_buffer_with_flags_and_name(
+                vertex_capacity,
+                vk::BufferUsageFlags::STORAGE_BUFFER
+                    | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS
+                    | vk::BufferUsageFlags::TRANSFER_DST,
+                vk_mem::MemoryUsage::AutoPreferDevice,
+                vk_mem::AllocationCreateFlags::empty(), // GPU-only memory, no CPU access needed
+                Some("Vertex Heap (BDA)".to_string()),
+            )?
+        };
 
         // Get device address for vertex heap
         let address_info = vk::BufferDeviceAddressInfo::default().buffer(vertex_heap);
-        let vertex_device_address = device.get_buffer_device_address(&address_info);
+        let vertex_device_address = unsafe { device.get_buffer_device_address(&address_info) };
 
         log::info!("Vertex Heap BDA: {vertex_device_address:#018X}");
 
         // Create Index Heap with BDA support
-        let (index_buffer, index_allocation) = allocator.create_buffer_with_flags_and_name(
-            index_capacity * std::mem::size_of::<u32>() as u64,
-            vk::BufferUsageFlags::INDEX_BUFFER
-                | vk::BufferUsageFlags::STORAGE_BUFFER
-                | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS
-                | vk::BufferUsageFlags::TRANSFER_DST,
-            vk_mem::MemoryUsage::AutoPreferDevice,
-            vk_mem::AllocationCreateFlags::empty(),
-            Some("Index Heap (BDA)".to_string()),
-        )?;
+        let (index_buffer, index_allocation) = unsafe {
+            allocator.create_buffer_with_flags_and_name(
+                index_capacity * std::mem::size_of::<u32>() as u64,
+                vk::BufferUsageFlags::INDEX_BUFFER
+                    | vk::BufferUsageFlags::STORAGE_BUFFER
+                    | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS
+                    | vk::BufferUsageFlags::TRANSFER_DST,
+                vk_mem::MemoryUsage::AutoPreferDevice,
+                vk_mem::AllocationCreateFlags::empty(),
+                Some("Index Heap (BDA)".to_string()),
+            )?
+        };
 
         // Get device address for index heap
         let index_address_info = vk::BufferDeviceAddressInfo::default().buffer(index_buffer);
-        let index_device_address = device.get_buffer_device_address(&index_address_info);
+        let index_device_address = unsafe { device.get_buffer_device_address(&index_address_info) };
 
         log::info!("Index Heap BDA: {index_device_address:#018X}");
 
@@ -157,13 +161,15 @@ impl DualHeapGeometryBuffer {
             ));
         }
 
-        self.upload_data(
-            command_pool,
-            queue,
-            self.vertex_heap,
-            offset,
-            bytemuck::cast_slice(vertices),
-        )?;
+        unsafe {
+            self.upload_data(
+                command_pool,
+                queue,
+                self.vertex_heap,
+                offset,
+                bytemuck::cast_slice(vertices),
+            )
+        }?;
 
         Ok(offset)
     }
@@ -190,13 +196,15 @@ impl DualHeapGeometryBuffer {
 
         let byte_offset = offset * std::mem::size_of::<u32>() as u64;
 
-        self.upload_data(
-            command_pool,
-            queue,
-            self.index_buffer,
-            byte_offset,
-            bytemuck::cast_slice(indices),
-        )?;
+        unsafe {
+            self.upload_data(
+                command_pool,
+                queue,
+                self.index_buffer,
+                byte_offset,
+                bytemuck::cast_slice(indices),
+            )
+        }?;
 
         Ok(byte_offset)
     }
@@ -215,49 +223,54 @@ impl DualHeapGeometryBuffer {
             .level(vk::CommandBufferLevel::PRIMARY)
             .command_buffer_count(1);
 
-        let cmd_buffers = self
-            .device
-            .allocate_command_buffers(&cmd_info)
-            .map_err(|e| {
+        let cmd_buffers =
+            unsafe { self.device.allocate_command_buffers(&cmd_info) }.map_err(|e| {
                 AshError::VulkanError(format!("Failed to allocate command buffer: {e}"))
             })?;
         let cmd_buffer = cmd_buffers[0];
 
-        self.device
-            .begin_command_buffer(
+        unsafe {
+            self.device.begin_command_buffer(
                 cmd_buffer,
                 &vk::CommandBufferBeginInfo::default()
                     .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
             )
-            .map_err(|e| AshError::VulkanError(format!("Failed to begin command buffer: {e}")))?;
+        }
+        .map_err(|e| AshError::VulkanError(format!("Failed to begin command buffer: {e}")))?;
 
         // Split into 65536-byte chunks for cmd_update_buffer
         if data.len() <= 65536 {
-            self.device
-                .cmd_update_buffer(cmd_buffer, dst_buffer, dst_offset, data);
+            unsafe {
+                self.device
+                    .cmd_update_buffer(cmd_buffer, dst_buffer, dst_offset, data);
+            }
         } else {
             for (i, chunk) in data.chunks(65536).enumerate() {
                 let chunk_offset = dst_offset + (i * 65536) as u64;
-                self.device
-                    .cmd_update_buffer(cmd_buffer, dst_buffer, chunk_offset, chunk);
+                unsafe {
+                    self.device
+                        .cmd_update_buffer(cmd_buffer, dst_buffer, chunk_offset, chunk);
+                }
             }
         }
 
-        self.device
-            .end_command_buffer(cmd_buffer)
+        unsafe { self.device.end_command_buffer(cmd_buffer) }
             .map_err(|e| AshError::VulkanError(format!("Failed to end command buffer: {e}")))?;
 
         let submit_info = vk::SubmitInfo::default().command_buffers(&cmd_buffers);
 
-        self.device
-            .queue_submit(queue, &[submit_info], vk::Fence::null())
-            .map_err(|e| AshError::VulkanError(format!("Failed to submit queue: {e}")))?;
+        unsafe {
+            self.device
+                .queue_submit(queue, &[submit_info], vk::Fence::null())
+        }
+        .map_err(|e| AshError::VulkanError(format!("Failed to submit queue: {e}")))?;
 
-        self.device
-            .queue_wait_idle(queue)
+        unsafe { self.device.queue_wait_idle(queue) }
             .map_err(|e| AshError::VulkanError(format!("Failed to wait for queue: {e}")))?;
 
-        self.device.free_command_buffers(command_pool, &cmd_buffers);
+        unsafe {
+            self.device.free_command_buffers(command_pool, &cmd_buffers);
+        }
 
         Ok(())
     }
@@ -313,10 +326,12 @@ impl DualHeapGeometryBuffer {
             }
         };
 
-        self.allocator
-            .destroy_buffer(self.vertex_heap, &mut vertex_alloc);
-        self.allocator
-            .destroy_buffer(self.index_buffer, &mut index_alloc);
+        unsafe {
+            self.allocator
+                .destroy_buffer(self.vertex_heap, &mut vertex_alloc);
+            self.allocator
+                .destroy_buffer(self.index_buffer, &mut index_alloc);
+        }
 
         self.vertex_heap = vk::Buffer::null();
         self.index_buffer = vk::Buffer::null();

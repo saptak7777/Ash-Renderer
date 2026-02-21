@@ -1,8 +1,8 @@
 use crate::renderer::queue::RenderQueue;
 use crate::{
+    AshError, Result,
     renderer::{initialization, resource_registry::ResourceRegistry},
     vulkan::{self, Allocator},
-    AshError, Result,
 };
 use std::sync::Arc;
 

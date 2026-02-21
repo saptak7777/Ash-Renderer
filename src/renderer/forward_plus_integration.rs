@@ -104,14 +104,14 @@ impl ForwardPlusIntegration {
         };
 
         for _ in 0..frame_count {
-            let (buf, alloc) = allocator
-                .vma
-                .create_buffer(&camera_buffer_info, &camera_alloc_info)
-                .map_err(|e| {
-                    crate::AshError::VulkanError(format!(
-                        "Camera data buffer creation failed: {e:?}"
-                    ))
-                })?;
+            let (buf, alloc) = unsafe {
+                allocator
+                    .vma
+                    .create_buffer(&camera_buffer_info, &camera_alloc_info)
+            }
+            .map_err(|e| {
+                crate::AshError::VulkanError(format!("Camera data buffer creation failed: {e:?}"))
+            })?;
             camera_bufs.push(buf);
             camera_allocs.push(alloc);
         }
@@ -179,9 +179,8 @@ impl ForwardPlusIntegration {
         ];
 
         let layout_info = vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings);
-        self.compute_descriptor_layout = device
-            .create_descriptor_set_layout(&layout_info, None)
-            .map_err(|e| {
+        self.compute_descriptor_layout =
+            unsafe { device.create_descriptor_set_layout(&layout_info, None) }.map_err(|e| {
                 AshError::VulkanError(format!(
                     "Failed to create compute descriptor set layout: {e}"
                 ))
@@ -205,12 +204,10 @@ impl ForwardPlusIntegration {
             .pool_sizes(&pool_sizes)
             .max_sets(self.frame_count as u32);
 
-        self.compute_descriptor_pool =
-            device
-                .create_descriptor_pool(&pool_info, None)
-                .map_err(|e| {
-                    AshError::VulkanError(format!("Failed to create compute descriptor pool: {e}"))
-                })?;
+        self.compute_descriptor_pool = unsafe { device.create_descriptor_pool(&pool_info, None) }
+            .map_err(|e| {
+            AshError::VulkanError(format!("Failed to create compute descriptor pool: {e}"))
+        })?;
 
         // 3. Allocate Descriptor Sets (one per frame)
         let layouts = vec![self.compute_descriptor_layout; self.frame_count];
@@ -218,8 +215,8 @@ impl ForwardPlusIntegration {
             .descriptor_pool(self.compute_descriptor_pool)
             .set_layouts(&layouts);
 
-        self.compute_descriptor_sets =
-            device.allocate_descriptor_sets(&alloc_info).map_err(|e| {
+        self.compute_descriptor_sets = unsafe { device.allocate_descriptor_sets(&alloc_info) }
+            .map_err(|e| {
                 AshError::VulkanError(format!("Failed to allocate compute descriptor sets: {e}"))
             })?;
 
@@ -233,13 +230,13 @@ impl ForwardPlusIntegration {
         // We use the helper ComputePipeline from crate::vulkan which simplifies creation
         // BDA Migration: Compute shader now only needs Set 0 (Depth/Camera)
         // Set 3 is gone, BDA handles everything.
-        self.compute_pipeline = Some(
+        self.compute_pipeline = Some(unsafe {
             ComputePipeline::builder(Arc::clone(&device))
                 .with_shader(shader_module.module)
                 .add_set_layout(self.compute_descriptor_layout) // Set 0: Depth buffer, camera
                 .add_push_constant(push_constant_range)
-                .build()?,
-        );
+                .build()?
+        });
 
         // 5. Update all descriptor sets with depth buffer and their respective camera buffers
         let depth_image_info = vk::DescriptorImageInfo {
@@ -267,7 +264,9 @@ impl ForwardPlusIntegration {
                     .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
                     .buffer_info(std::slice::from_ref(&camera_info)),
             ];
-            device.update_descriptor_sets(&writes, &[]);
+            unsafe {
+                device.update_descriptor_sets(&writes, &[]);
+            }
         }
 
         log::info!(
@@ -300,7 +299,9 @@ impl ForwardPlusIntegration {
                 .dst_binding(0)
                 .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
                 .image_info(std::slice::from_ref(&depth_image_info))];
-            device.update_descriptor_sets(&writes, &[]);
+            unsafe {
+                device.update_descriptor_sets(&writes, &[]);
+            }
         }
 
         log::debug!("Forward+ depth descriptors updated");
@@ -317,8 +318,7 @@ impl ForwardPlusIntegration {
         }
 
         // Assertive: this should not fail during normal operation
-        self.lights
-            .create_buffers(allocator)
+        unsafe { self.lights.create_buffers(allocator) }
             .expect("Forward+ buffer allocation failed");
         self.initialized = true;
     }
@@ -367,7 +367,9 @@ impl ForwardPlusIntegration {
             .get_allocation_info(&self.camera_allocs[frame_index]);
         let ptr = info.mapped_data;
         if !ptr.is_null() {
-            std::ptr::copy_nonoverlapping(&data, ptr as *mut CullingCameraData, 1);
+            unsafe {
+                std::ptr::copy_nonoverlapping(&data, ptr as *mut CullingCameraData, 1);
+            }
         }
         Ok(())
     }
@@ -390,10 +392,12 @@ impl ForwardPlusIntegration {
         // CRITICAL: Recreate tile buffer if screen size changed
         // Must happen before upload_lights and descriptor update
         // This also handles min size 1024 logic internally now
-        let _buffers_recreated = self.lights.recreate_tile_buffer_if_needed(allocator)?;
+        let _buffers_recreated = unsafe { self.lights.recreate_tile_buffer_if_needed(allocator)? };
 
         // Upload lights
-        self.lights.upload_lights(allocator, frame_index)?;
+        unsafe {
+            self.lights.upload_lights(allocator, frame_index)?;
+        }
 
         // Update cached info
         self.cached_info = self.lights.get_forward_plus_info();
@@ -527,18 +531,26 @@ impl ForwardPlusIntegration {
         log::debug!("Destroying Forward+ Integration");
 
         if self.compute_descriptor_pool != vk::DescriptorPool::null() {
-            device.destroy_descriptor_pool(self.compute_descriptor_pool, None);
+            unsafe {
+                device.destroy_descriptor_pool(self.compute_descriptor_pool, None);
+            }
         }
         if self.compute_descriptor_layout != vk::DescriptorSetLayout::null() {
-            device.destroy_descriptor_set_layout(self.compute_descriptor_layout, None);
+            unsafe {
+                device.destroy_descriptor_set_layout(self.compute_descriptor_layout, None);
+            }
         }
         // ComputePipeline drops itself
 
-        self.lights.destroy_buffers(allocator);
+        unsafe {
+            self.lights.destroy_buffers(allocator);
+        }
 
         // Destroy all per-frame camera buffers
         for (buf, alloc) in self.camera_bufs.iter().zip(self.camera_allocs.iter_mut()) {
-            allocator.vma.destroy_buffer(*buf, alloc);
+            unsafe {
+                allocator.vma.destroy_buffer(*buf, alloc);
+            }
         }
 
         self.initialized = false;

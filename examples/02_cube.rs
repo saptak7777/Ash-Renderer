@@ -4,9 +4,9 @@
 //! Shows how to control the camera from the application.
 
 use ash_renderer::prelude::*;
+use ash_renderer::renderer::Scene;
 use ash_renderer::renderer::features::ambient_lighting::{AmbientPreset, LightingBuilder};
 use ash_renderer::renderer::resources::uniform::StorageBuffer;
-use ash_renderer::renderer::Scene;
 use glam::{Mat4, Vec3, Vec4};
 use std::sync::Arc;
 use std::time::Instant;
