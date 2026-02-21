@@ -11,8 +11,8 @@
 use std::sync::{Arc, RwLock};
 
 use crate::renderer::{
+    ForwardPlusIntegration,
     features::{DirectionalLight, PointLight, SpotLight},
-    forward_plus_integration::ForwardPlusIntegration,
 };
 use crate::{AshError, Result};
 
