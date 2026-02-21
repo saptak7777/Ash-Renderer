@@ -10,6 +10,8 @@ Ash Renderer is a low-level Vulkan rendering library for Rust projects that want
 
 Oh, and did I mention it's **FULL BDA** (Buffer Device Address) and **FULL BINDLESS**? Yeah, we went there. Your CPU will thank us for not constantly bothering it with buffer bindings and descriptor updates. It's basically on vacation while your GPU does all the heavy lifting.
 
+![We Are Full BDA Bro](we%20are%20full%20bda%20bro.jpg)
+
 > [!IMPORTANT]
 > **Fair Warning**: This is a rendering component, not a game engine. You still have to handle your own physics, ECS, and logic. It's like buying a high-performance engine for a car you haven't built yet; it runs great on a test stand, but you can't drive it to the grocery store.
 
