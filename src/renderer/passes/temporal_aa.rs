@@ -660,9 +660,9 @@ impl TaaPass {
 
         // ── Transition read history image to SHADER_READ_ONLY_OPTIMAL ─────────
         let read_barrier = vk::ImageMemoryBarrier::default()
-            .old_layout(vk::ImageLayout::GENERAL)
+            .old_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
             .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
-            .src_access_mask(vk::AccessFlags::SHADER_WRITE)
+            .src_access_mask(vk::AccessFlags::SHADER_READ)
             .dst_access_mask(vk::AccessFlags::SHADER_READ)
             .image(self.history_images[read_idx])
             .subresource_range(vk::ImageSubresourceRange {

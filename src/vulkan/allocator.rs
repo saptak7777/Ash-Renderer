@@ -417,7 +417,7 @@ impl<'a> MapGuard<'a> {
     /// Copy data from a slice into the mapped memory.
     pub fn copy_from_slice<T: Copy>(&mut self, data: &[T]) {
         let size = std::mem::size_of_val(data);
-        debug_assert!(size <= self.size as usize, "Copy size exceeds mapped range");
+        assert!(size <= self.size as usize, "Copy size exceeds mapped range");
 
         unsafe {
             std::ptr::copy_nonoverlapping(data.as_ptr() as *const u8, self.ptr, size);

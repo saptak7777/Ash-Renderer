@@ -8,12 +8,9 @@
         features::vsm::VsmManager,
         frame_manager,
         instancing::{BatchKey, InstanceData},
-        passes::{
-            temporal_aa::{
-                ConfigChangeType, ConfigMetrics, ConfigMetricsReport, ConfigValidationError,
-                TaaConfig, Validate, detect_config_change,
-            },
-            vsr::VsrQuality,
+        passes::temporal_aa::{
+            ConfigChangeType, ConfigMetrics, ConfigMetricsReport, ConfigValidationError, TaaConfig,
+            Validate, detect_config_change,
         },
         resources,
         types::{DebugMode, DrawItem, MeshData, RenderCommand, RenderFrameContext, RendererConfig},
@@ -1027,7 +1024,12 @@ impl Renderer {
                 )?;
             }
             let hiz_buffer_addr = if let Some(ref hiz_arc) = self.systems.pipeline.hiz_pass {
-                hiz_arc.read().unwrap().hiz_buffer_addr()
+                hiz_arc
+                    .read()
+                    .map_err(|e| {
+                        crate::AshError::VulkanError(format!("Hi-Z pass lock poisoned: {}", e))
+                    })?
+                    .hiz_buffer_addr()
             } else {
                 0
             };
@@ -1107,25 +1109,23 @@ impl Renderer {
                                     if cull_indirect != vk::Buffer::null()
                                         && cull_count != vk::Buffer::null()
                                     {
-                                        self.context.device.device.cmd_draw_indexed_indirect_count(
+                                        self.context.device.device.cmd_draw_indirect_count(
                                             cmd,
                                             cull_indirect,
                                             0,
                                             cull_count,
                                             0,
                                             2048, // max_draw_count
-                                            std::mem::size_of::<vk::DrawIndexedIndirectCommand>()
-                                                as u32,
+                                            std::mem::size_of::<vk::DrawIndirectCommand>() as u32,
                                         );
                                     } else {
                                         // Fallback if culling is disabled or not run
-                                        self.context.device.device.cmd_draw_indexed_indirect(
+                                        self.context.device.device.cmd_draw_indirect(
                                             cmd,
                                             pass.indirect_buffer(),
                                             0,
                                             scene.occlusion_culling.object_count() as u32,
-                                            std::mem::size_of::<vk::DrawIndexedIndirectCommand>()
-                                                as u32,
+                                            std::mem::size_of::<vk::DrawIndirectCommand>() as u32,
                                         );
                                     }
                                 }
@@ -1213,20 +1213,9 @@ impl Renderer {
                 swapchain: self.frame.swapchain.as_ref().ok_or_else(|| {
                     AshError::VulkanError("Swapchain missing during post-process".to_string())
                 })?,
-                vsr: self.systems.vsr_pass.as_mut(),
                 hdr: self.systems.hdr_system.as_ref(),
                 taa_config: self.systems.taa_config.clone(),
                 taa_metrics: Some(&mut self.systems.taa_config_metrics),
-                vsr_config: self.systems.vsr_config.clone(),
-                sharpen_config: if self.systems.vsr_config.sharpening > 0.0 {
-                    Some(crate::renderer::passes::vsr::SharpenConfig {
-                        strength: self.systems.vsr_config.sharpening,
-                        edge_threshold: 0.12,
-                        adaptive: true,
-                    })
-                } else {
-                    None
-                },
                 jitter_uv,
                 prev_jitter_uv: self.systems.prev_jitter_uv,
                 depth_view,
@@ -1453,59 +1442,6 @@ impl Renderer {
             && self.systems.pipeline.indirect_draw_pass.is_some()
     }
 
-    /// Enables Temporal Super-Resolution (VSR)
-    pub fn enable_vsr(&mut self, quality: VsrQuality) -> Result<()> {
-        if self.vsr_enabled() {
-            return Ok(());
-        }
-
-        let extent = self
-            .frame
-            .swapchain
-            .as_ref()
-            .map(|s| s.extent)
-            .unwrap_or(vk::Extent2D {
-                width: 1920,
-                height: 1080,
-            });
-
-        let vsr = unsafe {
-            crate::renderer::initialization::initialize_vsr_pass(
-                &self.context.device,
-                &self.context.alloc,
-                &mut self.resources.assets.bindless_manager,
-                extent,
-                quality,
-            )?
-        };
-
-        self.systems.vsr_pass = Some(vsr);
-        self.systems.vsr_config.quality = quality;
-        log::info!("VSR enabled with {quality:?} quality");
-        Ok(())
-    }
-
-    /// Returns whether VSR is enabled
-    #[inline]
-    pub fn vsr_enabled(&self) -> bool {
-        self.systems.vsr_pass.is_some()
-    }
-
-    /// Returns the current VSR quality preset
-    #[inline]
-    pub fn vsr_quality(&self) -> Option<VsrQuality> {
-        self.systems.vsr_pass.as_ref().map(|t| t.config.quality)
-    }
-
-    /// Get jittered projection matrix for TAA/VSR
-    pub fn jitter_projection(&mut self, projection: glam::Mat4) -> glam::Mat4 {
-        if let Some(ref mut vsr) = self.systems.vsr_pass {
-            vsr.jitter_projection(projection)
-        } else {
-            projection
-        }
-    }
-
     /// Enables HDR rendering. Should be called after initialization.
     /// Allocates GPU memory for the HDR buffer.
     pub(crate) fn initialize_hdr(&mut self, width: u32, height: u32) -> Result<()> {
@@ -1652,10 +1588,6 @@ impl Renderer {
                 Ok(guard) => log::info!("{}", guard.quality_report()),
                 Err(e) => log::warn!("HiZ lock poisoned in log_quality_reports: {e}"),
             }
-        }
-
-        if let Some(vsr) = &self.systems.vsr_pass {
-            log::info!("{}", vsr.quality_report());
         }
     }
 

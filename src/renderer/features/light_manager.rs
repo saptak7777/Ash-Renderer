@@ -220,7 +220,11 @@ impl LightManager {
 
         let light_buffer_info = vk::BufferCreateInfo::default()
             .size(light_buffer_size)
-            .usage(vk::BufferUsageFlags::TRANSFER_DST | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS)
+            .usage(
+                vk::BufferUsageFlags::STORAGE_BUFFER
+                    | vk::BufferUsageFlags::TRANSFER_DST
+                    | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
+            )
             .sharing_mode(vk::SharingMode::EXCLUSIVE);
 
         let light_alloc_info = vk_mem::AllocationCreateInfo {
@@ -259,7 +263,9 @@ impl LightManager {
         // Create tile buffer with host-accessible memory for zero-initialization
         let tile_buffer_info = vk::BufferCreateInfo::default()
             .size(tile_buffer_size)
-            .usage(vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS)
+            .usage(
+                vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
+            )
             .sharing_mode(vk::SharingMode::EXCLUSIVE);
 
         let tile_alloc_info = vk_mem::AllocationCreateInfo {
@@ -362,7 +368,9 @@ impl LightManager {
         // Create new tile buffers with host-accessible memory for zero-initialization
         let tile_buffer_info = vk::BufferCreateInfo::default()
             .size(new_tile_buffer_size)
-            .usage(vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS)
+            .usage(
+                vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
+            )
             .sharing_mode(vk::SharingMode::EXCLUSIVE);
 
         let tile_alloc_info = vk_mem::AllocationCreateInfo {
@@ -450,6 +458,16 @@ impl LightManager {
                     data_size,
                 );
             }
+
+            // Lead Engineer Fix: Explicit flush for non-coherent host memory
+            // Align flush to 256 bytes (common nonCoherentAtomSize)
+            let aligned_size = (data_size as u64).div_ceil(256) * 256;
+            allocator
+                .vma
+                .flush_allocation(&light_buffer.allocation, 0, aligned_size)
+                .map_err(|e| {
+                    crate::AshError::VulkanError(format!("Failed to flush light buffer: {}", e))
+                })?;
         }
 
         self.dirty = false;

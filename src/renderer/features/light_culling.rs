@@ -82,8 +82,8 @@ impl GpuLight {
             params: [
                 light.inner_angle.cos(), // Precompute for shader
                 light.outer_angle.cos(),
-                1.0, // Enabled
-                0.0, // Padding
+                1.0, // Falloff (or unused depending on shader mapping)
+                1.0, // Enabled (Must be 1.0 to match shader 'params.w > 0.5' check)
             ],
         }
     }

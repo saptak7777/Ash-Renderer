@@ -642,16 +642,26 @@ impl VsmManager {
             );
         }
 
-        // Barrier to ensure culling results are visible to indirect draw
-        let cull_barrier = vk::BufferMemoryBarrier::default()
-            .src_access_mask(vk::AccessFlags::SHADER_WRITE)
-            .dst_access_mask(vk::AccessFlags::INDIRECT_COMMAND_READ)
-            .buffer(
-                inner.shadow_cull_pass.indirect_buffers
-                    [self.current_frame as usize % inner.resources.request_buffers.len()],
-            )
-            .offset(0)
-            .size(vk::WHOLE_SIZE);
+        let cull_barriers = [
+            vk::BufferMemoryBarrier::default()
+                .src_access_mask(vk::AccessFlags::SHADER_WRITE)
+                .dst_access_mask(vk::AccessFlags::INDIRECT_COMMAND_READ)
+                .buffer(
+                    inner.shadow_cull_pass.indirect_buffers
+                        [self.current_frame as usize % inner.resources.request_buffers.len()],
+                )
+                .offset(0)
+                .size(vk::WHOLE_SIZE),
+            vk::BufferMemoryBarrier::default()
+                .src_access_mask(vk::AccessFlags::SHADER_WRITE)
+                .dst_access_mask(vk::AccessFlags::INDIRECT_COMMAND_READ)
+                .buffer(
+                    inner.shadow_cull_pass.count_buffers
+                        [self.current_frame as usize % inner.resources.request_buffers.len()],
+                )
+                .offset(0)
+                .size(vk::WHOLE_SIZE),
+        ];
 
         unsafe {
             self.device.cmd_pipeline_barrier(
@@ -660,7 +670,7 @@ impl VsmManager {
                 vk::PipelineStageFlags::DRAW_INDIRECT,
                 vk::DependencyFlags::empty(),
                 &[],
-                &[cull_barrier],
+                &cull_barriers,
                 &[],
             );
         }
@@ -674,6 +684,7 @@ impl VsmManager {
                     bindless_descriptor_set: args.bindless_set,
                     vertex_addr: args.vertex_addr,
                     index_addr: args.index_addr,
+                    object_addr: args.object_addr,
                     pages: &pages,
                 },
                 scene_draw_fn,

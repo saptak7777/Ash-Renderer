@@ -14,7 +14,6 @@ use crate::renderer::{
         SkyboxPass,
         motion::MotionVectorPass,
         temporal_aa::{ConfigMetrics, TaaConfig},
-        vsr::{VsrConfig, VsrPass},
     },
     render_pipeline::RenderPipeline,
     resource_registry::ResourceId,
@@ -33,7 +32,6 @@ pub struct Systems {
 
     // Features & Config
     pub features: FeatureManager,
-    pub vsr_pass: Option<VsrPass>,
     pub motion_pass: Option<MotionVectorPass>,
     pub hdr_system: Option<HdrSystem>,
 
@@ -54,7 +52,6 @@ pub struct Systems {
     pub sample_shading: crate::renderer::types::SampleShadingQuality,
     pub taa_config: TaaConfig,
     pub taa_config_metrics: ConfigMetrics,
-    pub vsr_config: VsrConfig,
     /// Previous frame's jitter offset (UV space) for TAA reprojection.
     pub prev_jitter_uv: [f32; 2],
 
@@ -122,7 +119,6 @@ impl Systems {
             culling: CullingSystem::new(indirect_draw_pass),
             skybox_pass: passes.skybox_pass.take(),
             features,
-            vsr_pass: None,
             motion_pass: None,
             hdr_system: None,
             pipeline_cache,
@@ -137,7 +133,6 @@ impl Systems {
             sample_shading: config.pipeline.sample_shading,
             taa_config: TaaConfig::default(),
             taa_config_metrics: ConfigMetrics::default(),
-            vsr_config: VsrConfig::default(),
             prev_jitter_uv: [0.0, 0.0],
             lighting: lighting_system::LightingSystem::new(forward_plus_arc),
         };
@@ -208,22 +203,6 @@ impl Systems {
         image_count: usize,
     ) -> Result<()> {
         let extent = vk::Extent2D { width, height };
-
-        // --- 1. Recreate VSR Pass if enabled ---
-        if let Some(ref mut vsr) = self.vsr_pass {
-            unsafe {
-                vsr.destroy(&context.alloc.vma);
-                vsr.init(
-                    &context.alloc.vma,
-                    &context.device,
-                    &mut resources.assets.bindless_manager,
-                    width,
-                    height,
-                    self.vsr_config.quality,
-                )
-                .map_err(|e| AshError::VulkanError(format!("VSR init failed: {e}")))?;
-            }
-        }
 
         // --- 2. Recreate Main Graphics Pipeline ---
         log::info!("Recompiling pipeline due to resize/shader change...");
@@ -365,17 +344,8 @@ impl Systems {
         Ok(())
     }
 
-    /// Explicitly destroy GPU resources that require the VMA allocator.
     pub fn destroy(&mut self, context: &Context) {
-        // 1. Cleanup VSR Pass
-        if let Some(mut vsr) = self.vsr_pass.take() {
-            unsafe {
-                vsr.destroy(&context.alloc.vma);
-            }
-            log::info!("VSR pass resources destroyed.");
-        }
-
-        // 2. Cleanup Post Process Systems (including TAA)
+        // 1. Cleanup Post Process Systems (including TAA)
         self.pipeline
             .post_process_mut()
             .destroy_resources(&context.alloc.vma);

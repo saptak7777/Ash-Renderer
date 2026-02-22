@@ -60,6 +60,9 @@ layout(buffer_reference, scalar) readonly buffer ClusterBuffer {
 // ============================================================================
 // Camera BDA layout
 layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer CameraBuffer {
+    mat4 model;
+    mat4 view;
+    mat4 projection;
     mat4 viewProj;
 };
 

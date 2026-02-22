@@ -187,7 +187,8 @@ impl UniformBuffer {
                 &vk::BufferCreateInfo::default()
                     .size(size)
                     .usage(
-                        vk::BufferUsageFlags::UNIFORM_BUFFER
+                        vk::BufferUsageFlags::STORAGE_BUFFER
+                            | vk::BufferUsageFlags::UNIFORM_BUFFER
                             | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
                     )
                     .sharing_mode(vk::SharingMode::EXCLUSIVE),
@@ -287,7 +288,7 @@ impl UniformBuffer {
 
         unsafe {
             // Wait for device to finish all operations
-            let _ = self.device.device_wait_idle();
+            // (Removed: device_wait_idle() serialized stall. Parent manages GPU idle state)
 
             // Destroy buffer and allocation
             self.allocator
@@ -344,7 +345,8 @@ impl MaterialBuffer {
                 &vk::BufferCreateInfo::default()
                     .size(size)
                     .usage(
-                        vk::BufferUsageFlags::UNIFORM_BUFFER
+                        vk::BufferUsageFlags::STORAGE_BUFFER
+                            | vk::BufferUsageFlags::UNIFORM_BUFFER
                             | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
                     )
                     .sharing_mode(vk::SharingMode::EXCLUSIVE),
@@ -435,7 +437,7 @@ impl MaterialBuffer {
         log::debug!("Cleaning up material buffer");
 
         unsafe {
-            let _ = self.device.device_wait_idle();
+            // (Removed: device_wait_idle() serialized stall)
             self.allocator
                 .vma
                 .destroy_buffer(self.buffer, &mut self.allocation);
@@ -481,7 +483,8 @@ impl InstanceBuffer {
                 &vk::BufferCreateInfo::default()
                     .size(size)
                     .usage(
-                        vk::BufferUsageFlags::TRANSFER_DST
+                        vk::BufferUsageFlags::STORAGE_BUFFER
+                            | vk::BufferUsageFlags::TRANSFER_DST
                             | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
                     )
                     .sharing_mode(vk::SharingMode::EXCLUSIVE),
@@ -555,7 +558,7 @@ impl InstanceBuffer {
         }
 
         unsafe {
-            let _ = self.device.device_wait_idle();
+            // (Removed: device_wait_idle() serialized stall)
             self.allocator
                 .vma
                 .destroy_buffer(self.buffer, &mut self.allocation);
@@ -602,7 +605,8 @@ impl<T: Copy> StorageBuffer<T> {
                 &vk::BufferCreateInfo::default()
                     .size(size)
                     .usage(
-                        vk::BufferUsageFlags::TRANSFER_DST
+                        vk::BufferUsageFlags::STORAGE_BUFFER
+                            | vk::BufferUsageFlags::TRANSFER_DST
                             | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
                     )
                     .sharing_mode(vk::SharingMode::EXCLUSIVE),
@@ -748,7 +752,7 @@ impl<T: Copy> StorageBuffer<T> {
         }
 
         unsafe {
-            let _ = self.device.device_wait_idle();
+            // (Removed: device_wait_idle() serialized stall)
             self.allocator
                 .vma
                 .destroy_buffer(self.buffer, &mut self.allocation);

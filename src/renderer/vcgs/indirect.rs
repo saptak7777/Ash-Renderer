@@ -140,9 +140,9 @@ impl IndirectDrawPass {
         };
 
         // Object buffer (CPU writable)
-        let object_info = vk::BufferCreateInfo::default()
-            .size(object_size)
-            .usage(vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS);
+        let object_info = vk::BufferCreateInfo::default().size(object_size).usage(
+            vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
+        );
         let (object_buffer, mut object_alloc) =
             unsafe { allocator.create_buffer(&object_info, &buffer_alloc_info) }
                 .map_err(|e| crate::AshError::VulkanError(format!("Object buffer: {e:?}")))?;
@@ -176,7 +176,9 @@ impl IndirectDrawPass {
 
         // Indirect buffer (GPU only, indirect draw source)
         let indirect_info = vk::BufferCreateInfo::default().size(command_size).usage(
-            vk::BufferUsageFlags::INDIRECT_BUFFER | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
+            vk::BufferUsageFlags::STORAGE_BUFFER
+                | vk::BufferUsageFlags::INDIRECT_BUFFER
+                | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
         );
         let (indirect_buffer, indirect_alloc) =
             unsafe { allocator.create_buffer(&indirect_info, &device_alloc_info) }
@@ -185,9 +187,9 @@ impl IndirectDrawPass {
         self.indirect_allocation = Some(indirect_alloc);
 
         // Visibility buffer (GPU only)
-        let visibility_info = vk::BufferCreateInfo::default()
-            .size(visibility_size)
-            .usage(vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS);
+        let visibility_info = vk::BufferCreateInfo::default().size(visibility_size).usage(
+            vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
+        );
         let (visibility_buffer, visibility_alloc) =
             unsafe { allocator.create_buffer(&visibility_info, &device_alloc_info) }
                 .map_err(|e| crate::AshError::VulkanError(format!("Visibility buffer: {e:?}")))?;
@@ -196,7 +198,8 @@ impl IndirectDrawPass {
 
         // Count buffer (GPU readback)
         let count_info = vk::BufferCreateInfo::default().size(count_size).usage(
-            vk::BufferUsageFlags::TRANSFER_DST
+            vk::BufferUsageFlags::STORAGE_BUFFER
+                | vk::BufferUsageFlags::TRANSFER_DST
                 | vk::BufferUsageFlags::INDIRECT_BUFFER
                 | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
         );

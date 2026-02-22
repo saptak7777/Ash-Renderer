@@ -44,16 +44,19 @@ where
     unsafe { device.end_command_buffer(command_buffer) }
         .map_err(|e| crate::AshError::VulkanError(format!("Failed to end command buffer: {e}")))?;
 
+    let fence_info = vk::FenceCreateInfo::default();
+    let fence = unsafe { device.create_fence(&fence_info, None) }
+        .map_err(|e| crate::AshError::VulkanError(format!("Failed to create fence: {e}")))?;
+
     let submit_info =
         vk::SubmitInfo::default().command_buffers(std::slice::from_ref(&command_buffer));
 
-    unsafe { device.queue_submit(queue, &[submit_info], vk::Fence::null()) }
+    unsafe { device.queue_submit(queue, &[submit_info], fence) }
         .map_err(|e| crate::AshError::VulkanError(format!("Failed to submit queue: {e}")))?;
 
-    unsafe { device.queue_wait_idle(queue) }
-        .map_err(|e| crate::AshError::VulkanError(format!("Failed to wait for queue idle: {e}")))?;
-
     unsafe {
+        let _ = device.wait_for_fences(&[fence], true, u64::MAX);
+        device.destroy_fence(fence, None);
         device.free_command_buffers(command_pool, &command_buffers);
     }
 
@@ -119,16 +122,20 @@ pub unsafe fn end_single_time_commands(
     unsafe { device.end_command_buffer(command_buffer) }
         .map_err(|e| crate::AshError::VulkanError(format!("Failed to end command buffer: {e}")))?;
 
+    let fence_info = vk::FenceCreateInfo::default();
+    let fence = unsafe { device.create_fence(&fence_info, None) }
+        .map_err(|e| crate::AshError::VulkanError(format!("Failed to create fence: {e}")))?;
+
     let command_buffers = [command_buffer];
     let submit_info = vk::SubmitInfo::default().command_buffers(&command_buffers);
     let submit_infos = [submit_info];
 
-    unsafe { device.queue_submit(queue, &submit_infos, vk::Fence::null()) }
+    unsafe { device.queue_submit(queue, &submit_infos, fence) }
         .map_err(|e| crate::AshError::VulkanError(format!("Failed to submit queue: {e}")))?;
-    unsafe { device.queue_wait_idle(queue) }
-        .map_err(|e| crate::AshError::VulkanError(format!("Failed to wait for queue idle: {e}")))?;
 
     unsafe {
+        let _ = device.wait_for_fences(&[fence], true, u64::MAX);
+        device.destroy_fence(fence, None);
         device.free_command_buffers(command_pool, &command_buffers);
     }
 

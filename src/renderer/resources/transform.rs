@@ -295,13 +295,23 @@ impl TransformSystem {
             gpu_data.push(self.get_gpu_data(TransformHandle(i)));
         }
 
+        let byte_size = (count * std::mem::size_of::<GpuTransformData>()) as u64;
         unsafe {
-            let mut map = self.allocator.map_allocation_guarded(
-                &mut self.arena_alloc,
-                (count * std::mem::size_of::<GpuTransformData>()) as u64,
-            )?;
+            let mut map = self
+                .allocator
+                .map_allocation_guarded(&mut self.arena_alloc, byte_size)?;
             map.copy_from_slice(&gpu_data);
         }
+
+        // Lead Engineer Fix: Explicit flush for non-coherent host memory
+        // Align flush to 256 bytes (common nonCoherentAtomSize)
+        let aligned_size = byte_size.div_ceil(256) * 256;
+        self.allocator
+            .vma
+            .flush_allocation(&self.arena_alloc, 0, aligned_size)
+            .map_err(|e| {
+                crate::AshError::VulkanError(format!("Failed to flush transform buffer: {}", e))
+            })?;
 
         Ok(())
     }

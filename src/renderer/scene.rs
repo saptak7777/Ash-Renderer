@@ -58,16 +58,28 @@ impl Scene {
         let handle = self.material_manager.register_material(material)?;
 
         if !self.uploaded_material_indices.contains(&handle.index) {
-            if let Some(buffer_arc) = self.material_storage_buffer.as_ref() {
-                let mut buffer = buffer_arc.write().unwrap();
-                unsafe {
-                    buffer.write_element_at(handle.index as usize, &material.to_uniform())?;
-                }
-            }
+            self.register_material_uniform(handle.index, material.to_uniform())?;
             self.uploaded_material_indices.insert(handle.index);
         }
 
         Ok(handle)
+    }
+
+    /// Uploads the uniform data for an already registered material handle index.
+    pub fn register_material_uniform(
+        &mut self,
+        index: u32,
+        uniform: crate::renderer::resources::uniform::MaterialUniform,
+    ) -> Result<()> {
+        if let Some(buffer_arc) = self.material_storage_buffer.as_ref() {
+            let mut buffer = buffer_arc.write().map_err(|e| {
+                crate::AshError::VulkanError(format!("Material buffer lock poisoned: {}", e))
+            })?;
+            unsafe {
+                buffer.write_element_at(index as usize, &uniform)?;
+            }
+        }
+        Ok(())
     }
 
     pub fn new(

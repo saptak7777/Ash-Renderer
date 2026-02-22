@@ -46,40 +46,19 @@ impl CullingSystem {
             let device = &context.device.device;
 
             unsafe {
-                // 1. Reset count buffer to 0 before compute pass
-                device.cmd_fill_buffer(cmd, indirect_pass.count_buffer(), 0, 4, 0);
-
-                // 2. Buffer Barrier: ensure fill is done before compute shader reads/writes
-                let fill_barrier = vk::BufferMemoryBarrier::default()
-                    .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
-                    .dst_access_mask(vk::AccessFlags::SHADER_READ | vk::AccessFlags::SHADER_WRITE)
-                    .buffer(indirect_pass.count_buffer())
-                    .size(4)
-                    .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                    .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED);
-
-                device.cmd_pipeline_barrier(
-                    cmd,
-                    vk::PipelineStageFlags::TRANSFER,
-                    vk::PipelineStageFlags::COMPUTE_SHADER,
-                    vk::DependencyFlags::empty(),
-                    &[],
-                    &[fill_barrier],
-                    &[],
-                );
-
-                // 3. Dispatch Culling Compute Shader
+                // 1. Dispatch Culling Compute Shader
                 let cluster_buffer_addr = resources
                     .global_cluster_buffer
                     .as_ref()
                     .map(|b| b.device_address())
                     .unwrap_or(0);
 
-                // Note: IndirectDrawPass::execute_culling also does some internal barriers,
-                // but we explicitly manage the critical ones here for orchestrator clarity.
+                // Note: IndirectDrawPass::execute_culling handles the count buffer reset and synchronization internally
                 let camera_buffer_addr = resources.uniform_buffers[frame_index]
                     .read()
-                    .unwrap()
+                    .map_err(|e| {
+                        crate::AshError::VulkanError(format!("Camera buffer lock poisoned: {}", e))
+                    })?
                     .device_address();
 
                 let culling_ctx = crate::renderer::types::CullingContext {

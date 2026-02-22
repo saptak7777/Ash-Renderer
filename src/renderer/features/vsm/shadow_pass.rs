@@ -14,18 +14,25 @@ pub struct ShadowPageRenderInfo<'a> {
     pub bindless_descriptor_set: vk::DescriptorSet,
     pub vertex_addr: u64,
     pub index_addr: u64,
+    pub object_addr: u64,
     pub pages: &'a [super::page_manager::PageToRender],
 }
 
 #[repr(C, align(16))]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct ShadowPushConstants {
-    // 0-15: BDA pointers (Vertex & Index)
-    pub vertex_ptr: u64, // Offset 0
-    pub index_ptr: u64,  // Offset 8
+    // 0-31: BDA pointers
+    pub vertex_ptr: u64,    // Offset 0
+    pub instance_ptr: u64,  // Offset 8
+    pub index_ptr: u64,     // Offset 16
+    pub transform_ptr: u64, // Offset 24
 
-    // 16-63: Padding
-    pub _padding: [u64; 6], // Padding to reach offset 64
+    // 32-39: Additional fields
+    pub transform_index: u32, // Offset 32
+    pub use_instancing: u32,  // Offset 36
+
+    // 40-63: Padding to align light_space_matrix to 64
+    pub _padding: [u64; 3], // 24 bytes of padding
 
     // 64-127: Light Space Matrix (64 bytes)
     pub light_space_matrix: [[f32; 4]; 4], // Mat4 at offset 64
@@ -228,8 +235,8 @@ impl VsmShadowPass {
     /// Device must remain valid. Descriptor set layouts must be valid.
     pub unsafe fn create_pipeline(
         &mut self,
-        _device_layout: vk::DescriptorSetLayout, // Set 0 (Dummy/Obsolete)
-        bindless_layout: vk::DescriptorSetLayout, // Set 1
+        _device_layout: vk::DescriptorSetLayout, // Set 0 (Reserved for future global bindless extension)
+        bindless_layout: vk::DescriptorSetLayout, // Set 1 (Bindless Textures)
     ) -> Result<()> {
         log::info!("Creating VSM shadow pipeline");
 
@@ -244,7 +251,7 @@ impl VsmShadowPass {
             size: DRAW_PUSH_VERTEX_BYTES + DRAW_PUSH_FRAGMENT_BYTES + LIGHT_SPACE_MATRIX_BYTES,
         };
 
-        // Descriptor set layouts: Set 0 (Dummy) and Set 1 (Bindless)
+        // Descriptor set layouts: Set 0 (Reserved) and Set 1 (Bindless Textures)
         // We must have two layouts to match 'layout(set = 1, ...)' in the shader
         let layouts = [_device_layout, bindless_layout];
 
@@ -487,7 +494,7 @@ impl VsmShadowPass {
             }
         }
 
-        // 4. Bind Bindless Descriptor Set (Set 1)
+        // 4. Bind Bindless Texture Descriptor Set (Set 1)
         if let Some(layout) = self.shadow_pipeline_layout {
             unsafe {
                 self.device.cmd_bind_descriptor_sets(
@@ -500,15 +507,26 @@ impl VsmShadowPass {
                 );
             }
 
-            // 5. Push BDA pointers (Static for all pages)
-            let bda_push = [info.vertex_addr, info.index_addr];
+            let bda_push = ShadowPushConstants {
+                vertex_ptr: info.vertex_addr,
+                instance_ptr: info.object_addr,
+                index_ptr: info.index_addr,
+                transform_ptr: 0,
+                transform_index: 0,
+                use_instancing: 1, // Enable instancing for the manual pull
+                _padding: [0; 3],
+                light_space_matrix: [[0.0; 4]; 4], // Placeholder, written later per-page
+            };
+
             unsafe {
                 self.device.cmd_push_constants(
                     cmd,
                     layout,
                     vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
                     0, // Offset 0
-                    bytemuck::bytes_of(&bda_push),
+                    bytemuck::cast_slice(std::slice::from_ref(&bda_push))[..64]
+                        .try_into()
+                        .unwrap(), // push first 64 bytes
                 );
             }
         }

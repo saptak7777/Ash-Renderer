@@ -14,7 +14,6 @@ use ash::vk;
 
 use crate::renderer::passes::SkyboxInitContext;
 use crate::renderer::passes::hiz::HiZPass;
-use crate::renderer::passes::vsr::{VsrPass, VsrQuality};
 use crate::renderer::vcgs::IndirectDrawPass;
 use std::sync::{Arc, RwLock};
 use std::thread;
@@ -755,32 +754,4 @@ pub unsafe fn initialize_occlusion_culling(
     // (hiz.hiz_buffer_addr() is queried at dispatch time in execute_culling.)
 
     Ok((Arc::new(RwLock::new(hiz)), Arc::new(RwLock::new(indirect))))
-}
-
-/// Helper to initialize VSR pass.
-/// Extracted from Renderer for modularity.
-///
-/// # Safety
-/// The caller must ensure that the device, allocator, and bindless manager are valid.
-pub unsafe fn initialize_vsr_pass(
-    device: &vulkan::VulkanDevice,
-    alloc: &Arc<vulkan::Allocator>,
-    bindless_manager: &mut crate::vulkan::BindlessManager,
-    extent: vk::Extent2D,
-    quality: VsrQuality,
-) -> Result<VsrPass> {
-    let mut vsr = VsrPass::new(Arc::clone(&device.device));
-    unsafe {
-        vsr.init(
-            &alloc.vma,
-            device,
-            bindless_manager,
-            extent.width,
-            extent.height,
-            quality,
-        )
-    }
-    .map_err(|e| AshError::VulkanError(format!("VSR init failed: {e}")))?;
-
-    Ok(vsr)
 }

@@ -14,7 +14,7 @@ pub mod descriptor_set;
 pub mod device;
 pub mod framebuffer;
 pub mod instance;
-pub mod light_culling_pipeline;
+
 #[cfg(feature = "parallel")]
 pub mod parallel_command;
 pub mod parallel_command_recorder;

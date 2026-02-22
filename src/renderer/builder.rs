@@ -1,6 +1,5 @@
 use crate::Result;
 use crate::renderer::Renderer;
-use crate::renderer::passes::vsr::VsrConfig;
 use crate::renderer::types::RendererConfig;
 use ash::vk;
 
@@ -30,12 +29,6 @@ impl RendererBuilder {
     /// Set the VSM shadow map physical resolution.
     pub fn with_shadow_resolution(mut self, size: u32) -> Self {
         self.config.shadow_resolution = size;
-        self
-    }
-
-    /// Set the VSR (Virtual Super Resolution) configuration.
-    pub fn with_vsr(mut self, config: VsrConfig) -> Self {
-        self.config.vsr_config = config;
         self
     }
 

@@ -2,7 +2,6 @@ use crate::Result;
 use crate::renderer::passes::fullscreen::FullscreenPass;
 use crate::renderer::passes::fullscreen::PostProcessPushConstants;
 use crate::renderer::passes::temporal_aa::{ConfigMetrics, TaaPass, TaaPushConstants};
-use crate::renderer::passes::vsr::{SharpenConfig, VsrConfig, VsrPass};
 use crate::renderer::resources::HdrSystem;
 use crate::renderer::resources::Resources;
 use crate::vulkan;
@@ -280,12 +279,9 @@ pub struct PostProcessContext<'a> {
     pub resources: &'a Resources,
     pub frame: &'a Frame,
     pub swapchain: &'a SwapchainWrapper,
-    pub vsr: Option<&'a mut VsrPass>,
     pub hdr: Option<&'a HdrSystem>,
     pub taa_config: crate::renderer::passes::temporal_aa::TaaConfig,
     pub taa_metrics: Option<&'a mut ConfigMetrics>,
-    pub vsr_config: VsrConfig,
-    pub sharpen_config: Option<SharpenConfig>,
     pub jitter_uv: [f32; 2],
     pub prev_jitter_uv: [f32; 2],
     /// Direct depth image view (SHADER_READ_ONLY_OPTIMAL) for TAA
@@ -342,12 +338,6 @@ impl PostProcessSystem {
             } else {
                 raw_hdr_view
             };
-
-            // ── 2. [VSR BYPASSED] ─────────────────────────────────────────────
-            // Strictly enforce Native TAA by bypassing VSR.
-            let _ = ctx.vsr;
-            let _ = ctx.vsr_config;
-            let _ = ctx.sharpen_config;
 
             // ── 3. Tonemapping / Swapchain Phase ─────────────────────────────
             self.update_descriptor_set(

@@ -6,7 +6,6 @@
 pub mod assets;
 pub mod builder;
 pub mod cleanup_traits;
-pub mod command_list;
 pub mod context;
 pub mod diagnostics;
 pub mod features;
@@ -60,7 +59,6 @@ pub use passes::temporal_aa::{
     ConfigChangeType, ConfigMetrics, ConfigMetricsReport, ConfigValidationError, SharpeningMode,
     TaaConfig, Validate, detect_config_change,
 };
-pub use passes::vsr::{SharpenConfig, VsrConfig, VsrInputs, VsrPass, VsrQuality, VsrUpscaleConfig};
 
 // Resource and type re-exports
 pub use resources::*;

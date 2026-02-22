@@ -8,4 +8,3 @@ pub mod fullscreen;
 pub mod hiz;
 pub mod motion;
 pub mod temporal_aa;
-pub mod vsr;

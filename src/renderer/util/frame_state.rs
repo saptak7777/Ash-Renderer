@@ -4,12 +4,12 @@
 //! multiple passes need:
 //!
 //! - Camera matrices (view / jittered-projection / previous VP)
-//! - Halton jitter for TAA / VSR
+//! - Halton jitter for TAA
 //! - Elapsed time for animations and effects
 //! - Frame index for ring-buffer indexing
 //!
-//! Previously this data was scattered across `Resources::update_global_data`,
-//! `systems.vsr_pass`, and `renderer.rs`. Centralising it here ensures all
+//! Previously this data was scattered across `Resources::update_global_data`
+//! and `renderer.rs`. Centralising it here ensures all
 //! passes see the *same* values every frame.
 
 use super::halton::HaltonSequence;
@@ -120,7 +120,7 @@ impl FrameState {
         self.jitter = sample;
 
         // Convert sub-pixel jitter into NDC translation and inject into the
-        // projection's translation column.  This is the standard TAA / VSR
+        // projection's translation column.  This is the standard TAA
         // jitter application method used by UE5 and Unity HDRP.
         let jitter_ndc_x = (sample.x * 2.0) / width as f32;
         let jitter_ndc_y = (sample.y * 2.0) / height as f32;

@@ -673,7 +673,12 @@ impl Resources {
 
         // --- 3. Recreate Uniform Buffers ---
         for ub in &self.uniform_buffers {
-            let _ = ub.write().unwrap().cleanup();
+            let _ = ub
+                .write()
+                .map_err(|e| {
+                    crate::AshError::VulkanError(format!("Uniform buffer lock poisoned: {}", e))
+                })?
+                .cleanup();
         }
         self.uniform_buffers.clear();
 

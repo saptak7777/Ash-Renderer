@@ -114,20 +114,32 @@ impl SceneSynchronizer {
         resources: &mut crate::renderer::resources::Resources,
     ) -> Result<bool> {
         // ── Material Sync ──────────────────────────────────────────────────
-        let sync_list: Vec<(u32, crate::renderer::resources::Material)> = {
+        let mut newly_uploaded = Vec::new();
+
+        // Extract just the uniform representation we need.
+        // This drops the immutable borrow of `scene` immediately.
+        let sync_list: Vec<(u32, crate::renderer::resources::uniform::MaterialUniform)> = {
             scene
                 .material_manager
                 .iter_unsynced(&scene.uploaded_material_indices)
-                .map(|(id, mat)| (id, mat.clone()))
+                .map(|(i, mat)| (i, mat.to_uniform()))
                 .collect()
         };
 
-        for (handle_index, material) in sync_list {
+        for (handle_index, material_uniform) in sync_list {
             if !scene.uploaded_material_indices.contains(&handle_index) {
-                if let Err(e) = scene.register_material(&material) {
+                // Register uniform data to GPU. This calls into the Buffer map which requires mutable scene.
+                if let Err(e) = scene.register_material_uniform(handle_index, material_uniform) {
                     log::error!("Failed to sync material {handle_index} to GPU: {e}");
+                } else {
+                    newly_uploaded.push(handle_index);
                 }
             }
+        }
+
+        // Update the set after the loop to avoid borrow checker issues during iteration
+        for index in newly_uploaded {
+            scene.uploaded_material_indices.insert(index);
         }
 
         // ── Descriptor Pool Recycling ──────────────────────────────────────
