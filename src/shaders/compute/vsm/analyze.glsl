@@ -1,45 +1,30 @@
 #version 450
+#extension GL_EXT_buffer_reference2 : require
+#extension GL_EXT_scalar_block_layout : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+#extension GL_EXT_nonuniform_qualifier : require
+
+#define SKIP_PUSH_CONSTANTS
+#include "../../interop/structures.glsl"
+
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
-// Default limit. Matches VsmConfig in Rust. Overridden via Specialization Constants at pipeline creation.
 layout(constant_id = 0) const uint MAX_REQUESTS = 1024;
 
-layout(std140, set = 0, binding = 0) uniform VsmGlobal {
-    mat4 light_view_projections[16];
-    mat4 view_proj;
-    mat4 inv_view_proj;
-    vec4 camera_position;
-    vec4 light_dir;
-    uint page_table_size;
-    uint _pad0;
-    uint _pad1;
-    uint _pad2;
-} u_Global;
-
-struct PageRequest {
-    uint virtual_x;
-    uint virtual_y;
-    float priority;
-    uint layer;
-};
-
-layout(std430, set = 0, binding = 1) buffer RequestBuffer {
-    uint count;
-    uint overflow_count;
-    uint _padding[2];
-    PageRequest data[];
-} requests;
-
-// Page Table (R32UI)
-layout(set = 0, binding = 3, r32ui) uniform uimage2DArray u_PageTable;
+layout(push_constant) uniform LocalPushConstants {
+    uint64_t global_ptr;
+} pc;
 
 // Scene Depth Buffer
-layout(set = 0, binding = 5) uniform sampler2D u_SceneDepth;
+layout(set = 1, binding = 5) uniform sampler2D u_SceneDepth;
 
 void main() {
     ivec2 pixel_coord = ivec2(gl_GlobalInvocationID.xy);
     ivec2 screen_size = textureSize(u_SceneDepth, 0);
     
     if (pixel_coord.x >= screen_size.x || pixel_coord.y >= screen_size.y) return;
+
+    VsmGlobal u_Global = VsmGlobal(pc.global_ptr);
+    VsmRequestBuffer requests = VsmRequestBuffer(u_Global.request_ptr);
 
     vec2 uv = (vec2(pixel_coord) + 0.5) / vec2(screen_size);
 
@@ -72,9 +57,13 @@ void main() {
         
         uint layer = 0;
         
-        // 6. Check if already allocated or needs update (Simplified for now)
-        // We'll just request and let PageManager handle deduplication.
+        // 6. Bindless Residency Check
+        // Use the global_page_tables array from structures.glsl
+        uint page_entry = texelFetch(global_page_tables[nonuniformEXT(u_Global.page_table_index)], ivec3(page_x, page_y, layer), 0).r;
         
+        if (page_entry != 0xFFFFFFFFu) return; // Already allocated and resident
+        
+        // 7. Request Page
         uint idx = atomicAdd(requests.count, 1);
         if (idx < MAX_REQUESTS) { 
             requests.data[idx].virtual_x = page_x;

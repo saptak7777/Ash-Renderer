@@ -16,7 +16,7 @@ use ash::vk;
 use ash_renderer::prelude::*;
 use ash_renderer::renderer::Scene;
 use ash_renderer::renderer::features::PointLight;
-use ash_renderer::renderer::features::ambient_lighting::{AmbientPreset, LightingBuilder};
+use ash_renderer::renderer::features::ambient_lighting::LightingBuilder;
 use ash_renderer::renderer::resources::uniform::StorageBuffer;
 use glam::{Mat4, Vec3, Vec4};
 use std::sync::Arc;
@@ -231,7 +231,6 @@ impl ApplicationHandler for App {
 
                 // Set up lighting to highlight PBR properties (RAGE approach)
                 let mut lighting = LightingBuilder::new()
-                    .with_ambient_preset(AmbientPreset::IndoorLit)
                     .with_directional(
                         Vec3::new(1.0, -1.0, -1.0).normalize(),
                         Vec3::splat(2.0),

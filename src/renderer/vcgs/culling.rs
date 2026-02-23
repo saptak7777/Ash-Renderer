@@ -74,9 +74,22 @@ impl CullBoundingBox {
     }
 }
 
-/// Culling flags (bits)
-pub const CULL_FLAG_ENABLED: u32 = 1 << 0;
-pub const CULL_FLAG_CAST_SHADOWS: u32 = 1 << 1;
+/// Culling object flag bits.
+///
+/// These values are the authoritative source of truth for both CPU and GPU.
+/// GPU shaders (shadow_cull.comp, cull_clusters.comp) read the `flags` field
+/// directly from `CullObjectData.flags`, so **every bit assignment here must
+/// match the shader expectations exactly**.
+///
+/// | Bit | Constant                | Shader usage                     |
+/// |-----|-------------------------|----------------------------------|
+/// |  0  | `CULL_FLAG_CAST_SHADOWS`| `shadow_cull.comp` line 96 |
+/// |  1  | `CULL_FLAG_ENABLED`     | CPU-only visibility gate (no GPU shader reads this) |
+/// |  2  | `CULL_FLAG_TRANSPARENT` | reserved                          |
+/// |  3  | `CULL_FLAG_RECEIVE_SHADOWS` | reserved                      |
+/// |  4  | `CULL_FLAG_HIDDEN`      | CPU-side hidden override          |
+pub const CULL_FLAG_CAST_SHADOWS: u32 = 1 << 0; // Bit 0 — must match GPU shaders
+pub const CULL_FLAG_ENABLED: u32 = 1 << 1; // Bit 1 — CPU only
 pub const CULL_FLAG_TRANSPARENT: u32 = 1 << 2;
 pub const CULL_FLAG_RECEIVE_SHADOWS: u32 = 1 << 3;
 pub const CULL_FLAG_HIDDEN: u32 = 1 << 4;

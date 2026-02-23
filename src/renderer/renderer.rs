@@ -797,6 +797,11 @@ impl Renderer {
             is_swapchain_image: self.systems.hdr_system.is_none(),
             depth_format,
             draw_items: &draw_items,
+            vsm_ptr: unsafe {
+                let info = vk::BufferDeviceAddressInfo::default()
+                    .buffer(self.vsm_manager.get_resources()?.metadata_buffer);
+                self.context.device.device.get_buffer_device_address(&info)
+            },
         };
 
         self.systems.pipeline.render_geometry(
@@ -1067,8 +1072,10 @@ impl Renderer {
                 })?
                 .view();
 
+            let bindless_set = self.resources.assets.bindless_manager.descriptor_set();
             self.vsm_manager.update(
                 command_buffer,
+                bindless_set,
                 frame_index as u32,
                 depth_view,
                 self.resources.swapchain_extent.width,

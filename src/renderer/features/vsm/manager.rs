@@ -113,6 +113,7 @@ impl VsmManager {
         let compute_pipelines = unsafe {
             VsmComputePipelines::new(
                 Arc::clone(&device),
+                bindless_manager.descriptor_set_layout(),
                 resources.compute_layout,
                 config.max_requests_per_frame,
             )?
@@ -142,9 +143,10 @@ impl VsmManager {
             camera_position: glam::Vec4::ZERO,
             light_dir: glam::Vec4::ZERO,
             page_table_size: config.page_table_resolution(),
-            _pad0: 0,
-            _pad1: 0,
-            _pad2: 0,
+            page_table_index: 0,
+            request_ptr: 0,
+            allocation_ptr: 0,
+            _pad3: 0,
         };
 
         // Register with bindless manager
@@ -223,9 +225,23 @@ impl VsmManager {
         self.global_info.inv_view_proj = camera_view_proj.inverse();
         self.global_info.camera_position = camera_pos.extend(1.0);
         self.global_info.light_dir = light_dir.extend(0.0);
+        self.global_info.page_table_index = self.page_table_bindless_index;
 
         // Update VSM resources (upload to GPU)
         if let Some(inner) = &mut self.inner {
+            let buffer_index = frame_index as usize % inner.resources.request_buffers.len();
+
+            let req_addr_info = vk::BufferDeviceAddressInfo::default()
+                .buffer(inner.resources.request_buffers[buffer_index].buffer);
+            let request_ptr = unsafe { self.device.get_buffer_device_address(&req_addr_info) };
+
+            let alloc_addr_info =
+                vk::BufferDeviceAddressInfo::default().buffer(inner.resources.allocation_buffer);
+            let allocation_ptr = unsafe { self.device.get_buffer_device_address(&alloc_addr_info) };
+
+            self.global_info.request_ptr = request_ptr;
+            self.global_info.allocation_ptr = allocation_ptr;
+
             inner.resources.update_global_info(&self.global_info)?;
         }
 
@@ -296,6 +312,7 @@ impl VsmManager {
     pub fn update(
         &mut self,
         cmd: vk::CommandBuffer,
+        bindless_set: vk::DescriptorSet,
         _frame_index: u32,
         depth_view: vk::ImageView,
         screen_width: u32,
@@ -381,13 +398,13 @@ impl VsmManager {
             .update_analysis_descriptors(depth_view, self.current_frame)?;
 
         unsafe {
-            // 2. Bind Descriptor Set (Standardized Layout)
-            let descriptor_sets = [inner.resources.descriptor_set];
+            // 2. Bind Descriptor Sets (Standardized Dual-Set Layout)
+            let descriptor_sets = [bindless_set, inner.resources.descriptor_set];
             self.device.cmd_bind_descriptor_sets(
                 cmd,
                 vk::PipelineBindPoint::COMPUTE,
                 inner.compute_pipelines.analyze.layout(),
-                0,
+                0, // Start at set 0
                 &descriptor_sets,
                 &[],
             );
@@ -399,6 +416,19 @@ impl VsmManager {
                 vk::PipelineBindPoint::COMPUTE,
                 inner.compute_pipelines.analyze.handle(),
             );
+
+            let addr_info =
+                vk::BufferDeviceAddressInfo::default().buffer(inner.resources.metadata_buffer);
+            let global_ptr = self.device.get_buffer_device_address(&addr_info);
+
+            self.device.cmd_push_constants(
+                cmd,
+                inner.compute_pipelines.analyze.layout(),
+                vk::ShaderStageFlags::COMPUTE,
+                0,
+                bytemuck::bytes_of(&global_ptr),
+            );
+
             let groups_x = screen_width.div_ceil(8);
             let groups_y = screen_height.div_ceil(8);
             self.device.cmd_dispatch(cmd, groups_x, groups_y, 1);
@@ -440,6 +470,30 @@ impl VsmManager {
                     vk::PipelineBindPoint::COMPUTE,
                     inner.compute_pipelines.allocate.handle(),
                 );
+
+                // Binding both sets for Allocator
+                let descriptor_sets = [bindless_set, inner.resources.descriptor_set];
+                self.device.cmd_bind_descriptor_sets(
+                    cmd,
+                    vk::PipelineBindPoint::COMPUTE,
+                    inner.compute_pipelines.allocate.layout(),
+                    0,
+                    &descriptor_sets,
+                    &[],
+                );
+
+                let addr_info =
+                    vk::BufferDeviceAddressInfo::default().buffer(inner.resources.metadata_buffer);
+                let global_ptr = self.device.get_buffer_device_address(&addr_info);
+
+                self.device.cmd_push_constants(
+                    cmd,
+                    inner.compute_pipelines.allocate.layout(),
+                    vk::ShaderStageFlags::COMPUTE,
+                    0,
+                    bytemuck::bytes_of(&global_ptr),
+                );
+
                 self.device.cmd_dispatch(cmd, group_count, 1, 1);
 
                 // 6. Barrier: Ensure Page Table update finishes
@@ -474,6 +528,26 @@ impl VsmManager {
                     vk::PipelineBindPoint::COMPUTE,
                     inner.compute_pipelines.clear.handle(),
                 );
+
+                // Binding both sets for Clear
+                let descriptor_sets = [bindless_set, inner.resources.descriptor_set];
+                self.device.cmd_bind_descriptor_sets(
+                    cmd,
+                    vk::PipelineBindPoint::COMPUTE,
+                    inner.compute_pipelines.clear.layout(),
+                    0,
+                    &descriptor_sets,
+                    &[],
+                );
+
+                self.device.cmd_push_constants(
+                    cmd,
+                    inner.compute_pipelines.clear.layout(),
+                    vk::ShaderStageFlags::COMPUTE,
+                    0,
+                    bytemuck::bytes_of(&global_ptr),
+                );
+
                 // 16x16 local size -> 8x8 groups per 128x128 page
                 self.device.cmd_dispatch(cmd, 8, 8, alloc_count);
 

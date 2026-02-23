@@ -114,9 +114,10 @@ impl LightCullingIntegration {
         screen_height: u32,
         light_ptr: u64,
         tile_ptr: u64,
+        camera_ptr: u64,
     ) -> LightCullingPushConstants {
         self.pass
-            .get_push_constants(screen_width, screen_height, light_ptr, tile_ptr)
+            .get_push_constants(screen_width, screen_height, light_ptr, tile_ptr, camera_ptr)
     }
 
     /// Get dispatch dimensions

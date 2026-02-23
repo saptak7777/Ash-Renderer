@@ -26,7 +26,7 @@ vec3 getIBLContribution(float NdotV, vec3 N, vec3 R, vec3 F0, float roughness, v
 
     // 2. Diffuse Part: Irradiance Map
     vec3 irradiance = texture(u_IrradianceMap, N).rgb;
-    vec3 diffuse = irradiance * albedo;
+    vec3 diffuse = (irradiance * albedo) / PI;
 
     // 3. Specular Part: Prefilter Map (LD) + BRDF LUT (DFG)
     vec3 prefilteredColor = textureLod(u_PrefilterMap, R, roughness * MAX_REFLECTION_LOD).rgb;

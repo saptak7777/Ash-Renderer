@@ -90,7 +90,9 @@ impl ForwardPlusIntegration {
         let camera_size = std::mem::size_of::<CullingCameraData>() as u64;
         let camera_buffer_info = vk::BufferCreateInfo::default()
             .size(camera_size)
-            .usage(vk::BufferUsageFlags::UNIFORM_BUFFER)
+            .usage(
+                vk::BufferUsageFlags::UNIFORM_BUFFER | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
+            )
             .sharing_mode(vk::SharingMode::EXCLUSIVE);
 
         let mut camera_bufs = Vec::with_capacity(frame_count as usize);
@@ -157,21 +159,12 @@ impl ForwardPlusIntegration {
         )?;
 
         // 1. Create Descriptor Set Layout (Set 0 for Compute)
-        // NOTE: LightBuffer moved to Set 3 to match fragment shader
-        // Set 0 now only contains DepthBuffer and CameraData
+        // Set 0 now only contains DepthBuffer (CameraData migrated to BDA push constant)
         let bindings = [
             // Binding 0: Depth buffer (sampler)
             vk::DescriptorSetLayoutBinding {
                 binding: 0,
                 descriptor_type: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-                descriptor_count: 1,
-                stage_flags: vk::ShaderStageFlags::COMPUTE,
-                ..Default::default()
-            },
-            // Binding 1: Camera data (UBO)
-            vk::DescriptorSetLayoutBinding {
-                binding: 1,
-                descriptor_type: vk::DescriptorType::UNIFORM_BUFFER,
                 descriptor_count: 1,
                 stage_flags: vk::ShaderStageFlags::COMPUTE,
                 ..Default::default()
@@ -187,18 +180,11 @@ impl ForwardPlusIntegration {
             })?;
 
         // 2. Create Descriptor Pool (sized for frame_count sets)
-        // Each set contains: 1 COMBINED_IMAGE_SAMPLER (depth) + 1 UNIFORM_BUFFER (camera)
-        // Total pool must accommodate: frame_count sets × descriptors_per_set
-        let pool_sizes = [
-            vk::DescriptorPoolSize {
-                ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-                descriptor_count: self.frame_count as u32, // 1 depth sampler per set × frame_count sets
-            },
-            vk::DescriptorPoolSize {
-                ty: vk::DescriptorType::UNIFORM_BUFFER,
-                descriptor_count: self.frame_count as u32, // 1 camera UBO per set × frame_count sets
-            },
-        ];
+        // Each set contains: 1 COMBINED_IMAGE_SAMPLER (depth)
+        let pool_sizes = [vk::DescriptorPoolSize {
+            ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+            descriptor_count: self.frame_count as u32,
+        }];
 
         let pool_info = vk::DescriptorPoolCreateInfo::default()
             .pool_sizes(&pool_sizes)
@@ -246,24 +232,11 @@ impl ForwardPlusIntegration {
         };
 
         for frame_idx in 0..self.frame_count {
-            let camera_info = vk::DescriptorBufferInfo {
-                buffer: self.camera_bufs[frame_idx],
-                offset: 0,
-                range: std::mem::size_of::<CullingCameraData>() as u64,
-            };
-
-            let writes = [
-                vk::WriteDescriptorSet::default()
-                    .dst_set(self.compute_descriptor_sets[frame_idx])
-                    .dst_binding(0)
-                    .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-                    .image_info(std::slice::from_ref(&depth_image_info)),
-                vk::WriteDescriptorSet::default()
-                    .dst_set(self.compute_descriptor_sets[frame_idx])
-                    .dst_binding(1)
-                    .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
-                    .buffer_info(std::slice::from_ref(&camera_info)),
-            ];
+            let writes = [vk::WriteDescriptorSet::default()
+                .dst_set(self.compute_descriptor_sets[frame_idx])
+                .dst_binding(0)
+                .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                .image_info(std::slice::from_ref(&depth_image_info))];
             unsafe {
                 device.update_descriptor_sets(&writes, &[]);
             }
@@ -447,9 +420,13 @@ impl ForwardPlusIntegration {
                 let width = self.cached_info.num_tiles[0] * self.cached_info.tile_size;
                 let height = self.cached_info.num_tiles[1] * self.cached_info.tile_size;
 
+                let addr_info =
+                    vk::BufferDeviceAddressInfo::default().buffer(self.camera_bufs[frame_index]);
+                let camera_ptr = self.device.get_buffer_device_address(&addr_info);
+
                 let push_constants =
                     self.lights
-                        .get_culling_push_constants(width, height, frame_index);
+                        .get_culling_push_constants(width, height, frame_index, camera_ptr);
 
                 self.device.cmd_push_constants(
                     command_buffer,

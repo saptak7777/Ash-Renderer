@@ -33,18 +33,7 @@ layout(location = 1) out vec4 outNormal;
 layout(location = 2) out vec4 outAlbedo;
 layout(location = 3) out vec2 outMotion;
 
-// Set 1: VSM Resources
-layout(set = 1, binding = 0) uniform VsmGlobalInfo {
-    mat4 light_view_projections[16];
-    mat4 view_proj;
-    mat4 inv_view_proj;
-    vec4 camera_position;
-    vec4 light_dir;
-    uint page_table_size;
-} u_VsmGlobal;
-
-// Binding 1: Request Buffer (Not needed in frag)
-// Binding 2: Allocation Buffer (Not needed in frag)
+// Set 1: VSM Resources (Bindings 0-2 removed in favor of BDA)
 layout(set = 1, binding = 3, r32ui) uniform uimage2DArray u_PageTable;
 layout(set = 1, binding = 4, rg32f) uniform image2D u_PhysicalMemory;
 const uint MAX_LIGHTS_PER_TILE = 256;
@@ -56,8 +45,9 @@ const uint MAX_LIGHTS_PER_TILE = 256;
 
 
 float SampleVSM(vec3 worldPos) {
+    VsmGlobal u_Global = VsmGlobal(push.vsm_ptr);
     // 1. Project World -> Light Clip Space (Cascade 0 for now)
-    vec4 shadowClip = u_VsmGlobal.light_view_projections[0] * vec4(worldPos, 1.0);
+    vec4 shadowClip = u_Global.light_view_projections[0] * vec4(worldPos, 1.0);
     vec3 shadowNDC = shadowClip.xyz / shadowClip.w;
     vec2 shadowUV = shadowNDC.xy * 0.5 + 0.5;
     shadowUV.y = 1.0 - shadowUV.y; // Flip Y for Vulkan convention

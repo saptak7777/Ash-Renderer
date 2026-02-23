@@ -8,9 +8,7 @@ pub mod lighting;
 pub mod post_processing;
 pub mod vsm;
 
-pub use ambient_lighting::{
-    AmbientPreset, HemisphereAmbient, LightingBuilder, LightingPresets, SceneLighting,
-};
+pub use ambient_lighting::{LightingBuilder, LightingPresets, SceneLighting};
 pub use auto_rotate::AutoRotateFeature;
 pub use bloom::{BloomConfig, BloomFeature, BloomPass, BloomPushConstants};
 pub use feature_trait::{FeatureFrameContext, FeatureManager, FeatureRenderContext, RenderFeature};

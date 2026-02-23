@@ -23,7 +23,8 @@ impl VsmComputePipelines {
     /// Device must remain valid for the lifetime of these pipelines.
     pub unsafe fn new(
         device: Arc<ash::Device>,
-        descriptor_layout: vk::DescriptorSetLayout,
+        global_bindless_layout: vk::DescriptorSetLayout,
+        vsm_compute_layout: vk::DescriptorSetLayout,
         max_requests: u32,
     ) -> Result<Self> {
         log::info!("Creating VSM compute pipelines");
@@ -41,9 +42,16 @@ impl VsmComputePipelines {
                 })?
         };
 
+        let push_constant = vk::PushConstantRange::default()
+            .stage_flags(vk::ShaderStageFlags::COMPUTE)
+            .offset(0)
+            .size(8);
+
         let clear = unsafe {
             ComputePipeline::builder(Arc::clone(&device))
-                .add_set_layout(descriptor_layout)
+                .add_set_layout(global_bindless_layout)
+                .add_set_layout(vsm_compute_layout)
+                .add_push_constant(push_constant)
                 .with_shader(clear_module)
                 .with_entry_point("main")
                 .build()?
@@ -73,9 +81,16 @@ impl VsmComputePipelines {
             .map_entries(&spec_map)
             .data(&spec_data);
 
+        let push_constant = vk::PushConstantRange::default()
+            .stage_flags(vk::ShaderStageFlags::COMPUTE)
+            .offset(0)
+            .size(8);
+
         let analyze = unsafe {
             ComputePipeline::builder(Arc::clone(&device))
-                .add_set_layout(descriptor_layout)
+                .add_set_layout(global_bindless_layout)
+                .add_set_layout(vsm_compute_layout)
+                .add_push_constant(push_constant)
                 .with_shader(analyze_module)
                 .with_entry_point("main")
                 .with_specialization(spec_info)
@@ -97,9 +112,16 @@ impl VsmComputePipelines {
                 })?
         };
 
+        let push_constant = vk::PushConstantRange::default()
+            .stage_flags(vk::ShaderStageFlags::COMPUTE)
+            .offset(0)
+            .size(8);
+
         let allocate = unsafe {
             ComputePipeline::builder(Arc::clone(&device))
-                .add_set_layout(descriptor_layout)
+                .add_set_layout(global_bindless_layout)
+                .add_set_layout(vsm_compute_layout)
+                .add_push_constant(push_constant)
                 .with_shader(allocate_module)
                 .with_entry_point("main")
                 .build()?

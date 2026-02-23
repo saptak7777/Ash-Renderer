@@ -368,7 +368,8 @@ impl VsmResources {
                     request_size,
                     vk::BufferUsageFlags::STORAGE_BUFFER
                         | vk::BufferUsageFlags::TRANSFER_SRC
-                        | vk::BufferUsageFlags::TRANSFER_DST,
+                        | vk::BufferUsageFlags::TRANSFER_DST
+                        | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
                     vk_mem::MemoryUsage::AutoPreferHost,
                     vk_mem::AllocationCreateFlags::HOST_ACCESS_RANDOM,
                 )
@@ -394,7 +395,9 @@ impl VsmResources {
         let (allocation_buffer, allocation_buffer_alloc) = unsafe {
             allocator.create_buffer_with_flags(
                 alloc_size,
-                vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
+                vk::BufferUsageFlags::STORAGE_BUFFER
+                    | vk::BufferUsageFlags::TRANSFER_DST
+                    | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
                 vk_mem::MemoryUsage::AutoPreferHost,
                 vk_mem::AllocationCreateFlags::HOST_ACCESS_SEQUENTIAL_WRITE,
             )
@@ -407,7 +410,9 @@ impl VsmResources {
         let (metadata_buffer, metadata_buffer_alloc) = unsafe {
             allocator.create_buffer_with_flags(
                 metadata_size,
-                vk::BufferUsageFlags::UNIFORM_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
+                vk::BufferUsageFlags::UNIFORM_BUFFER
+                    | vk::BufferUsageFlags::TRANSFER_DST
+                    | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
                 vk_mem::MemoryUsage::AutoPreferHost,
                 vk_mem::AllocationCreateFlags::HOST_ACCESS_SEQUENTIAL_WRITE,
             )
@@ -431,65 +436,13 @@ impl VsmResources {
         )?;
 
         // Create compute descriptor set layout
-        let compute_bindings = [
-            // Binding 0: Metadata (Uniform Buffer)
-            vk::DescriptorSetLayoutBinding::default()
-                .binding(0)
-                .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
-                .descriptor_count(1)
-                .stage_flags(vk::ShaderStageFlags::COMPUTE | vk::ShaderStageFlags::FRAGMENT),
-            // Binding 1: Request Buffer (Storage Buffer)
-            vk::DescriptorSetLayoutBinding::default()
-                .binding(1)
-                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
-                .descriptor_count(1)
-                .stage_flags(vk::ShaderStageFlags::COMPUTE),
-            // Binding 2: Allocation Buffer (Storage Buffer)
-            vk::DescriptorSetLayoutBinding::default()
-                .binding(2)
-                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
-                .descriptor_count(1)
-                .stage_flags(vk::ShaderStageFlags::COMPUTE),
-            // Binding 3: Page Table (Storage Image)
-            vk::DescriptorSetLayoutBinding::default()
-                .binding(3)
-                .descriptor_type(vk::DescriptorType::STORAGE_IMAGE)
-                .descriptor_count(1)
-                .stage_flags(vk::ShaderStageFlags::COMPUTE | vk::ShaderStageFlags::FRAGMENT),
-            // Binding 4: Physical Cache (Storage Image)
-            vk::DescriptorSetLayoutBinding::default()
-                .binding(4)
-                .descriptor_type(vk::DescriptorType::STORAGE_IMAGE)
-                .descriptor_count(1)
-                .stage_flags(vk::ShaderStageFlags::COMPUTE | vk::ShaderStageFlags::FRAGMENT),
-            // Binding 5: Scene Depth Buffer (Combined Image Sampler)
-            vk::DescriptorSetLayoutBinding::default()
-                .binding(5)
-                .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-                .descriptor_count(1)
-                .stage_flags(vk::ShaderStageFlags::COMPUTE),
-        ];
-
-        let compute_layout_info =
-            vk::DescriptorSetLayoutCreateInfo::default().bindings(&compute_bindings);
         let compute_layout =
-            unsafe { device.create_descriptor_set_layout(&compute_layout_info, None) }.map_err(
-                |e| AshError::VulkanError(format!("Failed to create VSM compute layout: {e}")),
-            )?;
+            unsafe { crate::renderer::initialization::create_vsm_compute_layout(&device)? };
 
-        // Create dedicated descriptor pool for VSM
         let pool_sizes = [
             vk::DescriptorPoolSize {
                 ty: vk::DescriptorType::STORAGE_IMAGE,
                 descriptor_count: 2,
-            },
-            vk::DescriptorPoolSize {
-                ty: vk::DescriptorType::STORAGE_BUFFER,
-                descriptor_count: 2,
-            },
-            vk::DescriptorPoolSize {
-                ty: vk::DescriptorType::UNIFORM_BUFFER,
-                descriptor_count: 1,
             },
             vk::DescriptorPoolSize {
                 ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
@@ -515,18 +468,6 @@ impl VsmResources {
             })?[0];
 
         // Update descriptor set
-        let metadata_info = [vk::DescriptorBufferInfo::default()
-            .buffer(metadata_buffer)
-            .offset(0)
-            .range(vk::WHOLE_SIZE)];
-        let request_info = [vk::DescriptorBufferInfo::default()
-            .buffer(request_buffers[0].buffer)
-            .offset(0)
-            .range(vk::WHOLE_SIZE)];
-        let allocation_info = [vk::DescriptorBufferInfo::default()
-            .buffer(allocation_buffer)
-            .offset(0)
-            .range(vk::WHOLE_SIZE)];
         let table_info = [vk::DescriptorImageInfo::default()
             .image_view(page_table_view)
             .image_layout(vk::ImageLayout::GENERAL)];
@@ -535,21 +476,6 @@ impl VsmResources {
             .image_layout(vk::ImageLayout::GENERAL)];
 
         let writes = [
-            vk::WriteDescriptorSet::default()
-                .dst_set(descriptor_set)
-                .dst_binding(0)
-                .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
-                .buffer_info(&metadata_info),
-            vk::WriteDescriptorSet::default()
-                .dst_set(descriptor_set)
-                .dst_binding(1)
-                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
-                .buffer_info(&request_info),
-            vk::WriteDescriptorSet::default()
-                .dst_set(descriptor_set)
-                .dst_binding(2)
-                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
-                .buffer_info(&allocation_info),
             vk::WriteDescriptorSet::default()
                 .dst_set(descriptor_set)
                 .dst_binding(3)
@@ -766,30 +692,18 @@ impl VsmResources {
     pub fn update_analysis_descriptors(
         &self,
         depth_view: vk::ImageView,
-        frame_index: u32,
+        _frame_index: u32,
     ) -> Result<()> {
-        let request_buffer_info = [vk::DescriptorBufferInfo::default()
-            .buffer(self.request_buffers[frame_index as usize % self.request_buffers.len()].buffer)
-            .offset(0)
-            .range(vk::WHOLE_SIZE)];
-
         let depth_info = [vk::DescriptorImageInfo::default()
             .image_view(depth_view)
             .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
             .sampler(self.physical_cache_sampler)];
 
-        let writes = [
-            vk::WriteDescriptorSet::default()
-                .dst_set(self.descriptor_set)
-                .dst_binding(2)
-                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
-                .buffer_info(&request_buffer_info),
-            vk::WriteDescriptorSet::default()
-                .dst_set(self.descriptor_set)
-                .dst_binding(5)
-                .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-                .image_info(&depth_info),
-        ];
+        let writes = [vk::WriteDescriptorSet::default()
+            .dst_set(self.descriptor_set)
+            .dst_binding(5)
+            .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+            .image_info(&depth_info)];
 
         unsafe {
             self.device.update_descriptor_sets(&writes, &[]);

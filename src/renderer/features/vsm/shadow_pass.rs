@@ -18,27 +18,78 @@ pub struct ShadowPageRenderInfo<'a> {
     pub pages: &'a [super::page_manager::PageToRender],
 }
 
-#[repr(C, align(16))]
+/// Push constants shared by `shadow.vert` and `shadow.frag`.
+///
+/// The layout is the union of what both stages need and MUST match the GLSL
+/// blocks in those shaders exactly. All offsets are explicit.
+///
+///   BDA pointers (0–55):
+///     frame_ptr     u64  @ 0
+///     vertex_ptr    u64  @ 8
+///     instance_ptr  u64  @ 16
+///     material_ptr  u64  @ 24  ← fragment uses this for alpha-cutout
+///     index_ptr     u64  @ 32
+///     light_ptr     u64  @ 40
+///     tile_ptr      u64  @ 48
+///   Texture indices (56–63):
+///     vsm_page_index   u32  @ 56
+///     vsm_cache_index  u32  @ 60
+///   Model matrix (64–127):
+///     model  mat4  @ 64
+///   Material & flags (128–159):
+///     material_index              u32  @ 128  ← fragment uses for alpha-cutout
+///     use_instancing              u32  @ 132
+///     flags                       u32  @ 136
+///     debug_path                  u32  @ 140
+///     debug_visualization_enabled u32  @ 144
+///     skybox_index                u32  @ 148
+///     _pad_mat                    u32  @ 152 (×2 pad to 160)
+///     _pad_mat2                   u32  @ 156
+///   Light space matrix (160–223):
+///     light_space_matrix  mat4  @ 160
+///   Total: 224 bytes
+#[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct ShadowPushConstants {
-    // 0-31: BDA pointers
-    pub vertex_ptr: u64,    // Offset 0
-    pub instance_ptr: u64,  // Offset 8
-    pub index_ptr: u64,     // Offset 16
-    pub transform_ptr: u64, // Offset 24
+    // ── BDA pointers ─────────────────────────────────────────────────
+    pub frame_ptr: u64,    // offset   0
+    pub vertex_ptr: u64,   // offset   8
+    pub instance_ptr: u64, // offset  16
+    pub material_ptr: u64, // offset  24  ← frag: alpha-cutout BDA
+    pub index_ptr: u64,    // offset  32
+    pub light_ptr: u64,    // offset  40
+    pub tile_ptr: u64,     // offset  48
 
-    // 32-39: Additional fields
-    pub transform_index: u32, // Offset 32
-    pub use_instancing: u32,  // Offset 36
+    // ── Texture indices ───────────────────────────────────────────────
+    pub vsm_page_index: u32,  // offset  56
+    pub vsm_cache_index: u32, // offset  60
 
-    // 40-63: Padding to align light_space_matrix to 64
-    pub _padding: [u64; 3], // 24 bytes of padding
+    // ── Model matrix (per-draw, used by vert) ────────────────────────
+    pub model: [[f32; 4]; 4], // offset  64  (64 bytes)
 
-    // 64-127: Light Space Matrix (64 bytes)
-    pub light_space_matrix: [[f32; 4]; 4], // Mat4 at offset 64
+    // ── Material / control flags (frag reads from 128) ───────────────
+    pub material_index: u32,              // offset 128
+    pub use_instancing: u32,              // offset 132
+    pub flags: u32,                       // offset 136
+    pub debug_path: u32,                  // offset 140
+    pub debug_visualization_enabled: u32, // offset 144
+    pub skybox_index: u32,                // offset 148
+    pub _pad_mat: u32,                    // offset 152 — pad to align mat4
+    pub _pad_mat2: u32,                   // offset 156
+
+    // ── Light space matrix (160–223) ─────────────────────────────────
+    pub light_space_matrix: [[f32; 4]; 4], // offset 160
 }
 
-pub const LIGHT_SPACE_MATRIX_OFFSET: u32 = 64;
+/// Byte offset of the light-space-matrix field within ShadowPushConstants.
+pub const LIGHT_SPACE_MATRIX_OFFSET: u32 = 160;
+/// Byte offset of the model-matrix field within ShadowPushConstants.
+pub const MODEL_MATRIX_OFFSET: u32 = 64;
+
+const _: () = assert!(
+    std::mem::size_of::<ShadowPushConstants>() == 224,
+    "ShadowPushConstants must be 224 bytes to match shadow.vert / shadow.frag"
+);
 
 /// VSM shadow rendering pass
 pub struct VsmShadowPass {
@@ -240,15 +291,11 @@ impl VsmShadowPass {
     ) -> Result<()> {
         log::info!("Creating VSM shadow pipeline");
 
-        // Push constant range (extended for lightSpaceMatrix at offset 160)
-        const DRAW_PUSH_VERTEX_BYTES: u32 = 128;
-        const DRAW_PUSH_FRAGMENT_BYTES: u32 = 32;
-        const LIGHT_SPACE_MATRIX_BYTES: u32 = 64;
-
         let push_constant_range = vk::PushConstantRange {
             stage_flags: vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
             offset: 0,
-            size: DRAW_PUSH_VERTEX_BYTES + DRAW_PUSH_FRAGMENT_BYTES + LIGHT_SPACE_MATRIX_BYTES,
+            // Use the Rust struct size as the authoritative source so it can never drift.
+            size: std::mem::size_of::<ShadowPushConstants>() as u32,
         };
 
         // Descriptor set layouts: Set 0 (Reserved) and Set 1 (Bindless Textures)
@@ -507,15 +554,30 @@ impl VsmShadowPass {
                 );
             }
 
+            // Build the per-batch base push. Material pointer and index are left zero —
+            // the shadow pass currently renders opaque objects. When alpha-tested geometry
+            // is added, callers should fill material_ptr + material_index before issuing
+            // the draw. light_space_matrix is overwritten per-page below.
             let bda_push = ShadowPushConstants {
+                frame_ptr: 0,
                 vertex_ptr: info.vertex_addr,
                 instance_ptr: info.object_addr,
+                material_ptr: 0, // zero → frag skips alpha cutout branch
                 index_ptr: info.index_addr,
-                transform_ptr: 0,
-                transform_index: 0,
+                light_ptr: 0,
+                tile_ptr: 0,
+                vsm_page_index: 0,
+                vsm_cache_index: 0,
+                model: [[0.0; 4]; 4],
+                material_index: 0,
                 use_instancing: 1, // Enable instancing for the manual pull
-                _padding: [0; 3],
-                light_space_matrix: [[0.0; 4]; 4], // Placeholder, written later per-page
+                flags: 0,
+                debug_path: 0,
+                debug_visualization_enabled: 0,
+                skybox_index: 0,
+                _pad_mat: 0,
+                _pad_mat2: 0,
+                light_space_matrix: [[0.0; 4]; 4], // overwritten per-page
             };
 
             unsafe {
@@ -523,10 +585,8 @@ impl VsmShadowPass {
                     cmd,
                     layout,
                     vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
-                    0, // Offset 0
-                    bytemuck::cast_slice(std::slice::from_ref(&bda_push))[..64]
-                        .try_into()
-                        .unwrap(), // push first 64 bytes
+                    0,
+                    bytemuck::bytes_of(&bda_push), // push all 224 bytes
                 );
             }
         }
@@ -582,7 +642,7 @@ impl VsmShadowPass {
                     .cmd_clear_attachments(cmd, &[clear_attachment], &[clear_rect]);
             }
 
-            // Push constants (Matrix)
+            // Per-page: update only the light-space-matrix slot (offset 160).
             let matrix = page.mvp.to_cols_array_2d();
             let matrix_bytes = bytemuck::bytes_of(&matrix);
             if let Some(layout) = self.shadow_pipeline_layout {
@@ -591,7 +651,7 @@ impl VsmShadowPass {
                         cmd,
                         layout,
                         vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
-                        64, // Offset 64 for Light Space Matrix in ShadowPushConstants
+                        LIGHT_SPACE_MATRIX_OFFSET, // 160 — matches ShadowPushConstants.light_space_matrix
                         matrix_bytes,
                     );
                 }

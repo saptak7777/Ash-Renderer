@@ -31,45 +31,8 @@ void main() {
     vec3 g = texture(sourceTexture, uv + vec2(0.0, -d.y)).rgb;
     vec3 h = texture(sourceTexture, uv + vec2(0.0,  d.y)).rgb;
     
-    // Karis average calculation (only for the first downsample, technically, but good generally)
-    // Weight = 1 / (1 + luma)
-    // Groups: (a,b,d,e), (b,c,e,f)... simple tent is easier.
-    // Proper Karis:
-    // Implementation utilizes 5 groups for the 13-tap sample.
-    // Group 1: Center
-    // Group 2-5: 4 corners.
-    // Executing 13-tap downsample.
-    // Standard Karis typically uses a 5-tap (center + 4 corners).
-    // Adheres to the 13-tap pattern with weighted averaging.
-    
-    // OPTIMIZED: Pre-compute luma once per sample instead of redundant macro expansion
-    // Reduces from 9 dot products inside weight macro to 9 pre-computed values
-    // Simplified Karis Check (unused, removing conflict)
-    // float lumaCenter = dot(center, vec3(0.2126, 0.7152, 0.0722));
-    // float wCenter = 1.0 / (1.0 + lumaCenter);
-    
-    // This is getting complex for a simple replacement.
-    // Implementation of weighted 4x4 box groups.
-    // Actually, simply weighting the result by luma suppression is often enough.
-    
-    // Computing weighted average of groups.
-    // Box 1 (Top Left): a, e, g, center
-    // Box 2 (Top Right): b, f, g, center
-    // ...
-    // This shader seems to implement the "Better Bloom" by Call of Duty / Jimenez 2014.
-    // The "13-tap" is standard there.
-    // Karis average is usually applied *before* the first downsample or *during* it.
-    
-    // Applying luma weighting to the samples.
-    vec3 result = center * 0.125;
-    result += (a + b + c + d_sample) * 0.125;
-    result += (e + f + g + h) * 0.125;
-    // Wait, the previous code weights were different (0.25, 0.0625, 0.125).
-    // 0.25 center, 0.0625 corners (1/16), 0.125 edges (1/8).
-    // Sum: 0.25 + 4*0.0625 + 4*0.125 = 0.25 + 0.25 + 0.5 = 1.0. Correct.
-    
-    // OPTIMIZED: Pre-compute luma once per sample instead of redundant macro expansion
-    // Reduces from 9 dot products inside weight macro to 9 pre-computed values
+    // Karis average calculation to reduce fireflies.
+    // OPTIMIZED: Pre-compute luma once per sample.
     const vec3 LUMA = vec3(0.2126, 0.7152, 0.0722);
     
     float lumaCenter = dot(center, LUMA);

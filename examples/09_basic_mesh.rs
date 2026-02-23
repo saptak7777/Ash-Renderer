@@ -6,7 +6,7 @@
 
 use ash_renderer::prelude::*;
 use ash_renderer::renderer::Scene;
-use ash_renderer::renderer::features::ambient_lighting::{AmbientPreset, LightingBuilder};
+use ash_renderer::renderer::features::ambient_lighting::LightingBuilder;
 use glam::{Mat4, Vec3};
 use std::sync::Arc;
 use winit::{
@@ -121,7 +121,6 @@ impl ApplicationHandler for App {
 
                 // Simple directional lighting (RAGE approach)
                 let lighting = LightingBuilder::new()
-                    .with_ambient_preset(AmbientPreset::IndoorLit)
                     .with_directional(
                         Vec3::new(1.0, -1.0, -1.0).normalize(),
                         Vec3::splat(3.0),

@@ -13,8 +13,6 @@ pub struct SwapchainWrapper {
     pub format: vk::Format,
     pub color_space: vk::ColorSpaceKHR,
     pub extent: vk::Extent2D,
-    // [TEMPORARY_SDR_FALLBACK]: Remove when MSI 27 arrives.
-    pub is_hdr: bool,
     device: Arc<ash::Device>,
     image_views_managed_by_registry: bool,
     headless: bool,
@@ -46,13 +44,12 @@ impl SwapchainWrapper {
             image_views,
             format,
             color_space,
-            is_hdr,
             extent,
             headless_memory,
         ) = if !headless {
             let swapchain_loader =
                 swapchain::Device::new(vk_device.instance.instance(), &vk_device.device);
-            let (swapchain, images, image_views, format, color_space, is_hdr, extent) = unsafe {
+            let (swapchain, images, image_views, format, color_space, extent) = unsafe {
                 Self::build_swapchain(
                     vk_device,
                     &swapchain_loader,
@@ -67,16 +64,14 @@ impl SwapchainWrapper {
                 image_views,
                 format,
                 color_space,
-                is_hdr,
                 extent,
                 Vec::new(),
             )
         } else {
-            // Headless mode: offscreen images use the same 10-bit HDR format as the
-            // windowed pipeline so that headless tests validate the PQ-encoded path.
+            // Headless mode: standardized 8-bit SDR format.
             let extent = preferred_extent;
-            let format = vk::Format::A2B10G10R10_UNORM_PACK32;
-            let color_space = vk::ColorSpaceKHR::HDR10_ST2084_EXT;
+            let format = vk::Format::B8G8R8A8_UNORM;
+            let color_space = vk::ColorSpaceKHR::SRGB_NONLINEAR;
             let image_count = 3; // Triple buffering simulation
 
             let mut images = Vec::new();
@@ -165,7 +160,6 @@ impl SwapchainWrapper {
                 image_views,
                 format,
                 color_space,
-                true, // headless uses HDR format
                 extent,
                 memories,
             )
@@ -178,7 +172,6 @@ impl SwapchainWrapper {
             image_views,
             format,
             color_space,
-            is_hdr,
             extent,
             device: Arc::clone(&vk_device.device),
             image_views_managed_by_registry: false,
@@ -200,7 +193,6 @@ impl SwapchainWrapper {
         Vec<vk::ImageView>,
         vk::Format,
         vk::ColorSpaceKHR,
-        bool,
         vk::Extent2D,
     )> {
         let surface_loader = vk_device.instance.surface_loader();
@@ -232,27 +224,33 @@ impl SwapchainWrapper {
         }
         .map_err(|e| AshError::SwapchainCreationFailed(format!("{e:?}")))?;
 
-        // --- Dynamic HDR10 / SDR Format Selection (DEV FALLBACK) ---
-        let hdr10_surface_format = formats.iter().find(|f| {
-            f.format == vk::Format::A2B10G10R10_UNORM_PACK32
-                && f.color_space == vk::ColorSpaceKHR::HDR10_ST2084_EXT
-        });
-
-        let (chosen_format, chosen_color_space, is_hdr) = if let Some(sf) = hdr10_surface_format {
-            log::info!(
-                "Swapchain: HDR10 surface confirmed. Selecting A2B10G10R10_UNORM_PACK32 + HDR10_ST2084_EXT."
-            );
-            (sf.format, sf.color_space, true)
-        } else {
-            log::warn!("[DEV NOTICE] 10-BIT HARDWARE NOT DETECTED. ENGAGING 11-DAY SDR FALLBACK.");
+        // --- Standardized 8-bit SDR Output (Lean Architecture) ---
+        let (chosen_format, chosen_color_space) = {
             let sdr = formats
                 .iter()
                 .find(|f| {
-                    f.format == vk::Format::B8G8R8A8_SRGB
+                    f.format == vk::Format::B8G8R8A8_UNORM
                         && f.color_space == vk::ColorSpaceKHR::SRGB_NONLINEAR
                 })
-                .unwrap_or(&formats[0]);
-            (sdr.format, sdr.color_space, false)
+                .or_else(|| {
+                    formats.iter().find(|f| {
+                        f.format == vk::Format::R8G8B8A8_UNORM
+                            && f.color_space == vk::ColorSpaceKHR::SRGB_NONLINEAR
+                    })
+                })
+                .ok_or_else(|| {
+                    crate::AshError::VulkanError(
+                        "No compatible 8-bit UNORM (B8G8R8A8 or R8G8B8A8) sRGB format found"
+                            .to_string(),
+                    )
+                })?;
+
+            log::info!(
+                "Swapchain: Selecting standardized 8-bit SDR format: {:?} ({:?})",
+                sdr.format,
+                sdr.color_space
+            );
+            (sdr.format, sdr.color_space)
         };
 
         let image_count = if capabilities.max_image_count > 0 {
@@ -321,7 +319,6 @@ impl SwapchainWrapper {
             image_views,
             chosen_format,
             chosen_color_space,
-            is_hdr,
             extent,
         ))
     }
@@ -348,7 +345,7 @@ impl SwapchainWrapper {
         }
 
         let loader = self.swapchain_loader.as_ref().unwrap();
-        let (swapchain, images, image_views, format, color_space, is_hdr, extent) =
+        let (swapchain, images, image_views, format, color_space, extent) =
             // Reuse current present mode on recreation for now
             unsafe { Self::build_swapchain(vk_device, loader, self.swapchain, vk::PresentModeKHR::FIFO) }?;
 
@@ -357,7 +354,6 @@ impl SwapchainWrapper {
         self.image_views = image_views;
         self.format = format;
         self.color_space = color_space;
-        self.is_hdr = is_hdr;
         self.extent = extent;
 
         Ok(old_swapchain)

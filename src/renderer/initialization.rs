@@ -629,24 +629,6 @@ pub unsafe fn init_lighting_system(
 /// The caller must ensure that the device is valid.
 pub unsafe fn create_vsm_compute_layout(device: &ash::Device) -> Result<vk::DescriptorSetLayout> {
     let compute_bindings = [
-        // Binding 0: Metadata (Uniform Buffer)
-        vk::DescriptorSetLayoutBinding::default()
-            .binding(0)
-            .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
-            .descriptor_count(1)
-            .stage_flags(vk::ShaderStageFlags::COMPUTE | vk::ShaderStageFlags::FRAGMENT),
-        // Binding 1: Request Buffer (Storage Buffer)
-        vk::DescriptorSetLayoutBinding::default()
-            .binding(1)
-            .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
-            .descriptor_count(1)
-            .stage_flags(vk::ShaderStageFlags::COMPUTE),
-        // Binding 2: Allocation Buffer (Storage Buffer)
-        vk::DescriptorSetLayoutBinding::default()
-            .binding(2)
-            .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
-            .descriptor_count(1)
-            .stage_flags(vk::ShaderStageFlags::COMPUTE),
         // Binding 3: Page Table (Storage Image)
         vk::DescriptorSetLayoutBinding::default()
             .binding(3)

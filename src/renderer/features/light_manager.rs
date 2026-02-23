@@ -161,12 +161,14 @@ impl LightManager {
         width: u32,
         height: u32,
         frame_index: usize,
+        camera_ptr: u64,
     ) -> super::light_culling::LightCullingPushConstants {
         self.culling_pass.get_push_constants(
             width,
             height,
             self.light_ptr(frame_index),
             self.tile_ptr(frame_index),
+            camera_ptr,
         )
     }
 

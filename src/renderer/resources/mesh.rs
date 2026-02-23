@@ -658,7 +658,7 @@ impl Mesh {
                 &mut self.metallic_roughness_texture,
                 &mut self.metallic_roughness_texture_data,
                 false, // MR = Linear
-                CompressionFormat::Bc5,
+                CompressionFormat::Bc7,
                 vram_budget,
                 compression_enabled,
             )?
@@ -672,7 +672,7 @@ impl Mesh {
                 &mut self.occlusion_texture,
                 &mut self.occlusion_texture_data,
                 false, // Occlusion = Linear
-                CompressionFormat::Bc5,
+                CompressionFormat::Bc7,
                 vram_budget,
                 compression_enabled,
             )?

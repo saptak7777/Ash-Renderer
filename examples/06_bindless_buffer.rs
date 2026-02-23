@@ -6,7 +6,7 @@
 use ash::vk;
 use ash_renderer::prelude::*;
 use ash_renderer::renderer::Scene;
-use ash_renderer::renderer::features::ambient_lighting::{AmbientPreset, LightingBuilder};
+use ash_renderer::renderer::features::ambient_lighting::LightingBuilder;
 use ash_renderer::renderer::resources::uniform::StorageBuffer;
 use glam::{Mat4, Vec3, Vec4};
 use std::sync::Arc;
@@ -162,7 +162,6 @@ impl ApplicationHandler for App {
 
                 // 6. Setup PHASE 2 Lighting: Balanced HDR (RAGE approach)
                 let lighting = LightingBuilder::new()
-                    .with_ambient_preset(AmbientPreset::IndoorLit)
                     .with_directional(
                         Vec3::new(-1.0, -1.0, -1.0).normalize(),
                         Vec3::splat(2.5),
@@ -213,7 +212,6 @@ impl ApplicationHandler for App {
                             Vec3::new(-light_angle.cos(), -1.0, -light_angle.sin()).normalize();
 
                         let lighting = LightingBuilder::new()
-                            .with_ambient_preset(AmbientPreset::IndoorLit)
                             .with_directional(light_dir, Vec3::splat(2.5), 1.0)
                             .build();
 
@@ -362,7 +360,6 @@ fn run_headless(max_frames: u32) -> Result<()> {
     }
 
     let lighting = LightingBuilder::new()
-        .with_ambient_preset(AmbientPreset::IndoorLit)
         .with_directional(
             Vec3::new(-1.0, -1.0, -1.0).normalize(),
             Vec3::splat(2.5),
@@ -389,7 +386,6 @@ fn run_headless(max_frames: u32) -> Result<()> {
         let light_angle = time * 0.5;
         let light_dir = Vec3::new(-light_angle.cos(), -1.0, -light_angle.sin()).normalize();
         let lighting = LightingBuilder::new()
-            .with_ambient_preset(AmbientPreset::IndoorLit)
             .with_directional(light_dir, Vec3::splat(2.5), 1.0)
             .build();
         scene.set_lighting(lighting);

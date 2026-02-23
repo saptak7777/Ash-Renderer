@@ -33,9 +33,13 @@ impl MaterialPushConstants {
             material_buffer_index: 0,
             debug_visualization_enabled: 0,
             skybox_index: 0,
+            vsm_ptr_low: 0,
+            vsm_ptr_high: 0,
             _padding_1: 0,
             _padding_2: 0,
             _padding_3: 0,
+            _padding_4: 0,
+            _padding_5: 0,
         }
     }
 
@@ -107,9 +111,13 @@ pub struct MaterialPushConstants {
     pub material_buffer_index: u32,
     pub debug_visualization_enabled: u32,
     pub skybox_index: u32,
+    pub vsm_ptr_low: u32,
+    pub vsm_ptr_high: u32,
     pub _padding_1: u32,
     pub _padding_2: u32,
     pub _padding_3: u32,
+    pub _padding_4: u32,
+    pub _padding_5: u32,
 }
 
 pub const DRAW_PUSH_VERTEX_BYTES: u32 = 128;
@@ -152,7 +160,8 @@ struct DrawPushConstants {
     debug_path: u32,                  // 92
     debug_visualization_enabled: u32, // 144
     skybox_index: u32,                // 148
-    _padding: [u32; 2],               // 152 (Total 160)
+    vsm_ptr_low: u32,                 // 152
+    vsm_ptr_high: u32,                // 156
 }
 
 /// Context for draw calls with BDA support
@@ -178,6 +187,7 @@ pub struct DrawContext<'a> {
     // Transient Transform data
     pub transform_ptr: u64,
     pub transform_index: u32,
+    pub vsm_ptr: u64,
 }
 
 /// Parameters for indirect draw with count buffer
@@ -329,7 +339,8 @@ impl ModelRenderer {
             debug_path: 0,
             debug_visualization_enabled: ctx.material.debug_visualization_enabled,
             skybox_index: ctx.material.skybox_index,
-            _padding: [0; 2],
+            vsm_ptr_low: ctx.vsm_ptr as u32,
+            vsm_ptr_high: (ctx.vsm_ptr >> 32) as u32,
         };
 
         let push_bytes = bytemuck::bytes_of(&push);
@@ -412,7 +423,8 @@ impl ModelRenderer {
             debug_path: 0,
             debug_visualization_enabled: ctx.material.debug_visualization_enabled,
             skybox_index: ctx.material.skybox_index,
-            _padding: [0; 2],
+            vsm_ptr_low: ctx.vsm_ptr as u32,
+            vsm_ptr_high: (ctx.vsm_ptr >> 32) as u32,
         };
 
         let push_bytes = bytemuck::bytes_of(&push);
@@ -478,7 +490,8 @@ impl ModelRenderer {
             debug_path: 0,
             debug_visualization_enabled: ctx.material.debug_visualization_enabled,
             skybox_index: ctx.skybox_index,
-            _padding: [0; 2],
+            vsm_ptr_low: ctx.vsm_ptr as u32,
+            vsm_ptr_high: (ctx.vsm_ptr >> 32) as u32,
         };
 
         let push_bytes = bytemuck::bytes_of(&push);

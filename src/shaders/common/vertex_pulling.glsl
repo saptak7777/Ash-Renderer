@@ -6,9 +6,12 @@
 #extension GL_EXT_scalar_block_layout : require
 #extension GL_EXT_shader_explicit_arithmetic_types : require
 
-// Vertex struct matching Rust's Vertex (60 bytes, tightly packed)
-// CRITICAL: Uses scalar layout to match Rust's #[repr(C)] memory layout
-layout(buffer_reference, scalar) buffer VertexBuffer {
+// Vertex struct matching Rust's Vertex (64 bytes, tightly packed).
+// CRITICAL: scalar layout matches Rust's #[repr(C)] memory layout.
+// restrict   — only one BDA pointer to this vertex buffer per invocation.
+// readonly   — vertex data is never written back by any shader.
+// buffer_reference_align = 4 — minimum component alignment within the struct.
+layout(buffer_reference, scalar, buffer_reference_align = 4) restrict readonly buffer VertexBuffer {
     vec3 position;    // offset 0, 12 bytes
     vec3 normal;      // offset 12, 12 bytes
     vec2 uv;          // offset 24, 8 bytes

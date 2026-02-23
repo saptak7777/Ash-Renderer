@@ -49,6 +49,7 @@ pub struct GeometryRenderContext<'a> {
     pub is_swapchain_image: bool,
     pub depth_format: vk::Format,
     pub draw_items: &'a [DrawItem],
+    pub vsm_ptr: u64,
 }
 
 impl RenderPipeline {
@@ -533,6 +534,7 @@ impl RenderPipeline {
                         vsm_cache_index: ctx.vsm_manager.physical_memory_bindless_index,
                         transform_ptr: scene.transform_system.arena_addr,
                         transform_index: 0,
+                        vsm_ptr: ctx.vsm_ptr,
                     };
 
                     let count_params = IndirectDrawCountParams {
@@ -577,6 +579,7 @@ impl RenderPipeline {
                         vsm_cache_index: ctx.vsm_manager.physical_memory_bindless_index,
                         transform_ptr: scene.transform_system.arena_addr,
                         transform_index: 0, // In single-draw, we don't have a specific index here yet
+                        vsm_ptr: ctx.vsm_ptr,
                     };
 
                     unsafe {

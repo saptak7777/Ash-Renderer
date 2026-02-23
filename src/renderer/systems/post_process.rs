@@ -362,7 +362,6 @@ impl PostProcessSystem {
                 swapchain_extent,
                 target_image,
                 target_view,
-                u32::from(ctx.swapchain.is_hdr),
             )?;
         }
 
@@ -376,7 +375,6 @@ impl PostProcessSystem {
         extent: vk::Extent2D,
         target_image: vk::Image,
         target_view: vk::ImageView,
-        is_hdr: u32,
     ) -> Result<()> {
         if self.pipeline.is_none() || self.descriptor_sets.is_empty() {
             return Ok(());
@@ -461,7 +459,7 @@ impl PostProcessSystem {
                 } else {
                     0
                 },
-                is_hdr,
+                gamma: self.config.gamma,
             };
 
             self.device.cmd_push_constants(

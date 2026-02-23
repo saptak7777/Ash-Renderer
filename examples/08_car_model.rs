@@ -5,7 +5,7 @@
 
 use ash_renderer::prelude::*;
 use ash_renderer::renderer::Scene;
-use ash_renderer::renderer::features::ambient_lighting::{AmbientPreset, LightingBuilder};
+use ash_renderer::renderer::features::ambient_lighting::LightingBuilder;
 use ash_renderer::renderer::resources::gltf_loader;
 use ash_renderer::renderer::resources::uniform::StorageBuffer;
 use glam::{Mat4, Vec3};
@@ -63,7 +63,7 @@ impl ApplicationHandler for App {
         let surface_provider = ash_renderer::vulkan::WindowSurfaceProvider::new(&window);
 
         match Renderer::builder()
-            .with_environment_map("assets/textures/skybox.hdr")
+            .with_environment_map("assets/textures/kloppenheim_06_puresky_1k.exr")
             .build(&surface_provider)
         {
             Ok(mut renderer) => {
@@ -93,8 +93,8 @@ impl ApplicationHandler for App {
                 // Set reasonable defaults for PBR
                 renderer.set_post_processing_config(
                     ash_renderer::renderer::systems::post_process::PostProcessConfig {
-                        exposure: 1.0,
-                        gamma: 2.2,
+                        exposure: 0.8,
+                        gamma: 1.0,
                         bloom_enabled: true,
                         bloom_intensity: 0.04,
                         tonemapping_enabled: true,
@@ -103,7 +103,6 @@ impl ApplicationHandler for App {
 
                 // Setup clean lighting (Sun + Ambient)
                 let lighting = LightingBuilder::new()
-                    .with_ambient_preset(AmbientPreset::OutdoorDay)
                     .with_directional(
                         Vec3::new(-0.5, -1.0, -0.5).normalize(),
                         Vec3::new(1.0, 0.95, 0.8), // Warm sunlight

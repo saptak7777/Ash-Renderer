@@ -36,10 +36,7 @@ struct MaterialData {
     float _padding;
 };
 
-struct HemisphereAmbient {
-    vec4 sky_color;       // xyz = color, w = intensity
-    vec4 ground_color;    // xyz = color, w = unused
-};
+// [REMOVED] struct HemisphereAmbient { ... }
 
 struct DirectionalLight {
     vec4 direction;       // xyz = direction, w = shadow enabled
@@ -62,7 +59,8 @@ struct IndirectDrawCommand {
 };
 
 struct SceneLighting {
-    HemisphereAmbient ambient;
+    vec4 reserved0; // Standardized ABI padding
+    vec4 reserved1; // Standardized ABI padding
     DirectionalLight directional;
     uint point_light_count;
     uint num_tiles_x;
@@ -75,8 +73,18 @@ struct SceneLighting {
 };
 
 // --- BDA Buffer References (Require structs above) ---
+//
+// Qualifiers guide:
+//   restrict  — pointer is not aliased by any other BDA pointer in scope; enables
+//               better alias analysis and lowers register pressure in the compiler.
+//   readonly  — shader only reads; driver may cache aggressively.
+//   writeonly — shader only writes; driver may skip readback.
+//
+// CountBuffer / TileIndexBuffer are intentionally left without restrict because
+// they participate in atomics that may alias shared GPU state across wavefronts.
+// LightBuffer is r/w by Forward+ tile-generation passes.
 
-layout(buffer_reference, scalar) readonly buffer FrameData {
+layout(buffer_reference, scalar, buffer_reference_align = 8) restrict readonly buffer FrameData {
     mat4 model;
     mat4 view;
     mat4 projection;
@@ -88,23 +96,24 @@ layout(buffer_reference, scalar) readonly buffer FrameData {
     SceneLighting scene_lighting;
 };
 
-layout(buffer_reference, scalar) readonly buffer InstanceBuffer {
+layout(buffer_reference, scalar, buffer_reference_align = 4) restrict readonly buffer InstanceBuffer {
     InstanceData instances[];
 };
 
-layout(buffer_reference, scalar) readonly buffer ObjectBuffer {
+layout(buffer_reference, scalar, buffer_reference_align = 4) restrict readonly buffer ObjectBuffer {
     InstanceData objects[];
 };
 
-layout(buffer_reference, scalar) readonly buffer MaterialBuffer {
+layout(buffer_reference, scalar, buffer_reference_align = 4) restrict readonly buffer MaterialBuffer {
     MaterialData materials[];
 };
 
-layout(buffer_reference, scalar) buffer LightBuffer {
+// LightBuffer: r/w; restrict omitted intentionally (Forward+ tile writes alias this).
+layout(buffer_reference, scalar, buffer_reference_align = 4) buffer LightBuffer {
     Light lights[];
 };
 
-layout(buffer_reference, scalar) readonly buffer TransformBuffer {
+layout(buffer_reference, scalar, buffer_reference_align = 4) restrict readonly buffer TransformBuffer {
     mat4 matrices[];
 };
 
@@ -123,7 +132,8 @@ layout(set = 0, binding = 4, std430) readonly buffer BindlessBuffer {
 } bindless_buffers[];
 #endif
 
-layout(buffer_reference, scalar) writeonly buffer IndirectBuffer {
+// IndirectBuffer: write-only from compute; restrict allows the driver to skip reads.
+layout(buffer_reference, scalar, buffer_reference_align = 4) restrict writeonly buffer IndirectBuffer {
     IndirectDrawCommand commands[];
 };
 
@@ -135,9 +145,54 @@ layout(buffer_reference, scalar) buffer TileIndexBuffer {
     uint tileData[];
 };
 
-// --- Index Buffer for BDA-based Index Pulling ---
-layout(buffer_reference, scalar, buffer_reference_align = 4) readonly buffer IndexBuffer { 
+// IndexBuffer: read-only, tight 4-byte alignment known at compile time.
+layout(buffer_reference, scalar, buffer_reference_align = 4) restrict readonly buffer IndexBuffer { 
     uint indices[]; 
+};
+
+// --- VSM Shadow Mapping Structs ---
+
+struct VsmPageRequest {
+    uint virtual_x;
+    uint virtual_y;
+    float priority;
+    uint layer;
+};
+
+struct VsmPageAllocation {
+    uint virtual_x;
+    uint virtual_y;
+    uint physical_x;
+    uint physical_y;
+    uint layer;
+    uint flags;
+    uint _padding0;
+    uint _padding1;
+};
+
+layout(buffer_reference, scalar, buffer_reference_align = 8) buffer VsmRequestBuffer {
+    uint count;
+    uint overflow_count;
+    uint _padding[2];
+    VsmPageRequest data[];
+};
+
+layout(buffer_reference, scalar, buffer_reference_align = 8) buffer VsmAllocationBuffer {
+    uint count;
+    VsmPageAllocation allocations[];
+};
+
+layout(buffer_reference, scalar, buffer_reference_align = 16) restrict readonly buffer VsmGlobal {
+    mat4 light_view_projections[16];
+    mat4 view_proj;
+    mat4 inv_view_proj;
+    vec4 camera_position;
+    vec4 light_dir;
+    uint page_table_size;
+    uint page_table_index;
+    uint64_t request_ptr;
+    uint64_t allocation_ptr;
+    uint64_t _pad3;
 };
 
 uint load_index(uint64_t ptr, uint logical_index) {
@@ -176,5 +231,6 @@ layout(push_constant) uniform PushConstants {
     layout(offset = 92) uint debug_path;
     layout(offset = 96) uint debug_mode;
     layout(offset = 100) uint skybox_index;
+    layout(offset = 104) uint64_t vsm_ptr;
 } push;
 #endif

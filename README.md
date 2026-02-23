@@ -147,24 +147,26 @@ impl ApplicationHandler for App {
 }
 ```
 
-### 2. RAGE Ambient Lighting (The AAA Way)
+### 2. Modern Lighting System
 
-We've ditched the legacy ambient color for a proper **Hemisphere Ambient** model (as seen in RAGE/GTA V). It uses a sky color and ground color to ensure your metals look good even in the shadows.
+Ash Renderer uses a standardized Image-Based Lighting (IBL) and Directional light system. Legacy hemisphere ambient models have been replaced with a high-performance, single-path architecture.
 
 ```rust
-use ash_renderer::renderer::features::ambient_lighting::{AmbientPreset, LightingBuilder};
+use ash_renderer::renderer::features::ambient_lighting::{LightingPresets, LightingBuilder};
 
-// Build a preset or custom lighting setup (Compile-time verified!)
-let lighting = LightingBuilder::new()
-    .with_ambient_preset(AmbientPreset::OutdoorDay)
+// Use a pre-defined calibrated preset
+let lighting = LightingPresets::OUTDOOR_DAY;
+
+// Or build a custom configuration
+let custom_lighting = LightingBuilder::new()
     .with_directional(
         Vec3::new(-0.5, -1.0, -0.5).normalize(),
-        Vec3::splat(3.0),
-        1.0,
+        Vec3::new(1.0, 0.9, 0.8), // Warm sun color
+        3.0,                      // Intensity
     )
     .build();
 
-renderer.set_lighting(&lighting);
+renderer.set_lighting_config(lighting);
 ```
 
 ### 3. GLB Model Loading (The Easy Way)

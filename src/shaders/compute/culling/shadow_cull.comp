@@ -92,8 +92,8 @@ void main() {
     InstanceBuffer obj_buffer = InstanceBuffer(pc.objectBufferPtr);
     InstanceData obj = obj_buffer.instances[pc.baseIndex + objectIdx];
     
-    // Skip if not a shadow caster
-    if ((obj.flags & 1) == 0) { // Assuming Bit 0 is CAST_SHADOWS
+    // Skip if not a shadow caster (bit 0 = CAST_SHADOWS; see culling.rs CULL_FLAG_CAST_SHADOWS)
+    if ((obj.flags & 1) == 0) {
         return;
     }
 

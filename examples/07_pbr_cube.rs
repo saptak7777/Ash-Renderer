@@ -8,7 +8,7 @@ use ash_renderer::prelude::*;
 use ash_renderer::renderer::DebugMode;
 use ash_renderer::renderer::Scene;
 use ash_renderer::renderer::features::PointLight;
-use ash_renderer::renderer::features::ambient_lighting::{AmbientPreset, LightingBuilder};
+use ash_renderer::renderer::features::ambient_lighting::LightingBuilder;
 use ash_renderer::renderer::resources::uniform::StorageBuffer;
 use glam::{Mat4, Quat, Vec3, Vec4};
 use std::sync::Arc;
@@ -57,7 +57,7 @@ impl ApplicationHandler for App {
         let renderer = Renderer::builder()
             .with_vsync(true)
             .with_shadow_resolution(2048) // Lower shadow res for better perf in example
-            .with_environment_map("assets/textures/skybox.hdr")
+            .with_environment_map("assets/textures/kloppenheim_06_puresky_1k.exr")
             .build(&surface_provider);
 
         match renderer {
@@ -178,7 +178,6 @@ impl ApplicationHandler for App {
                 // CRITICAL: Set lighting to highlight the PBR properties
                 // RAGE Hemisphere Ambient + Global Directional Light
                 let lighting = LightingBuilder::new()
-                    .with_ambient_preset(AmbientPreset::IndoorLit)
                     .with_directional(
                         Vec3::new(1.0, -1.0, -1.0).normalize(),
                         Vec3::splat(2.0),
@@ -409,7 +408,6 @@ fn run_headless(max_frames: u32) -> Result<()> {
     }
 
     let lighting = LightingBuilder::new()
-        .with_ambient_preset(AmbientPreset::IndoorLit)
         .with_directional(
             Vec3::new(1.0, -1.0, -1.0).normalize(),
             Vec3::splat(2.0),

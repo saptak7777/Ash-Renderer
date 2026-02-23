@@ -33,9 +33,9 @@ impl HdrSystem {
         width: u32,
         height: u32,
     ) -> Result<Self> {
-        let format = vk::Format::R16G16B16A16_SFLOAT;
+        let format = vk::Format::B10G11R11_UFLOAT_PACK32;
 
-        log::info!("Creating HDR System target ({width}x{height}, R16G16B16A16_SFLOAT)");
+        log::info!("Creating HDR System target ({width}x{height}, B10G11R11_UFLOAT_PACK32)");
 
         let image_create_info = vk::ImageCreateInfo::default()
             .image_type(vk::ImageType::TYPE_2D)

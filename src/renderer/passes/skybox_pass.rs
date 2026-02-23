@@ -6,15 +6,29 @@ use crate::{
 use ash::vk;
 use std::sync::Arc;
 
-/// Push constants for skybox rendering
+/// Push constants for skybox rendering.
+///
+/// Layout MUST match `skybox.vert` / `skybox.frag` exactly:
+///   frame_ptr      u64  @ offset  0  (8 bytes)
+///   skybox_index   u32  @ offset  8  (4 bytes)
+///   _pad0          u32  @ offset 12  (4 bytes)  — align next field
+///   _pad1         [u64] @ offset 16  (64 bytes) — bridge to offset 80
+///   vertex_ptr     u64  @ offset 80  (8 bytes)
+///   Total: 88 bytes
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct SkyboxPushConstants {
-    frame_ptr: u64,
-    skybox_index: u32,
-    _pad: u32, // Explicit padding for 8-byte alignment of u64 vertex_heap_ptr
-    vertex_heap_ptr: u64,
+    frame_ptr: u64,       // offset 0
+    skybox_index: u32,    // offset 8
+    _pad0: u32,           // offset 12  — align u64 that follows
+    _pad1: [u64; 8],      // offset 16  — 64 bytes of explicit padding
+    vertex_heap_ptr: u64, // offset 80
 }
+
+const _: () = assert!(
+    std::mem::size_of::<SkyboxPushConstants>() == 88,
+    "SkyboxPushConstants must be 88 bytes to match the GLSL push block"
+);
 
 /// Self-contained skybox rendering pass.
 ///
@@ -197,7 +211,8 @@ impl SkyboxPass {
         let push = SkyboxPushConstants {
             frame_ptr,
             skybox_index: self.bindless_index,
-            _pad: 0,
+            _pad0: 0,
+            _pad1: [0u64; 8],
             vertex_heap_ptr: vertex_ptr,
         };
 
