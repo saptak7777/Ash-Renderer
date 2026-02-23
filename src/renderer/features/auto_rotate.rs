@@ -32,4 +32,12 @@ impl RenderFeature for AutoRotateFeature {
         ctx.transform
             .set_rotation(Vec3::new(angle * 0.5, angle, angle * 0.3));
     }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
 }

@@ -240,6 +240,12 @@ impl BloomFeature {
         self.pass.config_mut()
     }
 
+    /// Returns the final bloom texture view for sampling
+    pub fn output_view(&self) -> vk::ImageView {
+        // Placeholder for now as resources are managed by the main pass
+        vk::ImageView::null()
+    }
+
     /// Access the underlying BloomPass
     pub fn pass(&self) -> &BloomPass {
         &self.pass
@@ -693,6 +699,14 @@ impl RenderFeature for BloomFeature {
         }
 
         log::info!("Bloom feature removed");
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
     }
 }
 

@@ -243,7 +243,7 @@ What you actually submit each frame:
 ### Lighting
 AAA-standard lighting setup:
 - `LightingBuilder`: Fluent API for building lighting configurations
-- `AmbientPreset`: Pre-configured hemisphere ambient setups (OutdoorDay, IndoorLit, etc.)
+- `LightingPresets`: Pre-configured lighting setups (OutdoorDay, IndoorLit, etc.)
 - `DirectionalLight`: Sun/moon style lighting
 - `PointLight`: Spherical light sources
 - `SpotLight`: Conical light sources

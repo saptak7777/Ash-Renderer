@@ -510,7 +510,7 @@ impl HiZPass {
         log::info!(
             "HiZPass: BDA buffer allocated at {:#018X} ({} MiB)",
             self.hiz_buffer_addr,
-            byte_size / (1024 * 1024).max(1)
+            byte_size / (1024 * 1024)
         );
 
         Ok(())

@@ -310,7 +310,7 @@ impl TransformSystem {
             .vma
             .flush_allocation(&self.arena_alloc, 0, aligned_size)
             .map_err(|e| {
-                crate::AshError::VulkanError(format!("Failed to flush transform buffer: {}", e))
+                crate::AshError::VulkanError(format!("Failed to flush transform buffer: {e}"))
             })?;
 
         Ok(())

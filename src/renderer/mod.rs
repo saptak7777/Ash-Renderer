@@ -49,7 +49,6 @@ pub use renderer::Renderer;
 pub use resource_registry::{ResourceId, ResourceRegistry};
 pub use scene::{MeshUploadInfo, Scene};
 pub use shading::forward_plus::ForwardPlusIntegration;
-pub use shading::light_culling::LightCullingIntegration;
 
 // Pass-specific re-exports (if not covered by passes::*)
 pub use passes::fullscreen::FullscreenPass;

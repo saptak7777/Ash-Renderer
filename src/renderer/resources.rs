@@ -676,7 +676,7 @@ impl Resources {
             let _ = ub
                 .write()
                 .map_err(|e| {
-                    crate::AshError::VulkanError(format!("Uniform buffer lock poisoned: {}", e))
+                    crate::AshError::VulkanError(format!("Uniform buffer lock poisoned: {e}"))
                 })?
                 .cleanup();
         }

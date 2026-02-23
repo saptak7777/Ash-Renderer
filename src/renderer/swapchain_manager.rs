@@ -49,7 +49,7 @@ pub fn recreate_swapchain_resources(renderer: &mut Renderer, scene: &mut Scene) 
     ) {
         let mut fp = fp_lock
             .write()
-            .map_err(|e| AshError::VulkanError(format!("Forward+ lock poisoned: {}", e)))?;
+            .map_err(|e| AshError::VulkanError(format!("Forward+ lock poisoned: {e}")))?;
         unsafe {
             fp.update_depth_descriptor(&renderer.context.device.device, db.view(), db.sampler());
         }
@@ -66,7 +66,7 @@ pub fn recreate_swapchain_resources(renderer: &mut Renderer, scene: &mut Scene) 
     if let Some(ref forward_plus_arc) = renderer.systems.pipeline.forward_plus {
         let mut forward_plus = forward_plus_arc
             .write()
-            .map_err(|e| AshError::VulkanError(format!("Forward+ lock poisoned: {}", e)))?;
+            .map_err(|e| AshError::VulkanError(format!("Forward+ lock poisoned: {e}")))?;
         forward_plus.on_resize(swapchain_extent.width, swapchain_extent.height);
         let fp_info = forward_plus.get_lights().get_forward_plus_info();
         scene.scene_lighting.num_tiles_x = fp_info.num_tiles[0];

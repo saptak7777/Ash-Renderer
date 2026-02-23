@@ -57,7 +57,7 @@ impl CullingSystem {
                 let camera_buffer_addr = resources.uniform_buffers[frame_index]
                     .read()
                     .map_err(|e| {
-                        crate::AshError::VulkanError(format!("Camera buffer lock poisoned: {}", e))
+                        crate::AshError::VulkanError(format!("Camera buffer lock poisoned: {e}"))
                     })?
                     .device_address();
 

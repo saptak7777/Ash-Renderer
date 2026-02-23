@@ -34,6 +34,9 @@ pub trait RenderFeature: Send + Any {
     /// and remains valid for the duration of the call.
     unsafe fn render(&self, _ctx: &FeatureRenderContext<'_>) {}
     fn on_removed(&mut self, _device: &Device) {}
+
+    fn as_any(&self) -> &dyn Any;
+    fn as_any_mut(&mut self) -> &mut dyn Any;
 }
 
 pub struct FeatureManager {
@@ -49,6 +52,20 @@ impl FeatureManager {
             features: HashMap::new(),
             render_order: Vec::new(),
         }
+    }
+
+    pub fn get_feature<F: RenderFeature + 'static>(&self) -> Option<&F> {
+        let type_id = TypeId::of::<F>();
+        self.features
+            .get(&type_id)
+            .and_then(|f| f.as_any().downcast_ref::<F>())
+    }
+
+    pub fn get_feature_mut<F: RenderFeature + 'static>(&mut self) -> Option<&mut F> {
+        let type_id = TypeId::of::<F>();
+        self.features
+            .get_mut(&type_id)
+            .and_then(|f| f.as_any_mut().downcast_mut::<F>())
     }
 
     pub fn set_device(&mut self, device: Arc<Device>) {

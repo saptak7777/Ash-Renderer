@@ -37,7 +37,7 @@ pub struct MaterialUniform {
     pub emissive_texture_index: i32,
     pub tint_index: i32,
     pub alpha_cutoff: f32,
-    pub _padding: [f32; 1],
+    pub _padding: [f32; 1], // Explicit padding to maintain 16-byte alignment for std430/Rust Vec4
 }
 
 impl Default for MaterialUniform {

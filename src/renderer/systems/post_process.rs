@@ -18,8 +18,6 @@ pub struct PostProcessConfig {
     pub tonemapping_enabled: bool,
     pub exposure: f32,
     pub gamma: f32,
-    pub bloom_enabled: bool,
-    pub bloom_intensity: f32,
 }
 
 impl Default for PostProcessConfig {
@@ -28,8 +26,6 @@ impl Default for PostProcessConfig {
             tonemapping_enabled: true,
             exposure: 1.2,
             gamma: 1.0,
-            bloom_enabled: true,
-            bloom_intensity: 0.1,
         }
     }
 }
@@ -248,26 +244,6 @@ impl PostProcessSystem {
     pub fn gamma(&self) -> f32 {
         self.config.gamma
     }
-
-    /// Enable or disable bloom.
-    pub fn set_bloom_enabled(&mut self, enabled: bool) {
-        self.config.bloom_enabled = enabled;
-    }
-
-    /// Query bloom enabled state.
-    pub fn bloom_enabled(&self) -> bool {
-        self.config.bloom_enabled
-    }
-
-    /// Set the bloom intensity (clamped to `[0.0, 2.0]`).
-    pub fn set_bloom_intensity(&mut self, intensity: f32) {
-        self.config.bloom_intensity = intensity.clamp(0.0, 2.0);
-    }
-
-    /// Query the current bloom intensity.
-    pub fn bloom_intensity(&self) -> f32 {
-        self.config.bloom_intensity
-    }
 }
 
 /// Context for post-processing and upscaling.
@@ -288,6 +264,9 @@ pub struct PostProcessContext<'a> {
     pub depth_view: vk::ImageView,
     /// Direct motion vector image view (SHADER_READ_ONLY_OPTIMAL) for TAA
     pub motion_view: vk::ImageView,
+    /// Authoritative bloom settings from BloomFeature
+    pub bloom_view: vk::ImageView,
+    pub bloom_intensity: f32,
 }
 
 impl PostProcessSystem {
@@ -343,7 +322,7 @@ impl PostProcessSystem {
             self.update_descriptor_set(
                 ctx.image_index,
                 resolved_view,
-                black_view, // bloom placeholder
+                ctx.bloom_view,
                 black_view, // ssgi placeholder
                 hdr.sampler(),
             );
@@ -362,6 +341,7 @@ impl PostProcessSystem {
                 swapchain_extent,
                 target_image,
                 target_view,
+                ctx.bloom_intensity,
             )?;
         }
 
@@ -375,6 +355,7 @@ impl PostProcessSystem {
         extent: vk::Extent2D,
         target_image: vk::Image,
         target_view: vk::ImageView,
+        bloom_intensity: f32,
     ) -> Result<()> {
         if self.pipeline.is_none() || self.descriptor_sets.is_empty() {
             return Ok(());
@@ -449,11 +430,7 @@ impl PostProcessSystem {
 
             let push_constants = PostProcessPushConstants {
                 exposure: self.config.exposure,
-                bloom_intensity: if self.config.bloom_enabled {
-                    self.config.bloom_intensity
-                } else {
-                    0.0
-                },
+                bloom_intensity,
                 tonemapper_type: if self.config.tonemapping_enabled {
                     1
                 } else {

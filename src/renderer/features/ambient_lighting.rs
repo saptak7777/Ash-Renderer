@@ -51,10 +51,6 @@ impl Default for DirectionalLight {
 #[repr(C, align(16))]
 #[derive(Clone, Copy, Debug, Default, Pod, Zeroable)]
 pub struct SceneLighting {
-    /// Standardized ABI Padding
-    pub reserved0: [f32; 4],
-    /// Standardized ABI Padding
-    pub reserved1: [f32; 4],
     pub directional: DirectionalLight,
     pub point_light_count: u32,
     pub num_tiles_x: u32,
@@ -66,7 +62,7 @@ pub struct SceneLighting {
     pub ibl_intensity: f32,
 }
 
-const _: () = assert!(std::mem::size_of::<SceneLighting>() == 96);
+const _: () = assert!(std::mem::size_of::<SceneLighting>() == 64);
 const _: () = assert!(std::mem::align_of::<SceneLighting>() == 16);
 
 /// Type-state builder for SceneLighting
@@ -122,8 +118,6 @@ impl Default for LightingBuilder<NoDirectional> {
 impl LightingBuilder<DirectionalSet> {
     pub fn build(self) -> SceneLighting {
         SceneLighting {
-            reserved0: [0.0; 4],
-            reserved1: [0.0; 4],
             directional: self.directional,
             point_light_count: 0,
             num_tiles_x: 0,
@@ -142,8 +136,6 @@ pub struct LightingPresets;
 
 impl LightingPresets {
     pub const INDOOR_DARK: SceneLighting = SceneLighting {
-        reserved0: [0.0; 4],
-        reserved1: [0.0; 4],
         directional: DirectionalLight::sun(),
         point_light_count: 0,
         num_tiles_x: 0,
@@ -156,8 +148,6 @@ impl LightingPresets {
     };
 
     pub const INDOOR_LIT: SceneLighting = SceneLighting {
-        reserved0: [0.0; 4],
-        reserved1: [0.0; 4],
         directional: DirectionalLight::sun(),
         point_light_count: 0,
         num_tiles_x: 0,
@@ -170,8 +160,6 @@ impl LightingPresets {
     };
 
     pub const OUTDOOR_DAY: SceneLighting = SceneLighting {
-        reserved0: [0.0; 4],
-        reserved1: [0.0; 4],
         directional: DirectionalLight::sun(),
         point_light_count: 0,
         num_tiles_x: 0,
@@ -184,8 +172,6 @@ impl LightingPresets {
     };
 
     pub const OUTDOOR_NIGHT: SceneLighting = SceneLighting {
-        reserved0: [0.0; 4],
-        reserved1: [0.0; 4],
         directional: DirectionalLight::moon(),
         point_light_count: 0,
         num_tiles_x: 0,

@@ -59,8 +59,6 @@ struct IndirectDrawCommand {
 };
 
 struct SceneLighting {
-    vec4 reserved0; // Standardized ABI padding
-    vec4 reserved1; // Standardized ABI padding
     DirectionalLight directional;
     uint point_light_count;
     uint num_tiles_x;

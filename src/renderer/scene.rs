@@ -73,7 +73,7 @@ impl Scene {
     ) -> Result<()> {
         if let Some(buffer_arc) = self.material_storage_buffer.as_ref() {
             let mut buffer = buffer_arc.write().map_err(|e| {
-                crate::AshError::VulkanError(format!("Material buffer lock poisoned: {}", e))
+                crate::AshError::VulkanError(format!("Material buffer lock poisoned: {e}"))
             })?;
             unsafe {
                 buffer.write_element_at(index as usize, &uniform)?;

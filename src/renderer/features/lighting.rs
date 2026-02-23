@@ -181,4 +181,12 @@ impl RenderFeature for LightingFeature {
     unsafe fn render(&self, _ctx: &FeatureRenderContext<'_>) {
         // Lighting is applied in the main render pass. Nothing to do for now.
     }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
 }

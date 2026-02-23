@@ -468,7 +468,7 @@ impl LightManager {
                 .vma
                 .flush_allocation(&light_buffer.allocation, 0, aligned_size)
                 .map_err(|e| {
-                    crate::AshError::VulkanError(format!("Failed to flush light buffer: {}", e))
+                    crate::AshError::VulkanError(format!("Failed to flush light buffer: {e}"))
                 })?;
         }
 

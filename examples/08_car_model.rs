@@ -95,11 +95,12 @@ impl ApplicationHandler for App {
                     ash_renderer::renderer::systems::post_process::PostProcessConfig {
                         exposure: 0.8,
                         gamma: 1.0,
-                        bloom_enabled: true,
-                        bloom_intensity: 0.04,
                         tonemapping_enabled: true,
                     },
                 );
+
+                renderer.set_bloom_enabled(true);
+                renderer.set_bloom_intensity(0.04);
 
                 // Setup clean lighting (Sun + Ambient)
                 let lighting = LightingBuilder::new()

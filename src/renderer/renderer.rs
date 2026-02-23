@@ -1032,7 +1032,7 @@ impl Renderer {
                 hiz_arc
                     .read()
                     .map_err(|e| {
-                        crate::AshError::VulkanError(format!("Hi-Z pass lock poisoned: {}", e))
+                        crate::AshError::VulkanError(format!("Hi-Z pass lock poisoned: {e}"))
                     })?
                     .hiz_buffer_addr()
             } else {
@@ -1210,6 +1210,16 @@ impl Renderer {
                 .map(|gb| gb.motion_view())
                 .unwrap_or(vk::ImageView::null());
 
+            let (bloom_view, bloom_intensity) = if let Some(bloom) =
+                self.systems
+                    .features
+                    .get_feature::<crate::renderer::features::bloom::BloomFeature>()
+            {
+                (bloom.output_view(), bloom.config().intensity)
+            } else {
+                (self.resources.black_texture.view(), 0.0)
+            };
+
             let pp_ctx = crate::renderer::systems::post_process::PostProcessContext {
                 device: &self.context.device.device,
                 command_buffer,
@@ -1227,6 +1237,8 @@ impl Renderer {
                 prev_jitter_uv: self.systems.prev_jitter_uv,
                 depth_view,
                 motion_view,
+                bloom_view,
+                bloom_intensity,
             };
             self.systems.prev_jitter_uv = jitter_uv;
             self.systems.pipeline.post_process.record_commands(pp_ctx)?;
@@ -1317,12 +1329,6 @@ impl Renderer {
         self.systems.post_process().exposure()
     }
 
-    /// Sets the tonemapping gamma value
-    #[inline]
-    pub fn set_tonemapping_gamma(&mut self, gamma: f32) {
-        self.systems.post_process_mut().set_gamma(gamma);
-    }
-
     /// Returns the tonemapping gamma value
     #[inline]
     pub fn tonemapping_gamma(&self) -> f32 {
@@ -1332,27 +1338,53 @@ impl Renderer {
     /// Enables or disables bloom
     #[inline]
     pub fn set_bloom_enabled(&mut self, enabled: bool) {
-        self.systems.post_process_mut().set_bloom_enabled(enabled);
+        if let Some(bloom) = self
+            .systems
+            .features
+            .get_feature_mut::<crate::renderer::features::bloom::BloomFeature>()
+        {
+            bloom.set_enabled(enabled);
+        }
     }
 
     /// Returns whether bloom is enabled
     #[inline]
     pub fn bloom_enabled(&self) -> bool {
-        self.systems.post_process().bloom_enabled()
+        if let Some(bloom) = self
+            .systems
+            .features
+            .get_feature::<crate::renderer::features::bloom::BloomFeature>()
+        {
+            bloom.config().enabled
+        } else {
+            false
+        }
     }
 
     /// Sets the bloom intensity
     #[inline]
     pub fn set_bloom_intensity(&mut self, intensity: f32) {
-        self.systems
-            .post_process_mut()
-            .set_bloom_intensity(intensity);
+        if let Some(bloom) = self
+            .systems
+            .features
+            .get_feature_mut::<crate::renderer::features::bloom::BloomFeature>()
+        {
+            bloom.set_intensity(intensity);
+        }
     }
 
     /// Returns the bloom intensity
     #[inline]
     pub fn bloom_intensity(&self) -> f32 {
-        self.systems.post_process().bloom_intensity()
+        if let Some(bloom) = self
+            .systems
+            .features
+            .get_feature::<crate::renderer::features::bloom::BloomFeature>()
+        {
+            bloom.config().intensity
+        } else {
+            0.0
+        }
     }
 
     // â”€â”€â”€ Lighting Delegates (owned by systems.lighting) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -1524,10 +1556,20 @@ impl Renderer {
 
     /// Returns post-processing settings as a tuple (exposure, gamma, bloom_intensity)
     pub fn post_processing_settings(&self) -> (f32, f32, f32) {
+        let bloom_intensity = if let Some(bloom) =
+            self.systems
+                .features
+                .get_feature::<crate::renderer::features::bloom::BloomFeature>()
+        {
+            bloom.config().intensity
+        } else {
+            0.0
+        };
+
         (
             self.systems.pipeline.post_process().config.exposure,
             self.systems.pipeline.post_process().config.gamma,
-            self.systems.pipeline.post_process().config.bloom_intensity,
+            bloom_intensity,
         )
     }
 
