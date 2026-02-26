@@ -404,7 +404,6 @@ impl Renderer {
         scene: &mut super::Scene,
         commands: &[RenderCommand],
     ) -> Result<()> {
-        log::debug!("Submitting {} render commands", commands.len());
         scene.occlusion_culling.begin_frame();
 
         // 1. Sort commands to minimize state changes
@@ -775,12 +774,6 @@ impl Renderer {
                 .begin_command_buffer(&self.context.device.device)?;
             let device_arc = Arc::clone(&self.context.device.device);
             let cmd_ctx = CommandBufferContext::new(device_arc.as_ref(), command_buffer);
-
-            log::debug!(
-                "Frame {}: Using image index {}",
-                self.frame.frame_manager.get_current_frame_index(),
-                image_index
-            );
 
             // â”€â”€ 1. Host-Write Barrier â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
             // Ensure CPU-side buffer writes (uniforms, instance data) are visible to

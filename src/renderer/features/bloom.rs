@@ -552,21 +552,21 @@ impl RenderFeature for BloomFeature {
         }
 
         // Early return if pipelines not ready
-        let Some(prefilter_pipeline) = self.prefilter_pipeline else {
+        let Some(_prefilter_pipeline) = self.prefilter_pipeline else {
             return;
         };
-        let Some(downsample_pipeline) = self.downsample_pipeline else {
+        let Some(_downsample_pipeline) = self.downsample_pipeline else {
             return;
         };
-        let Some(upsample_pipeline) = self.upsample_pipeline else {
+        let Some(_upsample_pipeline) = self.upsample_pipeline else {
             return;
         };
-        let Some(pipeline_layout) = self.pipeline_layout else {
+        let Some(_pipeline_layout) = self.pipeline_layout else {
             return;
         };
 
-        let device = ctx.device;
-        let cmd = ctx.command_buffer;
+        let _device = ctx.device;
+        let _cmd = ctx.command_buffer;
 
         // Note: Full bloom implementation requires:
         // 1. Source HDR image (from renderer)
@@ -604,49 +604,6 @@ impl RenderFeature for BloomFeature {
         //    - Output: Mip i-1 (additive blend)
         //    - Push constants: texel_size for mip i-1, intensity
         //
-        // Example command recording (when resources available):
-        /*
-        // Prefilter
-        let pc = self.pass.get_prefilter_push_constants();
-        device.cmd_push_constants(
-            cmd,
-            pipeline_layout,
-            vk::ShaderStageFlags::FRAGMENT,
-            0,
-            bytemuck::bytes_of(&pc),
-        );
-        device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, prefilter_pipeline);
-        // ... bind descriptor set, begin render pass, draw ...
-
-        // Downsample loop
-        for i in 0..mip_count-1 {
-            if let Some(pc) = self.pass.get_downsample_push_constants(i) {
-                device.cmd_push_constants(...);
-                device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, downsample_pipeline);
-                // ... render to mip i+1 ...
-            }
-        }
-
-        // Upsample loop (reverse order, with additive blending)
-        for i in (1..mip_count).rev() {
-            if let Some(pc) = self.pass.get_upsample_push_constants(mip_count - 1 - i) {
-                device.cmd_push_constants(...);
-                device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, upsample_pipeline);
-                // ... render to mip i-1 with additive blend ...
-            }
-        }
-        */
-
-        // Placeholder: Log that bloom would execute
-        let _ = (
-            device,
-            cmd,
-            prefilter_pipeline,
-            downsample_pipeline,
-            upsample_pipeline,
-            pipeline_layout,
-        );
-        log::trace!("Bloom render called (awaiting renderer integration)");
     }
 
     fn on_removed(&mut self, device: &Device) {

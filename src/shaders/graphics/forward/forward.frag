@@ -468,16 +468,5 @@ void main() {
              float b = float(seed * 48271u) * (1.0/4294967296.0);
              outColor = vec4(pow(vec3(r, g, b), gamma_fix), 1.0);
         }
-        // Mode 10+: Legacy Paths (mapped from debug_path)
-        else if (push.debug_mode >= 10) { 
-             uint path = push.debug_mode - 10;
-             if (path == 1) outColor = vec4(pow(vec3(0.0, 0.0, 1.0), gamma_fix), 1.0);
-             else if (path == 2) outColor = vec4(pow(vec3(0.0, 1.0, 0.0), gamma_fix), 1.0);
-             else if (path == 3) outColor = vec4(baseColor, 1.0); // Albedo is a color (Single Gamma)
-             else if (path == 4) outColor = vec4(pow(normal * 0.5 + 0.5, gamma_fix), 1.0); // Data (Neutralized)
-             else if (path == 5) outColor = vec4(pow(vec3(metallic), gamma_fix), 1.0); // Data (Neutralized)
-             else if (path == 6) outColor = vec4(pow(vec3(roughness), gamma_fix), 1.0); // Data (Neutralized)
-             else if (path == 7) outColor = vec4(clamp(ambient + directional + Lo, 0.0, 1.0), 1.0); // Lighting is a color (Single Gamma)
-        }
     }
 }

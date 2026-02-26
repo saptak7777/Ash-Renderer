@@ -10,7 +10,7 @@
 //! - Configurable blend factor
 
 use ash::vk;
-use glam::{Mat4, Vec2};
+use glam::Mat4;
 use std::fmt;
 use std::sync::Arc;
 
@@ -330,8 +330,6 @@ impl Validate for TaaConfig {
     }
 }
 
-use crate::renderer::util::halton::HaltonSequence;
-
 /// TAA push constants for shader
 #[repr(C)]
 #[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
@@ -368,69 +366,53 @@ impl Default for TaaPushConstants {
 /// Temporal Anti-Aliasing manager
 pub struct TemporalAA {
     config: TaaConfig,
-    halton: HaltonSequence,
-    current_jitter: Vec2,
-    previous_jitter: Vec2,
-    frame_index: u64,
 }
 
 impl TemporalAA {
     /// Create a new TAA manager
     pub fn new() -> Self {
-        Self::with_config(TaaConfig::default())
+        Self {
+            config: TaaConfig::default(),
+        }
     }
 
     /// Create with custom config
     pub fn with_config(config: TaaConfig) -> Self {
-        Self {
-            config,
-            halton: HaltonSequence::new(2, 3),
-            current_jitter: Vec2::ZERO,
-            previous_jitter: Vec2::ZERO,
-            frame_index: 0,
-        }
+        Self { config }
     }
 
-    /// Begin new frame - update jitter
-    pub fn begin_frame(&mut self) {
-        self.previous_jitter = self.current_jitter;
-        self.current_jitter = self.halton.next_sample() * self.config.jitter_scale;
-        self.frame_index += 1;
-    }
+    // --- Jitter management moved to FrameState ---
 
     /// Get jittered projection matrix
-    pub fn jitter_projection(&self, projection: Mat4, width: u32, height: u32) -> Mat4 {
+    pub fn jitter_projection(
+        &self,
+        frame_state: &crate::renderer::util::frame_state::FrameState,
+    ) -> Mat4 {
         if !self.config.enabled {
-            return projection;
+            return frame_state.projection;
         }
-
-        let jitter_x = self.current_jitter.x * 2.0 / width as f32;
-        let jitter_y = self.current_jitter.y * 2.0 / height as f32;
-
-        let mut jittered = projection;
-        *jittered.col_mut(2) = projection.col(2) + glam::Vec4::new(jitter_x, jitter_y, 0.0, 0.0);
-        jittered
+        frame_state.jittered_projection
     }
 
     /// Get push constants for TAA resolve shader
-    pub fn push_constants(&self, width: u32, height: u32) -> TaaPushConstants {
+    pub fn push_constants(
+        &self,
+        frame_state: &crate::renderer::util::frame_state::FrameState,
+        width: u32,
+        height: u32,
+    ) -> TaaPushConstants {
         TaaPushConstants {
             width: width as f32,
             height: height as f32,
-            jitter_x: self.current_jitter.x,
-            jitter_y: self.current_jitter.y,
-            prev_jitter_x: self.previous_jitter.x,
-            prev_jitter_y: self.previous_jitter.y,
+            jitter_x: frame_state.jitter.x * self.config.jitter_scale,
+            jitter_y: frame_state.jitter.y * self.config.jitter_scale,
+            prev_jitter_x: frame_state.prev_jitter.x * self.config.jitter_scale,
+            prev_jitter_y: frame_state.prev_jitter.y * self.config.jitter_scale,
             blend_factor: self.config.blend_factor,
             clamping_gamma: self.config.quality.clamping_gamma(),
             depth_threshold: self.config.depth_threshold,
             anti_flicker: if self.config.anti_flicker { 1 } else { 0 },
         }
-    }
-
-    /// Get current jitter
-    pub fn current_jitter(&self) -> Vec2 {
-        self.current_jitter
     }
 
     /// Is TAA enabled?
@@ -450,9 +432,7 @@ impl TemporalAA {
 
     /// Reset history (call on camera cut or teleport)
     pub fn reset_history(&mut self) {
-        self.halton.reset();
-        self.current_jitter = Vec2::ZERO;
-        self.previous_jitter = Vec2::ZERO;
+        // Shared Halton reset should be handled by FrameState::reset_temporal_history
     }
 }
 
@@ -1145,9 +1125,22 @@ mod tests {
     fn test_jittered_projection() {
         let taa = TemporalAA::new();
         let proj = Mat4::perspective_rh(45.0_f32.to_radians(), 16.0 / 9.0, 100.0, 0.1);
-        let jittered = taa.jitter_projection(proj, 1920, 1080);
-        // Initial jitter is zero, so should be same
-        assert_eq!(proj, jittered);
+        let mut frame_state = crate::renderer::util::frame_state::FrameState::new(2, 3);
+
+        // Before begin_frame, jittered_projection should be identity or uninitialized
+        // After begin_frame, it should be projection (since halton starts at 0,0 or similar? No, halton is deterministic)
+
+        frame_state.begin_frame(
+            0.016,
+            glam::Mat4::IDENTITY,
+            proj,
+            glam::Vec3::ZERO,
+            1920,
+            1080,
+        );
+
+        let jittered = taa.jitter_projection(&frame_state);
+        assert_ne!(proj, jittered); // Should now be jittered
     }
 
     #[test]

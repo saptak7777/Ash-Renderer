@@ -5,7 +5,6 @@ use crate::renderer::{
 use crate::vulkan::{CommandBufferManager, SwapchainWrapper};
 use crate::{AshError, Result};
 use ash::vk;
-use glam::Mat4;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -19,7 +18,6 @@ pub struct Frame {
 
     // Rendering State
     pub start_time: Instant,
-    pub prev_view_proj: Mat4,
     pub gbuffer_indices: Option<GBufferIndices>,
     pub hdr_image_index: Option<u32>,
     pub last_image_index: u32,
@@ -73,7 +71,6 @@ impl Frame {
                 cmds,
                 swapchain_image_view_ids,
                 start_time: Instant::now(),
-                prev_view_proj: Mat4::IDENTITY,
                 gbuffer_indices: None,
                 hdr_image_index: None,
                 last_image_index: 0,

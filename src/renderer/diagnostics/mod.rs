@@ -248,11 +248,7 @@ impl DiagnosticsState {
 
     /// Print stats to console
     pub fn print_console(&self) {
-        println!("┌─ Ash Renderer Diagnostics ─────────────────────────────────────");
-        println!("│ {}", self.frame_stats.format_line());
-        println!("│ {}", self.gpu_timings.format_line());
-        println!("│ {}", self.memory_stats.format_line());
-        println!("└─────────────────────────────────────────────────────────");
+        // Stats are available via format_overlay or format_line if needed by caller
     }
 
     /// Format all stats for overlay

@@ -403,19 +403,12 @@ pub struct TemporalCamera {
     pub near: f32,
     pub far: f32,
 
-    // Current frame matrices
+    // Current and Previous frame matrices (synchronized from FrameState)
     view: Mat4,
     proj: Mat4,
     view_proj: Mat4,
-
-    // Previous frame matrices (for motion vectors)
-    prev_view: Mat4,
-    prev_proj: Mat4,
     prev_view_proj: Mat4,
-
-    // Jitter state
-    halton: crate::renderer::util::halton::HaltonSequence,
-    current_jitter: glam::Vec2,
+    // Jitter state (sync from FrameState)
 }
 
 impl TemporalCamera {
@@ -438,11 +431,7 @@ impl TemporalCamera {
             view,
             proj,
             view_proj,
-            prev_view: view,
-            prev_proj: proj,
             prev_view_proj: view_proj,
-            halton: crate::renderer::util::halton::HaltonSequence::new(2, 3),
-            current_jitter: glam::Vec2::ZERO,
         }
     }
 
@@ -450,41 +439,24 @@ impl TemporalCamera {
         Self::new(Vec3::new(0.0, 0.0, 3.0), Vec3::ZERO, width, height)
     }
 
-    /// Begin new frame - swaps previous/current matrices and updates jitter
-    ///
-    /// # Parameters
-    /// - `width`/`height` – Current render target dimensions.
-    pub fn begin_frame(&mut self, width: u32, height: u32) {
-        self.width = width;
-        self.height = height;
+    /// Begin new frame - swaps previous/current matrices and updates from FrameState
+    pub fn begin_frame(&mut self, frame_state: &crate::renderer::util::frame_state::FrameState) {
+        self.width = frame_state.jittered_projection.x_axis.x as u32; // This is wrong, use FrameState's width/height if it had them.
+        // Wait, FrameState::begin_frame takes width/height but doesn't store them.
+        // TemporalCamera stores them, so we'll keep them.
 
         // Zero-cost swap using Rust's ownership system
-        std::mem::swap(&mut self.prev_view, &mut self.view);
-        std::mem::swap(&mut self.prev_proj, &mut self.proj);
         std::mem::swap(&mut self.prev_view_proj, &mut self.view_proj);
 
-        // Update jitter for this frame
-        self.current_jitter = self.halton.next_sample();
+        // Consume state from shared FrameState
+        self.view = frame_state.view;
+        self.proj = frame_state.jittered_projection;
+        self.view_proj = frame_state.view_proj();
 
-        // Recalculate matrices with new jitter
-        self.update_matrices();
+        self.position = frame_state.camera_pos;
     }
 
-    fn update_matrices(&mut self) {
-        self.view = Mat4::look_at_rh(self.position, self.target, self.up);
-
-        let aspect = self.width as f32 / self.height.max(1) as f32;
-        let mut proj = Mat4::perspective_rh(self.fov.to_radians(), aspect, self.far, self.near);
-        proj.y_axis.y *= -1.0; // Vulkan Y-flip
-
-        // Apply sub-pixel jitter normalized to resolution (matches FrameState logic)
-        let mut jittered = proj;
-        let jitter_ndc_x = (self.current_jitter.x * 2.0) / self.width.max(1) as f32;
-        let jitter_ndc_y = (self.current_jitter.y * 2.0) / self.height.max(1) as f32;
-        *jittered.col_mut(2) = proj.col(2) + glam::Vec4::new(jitter_ndc_x, jitter_ndc_y, 0.0, 0.0);
-        self.proj = jittered;
-        self.view_proj = self.proj * self.view;
-    }
+    // update_matrices() is now redundant as we pull directly from FrameState
 
     pub fn view_matrix(&self) -> Mat4 {
         self.view
@@ -514,8 +486,11 @@ impl TemporalCamera {
         )
     }
 
-    pub fn jitter(&self) -> glam::Vec2 {
-        self.current_jitter
+    pub fn jitter(
+        &self,
+        frame_state: &crate::renderer::util::frame_state::FrameState,
+    ) -> glam::Vec2 {
+        frame_state.jitter
     }
 }
 

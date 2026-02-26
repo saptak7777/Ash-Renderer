@@ -127,12 +127,6 @@ impl Default for MvpMatrices {
 }
 
 impl MvpMatrices {
-    fn recalc_view_proj(&mut self) {
-        // Save previous view_proj for TAA motion vectors
-        self.prev_view_proj = self.view_proj;
-        self.view_proj = self.projection * self.view;
-    }
-
     /// Update from a modern Transform object
     pub fn set_transform(&mut self, transform: &mut super::Transform) {
         self.model = transform.model_matrix();
@@ -153,7 +147,6 @@ impl MvpMatrices {
     pub fn set_view(&mut self, eye: Vec3, center: Vec3, up: Vec3) {
         self.view = Mat4::look_at_rh(eye, center, up);
         self.camera_pos = eye.extend(1.0);
-        self.recalc_view_proj();
     }
 
     /// Set perspective projection matrix using **Reverse-Z**.
@@ -169,8 +162,6 @@ impl MvpMatrices {
         // Flip Y for Vulkan's coordinate system (Y points down in NDC)
         self.projection.y_axis.y *= -1.0;
         self.inv_projection = self.projection.inverse();
-
-        self.recalc_view_proj();
     }
 
     /// Configure lighting for the frame
@@ -341,142 +332,6 @@ impl crate::renderer::cleanup_traits::VulkanResourceCleanup for UniformBuffer {
 }
 
 impl crate::renderer::resource_registry::VulkanResource for UniformBuffer {}
-
-/// GPU buffer wrapper for material parameters
-pub struct MaterialBuffer {
-    pub buffer: vk::Buffer,
-    pub allocation: vk_mem::Allocation,
-    pub data: MaterialUniform,
-    allocator: Arc<crate::vulkan::Allocator>,
-    device: Arc<ash::Device>,
-    destroyed: bool,
-}
-
-impl MaterialBuffer {
-    /// # Safety
-    /// Caller must ensure that the provided allocator and device are valid.
-    pub unsafe fn new(
-        allocator: Arc<crate::vulkan::Allocator>,
-        device: Arc<ash::Device>,
-    ) -> crate::Result<Self> {
-        let size = std::mem::size_of::<MaterialUniform>() as u64;
-
-        let (buffer, mut allocation) = unsafe {
-            allocator.vma.create_buffer(
-                &vk::BufferCreateInfo::default()
-                    .size(size)
-                    .usage(
-                        vk::BufferUsageFlags::STORAGE_BUFFER
-                            | vk::BufferUsageFlags::UNIFORM_BUFFER
-                            | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
-                    )
-                    .sharing_mode(vk::SharingMode::EXCLUSIVE),
-                &vk_mem::AllocationCreateInfo {
-                    usage: vk_mem::MemoryUsage::AutoPreferHost,
-                    flags: vk_mem::AllocationCreateFlags::HOST_ACCESS_SEQUENTIAL_WRITE,
-                    ..Default::default()
-                },
-            )
-        }
-        .map_err(|e| {
-            crate::AshError::VulkanError(format!("Failed to create material buffer: {e}"))
-        })?;
-
-        let data = MaterialUniform::default();
-
-        {
-            let mut guard = unsafe { allocator.map_allocation_guarded(&mut allocation, size) }?;
-            guard.copy_from_slice(&[data]);
-        }
-
-        allocator
-            .vma
-            .flush_allocation(&allocation, 0, size)
-            .map_err(|e| {
-                crate::AshError::VulkanError(format!("Failed to flush material buffer: {e}"))
-            })?;
-
-        log::info!("Created material buffer ({size} bytes)");
-
-        Ok(Self {
-            buffer,
-            allocation,
-            data,
-            allocator,
-            device,
-            destroyed: false,
-        })
-    }
-
-    /// # Safety
-    /// Requires valid allocation and proper memory access
-    pub unsafe fn update(&mut self) -> crate::Result<()> {
-        let size = std::mem::size_of::<MaterialUniform>() as u64;
-
-        {
-            let mut guard = unsafe {
-                self.allocator
-                    .map_allocation_guarded(&mut self.allocation, size)
-            }?;
-
-            guard.copy_from_slice(&[self.data]);
-        }
-
-        // --- Lead Engineer Fix: Capped Aligned Flush ---
-        const ATOM_SIZE: u64 = 256;
-        let aligned_size = (size.div_ceil(ATOM_SIZE) * ATOM_SIZE).min(size);
-
-        self.allocator
-            .vma
-            .flush_allocation(&self.allocation, 0, aligned_size)
-            .map_err(|e| {
-                crate::AshError::VulkanError(format!("Failed to flush material buffer: {e}"))
-            })?;
-
-        Ok(())
-    }
-
-    pub fn uniform_mut(&mut self) -> &mut MaterialUniform {
-        &mut self.data
-    }
-
-    pub fn uniform(&self) -> &MaterialUniform {
-        &self.data
-    }
-
-    /// Get the GPU device address for BDA pulling
-    pub fn device_address(&self) -> u64 {
-        let info = vk::BufferDeviceAddressInfo::default().buffer(self.buffer);
-        unsafe { self.device.get_buffer_device_address(&info) }
-    }
-
-    pub fn cleanup(&mut self) -> crate::Result<()> {
-        if self.destroyed {
-            return Ok(());
-        }
-
-        log::debug!("Cleaning up material buffer");
-
-        unsafe {
-            // (Removed: device_wait_idle() serialized stall)
-            self.allocator
-                .vma
-                .destroy_buffer(self.buffer, &mut self.allocation);
-        }
-
-        self.buffer = vk::Buffer::null();
-        self.destroyed = true;
-
-        Ok(())
-    }
-}
-
-impl Drop for MaterialBuffer {
-    fn drop(&mut self) {
-        let _ = self.cleanup();
-        log::debug!("MaterialBuffer dropped");
-    }
-}
 
 /// GPU storage buffer for per-instance data (matches CullObjectData)
 pub struct InstanceBuffer {
@@ -725,38 +580,14 @@ impl<T: Copy> StorageBuffer<T> {
             .get_allocation_info(&self.allocation)
             .mapped_data;
 
-        if mapped_ptr.is_null() {
-            // Unlikely with current allocation flags
-            let mut guard = unsafe {
-                self.allocator.map_allocation_guarded(
-                    &mut self.allocation,
-                    (self.capacity * element_size) as u64,
-                )
-            }?;
-            let base = guard.as_mut_ptr() as *mut T;
-            unsafe {
-                std::ptr::write(base.add(index), *element);
-            }
-        } else {
-            let base = mapped_ptr as *mut T;
-            unsafe {
-                std::ptr::write(base.add(index), *element);
-            }
+        let base = mapped_ptr as *mut T;
+        unsafe {
+            std::ptr::write(base.add(index), *element);
         }
-
-        // --- Lead Engineer Fix: Capped Aligned Flush Range ---
-        const ATOM_SIZE: u64 = 256;
-        let start = offset_bytes;
-        let end = start + element_size as u64;
-        let total_size = (self.capacity * element_size) as u64;
-
-        let aligned_start = (start / ATOM_SIZE) * ATOM_SIZE;
-        let aligned_end = (end.div_ceil(ATOM_SIZE) * ATOM_SIZE).min(total_size);
-        let aligned_size = aligned_end - aligned_start;
 
         self.allocator
             .vma
-            .flush_allocation(&self.allocation, aligned_start, aligned_size)
+            .flush_allocation(&self.allocation, offset_bytes, element_size as u64)
             .map_err(|e| {
                 crate::AshError::VulkanError(format!(
                     "Failed to flush storage buffer at index {index}: {e}"

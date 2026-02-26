@@ -595,31 +595,6 @@ impl HiZPass {
         Ok(())
     }
 
-    // --- DELETED (Phase 5): create_descriptors() was here. ---
-    // Descriptor pool/layout for the old image-based pipeline has been removed.
-    // All data now flows through BDA push constants.
-
-    // --- STUB: old image-based create_descriptors signature for reference only ---
-    #[allow(dead_code)]
-    unsafe fn _deleted_create_descriptors(&mut self) -> Result<()> {
-        // This method has been intentionally deleted as part of Phase 5:
-        // Buffer-Backed Hi-Z Migration. The VkDescriptorPool and
-        // VkDescriptorSetLayout for the Hi-Z pipeline are gone.
-        unreachable!("Phase 5: create_descriptors() has been eradicated")
-    }
-
-    // --- DELETED (Phase 5): old create_pipeline with image descriptor layout ---
-    #[allow(dead_code)]
-    unsafe fn _deleted_old_create_pipeline(&mut self) -> Result<()> {
-        unreachable!("Phase 5: old image-based create_pipeline() has been eradicated")
-    }
-
-    /// Validate mip chain configuration at runtime
-    // Note: moved immediately before build_pyramid. Method body unchanged.
-    unsafe fn _old_create_descriptors_placeholder(&self) -> Result<()> {
-        Ok(())
-    }
-
     /// Validate mip chain configuration at runtime.
     ///
     /// Returns `true` if the buffer dimensions match the current mip chain.

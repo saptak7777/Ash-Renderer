@@ -112,7 +112,7 @@ impl SceneSynchronizer {
     pub fn prepare_frame(&self, info: FramePreparationInfo<'_>) -> Result<()> {
         let FramePreparationInfo {
             context,
-            frame,
+            frame: _frame,
             scene,
             systems,
             resources,
@@ -228,10 +228,6 @@ impl SceneSynchronizer {
                 fp.upload_to_gpu(&context.alloc, &context.device.device, frame_index)?;
             }
         }
-
-        // Archive this frame's view_proj so the next frame has a valid prev_view_proj.
-        frame.prev_view_proj = frame_state.view_proj();
-        resources.current_view_proj = frame_state.view_proj();
 
         Ok(())
     }
