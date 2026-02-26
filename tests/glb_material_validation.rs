@@ -18,6 +18,7 @@ mod tests {
             occlusion_strength: 1.0,
             normal_scale: 1.0,
             alpha_cutoff: 0.5,
+            flags: 0,
         });
 
         // Verify we can access the properties
@@ -47,6 +48,7 @@ mod tests {
             occlusion_strength: 1.0,
             normal_scale: 1.0,
             alpha_cutoff: 0.5,
+            flags: 0,
         };
 
         let material = Material {
@@ -253,6 +255,7 @@ mod tests {
             occlusion_strength: 1.0,
             normal_scale: 1.0,
             alpha_cutoff: 0.5,
+            flags: 0,
         });
 
         // Simulate creating submesh
@@ -296,6 +299,7 @@ mod tests {
             occlusion_strength: 1.0,
             normal_scale: 1.0,
             alpha_cutoff: 0.5,
+            flags: 0,
         };
 
         // Create and register material
@@ -534,6 +538,7 @@ mod tests {
             occlusion_strength: 1.0,
             normal_scale: 1.0,
             alpha_cutoff: 0.5,
+            flags: 0,
         });
 
         // 2. Create submesh (Phase 3)

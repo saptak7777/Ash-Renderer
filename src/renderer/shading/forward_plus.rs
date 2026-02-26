@@ -23,12 +23,10 @@ use crate::vulkan::Allocator;
 use ash::vk;
 use bytemuck;
 use std::sync::Arc;
-use vk_mem::Alloc;
 
-use crate::renderer::features::light_culling::{CullingCameraData, LightCullingPushConstants};
-use crate::renderer::features::{
-    DirectionalLight, ForwardPlusInfo, LightManager, PointLight, SpotLight,
-};
+use crate::renderer::features::LightManager;
+use crate::renderer::features::lighting::{DirectionalLight, PointLight, SpotLight};
+use crate::renderer::types::GpuPushConstants;
 use crate::vulkan::{ComputePipeline, ShaderModule};
 use crate::{AshError, Result};
 
@@ -42,10 +40,6 @@ use crate::{AshError, Result};
 pub struct ForwardPlusIntegration {
     /// Light manager (owns light and tile buffers)
     lights: LightManager,
-
-    /// Camera Data UBO for Compute Shader (per-frame)
-    camera_bufs: Vec<vk::Buffer>,
-    camera_allocs: Vec<vk_mem::Allocation>,
 
     /// Whether the integration has been destroyed
     destroyed: bool,
@@ -61,8 +55,6 @@ pub struct ForwardPlusIntegration {
 
     /// Whether the integration is initialized
     initialized: bool,
-    /// Cached info data
-    cached_info: ForwardPlusInfo,
     // Whether this is the first frame (needs full descriptor update)
     // first_frame: bool,
     allocator: Arc<Allocator>,
@@ -86,42 +78,8 @@ impl ForwardPlusIntegration {
     ) -> Result<Self> {
         let lights = LightManager::new(frame_count as usize);
 
-        // Create per-frame Camera Data UBOs for Compute Shader
-        let camera_size = std::mem::size_of::<CullingCameraData>() as u64;
-        let camera_buffer_info = vk::BufferCreateInfo::default()
-            .size(camera_size)
-            .usage(
-                vk::BufferUsageFlags::UNIFORM_BUFFER | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
-            )
-            .sharing_mode(vk::SharingMode::EXCLUSIVE);
-
-        let mut camera_bufs = Vec::with_capacity(frame_count as usize);
-        let mut camera_allocs = Vec::with_capacity(frame_count as usize);
-
-        let camera_alloc_info = vk_mem::AllocationCreateInfo {
-            usage: vk_mem::MemoryUsage::Auto,
-            flags: vk_mem::AllocationCreateFlags::HOST_ACCESS_SEQUENTIAL_WRITE
-                | vk_mem::AllocationCreateFlags::MAPPED,
-            ..Default::default()
-        };
-
-        for _ in 0..frame_count {
-            let (buf, alloc) = unsafe {
-                allocator
-                    .vma
-                    .create_buffer(&camera_buffer_info, &camera_alloc_info)
-            }
-            .map_err(|e| {
-                crate::AshError::VulkanError(format!("Camera data buffer creation failed: {e:?}"))
-            })?;
-            camera_bufs.push(buf);
-            camera_allocs.push(alloc);
-        }
-
         Ok(Self {
             lights,
-            camera_bufs,
-            camera_allocs,
             destroyed: false,
             compute_pipeline: None,
             compute_descriptor_pool: vk::DescriptorPool::null(),
@@ -129,7 +87,6 @@ impl ForwardPlusIntegration {
             compute_descriptor_layout: vk::DescriptorSetLayout::null(),
             frame_count: frame_count as usize,
             initialized: false,
-            cached_info: ForwardPlusInfo::default(),
             allocator: Arc::clone(allocator),
             device,
         })
@@ -210,7 +167,7 @@ impl ForwardPlusIntegration {
         let push_constant_range = vk::PushConstantRange {
             stage_flags: vk::ShaderStageFlags::COMPUTE,
             offset: 0,
-            size: std::mem::size_of::<LightCullingPushConstants>() as u32,
+            size: std::mem::size_of::<GpuPushConstants>() as u32,
         };
 
         // We use the helper ComputePipeline from crate::vulkan which simplifies creation
@@ -309,42 +266,6 @@ impl ForwardPlusIntegration {
 
     pub fn on_resize(&mut self, width: u32, height: u32) {
         self.lights.on_resize(width, height);
-        self.cached_info = self.lights.get_forward_plus_info();
-    }
-
-    /// Update camera data for light culling.
-    ///
-    /// # Safety
-    /// Allocator must be valid. The internal camera buffer must have been successfully
-    /// allocated during `new()`.
-    pub unsafe fn update_camera(
-        &mut self,
-        allocator: &Allocator,
-        frame_index: usize,
-        view: &[[f32; 4]; 4],
-        projection: &[[f32; 4]; 4],
-        camera_pos: &[f32; 4],
-    ) -> Result<()> {
-        let inv_projection = glam::Mat4::from_cols_array_2d(projection)
-            .inverse()
-            .to_cols_array_2d();
-        let data = CullingCameraData {
-            view: *view,
-            projection: *projection,
-            inv_projection,
-            camera_pos: *camera_pos,
-        };
-
-        let info = allocator
-            .vma
-            .get_allocation_info(&self.camera_allocs[frame_index]);
-        let ptr = info.mapped_data;
-        if !ptr.is_null() {
-            unsafe {
-                std::ptr::copy_nonoverlapping(&data, ptr as *mut CullingCameraData, 1);
-            }
-        }
-        Ok(())
     }
 
     /// Upload current light data to GPU buffers.
@@ -372,9 +293,6 @@ impl ForwardPlusIntegration {
             self.lights.upload_lights(allocator, frame_index)?;
         }
 
-        // Update cached info
-        self.cached_info = self.lights.get_forward_plus_info();
-
         Ok(())
     }
 
@@ -391,7 +309,12 @@ impl ForwardPlusIntegration {
     /// - Push constant calculation
     /// - Compute dispatch
     /// - Execution barriers for tile buffer visibility
-    pub fn cull_lights(&self, command_buffer: vk::CommandBuffer, frame_index: usize) -> Result<()> {
+    pub fn cull_lights(
+        &self,
+        command_buffer: vk::CommandBuffer,
+        frame_index: usize,
+        frame_ptr: u64,
+    ) -> Result<()> {
         if let Some(pipeline) = &self.compute_pipeline {
             if self.compute_descriptor_sets.is_empty() {
                 return Ok(());
@@ -404,7 +327,7 @@ impl ForwardPlusIntegration {
                     pipeline.handle(),
                 );
 
-                // Bind Set 0: Depth buffer, camera buffer (frame-specific)
+                // Bind Set 0: Depth buffer
                 self.device.cmd_bind_descriptor_sets(
                     command_buffer,
                     vk::PipelineBindPoint::COMPUTE,
@@ -416,17 +339,9 @@ impl ForwardPlusIntegration {
 
                 let (tx, ty, tz) = self.lights.get_dispatch_dimensions();
 
-                // Reconstruct screen size for PC
-                let width = self.cached_info.num_tiles[0] * self.cached_info.tile_size;
-                let height = self.cached_info.num_tiles[1] * self.cached_info.tile_size;
-
-                let addr_info =
-                    vk::BufferDeviceAddressInfo::default().buffer(self.camera_bufs[frame_index]);
-                let camera_ptr = self.device.get_buffer_device_address(&addr_info);
-
-                let push_constants =
-                    self.lights
-                        .get_culling_push_constants(width, height, frame_index, camera_ptr);
+                let push_constants = self
+                    .lights
+                    .get_culling_push_constants(frame_index, frame_ptr);
 
                 self.device.cmd_push_constants(
                     command_buffer,
@@ -438,25 +353,24 @@ impl ForwardPlusIntegration {
 
                 self.device.cmd_dispatch(command_buffer, tx, ty, tz);
 
-                // Pipeline barrier to ensure writes are visible to fragment shader
+                // Pipeline barrier to ensure writes are visible to fragment shader (Sync2)
                 // LightManager owns tile buffer, used in Set 2 binding 2.
                 if let Some(t_buf) = self.lights.get_tile_buffer(frame_index) {
-                    let barrier = vk::BufferMemoryBarrier::default()
-                        .src_access_mask(vk::AccessFlags::SHADER_WRITE)
-                        .dst_access_mask(vk::AccessFlags::SHADER_READ)
+                    let barrier = vk::BufferMemoryBarrier2::default()
+                        .src_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
+                        .src_access_mask(vk::AccessFlags2::SHADER_WRITE)
+                        .dst_stage_mask(vk::PipelineStageFlags2::FRAGMENT_SHADER)
+                        .dst_access_mask(vk::AccessFlags2::SHADER_READ)
+                        .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                        .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
                         .buffer(t_buf)
                         .offset(0)
-                        .size(vk::WHOLE_SIZE); // Or proper size
+                        .size(vk::WHOLE_SIZE);
 
-                    self.device.cmd_pipeline_barrier(
-                        command_buffer,
-                        vk::PipelineStageFlags::COMPUTE_SHADER,
-                        vk::PipelineStageFlags::FRAGMENT_SHADER,
-                        vk::DependencyFlags::empty(),
-                        &[],
-                        &[barrier],
-                        &[],
-                    );
+                    let buffer_barriers = [barrier];
+                    let dep_info =
+                        vk::DependencyInfo::default().buffer_memory_barriers(&buffer_barriers);
+                    self.device.cmd_pipeline_barrier2(command_buffer, &dep_info);
                 }
             }
         }
@@ -523,13 +437,6 @@ impl ForwardPlusIntegration {
             self.lights.destroy_buffers(allocator);
         }
 
-        // Destroy all per-frame camera buffers
-        for (buf, alloc) in self.camera_bufs.iter().zip(self.camera_allocs.iter_mut()) {
-            unsafe {
-                allocator.vma.destroy_buffer(*buf, alloc);
-            }
-        }
-
         self.initialized = false;
     }
 }
@@ -563,9 +470,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_default_state() {
-        // Unit tests are limited without active Vulkan context.
-        let info = ForwardPlusInfo::default();
-        assert_eq!(info.num_tiles, [0, 0]);
+    fn test_initialization_state() {
+        // Basic state check
     }
 }

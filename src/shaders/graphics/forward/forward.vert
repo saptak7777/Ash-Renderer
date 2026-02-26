@@ -17,17 +17,19 @@ layout(location = 4) out vec4 fragPosLightSpace;
 layout(location = 5) out vec4 fragTangent;
 layout(location = 6) out vec2 motionVector;
 layout(location = 7) flat out uint fragInstanceIndex;
-layout(location = 8) flat out uint fragMaterialIndex;
 
 void main() {
     // Access Frame Data via BDA
     FrameData frame = FrameData(push.frame_ptr);
     
     mat4 model;
+    mat4 prev_model;
     if (push.transform_ptr != 0) {
         model = TransformBuffer(push.transform_ptr).matrices[push.transform_index];
+        prev_model = model;
     } else {
         model = mat4(1.0);
+        prev_model = mat4(1.0);
     }
     int vertex_offset = 0;
     uint matIdx = push.material_index;
@@ -38,6 +40,7 @@ void main() {
         // gl_InstanceIndex correctly accounts for firstInstance in indirect draws
         InstanceData instance = instance_ctx.instances[gl_InstanceIndex];
         model = instance.model;
+        prev_model = instance.prev_model;
         vertex_offset = instance.vertex_offset;
         matIdx = instance.material_index;
     }
@@ -65,13 +68,12 @@ void main() {
     fragWorldPos = worldPosition.xyz;
     fragTangent = vec4(mat3(model) * vertex.tangent.xyz, vertex.tangent.w);
 
-    // Calculate motion vectors
-    vec4 currentClip = gl_Position;
-    vec4 prevClip = frame.prev_view_proj * worldPosition;
+    // Calculate motion vectors (using jitter-free matrices to prevent double-correction)
+    vec4 currentClip = frame.view_proj_no_jitter * worldPosition;
+    vec4 prevClip = frame.prev_view_proj_no_jitter * (prev_model * vec4(vertex.position, 1.0));
     
     float w_current = max(abs(currentClip.w), 1e-6);
     float w_prev = max(abs(prevClip.w), 1e-6);
     motionVector = (currentClip.xy / w_current - prevClip.xy / w_prev) * 0.5;
     fragInstanceIndex = gl_InstanceIndex;
-    fragMaterialIndex = matIdx;
 }

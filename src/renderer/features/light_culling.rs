@@ -9,9 +9,8 @@
 //!
 //! This avoids the O(lights * pixels) complexity of traditional forward rendering.
 
-use glam::Mat4;
-
 use super::lighting::{DirectionalLight, PointLight, SpotLight};
+use crate::renderer::types::GpuPushConstants;
 
 /// Maximum number of lights that can be culled
 pub const MAX_LIGHTS: usize = 1024;
@@ -89,43 +88,9 @@ impl GpuLight {
     }
 }
 
-/// Push constants for light culling shader
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Default, bytemuck::Pod, bytemuck::Zeroable)]
-pub struct LightCullingPushConstants {
-    /// Screen size in pixels
-    pub screen_size: [u32; 2],
-    /// Number of lights
-    pub light_count: u32,
-    pub _padding: u32,
-    /// Address of global LightBuffer
-    pub light_ptr: u64,
-    /// Address of TileLightIndices buffer
-    pub tile_ptr: u64,
-    /// Address of CullingCameraData buffer
-    pub camera_ptr: u64,
-}
+// Removed LightCullingPushConstants in favor of unified GpuPushConstants
 
-/// Camera data UBO for culling shader
-#[repr(C)]
-#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
-pub struct CullingCameraData {
-    pub view: [[f32; 4]; 4],
-    pub projection: [[f32; 4]; 4],
-    pub inv_projection: [[f32; 4]; 4],
-    pub camera_pos: [f32; 4],
-}
-
-impl Default for CullingCameraData {
-    fn default() -> Self {
-        Self {
-            view: Mat4::IDENTITY.to_cols_array_2d(),
-            projection: Mat4::IDENTITY.to_cols_array_2d(),
-            inv_projection: Mat4::IDENTITY.to_cols_array_2d(),
-            camera_pos: [0.0; 4],
-        }
-    }
-}
+// CullingCameraData removed as redundant (moved to FrameData)
 
 /// Light culling configuration
 #[derive(Clone, Debug)]
@@ -285,19 +250,16 @@ impl LightCullingPass {
     /// Get push constants for current state
     pub fn get_push_constants(
         &self,
-        screen_width: u32,
-        screen_height: u32,
+        frame_ptr: u64,
         light_ptr: u64,
         tile_ptr: u64,
-        camera_ptr: u64,
-    ) -> LightCullingPushConstants {
-        LightCullingPushConstants {
-            screen_size: [screen_width, screen_height],
-            light_count: self.lights.len() as u32,
-            _padding: 0,
+    ) -> GpuPushConstants {
+        GpuPushConstants {
+            frame_ptr,
             light_ptr,
             tile_ptr,
-            camera_ptr,
+            object_count: self.lights.len() as u32,
+            ..Default::default()
         }
     }
 

@@ -10,6 +10,10 @@ pub struct VsmGlobalInfo {
     pub light_dir: Vec4, // .xyz = dir, .w = time/padding
     pub page_table_size: u32,
     pub page_table_index: u32,
+    pub physical_cache_index: u32,
+    pub scene_depth_index: u32,
+    pub page_table_storage_index: u32,
+    pub physical_cache_storage_index: u32,
     pub request_ptr: u64,
     pub allocation_ptr: u64,
     pub _pad3: u64,

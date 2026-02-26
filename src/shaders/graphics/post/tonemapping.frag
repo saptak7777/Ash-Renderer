@@ -93,7 +93,7 @@ void main() {
     vec3 bloom = texture(bloomBuffer, fragTexCoord).rgb;
 
     // 2. Composite
-    hdr += bloom * pc.bloom_intensity;
+    // hdr += bloom * pc.bloom_intensity; // Severed Ghost Bloom (Phase 1)
     hdr *= pc.exposure;
 
     // 3. Tone Mapping (HDR -> SDR [0, 1])

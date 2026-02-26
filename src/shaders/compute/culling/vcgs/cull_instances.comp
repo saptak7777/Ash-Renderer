@@ -7,12 +7,12 @@
 //   base_index              u32      @ offset 24
 //   indirect_start          u32      @ offset 28
 //   object_buffer_addr      u64      @ offset 32  (BDA)
-//   cluster_buffer_addr     u64      @ offset 40  (BDA, reserved)
-//   visibility_buffer_addr  u64      @ offset 48  (BDA)
-//   indirect_buffer_addr    u64      @ offset 56  (BDA)
-//   count_buffer_addr       u64      @ offset 64  (BDA)
-//   debug_mode              u32      @ offset 72
-//   _pad                    u32      @ offset 76
+//   indirect_buffer_addr    u64      @ offset 40  (BDA)
+//   count_buffer_addr       u64      @ offset 48  (BDA)
+//   hiz_buffer_addr         u64      @ offset 56  (BDA)
+//   debug_mode              u32      @ offset 64
+//   _pad                    u32      @ offset 68
+//   camera_buffer_addr      u64      @ offset 72  (BDA)
 #version 450
 #extension GL_EXT_nonuniform_qualifier                   : enable
 #extension GL_GOOGLE_include_directive                   : require
@@ -20,63 +20,19 @@
 #extension GL_EXT_scalar_block_layout                    : require
 #extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
 
-#define SKIP_PUSH_CONSTANTS
-#define SKIP_GLOBAL_BINDED_RESOURCES
 #include "interop/structures.glsl"
 #include "common/culling.glsl"
 
 layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 
-// ============================================================================
-// DESCRIPTOR SETS — only the Hi-Z sampler and camera UBO remain.
-// Image samplers cannot be BDA. The camera UBO will be converted in Phase 4
-// once the FrameData BDA handoff is wired to the compute pipeline.
-// ============================================================================
-
-// Camera BDA layout
-layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer CameraBuffer {
-    mat4 model;
-    mat4 view;
-    mat4 projection;
-    mat4 viewProj;
-};
-
-// No HiZ sampler descriptor here! (Phase 3: BDA only)
-
-// ============================================================================
-// BDA BUFFER REFERENCES
-// ObjectBuffer and IndirectBuffer and CountBuffer come from structures.glsl.
-// VisibilityBuffer is culling-specific.
-// ============================================================================
-
-layout(buffer_reference, scalar) buffer VisibilityBuffer {
-    uint visibility[];
-};
+// Unified ABI: PushConstants block now from structure.glsl
+// layout(push_constant) uniform PushConstants { ... } push;
 
 layout(buffer_reference, std430, buffer_reference_align = 4) readonly buffer HiZBuffer {
     uint data[];
 };
 
-// ============================================================================
-// PUSH CONSTANTS — mirrors Rust CullingPushConstants exactly (80 bytes)
-// ============================================================================
-
-layout(push_constant) uniform CullingPC {
-    vec4     screenParams;         // width, height, 1/width, 1/height  @ 0
-    uint     objectCount;          //                                    @ 16
-    uint     hizLevels;            //                                    @ 20
-    uint     baseIndex;            //                                    @ 24
-    uint     indirectStart;        //                                    @ 28
-    uint64_t objectBufferPtr;      // BDA → ObjectBuffer                @ 32
-    uint64_t clusterBufferPtr;     // BDA → (unused in instance pass)   @ 40
-    uint64_t visibilityBufferPtr;  // BDA → VisibilityBuffer            @ 48
-    uint64_t indirectBufferPtr;    // BDA → IndirectBuffer              @ 56
-    uint64_t countBufferPtr;       // BDA → CountBuffer                 @ 64
-    uint64_t hizBufferPtr;         // BDA → HiZBuffer                   @ 72
-    uint     debugMode;            //                                    @ 80
-    uint     _pad;                 //                                    @ 84
-    uint64_t cameraBufferPtr;      // BDA → CameraBuffer                 @ 88
-} pc;
+// No HiZ sampler descriptor here! (Phase 3: BDA only)
 
 // ============================================================================
 // HELPERS
@@ -113,14 +69,15 @@ bool occlusionCull(vec3 center, vec3 extents, mat4 vp) {
         maxScreen = max(maxScreen, screen);
         maxZ = max(maxZ, ndc.z);
     }
+    FrameData frame = FrameData(push.frame_ptr);
     minScreen = clamp(minScreen, vec2(0.0), vec2(1.0));
     maxScreen = clamp(maxScreen, vec2(0.0), vec2(1.0));
-    vec2  screenSize = (maxScreen - minScreen) * pc.screenParams.xy;
-    float lod   = clamp(ceil(log2(max(screenSize.x, screenSize.y))), 0.0, float(pc.hizLevels - 1));
+    vec2  screenSize = (maxScreen - minScreen) * frame.screen_params.xy;
+    float lod   = clamp(ceil(log2(max(screenSize.x, screenSize.y))), 0.0, float(frame.hiz_levels - 1));
     uint mipLevel = uint(lod);
 
-    uint base_width = uint(pc.screenParams.x);
-    uint base_height = uint(pc.screenParams.y);
+    uint base_width = uint(frame.screen_params.x);
+    uint base_height = uint(frame.screen_params.y);
     uint offset = get_mip_offset(base_width, base_height, mipLevel);
     
     uint mip_width = max(1u, base_width >> mipLevel);
@@ -135,8 +92,8 @@ bool occlusionCull(vec3 center, vec3 extents, mat4 vp) {
     uint x1 = uint(clamp(ceil(pMax.x), 0.0, mipSize.x - 1.0));
     uint y1 = uint(clamp(ceil(pMax.y), 0.0, mipSize.y - 1.0));
 
-    if (pc.hizBufferPtr == 0ul) return false;
-    HiZBuffer hiz = HiZBuffer(pc.hizBufferPtr);
+    if (push.light_ptr == 0ul) return false;
+    HiZBuffer hiz = HiZBuffer(push.light_ptr);
     
     float d00 = uintBitsToFloat(hiz.data[offset + (y0 * mip_width) + x0]);
     float d10 = uintBitsToFloat(hiz.data[offset + (y0 * mip_width) + x1]);
@@ -157,18 +114,17 @@ void main() {
     uint objectIdx = gl_GlobalInvocationID.x;
 
     // BDA null-pointer guard
-    if (pc.objectBufferPtr == 0ul || pc.visibilityBufferPtr == 0ul) return;
-    if (objectIdx >= pc.objectCount) return;
+    if (push.instance_ptr == 0ul) return;
+    if (objectIdx >= push.object_count) return;
 
     // Instantiate typed handles from raw 64-bit pointers
-    ObjectBuffer     objBuf = ObjectBuffer(pc.objectBufferPtr);
-    VisibilityBuffer visBuf = VisibilityBuffer(pc.visibilityBufferPtr);
-    IndirectBuffer   cmdBuf = IndirectBuffer(pc.indirectBufferPtr);
-    CountBuffer      cntBuf = CountBuffer(pc.countBufferPtr);
-    CameraBuffer     camera = CameraBuffer(pc.cameraBufferPtr);
+    ObjectBuffer     objBuf = ObjectBuffer(push.instance_ptr);
+    IndirectBuffer   cmdBuf = IndirectBuffer(push.material_ptr);
+    CountBuffer      cntBuf = CountBuffer(push.index_ptr);
+    FrameData        frame  = FrameData(push.frame_ptr);
 
     // Fetch object data — pure BDA read, no descriptor binding
-    InstanceData obj = objBuf.objects[pc.baseIndex + objectIdx];
+    InstanceData obj = objBuf.objects[push.base_index + objectIdx];
 
     // Transform bounds to world space
     vec3  worldCenter  = (obj.model * vec4(obj.bounds_center.xyz, 1.0)).xyz;
@@ -188,50 +144,47 @@ void main() {
         );
     }
 
-    // Frustum culling using camera UBO (Phase 4: will become FrameData BDA)
+    // Frustum culling using FrameData BDA
     vec4 frustumPlanes[6];
-    extractFrustumPlanes(camera.viewProj, frustumPlanes);
+    extractFrustumPlanes(frame.view_proj, frustumPlanes);
 
     bool culled = isSphere
         ? frustumCullSphere(worldCenter, worldRadius, frustumPlanes)
         : frustumCullAABB(worldCenter, worldExtents, frustumPlanes);
 
-    if (culled) { visBuf.visibility[objectIdx] = 0u; return; }
+    if (culled) { return; }
 
     // Screen-size culling: reject sub-pixel geometry
-    vec4  clipPos   = camera.viewProj * vec4(worldCenter, 1.0);
+    vec4  clipPos   = frame.view_proj * vec4(worldCenter, 1.0);
     float clipW     = clipPos.w;
     float boundRad  = max(worldExtents.x, max(worldExtents.y, worldExtents.z));
     if (clipW > 0.0001 && (boundRad / clipW) < 0.005) {
-        visBuf.visibility[objectIdx] = 0u;
         return;
     }
 
     // Nanite LOD selection (The Cut)
     float parentError = 1000000.0;
-    if (obj.parent_index != 0xFFFFFFFFu && obj.parent_index < pc.objectCount) {
+    if (obj.parent_index != 0xFFFFFFFFu && obj.parent_index < push.object_count) {
         InstanceData parent = objBuf.objects[obj.parent_index];
         parentError = parent.error_metric;
     }
     float dist           = max(clipW, 0.0001);
     float errorThreshold = dist * 0.002;
     bool  isSelected     = (obj.error_metric <= errorThreshold) && (parentError > errorThreshold);
-    if (!isSelected) { visBuf.visibility[objectIdx] = 0u; return; }
+    if (!isSelected) { return; }
 
     // Hi-Z occlusion culling
-    if (occlusionCull(worldCenter, worldExtents, camera.viewProj)) {
-        visBuf.visibility[objectIdx] = 0u;
+    if (occlusionCull(worldCenter, worldExtents, frame.view_proj)) {
         return;
     }
 
     // VISIBLE — write output via BDA pointers only
-    visBuf.visibility[objectIdx] = 1u;
     uint slot = atomicAdd(cntBuf.count, 1u);
 
     IndirectDrawCommand cmd;
     cmd.vertexCount   = obj.index_count;
     cmd.instanceCount = 1u;
     cmd.firstVertex   = obj.first_index;
-    cmd.firstInstance = pc.baseIndex + objectIdx;
-    cmdBuf.commands[pc.indirectStart + slot] = cmd;
+    cmd.firstInstance = push.base_index + objectIdx;
+    cmdBuf.commands[push.indirect_start + slot] = cmd;
 }

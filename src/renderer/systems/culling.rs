@@ -47,11 +47,6 @@ impl CullingSystem {
 
             unsafe {
                 // 1. Dispatch Culling Compute Shader
-                let cluster_buffer_addr = resources
-                    .global_cluster_buffer
-                    .as_ref()
-                    .map(|b| b.device_address())
-                    .unwrap_or(0);
 
                 // Note: IndirectDrawPass::execute_culling handles the count buffer reset and synchronization internally
                 let camera_buffer_addr = resources.uniform_buffers[frame_index]
@@ -68,40 +63,35 @@ impl CullingSystem {
                     object_offset: 0,
                     object_count: scene.occlusion_culling.object_count() as u32,
                     indirect_offset: 0,
-                    cluster_buffer_addr,
                     hiz_buffer_addr,
                     camera_buffer_addr,
                 };
 
                 indirect_pass.execute_culling(cmd, &scene.occlusion_culling, &culling_ctx)?;
 
-                // 4. CRITICAL BARRIER: Compute-to-Graphics for Indirect Buffers
-                // Transition DRAW_INDIRECT_BUFFER and COUNT_BUFFER from SHADER_WRITE to INDIRECT_COMMAND_READ
-                let indirect_barrier = vk::BufferMemoryBarrier::default()
-                    .src_access_mask(vk::AccessFlags::SHADER_WRITE)
-                    .dst_access_mask(vk::AccessFlags::INDIRECT_COMMAND_READ)
+                // 4. CRITICAL BARRIER: Compute-to-Graphics for Indirect Buffers (Sync2)
+                let indirect_barrier = vk::BufferMemoryBarrier2::default()
+                    .src_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
+                    .src_access_mask(vk::AccessFlags2::SHADER_WRITE)
+                    .dst_stage_mask(vk::PipelineStageFlags2::DRAW_INDIRECT)
+                    .dst_access_mask(vk::AccessFlags2::INDIRECT_COMMAND_READ)
                     .buffer(indirect_pass.indirect_buffer())
-                    .size(vk::WHOLE_SIZE)
-                    .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                    .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED);
+                    .offset(0)
+                    .size(vk::WHOLE_SIZE);
 
-                let count_barrier = vk::BufferMemoryBarrier::default()
-                    .src_access_mask(vk::AccessFlags::SHADER_WRITE)
-                    .dst_access_mask(vk::AccessFlags::INDIRECT_COMMAND_READ)
+                let count_barrier = vk::BufferMemoryBarrier2::default()
+                    .src_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
+                    .src_access_mask(vk::AccessFlags2::SHADER_WRITE)
+                    .dst_stage_mask(vk::PipelineStageFlags2::DRAW_INDIRECT)
+                    .dst_access_mask(vk::AccessFlags2::INDIRECT_COMMAND_READ)
                     .buffer(indirect_pass.count_buffer())
-                    .size(vk::WHOLE_SIZE)
-                    .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                    .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED);
+                    .offset(0)
+                    .size(vk::WHOLE_SIZE);
 
-                device.cmd_pipeline_barrier(
-                    cmd,
-                    vk::PipelineStageFlags::COMPUTE_SHADER,
-                    vk::PipelineStageFlags::DRAW_INDIRECT,
-                    vk::DependencyFlags::empty(),
-                    &[],
-                    &[indirect_barrier, count_barrier],
-                    &[],
-                );
+                let buffer_barriers = [indirect_barrier, count_barrier];
+                let dep_info =
+                    vk::DependencyInfo::default().buffer_memory_barriers(&buffer_barriers);
+                device.cmd_pipeline_barrier2(cmd, &dep_info);
             }
         }
 

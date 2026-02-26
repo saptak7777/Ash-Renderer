@@ -73,19 +73,46 @@ impl VulkanDevice {
                     )
                 })?;
 
+            let mut vulkan12_features_supported = vk::PhysicalDeviceVulkan12Features::default();
+            let mut vulkan13_features_supported = vk::PhysicalDeviceVulkan13Features::default();
+            let device_features_supported = {
+                let mut features2_supported = vk::PhysicalDeviceFeatures2::default()
+                    .push_next(&mut vulkan12_features_supported)
+                    .push_next(&mut vulkan13_features_supported);
+                vk_instance
+                    .get_physical_device_features2(physical_device, &mut features2_supported);
+                features2_supported.features
+            };
+
+            // Mandatory requirement: Vulkan 1.3 Core Features
+            if vulkan13_features_supported.dynamic_rendering == vk::FALSE {
+                return Err(AshError::DeviceInitFailed(
+                    "Selected GPU does not support VK_KHR_dynamic_rendering (Vulkan 1.3 requirement)".to_string()
+                ));
+            }
+            if vulkan13_features_supported.synchronization2 == vk::FALSE {
+                return Err(AshError::DeviceInitFailed(
+                    "Selected GPU does not support VK_KHR_synchronization2 (Vulkan 1.3 requirement)".to_string()
+                ));
+            }
+            if vulkan12_features_supported.buffer_device_address == vk::FALSE {
+                return Err(AshError::DeviceInitFailed(
+                    "Selected GPU does not support bufferDeviceAddress (Vulkan 1.3 requirement)"
+                        .to_string(),
+                ));
+            }
+
+            let sample_rate_shading_supported =
+                device_features_supported.sample_rate_shading == vk::TRUE;
+
+            let memory_properties =
+                vk_instance.get_physical_device_memory_properties(physical_device);
             let mut properties12 = vk::PhysicalDeviceVulkan12Properties::default();
             let mut device_properties2 =
                 vk::PhysicalDeviceProperties2::default().push_next(&mut properties12);
             vk_instance.get_physical_device_properties2(physical_device, &mut device_properties2);
 
             let device_properties = device_properties2.properties;
-            let device_features_supported =
-                vk_instance.get_physical_device_features(physical_device);
-            let sample_rate_shading_supported =
-                device_features_supported.sample_rate_shading == vk::TRUE;
-
-            let memory_properties =
-                vk_instance.get_physical_device_memory_properties(physical_device);
             let device_name = CStr::from_ptr(device_properties.device_name.as_ptr());
             let timestamp_period_ns = device_properties.limits.timestamp_period;
             log::info!(
@@ -130,9 +157,14 @@ impl VulkanDevice {
                 .descriptor_binding_storage_buffer_update_after_bind(true)
                 .scalar_block_layout(true); // CRITICAL: Required for BDA vertex pulling with scalar layout
 
+            let mut vulkan13_features = vk::PhysicalDeviceVulkan13Features::default()
+                .dynamic_rendering(true)
+                .synchronization2(true);
+
             let mut features2 = vk::PhysicalDeviceFeatures2::default()
                 .features(device_features)
-                .push_next(&mut vulkan12_features);
+                .push_next(&mut vulkan12_features)
+                .push_next(&mut vulkan13_features);
 
             let device_create_info = vk::DeviceCreateInfo::default()
                 .queue_create_infos(&queue_infos)

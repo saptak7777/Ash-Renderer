@@ -35,7 +35,6 @@ pub struct RendererResources {
     pub dummy_black_2d: Texture,
     pub material_storage_buffer:
         StorageBuffer<crate::renderer::resources::uniform::MaterialUniform>,
-    pub instance_buffers: Vec<crate::renderer::resources::InstanceBuffer>,
     pub post_sampler: vk::Sampler,
 }
 

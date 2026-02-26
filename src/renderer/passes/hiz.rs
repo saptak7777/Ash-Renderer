@@ -740,20 +740,16 @@ impl HiZPass {
             let group_y = dst_height.div_ceil(8);
             self.device.cmd_dispatch(cmd, group_x, group_y, 1);
 
-            // Memory barrier: Flush BDA writes so the next mip can safely read them.
-            let barrier = vk::MemoryBarrier::default()
-                .src_access_mask(vk::AccessFlags::SHADER_WRITE)
-                .dst_access_mask(vk::AccessFlags::SHADER_READ);
+            // Memory barrier: Flush BDA writes so the next mip can safely read them (Sync2)
+            let barrier = vk::MemoryBarrier2::default()
+                .src_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
+                .src_access_mask(vk::AccessFlags2::SHADER_WRITE)
+                .dst_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
+                .dst_access_mask(vk::AccessFlags2::SHADER_READ);
 
-            self.device.cmd_pipeline_barrier(
-                cmd,
-                vk::PipelineStageFlags::COMPUTE_SHADER,
-                vk::PipelineStageFlags::COMPUTE_SHADER,
-                vk::DependencyFlags::empty(),
-                std::slice::from_ref(&barrier),
-                &[],
-                &[],
-            );
+            let memory_barriers = [barrier];
+            let dep_info = vk::DependencyInfo::default().memory_barriers(&memory_barriers);
+            self.device.cmd_pipeline_barrier2(cmd, &dep_info);
 
             src_width = dst_width;
             src_height = dst_height;
@@ -985,6 +981,9 @@ impl HiZPass {
 
         self.initialized = false;
         log::info!("HiZPass: Resources destroyed");
+    }
+    pub fn mip_count(&self) -> u32 {
+        self.mip_count
     }
 }
 

@@ -4,8 +4,6 @@
 #extension GL_EXT_scalar_block_layout : require
 #extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
 
-#define SKIP_PUSH_CONSTANTS
-#define SKIP_GLOBAL_BINDED_RESOURCES
 #include "interop/structures.glsl"
 
 // GPU Light Culling Compute Shader
@@ -22,26 +20,8 @@ layout(local_size_x_id = 0, local_size_y_id = 1, local_size_z = 1) in;
 // Maximum lights per tile (synchronized with Rust light_culling.rs)
 #define MAX_LIGHTS_PER_TILE 256
 
-// Push constants for screen info
-layout(push_constant) uniform PushConstants {
-    uvec2 screenSize;
-    uint lightCount;
-    uint _padding;
-    uint64_t light_ptr;
-    uint64_t tile_ptr;
-    uint64_t camera_ptr;
-} pc;
-
 // Input: Depth buffer for frustum culling
 layout(set = 0, binding = 0) uniform sampler2D depthBuffer;
-
-// BDA View-projection matrix for frustum construction
-layout(buffer_reference, scalar, buffer_reference_align = 16) restrict readonly buffer CameraBuffer {
-    mat4 view;
-    mat4 projection;
-    mat4 invProjection;
-    vec4 cameraPos;
-};
 
 
 // Shared memory for light indices within workgroup
@@ -53,18 +33,20 @@ shared uint sharedMaxDepthInt;
 shared vec4 sharedFrustumPlanes[6];
 
 // Convert screen UV to view-space position at given depth
-vec3 screenToView(vec2 uv, float depth, CameraBuffer camera) {
+vec3 screenToView(vec2 uv, float depth, FrameData camera) {
     vec4 clip = vec4(uv * 2.0 - 1.0, depth, 1.0);
-    vec4 view = camera.invProjection * clip;
+    vec4 view = camera.inv_projection * clip;
     return view.xyz / view.w;
 }
 
 // Construct frustum planes for a tile
-void getTileFrustum(uvec2 tileId, float minDepth, float maxDepth, CameraBuffer camera, out vec4 planes[6]) {
+void getTileFrustum(uvec2 tileId, float minDepth, float maxDepth, out vec4 planes[6]) {
     // Tile corners in UV space [0, 1] (using specialization constants)
+    FrameData camera = FrameData(push.frame_ptr);
+    vec2 screenSize = camera.screen_params.xy;
     vec2 tileSize = vec2(float(WORKGROUP_SIZE_X), float(WORKGROUP_SIZE_Y));
-    vec2 minUV = vec2(tileId) * tileSize / vec2(pc.screenSize);
-    vec2 maxUV = vec2(tileId + 1) * tileSize / vec2(pc.screenSize);
+    vec2 minUV = vec2(tileId) * tileSize / screenSize;
+    vec2 maxUV = vec2(tileId + 1) * tileSize / screenSize;
 
     // View-space corners at near plane
     vec3 corners[4];
@@ -75,20 +57,17 @@ void getTileFrustum(uvec2 tileId, float minDepth, float maxDepth, CameraBuffer c
 
     // Frustum planes (in view space)
     // Left, Right, Bottom, Top, Near, Far
-    // Calculate normals from cross products
     vec3 v0 = cross(corners[3], corners[0]);
     vec3 v1 = cross(corners[1], corners[2]);
     vec3 v2 = cross(corners[0], corners[1]);
     vec3 v3 = cross(corners[2], corners[3]);
 
     // Normalize and calculate plane distances: plane = vec4(normal, -dot(normal, point_on_plane))
-    planes[0] = vec4(length(v0) > 0.0001 ? normalize(v0) : vec3(0.0), -dot(length(v0) > 0.0001 ? normalize(v0) : vec3(0.0), corners[0])); // Left
-    planes[1] = vec4(length(v1) > 0.0001 ? normalize(v1) : vec3(0.0), -dot(length(v1) > 0.0001 ? normalize(v1) : vec3(0.0), corners[1])); // Right
-    planes[2] = vec4(length(v2) > 0.0001 ? normalize(v2) : vec3(0.0), -dot(length(v2) > 0.0001 ? normalize(v2) : vec3(0.0), corners[0])); // Bottom
-    planes[3] = vec4(length(v3) > 0.0001 ? normalize(v3) : vec3(0.0), -dot(length(v3) > 0.0001 ? normalize(v3) : vec3(0.0), corners[3])); // Top
+    planes[0] = vec4(normalize(v0), 0.0); // Left
+    planes[1] = vec4(normalize(v1), 0.0); // Right
+    planes[2] = vec4(normalize(v2), 0.0); // Bottom
+    planes[3] = vec4(normalize(v3), 0.0); // Top
     
-    // Z-CULLING: View-space near/far distances derived from tile min/max depth
-    // In Reversed-Z: maxDepth is near, minDepth is far.
     float nearPlaneView = screenToView(vec2(0.5, 0.5), maxDepth, camera).z;
     float farPlaneView = screenToView(vec2(0.5, 0.5), minDepth, camera).z;
 
@@ -154,13 +133,15 @@ void main() {
     uint localIndex = localId.y * WORKGROUP_SIZE_X + localId.x;
     
     // Calculate tile index for output buffer
-    uvec2 numTiles = (pc.screenSize + uvec2(WORKGROUP_SIZE_X, WORKGROUP_SIZE_Y) - 1) / uvec2(WORKGROUP_SIZE_X, WORKGROUP_SIZE_Y);
+    FrameData camera = FrameData(push.frame_ptr);
+    vec2 screenSize = camera.screen_params.xy;
+    uvec2 numTiles = (uvec2(screenSize) + uvec2(WORKGROUP_SIZE_X, WORKGROUP_SIZE_Y) - 1) / uvec2(WORKGROUP_SIZE_X, WORKGROUP_SIZE_Y);
     uint tileIndex = tileId.y * numTiles.x + tileId.x;
     uint tileOffset = tileIndex * (MAX_LIGHTS_PER_TILE + 1);
     
     // Modern BDA Buffer References
-    LightBuffer lb = LightBuffer(pc.light_ptr);
-    TileIndexBuffer tib = TileIndexBuffer(pc.tile_ptr);
+    LightBuffer lb = LightBuffer(push.light_ptr);
+    TileIndexBuffer tib = TileIndexBuffer(push.tile_ptr);
     
     // Initialize shared memory
     if (localIndex == 0) {
@@ -172,7 +153,7 @@ void main() {
     
     // Sample depth buffer to find min/max depth for this tile
     uvec2 pixelCoord = tileId * uvec2(WORKGROUP_SIZE_X, WORKGROUP_SIZE_Y) + localId;
-    if (pixelCoord.x < pc.screenSize.x && pixelCoord.y < pc.screenSize.y) {
+    if (pixelCoord.x < uint(screenSize.x) && pixelCoord.y < uint(screenSize.y)) {
         float depth = texelFetch(depthBuffer, ivec2(pixelCoord), 0).r;
         uint depthInt = floatBitsToUint(depth);
         atomicMin(sharedMinDepthInt, depthInt);
@@ -186,9 +167,8 @@ void main() {
     
     // OPTIMIZATION: Only thread 0 computes frustum, others read from shared memory
     if (localIndex == 0) {
-        CameraBuffer camera = CameraBuffer(pc.camera_ptr);
         vec4 frustumPlanes[6];
-        getTileFrustum(tileId, minDepth, maxDepth, camera, frustumPlanes);
+        getTileFrustum(tileId, minDepth, maxDepth, frustumPlanes);
         // Copy to shared memory
         for (int i = 0; i < 6; i++) {
             sharedFrustumPlanes[i] = frustumPlanes[i];
@@ -196,7 +176,7 @@ void main() {
     }
     barrier();
     
-    if (pc.lightCount == 0) {
+    if (push.object_count == 0) {
         if (localIndex == 0) {
             tib.tileData[tileOffset] = 0;
         }
@@ -205,9 +185,9 @@ void main() {
     
     // Each thread tests some lights
     uint workgroupSize = WORKGROUP_SIZE_X * WORKGROUP_SIZE_Y;
-    uint lightsPerThread = (pc.lightCount + workgroupSize - 1) / workgroupSize;
+    uint lightsPerThread = (push.object_count + workgroupSize - 1) / workgroupSize;
     uint lightStart = localIndex * lightsPerThread;
-    uint lightEnd = min(lightStart + lightsPerThread, pc.lightCount);
+    uint lightEnd = min(lightStart + lightsPerThread, push.object_count);
 
     for (uint i = lightStart; i < lightEnd; i++) {
         Light light = lb.lights[i];
@@ -226,7 +206,7 @@ void main() {
             continue;
         }
         
-        CameraBuffer camera = CameraBuffer(pc.camera_ptr);
+        FrameData camera = FrameData(push.frame_ptr);
         
         // Transform light to view space
         vec3 lightPosView = (camera.view * vec4(light.position.xyz, 1.0)).xyz;

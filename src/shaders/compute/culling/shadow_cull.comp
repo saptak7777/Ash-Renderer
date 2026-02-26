@@ -1,4 +1,3 @@
-// shaders/shadow_cull.comp
 #version 450
 #extension GL_GOOGLE_include_directive : require
 #extension GL_EXT_buffer_reference2 : require
@@ -12,24 +11,8 @@
 
 layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 
-#define SKIP_PUSH_CONSTANTS
 #include "interop/structures.glsl"
 #include "common/culling.glsl"
-
-// ============================================================================
-// PUSH CONSTANTS
-// ============================================================================
-
-layout(push_constant) uniform ShadowCullPushConstants {
-    mat4 viewProj;
-    uint objectCount;
-    uint baseIndex;
-    uint indirectStart;
-    uint _padding;
-    uint64_t objectBufferPtr;   // BDA Pointer to InstanceData array
-    uint64_t indirectBufferPtr; // BDA Pointer to IndirectDrawCommand array
-    uint64_t countBufferPtr;    // BDA Pointer to atomic count (uint)
-} pc;
 
 // ============================================================================
 // MAIN
@@ -38,13 +21,15 @@ layout(push_constant) uniform ShadowCullPushConstants {
 void main() {
     uint objectIdx = gl_GlobalInvocationID.x;
     
-    if (pc.objectBufferPtr == 0 || objectIdx >= pc.objectCount) {
+    // instance_ptr: BDA Pointer to InstanceData array
+    // material_index: objectCount
+    if (push.instance_ptr == 0 || objectIdx >= push.object_count) {
         return;
     }
     
     // Fetch instance data via BDA
-    InstanceBuffer obj_buffer = InstanceBuffer(pc.objectBufferPtr);
-    InstanceData obj = obj_buffer.instances[pc.baseIndex + objectIdx];
+    InstanceBuffer obj_buffer = InstanceBuffer(push.instance_ptr);
+    InstanceData obj = obj_buffer.instances[push.base_index + objectIdx];
     
     // Skip if not a shadow caster (bit 0 = CAST_SHADOWS; see culling.rs CULL_FLAG_CAST_SHADOWS)
     if ((obj.flags & 1) == 0) {
@@ -55,8 +40,12 @@ void main() {
     vec3 worldCenter = (obj.model * vec4(obj.bounds_center.xyz, 1.0)).xyz;
     bool isSphere = obj.bounds_center.w > 0.5;
     
+    // vsm_ptr: Optional pointer to VsmGlobal for viewProj matrices
+    VsmGlobal vsm = VsmGlobal(push.vsm_ptr);
+    mat4 viewProj = vsm.light_view_projections[push.clipmap_level];
+    
     vec4 frustumPlanes[6];
-    extractFrustumPlanes(pc.viewProj, frustumPlanes);
+    extractFrustumPlanes(viewProj, frustumPlanes);
     
     bool culled = false;
     if (isSphere) {
@@ -77,15 +66,17 @@ void main() {
     }
     
     // Visible - increment count and write command
-    CountBuffer counter = CountBuffer(pc.countBufferPtr);
+    // light_ptr: BDA Pointer to atomic count (uint)
+    CountBuffer counter = CountBuffer(push.light_ptr);
     uint visibleIndex = atomicAdd(counter.count, 1);
     
     IndirectDrawCommand cmd;
     cmd.vertexCount = obj.index_count;
     cmd.instanceCount = 1;
     cmd.firstVertex = obj.first_index; // Critical: gl_VertexIndex starts here
-    cmd.firstInstance = pc.baseIndex + objectIdx;
+    cmd.firstInstance = push.base_index + objectIdx;
     
-    IndirectBuffer out_buffer = IndirectBuffer(pc.indirectBufferPtr);
-    out_buffer.commands[pc.indirectStart + visibleIndex] = cmd;
+    // tile_ptr: BDA Pointer to IndirectDrawCommand array
+    IndirectBuffer out_buffer = IndirectBuffer(push.tile_ptr);
+    out_buffer.commands[push.indirect_start + visibleIndex] = cmd;
 }

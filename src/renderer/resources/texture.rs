@@ -149,10 +149,12 @@ impl Texture {
         // 3. Transition to Transfer Destiny and Copy
         unsafe {
             vulkan::utils::execute_single_use_fenced(&device, command_pool, queue, |cmd| {
-                // Transition ALL layers and mips to TRANSFER_DST_OPTIMAL
-                let layout_barrier = vk::ImageMemoryBarrier::default()
-                    .src_access_mask(vk::AccessFlags::empty())
-                    .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                // Transition ALL layers and mips to TRANSFER_DST_OPTIMAL (Sync2)
+                let layout_barrier = vk::ImageMemoryBarrier2::default()
+                    .src_stage_mask(vk::PipelineStageFlags2::TOP_OF_PIPE)
+                    .src_access_mask(vk::AccessFlags2::empty())
+                    .dst_stage_mask(vk::PipelineStageFlags2::TRANSFER)
+                    .dst_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
                     .old_layout(vk::ImageLayout::UNDEFINED)
                     .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
                     .image(image)
@@ -165,16 +167,9 @@ impl Texture {
                             .layer_count(6),
                     );
 
-                device.cmd_pipeline_barrier(
-                    cmd,
-                    vk::PipelineStageFlags::TOP_OF_PIPE,
-                    vk::PipelineStageFlags::TRANSFER,
-                    vk::DependencyFlags::empty(),
-                    &[],
-                    &[],
-                    &[layout_barrier],
-                );
-
+                let image_barriers = [layout_barrier];
+                let dep_info = vk::DependencyInfo::default().image_memory_barriers(&image_barriers);
+                device.cmd_pipeline_barrier2(cmd, &dep_info);
                 // Copy all mips and faces
                 let mut regions = Vec::new();
                 let mut offset = 0;
@@ -211,10 +206,12 @@ impl Texture {
                     &regions,
                 );
 
-                // Transition to SHADER_READ_ONLY_OPTIMAL
-                let read_barrier = vk::ImageMemoryBarrier::default()
-                    .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
-                    .dst_access_mask(vk::AccessFlags::SHADER_READ)
+                // Transition to SHADER_READ_ONLY_OPTIMAL (Sync2)
+                let read_barrier = vk::ImageMemoryBarrier2::default()
+                    .src_stage_mask(vk::PipelineStageFlags2::TRANSFER)
+                    .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
+                    .dst_stage_mask(vk::PipelineStageFlags2::FRAGMENT_SHADER)
+                    .dst_access_mask(vk::AccessFlags2::SHADER_READ)
                     .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
                     .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
                     .image(image)
@@ -227,15 +224,9 @@ impl Texture {
                             .layer_count(6),
                     );
 
-                device.cmd_pipeline_barrier(
-                    cmd,
-                    vk::PipelineStageFlags::TRANSFER,
-                    vk::PipelineStageFlags::FRAGMENT_SHADER,
-                    vk::DependencyFlags::empty(),
-                    &[],
-                    &[],
-                    &[read_barrier],
-                );
+                let image_barriers = [read_barrier];
+                let dep_info = vk::DependencyInfo::default().image_memory_barriers(&image_barriers);
+                device.cmd_pipeline_barrier2(cmd, &dep_info);
             })?
         };
 
@@ -374,12 +365,14 @@ impl Texture {
 
         // Execute upload and mipmap generation
         vulkan::utils::execute_single_use(device.as_ref(), command_pool, queue, |cmd| {
-            // Transition Mip 0 to TRANSFER_DST_OPTIMAL
-            let barrier = vk::ImageMemoryBarrier::default()
+            // Transition Mip 0 to TRANSFER_DST_OPTIMAL (Sync2)
+            let barrier = vk::ImageMemoryBarrier2::default()
+                .src_stage_mask(vk::PipelineStageFlags2::TOP_OF_PIPE)
+                .src_access_mask(vk::AccessFlags2::empty())
+                .dst_stage_mask(vk::PipelineStageFlags2::TRANSFER)
+                .dst_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
                 .old_layout(vk::ImageLayout::UNDEFINED)
                 .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
-                .src_access_mask(vk::AccessFlags::empty())
-                .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE)
                 .image(image)
                 .subresource_range(vk::ImageSubresourceRange {
                     aspect_mask: vk::ImageAspectFlags::COLOR,
@@ -389,16 +382,10 @@ impl Texture {
                     layer_count: 1,
                 });
 
+            let image_barriers = [barrier];
+            let dep_info = vk::DependencyInfo::default().image_memory_barriers(&image_barriers);
             unsafe {
-                device.cmd_pipeline_barrier(
-                    cmd,
-                    vk::PipelineStageFlags::TOP_OF_PIPE,
-                    vk::PipelineStageFlags::TRANSFER,
-                    vk::DependencyFlags::empty(),
-                    &[],
-                    &[],
-                    &[barrier],
-                );
+                device.cmd_pipeline_barrier2(cmd, &dep_info);
             }
 
             let region = vk::BufferImageCopy {
@@ -437,12 +424,14 @@ impl Texture {
                 let next_width = if mip_width > 1 { mip_width / 2 } else { 1 };
                 let next_height = if mip_height > 1 { mip_height / 2 } else { 1 };
 
-                // Transition i-1 to TRANSFER_SRC
-                let barrier_src = vk::ImageMemoryBarrier::default()
+                // Transition i-1 to TRANSFER_SRC (Sync2)
+                let barrier_src = vk::ImageMemoryBarrier2::default()
+                    .src_stage_mask(vk::PipelineStageFlags2::TRANSFER)
+                    .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
+                    .dst_stage_mask(vk::PipelineStageFlags2::TRANSFER)
+                    .dst_access_mask(vk::AccessFlags2::TRANSFER_READ)
                     .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
                     .new_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
-                    .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
-                    .dst_access_mask(vk::AccessFlags::TRANSFER_READ)
                     .image(image)
                     .subresource_range(vk::ImageSubresourceRange {
                         aspect_mask: vk::ImageAspectFlags::COLOR,
@@ -452,16 +441,10 @@ impl Texture {
                         layer_count: 1,
                     });
 
+                let image_barriers = [barrier_src];
+                let dep_info = vk::DependencyInfo::default().image_memory_barriers(&image_barriers);
                 unsafe {
-                    device.cmd_pipeline_barrier(
-                        cmd,
-                        vk::PipelineStageFlags::TRANSFER,
-                        vk::PipelineStageFlags::TRANSFER,
-                        vk::DependencyFlags::empty(),
-                        &[],
-                        &[],
-                        &[barrier_src],
-                    );
+                    device.cmd_pipeline_barrier2(cmd, &dep_info);
                 }
 
                 let blit = vk::ImageBlit {
@@ -507,12 +490,14 @@ impl Texture {
                     );
                 }
 
-                // Transition i-1 to SHADER_READ_ONLY
-                let barrier_done = vk::ImageMemoryBarrier::default()
+                // Transition i-1 to SHADER_READ_ONLY (Sync2)
+                let barrier_done = vk::ImageMemoryBarrier2::default()
+                    .src_stage_mask(vk::PipelineStageFlags2::TRANSFER)
+                    .src_access_mask(vk::AccessFlags2::TRANSFER_READ)
+                    .dst_stage_mask(vk::PipelineStageFlags2::FRAGMENT_SHADER)
+                    .dst_access_mask(vk::AccessFlags2::SHADER_READ)
                     .old_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
                     .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
-                    .src_access_mask(vk::AccessFlags::TRANSFER_READ)
-                    .dst_access_mask(vk::AccessFlags::SHADER_READ)
                     .image(image)
                     .subresource_range(vk::ImageSubresourceRange {
                         aspect_mask: vk::ImageAspectFlags::COLOR,
@@ -522,28 +507,24 @@ impl Texture {
                         layer_count: 1,
                     });
 
+                let image_barriers = [barrier_done];
+                let dep_info = vk::DependencyInfo::default().image_memory_barriers(&image_barriers);
                 unsafe {
-                    device.cmd_pipeline_barrier(
-                        cmd,
-                        vk::PipelineStageFlags::TRANSFER,
-                        vk::PipelineStageFlags::FRAGMENT_SHADER,
-                        vk::DependencyFlags::empty(),
-                        &[],
-                        &[],
-                        &[barrier_done],
-                    );
+                    device.cmd_pipeline_barrier2(cmd, &dep_info);
                 }
 
                 mip_width = next_width;
                 mip_height = next_height;
             }
 
-            // Transition last mip
-            let barrier_last = vk::ImageMemoryBarrier::default()
+            // Transition last mip (Sync2)
+            let barrier_last = vk::ImageMemoryBarrier2::default()
+                .src_stage_mask(vk::PipelineStageFlags2::TRANSFER)
+                .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
+                .dst_stage_mask(vk::PipelineStageFlags2::FRAGMENT_SHADER)
+                .dst_access_mask(vk::AccessFlags2::SHADER_READ)
                 .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
                 .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
-                .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
-                .dst_access_mask(vk::AccessFlags::SHADER_READ)
                 .image(image)
                 .subresource_range(vk::ImageSubresourceRange {
                     aspect_mask: vk::ImageAspectFlags::COLOR,
@@ -553,16 +534,10 @@ impl Texture {
                     layer_count: 1,
                 });
 
+            let image_barriers = [barrier_last];
+            let dep_info = vk::DependencyInfo::default().image_memory_barriers(&image_barriers);
             unsafe {
-                device.cmd_pipeline_barrier(
-                    cmd,
-                    vk::PipelineStageFlags::TRANSFER,
-                    vk::PipelineStageFlags::FRAGMENT_SHADER,
-                    vk::DependencyFlags::empty(),
-                    &[],
-                    &[],
-                    &[barrier_last],
-                );
+                device.cmd_pipeline_barrier2(cmd, &dep_info);
             }
         })?;
 
@@ -654,6 +629,28 @@ impl Texture {
         let device = Arc::clone(&ctx.device);
         let command_pool = ctx.command_pool;
         let queue = ctx.queue;
+        let bytes_per_pixel = match info.format {
+            vk::Format::R8G8B8A8_UNORM
+            | vk::Format::R8G8B8A8_SRGB
+            | vk::Format::B8G8R8A8_UNORM
+            | vk::Format::B8G8R8A8_SRGB => 4,
+            vk::Format::R16G16B16A16_SFLOAT => 8,
+            vk::Format::R32G32B32_SFLOAT => 12,
+            vk::Format::R32G32B32A32_SFLOAT => 16,
+            _ => 0, // Skip validation for complex/compressed formats in this raw path
+        };
+
+        let expected_size = (info.width * info.height) as usize * bytes_per_pixel;
+        if bytes_per_pixel > 0 && raw_data.len() != expected_size {
+            return Err(AshError::VulkanError(format!(
+                "Texture data size mismatch: format {:?} expects {} bytes per pixel (total {}), but got {} bytes",
+                info.format,
+                bytes_per_pixel,
+                expected_size,
+                raw_data.len()
+            )));
+        }
+
         let image_size = raw_data.len() as vk::DeviceSize;
 
         let (staging_buffer, mut staging_alloc) = unsafe {
@@ -697,11 +694,13 @@ impl Texture {
 
         // Single move
         vulkan::utils::execute_single_use(device.as_ref(), command_pool, queue, |cmd| {
-            let barrier_start = vk::ImageMemoryBarrier::default()
+            let barrier_start = vk::ImageMemoryBarrier2::default()
+                .src_stage_mask(vk::PipelineStageFlags2::TOP_OF_PIPE)
+                .src_access_mask(vk::AccessFlags2::empty())
+                .dst_stage_mask(vk::PipelineStageFlags2::TRANSFER)
+                .dst_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
                 .old_layout(vk::ImageLayout::UNDEFINED)
                 .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
-                .src_access_mask(vk::AccessFlags::empty())
-                .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE)
                 .image(image)
                 .subresource_range(vk::ImageSubresourceRange {
                     aspect_mask: vk::ImageAspectFlags::COLOR,
@@ -711,18 +710,12 @@ impl Texture {
                     layer_count: 1,
                 });
 
+            let image_barriers_start = [barrier_start];
+            let dep_info_start =
+                vk::DependencyInfo::default().image_memory_barriers(&image_barriers_start);
             unsafe {
-                device.cmd_pipeline_barrier(
-                    cmd,
-                    vk::PipelineStageFlags::TOP_OF_PIPE,
-                    vk::PipelineStageFlags::TRANSFER,
-                    vk::DependencyFlags::empty(),
-                    &[],
-                    &[],
-                    &[barrier_start],
-                );
+                device.cmd_pipeline_barrier2(cmd, &dep_info_start);
             }
-
             let region = vk::BufferImageCopy {
                 buffer_offset: 0,
                 buffer_row_length: 0,
@@ -751,11 +744,13 @@ impl Texture {
                 );
             }
 
-            let barrier_end = vk::ImageMemoryBarrier::default()
+            let barrier_end = vk::ImageMemoryBarrier2::default()
+                .src_stage_mask(vk::PipelineStageFlags2::TRANSFER)
+                .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
+                .dst_stage_mask(vk::PipelineStageFlags2::FRAGMENT_SHADER)
+                .dst_access_mask(vk::AccessFlags2::SHADER_READ)
                 .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
                 .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
-                .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
-                .dst_access_mask(vk::AccessFlags::SHADER_READ)
                 .image(image)
                 .subresource_range(vk::ImageSubresourceRange {
                     aspect_mask: vk::ImageAspectFlags::COLOR,
@@ -765,16 +760,11 @@ impl Texture {
                     layer_count: 1,
                 });
 
+            let image_barriers_end = [barrier_end];
+            let dep_info_end =
+                vk::DependencyInfo::default().image_memory_barriers(&image_barriers_end);
             unsafe {
-                device.cmd_pipeline_barrier(
-                    cmd,
-                    vk::PipelineStageFlags::TRANSFER,
-                    vk::PipelineStageFlags::FRAGMENT_SHADER,
-                    vk::DependencyFlags::empty(),
-                    &[],
-                    &[],
-                    &[barrier_end],
-                );
+                device.cmd_pipeline_barrier2(cmd, &dep_info_end);
             }
         })?;
 
@@ -914,12 +904,14 @@ impl Texture {
 
         // Upload
         vulkan::utils::execute_single_use(device.as_ref(), command_pool, queue, |cmd| {
-            // Transition all mips to TRANSFER_DST
-            let barrier = vk::ImageMemoryBarrier::default()
+            // Transition all mips to TRANSFER_DST (Sync2)
+            let barrier = vk::ImageMemoryBarrier2::default()
+                .src_stage_mask(vk::PipelineStageFlags2::TOP_OF_PIPE)
+                .src_access_mask(vk::AccessFlags2::empty())
+                .dst_stage_mask(vk::PipelineStageFlags2::TRANSFER)
+                .dst_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
                 .old_layout(vk::ImageLayout::UNDEFINED)
                 .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
-                .src_access_mask(vk::AccessFlags::empty())
-                .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE)
                 .image(image)
                 .subresource_range(vk::ImageSubresourceRange {
                     aspect_mask: vk::ImageAspectFlags::COLOR,
@@ -929,18 +921,11 @@ impl Texture {
                     layer_count: 1,
                 });
 
+            let image_barriers = [barrier];
+            let dep_info = vk::DependencyInfo::default().image_memory_barriers(&image_barriers);
             unsafe {
-                device.cmd_pipeline_barrier(
-                    cmd,
-                    vk::PipelineStageFlags::TOP_OF_PIPE,
-                    vk::PipelineStageFlags::TRANSFER,
-                    vk::DependencyFlags::empty(),
-                    &[],
-                    &[],
-                    &[barrier],
-                );
+                device.cmd_pipeline_barrier2(cmd, &dep_info);
             }
-
             // Copy regions
             let mut regions = Vec::with_capacity(mip_levels as usize);
             let mut buffer_offset = 0;
@@ -986,12 +971,14 @@ impl Texture {
                 );
             }
 
-            // Transition to SHADER_READ_ONLY
-            let barrier_done = vk::ImageMemoryBarrier::default()
+            // Transition to SHADER_READ_ONLY (Sync2)
+            let barrier_done = vk::ImageMemoryBarrier2::default()
+                .src_stage_mask(vk::PipelineStageFlags2::TRANSFER)
+                .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
+                .dst_stage_mask(vk::PipelineStageFlags2::FRAGMENT_SHADER)
+                .dst_access_mask(vk::AccessFlags2::SHADER_READ)
                 .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
                 .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
-                .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
-                .dst_access_mask(vk::AccessFlags::SHADER_READ)
                 .image(image)
                 .subresource_range(vk::ImageSubresourceRange {
                     aspect_mask: vk::ImageAspectFlags::COLOR,
@@ -1001,16 +988,10 @@ impl Texture {
                     layer_count: 1,
                 });
 
+            let image_barriers = [barrier_done];
+            let dep_info = vk::DependencyInfo::default().image_memory_barriers(&image_barriers);
             unsafe {
-                device.cmd_pipeline_barrier(
-                    cmd,
-                    vk::PipelineStageFlags::TRANSFER,
-                    vk::PipelineStageFlags::FRAGMENT_SHADER,
-                    vk::DependencyFlags::empty(),
-                    &[],
-                    &[],
-                    &[barrier_done],
-                );
+                device.cmd_pipeline_barrier2(cmd, &dep_info);
             }
         })?;
 
@@ -1556,11 +1537,13 @@ impl Texture {
 
             // Upload
             vulkan::utils::execute_single_use(device.as_ref(), command_pool, queue, |cmd| {
-                let barrier = vk::ImageMemoryBarrier::default()
+                let barrier = vk::ImageMemoryBarrier2::default()
+                    .src_stage_mask(vk::PipelineStageFlags2::TOP_OF_PIPE)
+                    .src_access_mask(vk::AccessFlags2::empty())
+                    .dst_stage_mask(vk::PipelineStageFlags2::TRANSFER)
+                    .dst_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
                     .old_layout(vk::ImageLayout::UNDEFINED)
                     .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
-                    .src_access_mask(vk::AccessFlags::empty())
-                    .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE)
                     .image(image)
                     .subresource_range(vk::ImageSubresourceRange {
                         aspect_mask: vk::ImageAspectFlags::COLOR,
@@ -1570,15 +1553,9 @@ impl Texture {
                         layer_count: 1,
                     });
 
-                device.cmd_pipeline_barrier(
-                    cmd,
-                    vk::PipelineStageFlags::TOP_OF_PIPE,
-                    vk::PipelineStageFlags::TRANSFER,
-                    vk::DependencyFlags::empty(),
-                    &[],
-                    &[],
-                    &[barrier],
-                );
+                let image_barriers = [barrier];
+                let dep_info = vk::DependencyInfo::default().image_memory_barriers(&image_barriers);
+                device.cmd_pipeline_barrier2(cmd, &dep_info);
 
                 let region = vk::BufferImageCopy {
                     buffer_offset: 0,
@@ -1606,11 +1583,13 @@ impl Texture {
                     &[region],
                 );
 
-                let barrier_final = vk::ImageMemoryBarrier::default()
+                let barrier_final = vk::ImageMemoryBarrier2::default()
+                    .src_stage_mask(vk::PipelineStageFlags2::TRANSFER)
+                    .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
+                    .dst_stage_mask(vk::PipelineStageFlags2::FRAGMENT_SHADER)
+                    .dst_access_mask(vk::AccessFlags2::SHADER_READ)
                     .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
                     .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
-                    .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
-                    .dst_access_mask(vk::AccessFlags::SHADER_READ)
                     .image(image)
                     .subresource_range(vk::ImageSubresourceRange {
                         aspect_mask: vk::ImageAspectFlags::COLOR,
@@ -1620,15 +1599,10 @@ impl Texture {
                         layer_count: 1,
                     });
 
-                device.cmd_pipeline_barrier(
-                    cmd,
-                    vk::PipelineStageFlags::TRANSFER,
-                    vk::PipelineStageFlags::FRAGMENT_SHADER,
-                    vk::DependencyFlags::empty(),
-                    &[],
-                    &[],
-                    &[barrier_final],
-                );
+                let image_barriers_final = [barrier_final];
+                let dep_info_final =
+                    vk::DependencyInfo::default().image_memory_barriers(&image_barriers_final);
+                device.cmd_pipeline_barrier2(cmd, &dep_info_final);
             })?;
 
             allocator
@@ -1733,11 +1707,13 @@ impl Texture {
 
             // Upload all layers
             vulkan::utils::execute_single_use(device.as_ref(), command_pool, queue, |cmd| {
-                let barrier = vk::ImageMemoryBarrier::default()
+                let barrier = vk::ImageMemoryBarrier2::default()
+                    .src_stage_mask(vk::PipelineStageFlags2::TOP_OF_PIPE)
+                    .src_access_mask(vk::AccessFlags2::empty())
+                    .dst_stage_mask(vk::PipelineStageFlags2::TRANSFER)
+                    .dst_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
                     .old_layout(vk::ImageLayout::UNDEFINED)
                     .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
-                    .src_access_mask(vk::AccessFlags::empty())
-                    .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE)
                     .image(image)
                     .subresource_range(vk::ImageSubresourceRange {
                         aspect_mask: vk::ImageAspectFlags::COLOR,
@@ -1747,15 +1723,9 @@ impl Texture {
                         layer_count,
                     });
 
-                device.cmd_pipeline_barrier(
-                    cmd,
-                    vk::PipelineStageFlags::TOP_OF_PIPE,
-                    vk::PipelineStageFlags::TRANSFER,
-                    vk::DependencyFlags::empty(),
-                    &[],
-                    &[],
-                    &[barrier],
-                );
+                let image_barriers = [barrier];
+                let dep_info = vk::DependencyInfo::default().image_memory_barriers(&image_barriers);
+                device.cmd_pipeline_barrier2(cmd, &dep_info);
 
                 // Copy each layer
                 for layer in 0..layer_count {
@@ -1786,11 +1756,13 @@ impl Texture {
                     );
                 }
 
-                let barrier_final = vk::ImageMemoryBarrier::default()
+                let barrier_final = vk::ImageMemoryBarrier2::default()
+                    .src_stage_mask(vk::PipelineStageFlags2::TRANSFER)
+                    .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
+                    .dst_stage_mask(vk::PipelineStageFlags2::FRAGMENT_SHADER)
+                    .dst_access_mask(vk::AccessFlags2::SHADER_READ)
                     .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
                     .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
-                    .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
-                    .dst_access_mask(vk::AccessFlags::SHADER_READ)
                     .image(image)
                     .subresource_range(vk::ImageSubresourceRange {
                         aspect_mask: vk::ImageAspectFlags::COLOR,
@@ -1800,15 +1772,10 @@ impl Texture {
                         layer_count,
                     });
 
-                device.cmd_pipeline_barrier(
-                    cmd,
-                    vk::PipelineStageFlags::TRANSFER,
-                    vk::PipelineStageFlags::FRAGMENT_SHADER,
-                    vk::DependencyFlags::empty(),
-                    &[],
-                    &[],
-                    &[barrier_final],
-                );
+                let image_barriers_final = [barrier_final];
+                let dep_info_final =
+                    vk::DependencyInfo::default().image_memory_barriers(&image_barriers_final);
+                device.cmd_pipeline_barrier2(cmd, &dep_info_final);
             })?;
 
             allocator
@@ -2133,12 +2100,14 @@ impl Texture {
 
         // Upload
         vulkan::utils::execute_single_use(device.as_ref(), command_pool, queue, |cmd| {
-            // Transition to TRANSFER_DST
-            let barrier = vk::ImageMemoryBarrier::default()
+            // Transition to TRANSFER_DST (Sync2)
+            let barrier = vk::ImageMemoryBarrier2::default()
+                .src_stage_mask(vk::PipelineStageFlags2::TOP_OF_PIPE)
+                .src_access_mask(vk::AccessFlags2::empty())
+                .dst_stage_mask(vk::PipelineStageFlags2::TRANSFER)
+                .dst_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
                 .old_layout(vk::ImageLayout::UNDEFINED)
                 .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
-                .src_access_mask(vk::AccessFlags::empty())
-                .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE)
                 .image(image)
                 .subresource_range(vk::ImageSubresourceRange {
                     aspect_mask: vk::ImageAspectFlags::COLOR,
@@ -2148,16 +2117,10 @@ impl Texture {
                     layer_count: 6,
                 });
 
+            let image_barriers = [barrier];
+            let dep_info = vk::DependencyInfo::default().image_memory_barriers(&image_barriers);
             unsafe {
-                device.cmd_pipeline_barrier(
-                    cmd,
-                    vk::PipelineStageFlags::TOP_OF_PIPE,
-                    vk::PipelineStageFlags::TRANSFER,
-                    vk::DependencyFlags::empty(),
-                    &[],
-                    &[],
-                    &[barrier],
-                );
+                device.cmd_pipeline_barrier2(cmd, &dep_info);
             }
 
             // Copy 6 faces

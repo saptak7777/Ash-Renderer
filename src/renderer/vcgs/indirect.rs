@@ -6,7 +6,7 @@
 use ash::vk;
 use std::sync::Arc;
 
-use super::culling::{CullObjectData, CullingPushConstants, OcclusionCulling};
+use super::culling::{CullObjectData, OcclusionCulling};
 use crate::Result;
 use crate::vulkan::descriptor_bindless::BindlessManager;
 use crate::vulkan::{Allocator, VulkanDevice};
@@ -31,10 +31,6 @@ pub struct IndirectDrawPass {
     indirect_buffer: vk::Buffer,
     indirect_allocation: Option<vk_mem::Allocation>,
 
-    // Visibility flags buffer (output)
-    visibility_buffer: vk::Buffer,
-    visibility_allocation: Option<vk_mem::Allocation>,
-
     // Visible count buffer (atomic counter)
     count_buffer: vk::Buffer,
     count_allocation: Option<vk_mem::Allocation>,
@@ -46,7 +42,6 @@ pub struct IndirectDrawPass {
     // Cached BDA pointers (computed at creation, zero-cost to access at runtime)
     object_buffer_addr: u64,
     indirect_buffer_addr: u64,
-    visibility_buffer_addr: u64,
     count_buffer_addr: u64,
 
     initialized: bool,
@@ -68,15 +63,12 @@ impl IndirectDrawPass {
             // template_allocation: None,
             indirect_buffer: vk::Buffer::null(),
             indirect_allocation: None,
-            visibility_buffer: vk::Buffer::null(),
-            visibility_allocation: None,
             count_buffer: vk::Buffer::null(),
             count_allocation: None,
             cull_pipeline: vk::Pipeline::null(),
             cull_layout: vk::PipelineLayout::null(),
             object_buffer_addr: 0,
             indirect_buffer_addr: 0,
-            visibility_buffer_addr: 0,
             count_buffer_addr: 0,
             initialized: false,
             destroyed: false,
@@ -124,7 +116,6 @@ impl IndirectDrawPass {
         let object_size = (std::mem::size_of::<CullObjectData>() * max_objects) as u64;
         let command_size =
             (std::mem::size_of::<vk::DrawIndexedIndirectCommand>() * max_objects) as u64;
-        let visibility_size = (max_objects * 4) as u64; // u32 per object
         let count_size = 16u64; // Atomic counter + padding
 
         let buffer_alloc_info = vk_mem::AllocationCreateInfo {
@@ -172,8 +163,6 @@ impl IndirectDrawPass {
         self.object_allocation = Some(object_alloc);
         self.object_buffer_size = object_size;
 
-        // Template buffer - DELETED
-
         // Indirect buffer (GPU only, indirect draw source)
         let indirect_info = vk::BufferCreateInfo::default().size(command_size).usage(
             vk::BufferUsageFlags::STORAGE_BUFFER
@@ -185,16 +174,6 @@ impl IndirectDrawPass {
                 .map_err(|e| crate::AshError::VulkanError(format!("Indirect buffer: {e:?}")))?;
         self.indirect_buffer = indirect_buffer;
         self.indirect_allocation = Some(indirect_alloc);
-
-        // Visibility buffer (GPU only)
-        let visibility_info = vk::BufferCreateInfo::default().size(visibility_size).usage(
-            vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
-        );
-        let (visibility_buffer, visibility_alloc) =
-            unsafe { allocator.create_buffer(&visibility_info, &device_alloc_info) }
-                .map_err(|e| crate::AshError::VulkanError(format!("Visibility buffer: {e:?}")))?;
-        self.visibility_buffer = visibility_buffer;
-        self.visibility_allocation = Some(visibility_alloc);
 
         // Count buffer (GPU readback)
         let count_info = vk::BufferCreateInfo::default().size(count_size).usage(
@@ -218,23 +197,18 @@ impl IndirectDrawPass {
             let info = vk::BufferDeviceAddressInfo::default().buffer(self.indirect_buffer);
             self.device.get_buffer_device_address(&info)
         };
-        self.visibility_buffer_addr = unsafe {
-            let info = vk::BufferDeviceAddressInfo::default().buffer(self.visibility_buffer);
-            self.device.get_buffer_device_address(&info)
-        };
         self.count_buffer_addr = unsafe {
             let info = vk::BufferDeviceAddressInfo::default().buffer(self.count_buffer);
             self.device.get_buffer_device_address(&info)
         };
 
         log::debug!(
-            "IndirectDrawPass: Created buffers (obj={object_size}, cmd={command_size}, vis={visibility_size}, cnt={count_size})"
+            "IndirectDrawPass: Created buffers (obj={object_size}, cmd={command_size}, cnt={count_size})"
         );
         log::info!(
-            "IndirectDrawPass BDA: obj={:#018X} indirect={:#018X} vis={:#018X} cnt={:#018X}",
+            "IndirectDrawPass BDA: obj={:#018X} indirect={:#018X} cnt={:#018X}",
             self.object_buffer_addr,
             self.indirect_buffer_addr,
-            self.visibility_buffer_addr,
             self.count_buffer_addr
         );
         Ok(())
@@ -251,7 +225,7 @@ impl IndirectDrawPass {
         let push_constant_range = vk::PushConstantRange::default()
             .stage_flags(vk::ShaderStageFlags::COMPUTE)
             .offset(0)
-            .size(std::mem::size_of::<CullingPushConstants>() as u32);
+            .size(std::mem::size_of::<crate::renderer::types::GpuPushConstants>() as u32);
 
         // Phase 4: Zero descriptor sets. Pure BDA pipeline.
         let layout_info = vk::PipelineLayoutCreateInfo::default()
@@ -296,7 +270,7 @@ impl IndirectDrawPass {
         let push_constant_range = vk::PushConstantRange::default()
             .stage_flags(vk::ShaderStageFlags::COMPUTE)
             .offset(0)
-            .size(std::mem::size_of::<CullingPushConstants>() as u32);
+            .size(std::mem::size_of::<crate::renderer::types::GpuPushConstants>() as u32);
         let layout_info = vk::PipelineLayoutCreateInfo::default()
             .set_layouts(&[])
             .push_constant_ranges(std::slice::from_ref(&push_constant_range));
@@ -374,8 +348,6 @@ impl IndirectDrawPass {
         Ok(())
     }
 
-    // upload_templates DELETED
-
     /// Execute culling pass
     ///
     /// # Safety
@@ -405,25 +377,20 @@ impl IndirectDrawPass {
             self.device.cmd_fill_buffer(cmd, self.count_buffer, 0, 4, 0);
         }
 
-        // Barrier for fill
-        let barrier = vk::BufferMemoryBarrier {
-            src_access_mask: vk::AccessFlags::TRANSFER_WRITE,
-            dst_access_mask: vk::AccessFlags::SHADER_READ | vk::AccessFlags::SHADER_WRITE,
-            buffer: self.count_buffer,
-            size: vk::WHOLE_SIZE,
-            ..Default::default()
-        };
+        // Barrier for fill (Sync2)
+        let barrier = vk::BufferMemoryBarrier2::default()
+            .src_stage_mask(vk::PipelineStageFlags2::TRANSFER)
+            .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
+            .dst_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
+            .dst_access_mask(vk::AccessFlags2::SHADER_READ | vk::AccessFlags2::SHADER_WRITE)
+            .buffer(self.count_buffer)
+            .offset(0)
+            .size(vk::WHOLE_SIZE);
 
+        let buffer_barriers = [barrier];
+        let dep_info = vk::DependencyInfo::default().buffer_memory_barriers(&buffer_barriers);
         unsafe {
-            self.device.cmd_pipeline_barrier(
-                cmd,
-                vk::PipelineStageFlags::TRANSFER,
-                vk::PipelineStageFlags::COMPUTE_SHADER,
-                vk::DependencyFlags::empty(),
-                &[],
-                &[barrier],
-                &[],
-            );
+            self.device.cmd_pipeline_barrier2(cmd, &dep_info);
         }
 
         // Bind pipeline
@@ -435,20 +402,17 @@ impl IndirectDrawPass {
         // Phase 2+3 BDA Routing: all output buffers routed as raw 64-bit pointers.
         // No descriptor sets needed — the shader receives raw 64-bit pointers.
         // Push constants — view_proj removed (Phase 3: shader reads it from FrameData UBO via BDA)
-        let mut push = culling.push_constants(ctx.width, ctx.height);
+        let mut push = culling.push_constants();
         push.object_count = ctx.object_count;
         push.base_index = ctx.object_offset;
         push.indirect_start = ctx.indirect_offset;
 
-        // Phase 2+3 BDA Routing: all output buffers routed as raw 64-bit pointers.
-        // No descriptor sets needed — the shader receives raw 64-bit pointers.
-        push.object_buffer_addr = self.object_buffer_addr;
-        push.cluster_buffer_addr = ctx.cluster_buffer_addr;
-        push.visibility_buffer_addr = self.visibility_buffer_addr;
-        push.indirect_buffer_addr = self.indirect_buffer_addr;
-        push.count_buffer_addr = self.count_buffer_addr;
-        push.hiz_buffer_addr = ctx.hiz_buffer_addr;
-        push.camera_buffer_addr = ctx.camera_buffer_addr;
+        // Phase 2+3 BDA Routing: map to unified GpuPushConstants
+        push.instance_ptr = self.object_buffer_addr;
+        push.material_ptr = self.indirect_buffer_addr;
+        push.index_ptr = self.count_buffer_addr;
+        push.light_ptr = ctx.hiz_buffer_addr;
+        push.frame_ptr = ctx.camera_buffer_addr;
 
         unsafe {
             self.device.cmd_push_constants(
@@ -464,36 +428,29 @@ impl IndirectDrawPass {
         let group_count = ctx.object_count.div_ceil(64);
         unsafe {
             self.device.cmd_dispatch(cmd, group_count, 1, 1);
-        }
 
-        // Barrier for indirect read
-        // Barriers for Indirect Draw & Count Read
-        let indirect_barrier = vk::BufferMemoryBarrier {
-            src_access_mask: vk::AccessFlags::SHADER_WRITE,
-            dst_access_mask: vk::AccessFlags::INDIRECT_COMMAND_READ,
-            buffer: self.indirect_buffer,
-            size: vk::WHOLE_SIZE,
-            ..Default::default()
-        };
+            // 4. CRITICAL BARRIER: Compute-to-Graphics for Indirect Buffers (Sync2)
+            let indirect_barrier = vk::BufferMemoryBarrier2::default()
+                .src_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
+                .src_access_mask(vk::AccessFlags2::SHADER_WRITE)
+                .dst_stage_mask(vk::PipelineStageFlags2::DRAW_INDIRECT)
+                .dst_access_mask(vk::AccessFlags2::INDIRECT_COMMAND_READ)
+                .buffer(self.indirect_buffer)
+                .offset(0)
+                .size(vk::WHOLE_SIZE);
 
-        let count_barrier = vk::BufferMemoryBarrier {
-            src_access_mask: vk::AccessFlags::SHADER_WRITE,
-            dst_access_mask: vk::AccessFlags::INDIRECT_COMMAND_READ,
-            buffer: self.count_buffer,
-            size: vk::WHOLE_SIZE,
-            ..Default::default()
-        };
+            let count_barrier = vk::BufferMemoryBarrier2::default()
+                .src_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
+                .src_access_mask(vk::AccessFlags2::SHADER_WRITE)
+                .dst_stage_mask(vk::PipelineStageFlags2::DRAW_INDIRECT)
+                .dst_access_mask(vk::AccessFlags2::INDIRECT_COMMAND_READ)
+                .buffer(self.count_buffer)
+                .offset(0)
+                .size(vk::WHOLE_SIZE);
 
-        unsafe {
-            self.device.cmd_pipeline_barrier(
-                cmd,
-                vk::PipelineStageFlags::COMPUTE_SHADER,
-                vk::PipelineStageFlags::DRAW_INDIRECT,
-                vk::DependencyFlags::empty(),
-                &[],
-                &[indirect_barrier, count_barrier],
-                &[],
-            );
+            let buffer_barriers = [indirect_barrier, count_barrier];
+            let dep_info = vk::DependencyInfo::default().buffer_memory_barriers(&buffer_barriers);
+            self.device.cmd_pipeline_barrier2(cmd, &dep_info);
         }
 
         Ok(())
@@ -516,11 +473,6 @@ impl IndirectDrawPass {
     /// Get indirect buffer device address (cached at creation)
     pub fn indirect_buffer_address(&self) -> u64 {
         self.indirect_buffer_addr
-    }
-
-    /// Get visibility buffer device address (cached at creation)
-    pub fn visibility_buffer_address(&self) -> u64 {
-        self.visibility_buffer_addr
     }
 
     /// Get count buffer device address (cached at creation)
@@ -592,17 +544,9 @@ impl IndirectDrawPass {
                 allocator.destroy_buffer(self.object_buffer, &mut alloc);
             }
         }
-        // if let Some(mut alloc) = self.template_allocation.take() {
-        //     allocator.destroy_buffer(self.template_buffer, &mut alloc);
-        // }
         if let Some(mut alloc) = self.indirect_allocation.take() {
             unsafe {
                 allocator.destroy_buffer(self.indirect_buffer, &mut alloc);
-            }
-        }
-        if let Some(mut alloc) = self.visibility_allocation.take() {
-            unsafe {
-                allocator.destroy_buffer(self.visibility_buffer, &mut alloc);
             }
         }
         if let Some(mut alloc) = self.count_allocation.take() {

@@ -54,6 +54,7 @@ impl SwapchainWrapper {
                     vk_device,
                     &swapchain_loader,
                     vk::SwapchainKHR::null(),
+                    None,
                     present_mode,
                 )
             }?;
@@ -186,6 +187,7 @@ impl SwapchainWrapper {
         vk_device: &crate::vulkan::VulkanDevice,
         swapchain_loader: &swapchain::Device,
         old_swapchain: vk::SwapchainKHR,
+        requested_extent: Option<vk::Extent2D>,
         present_mode: vk::PresentModeKHR,
     ) -> Result<(
         vk::SwapchainKHR,
@@ -262,7 +264,7 @@ impl SwapchainWrapper {
             capabilities.min_image_count.max(2)
         };
 
-        let extent = capabilities.current_extent;
+        let extent = requested_extent.unwrap_or(capabilities.current_extent);
 
         let swapchain_create_info = vk::SwapchainCreateInfoKHR::default()
             .surface(surface)
@@ -334,6 +336,7 @@ impl SwapchainWrapper {
     pub unsafe fn recreate(
         &mut self,
         vk_device: &crate::vulkan::VulkanDevice,
+        requested_extent: Option<vk::Extent2D>,
     ) -> Result<vk::SwapchainKHR> {
         let old_swapchain = self.swapchain;
 
@@ -346,8 +349,16 @@ impl SwapchainWrapper {
 
         let loader = self.swapchain_loader.as_ref().unwrap();
         let (swapchain, images, image_views, format, color_space, extent) =
-            // Reuse current present mode on recreation for now
-            unsafe { Self::build_swapchain(vk_device, loader, self.swapchain, vk::PresentModeKHR::FIFO) }?;
+            // Explicitly pass requested extent if available, otherwise use surface capabilities
+            unsafe {
+                Self::build_swapchain(
+                    vk_device,
+                    loader,
+                    self.swapchain,
+                    requested_extent,
+                    vk::PresentModeKHR::FIFO,
+                )
+            }?;
 
         self.swapchain = swapchain;
         self.images = images;

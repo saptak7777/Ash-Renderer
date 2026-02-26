@@ -1,8 +1,6 @@
 use crate::renderer::{
-    context::Context,
-    frame_manager::FrameManager,
-    resource_registry::ResourceId,
-    types::{DrawItem, GBufferIndices},
+    context::Context, frame_manager::FrameManager, resource_registry::ResourceId,
+    types::GBufferIndices,
 };
 use crate::vulkan::{CommandBufferManager, SwapchainWrapper};
 use crate::{AshError, Result};
@@ -21,7 +19,6 @@ pub struct Frame {
 
     // Rendering State
     pub start_time: Instant,
-    pub draw_items: Vec<DrawItem>,
     pub prev_view_proj: Mat4,
     pub gbuffer_indices: Option<GBufferIndices>,
     pub hdr_image_index: Option<u32>,
@@ -76,7 +73,6 @@ impl Frame {
                 cmds,
                 swapchain_image_view_ids,
                 start_time: Instant::now(),
-                draw_items: Vec::new(),
                 prev_view_proj: Mat4::IDENTITY,
                 gbuffer_indices: None,
                 hdr_image_index: None,

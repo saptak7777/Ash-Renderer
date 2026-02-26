@@ -126,10 +126,8 @@ impl Drop for Pipeline {
 pub struct PipelineBuilder {
     device: Arc<ash::Device>,
     layout: Option<vk::PipelineLayout>,
-    render_pass: Option<vk::RenderPass>,
     extent: Option<vk::Extent2D>,
     pipeline_cache: Option<vk::PipelineCache>,
-    subpass: u32,
     shader_stages: Vec<ShaderStage>,
     shader_watch: Vec<ShaderWatchRegistration>,
     specialization: HashMap<vk::ShaderStageFlags, SpecializationData>,
@@ -152,10 +150,8 @@ impl PipelineBuilder {
         Self {
             device,
             layout: None,
-            render_pass: None,
             extent: None,
             pipeline_cache: None,
-            subpass: 0,
             shader_stages: Vec::new(),
             shader_watch: Vec::new(),
             specialization: HashMap::new(),
@@ -179,7 +175,7 @@ impl PipelineBuilder {
                     | vk::ColorComponentFlags::G
                     | vk::ColorComponentFlags::B
                     | vk::ColorComponentFlags::A,
-                blend_enable: vk::TRUE,
+                blend_enable: vk::FALSE,
                 src_color_blend_factor: vk::BlendFactor::SRC_ALPHA,
                 dst_color_blend_factor: vk::BlendFactor::ONE_MINUS_SRC_ALPHA,
                 color_blend_op: vk::BlendOp::ADD,
@@ -196,11 +192,6 @@ impl PipelineBuilder {
 
     pub fn with_layout(mut self, layout: vk::PipelineLayout) -> Self {
         self.layout = Some(layout);
-        self
-    }
-
-    pub fn with_render_pass(mut self, render_pass: vk::RenderPass) -> Self {
-        self.render_pass = Some(render_pass);
         self
     }
 
@@ -227,11 +218,6 @@ impl PipelineBuilder {
         if cache != vk::PipelineCache::null() {
             self.pipeline_cache = Some(cache);
         }
-        self
-    }
-
-    pub fn with_subpass(mut self, subpass: u32) -> Self {
-        self.subpass = subpass;
         self
     }
 
@@ -456,11 +442,10 @@ impl PipelineBuilder {
             AshError::PipelineMissing("Pipeline layout must be provided".to_string())
         })?;
 
-        // Validate that either legacy RenderPass or Dynamic Rendering is configured
-        let use_dynamic_rendering = self.render_pass.is_none();
-        if use_dynamic_rendering && self.color_attachment_formats.is_empty() {
+        // Validate that Dynamic Rendering is configured
+        if self.color_attachment_formats.is_empty() {
             return Err(AshError::PipelineMissing(
-                "Either render_pass or dynamic rendering formats must be provided".to_string(),
+                "Dynamic rendering formats must be provided".to_string(),
             ));
         }
 
@@ -546,23 +531,19 @@ impl PipelineBuilder {
             .sample_shading_enable(self.multisample_cfg.enable_sample_shading)
             .min_sample_shading(self.multisample_cfg.min_sample_shading);
 
-        // Dynamic Rendering: Create VkPipelineRenderingCreateInfo if using format-based mode
-        let mut rendering_info = if use_dynamic_rendering {
-            Some(
-                vk::PipelineRenderingCreateInfo::default()
-                    .color_attachment_formats(&self.color_attachment_formats)
-                    .depth_attachment_format(
-                        self.depth_attachment_format
-                            .unwrap_or(vk::Format::UNDEFINED),
-                    )
-                    .stencil_attachment_format(
-                        self.stencil_attachment_format
-                            .unwrap_or(vk::Format::UNDEFINED),
-                    ),
-            )
-        } else {
-            None
-        };
+        // Dynamic Rendering: Create VkPipelineRenderingCreateInfo
+        let mut rendering_info = Some(
+            vk::PipelineRenderingCreateInfo::default()
+                .color_attachment_formats(&self.color_attachment_formats)
+                .depth_attachment_format(
+                    self.depth_attachment_format
+                        .unwrap_or(vk::Format::UNDEFINED),
+                )
+                .stencil_attachment_format(
+                    self.stencil_attachment_format
+                        .unwrap_or(vk::Format::UNDEFINED),
+                ),
+        );
 
         let mut pipeline_info = vk::GraphicsPipelineCreateInfo::default()
             .stages(&stage_infos)
@@ -576,10 +557,8 @@ impl PipelineBuilder {
             .base_pipeline_handle(vk::Pipeline::null())
             .base_pipeline_index(-1);
 
-        // Set either legacy RenderPass or Dynamic Rendering info
-        if let Some(render_pass) = self.render_pass {
-            pipeline_info = pipeline_info.render_pass(render_pass).subpass(self.subpass);
-        } else if let Some(ref mut rendering) = rendering_info {
+        // Set Dynamic Rendering info
+        if let Some(ref mut rendering) = rendering_info {
             pipeline_info = pipeline_info.push_next(rendering);
         }
 

@@ -108,6 +108,11 @@ pub struct CullObjectData {
     pub model_row2: [f32; 4],
     /// Model matrix row 3
     pub model_row3: [f32; 4],
+    /// Previous model matrix rows
+    pub prev_model_row0: [f32; 4],
+    pub prev_model_row1: [f32; 4],
+    pub prev_model_row2: [f32; 4],
+    pub prev_model_row3: [f32; 4],
     /// Draw command index (index into template buffer)
     pub draw_index: u32,
     /// Override first index
@@ -135,6 +140,7 @@ pub struct CullObjectData {
 pub struct CullObjectDesc {
     pub bounds: CullBoundingBox,
     pub model: Mat4,
+    pub prev_model: Mat4,
     pub draw_index: u32,
     pub first_index: u32,
     pub index_count: u32,
@@ -152,6 +158,10 @@ impl CullObjectData {
             model_row1: cols[1],
             model_row2: cols[2],
             model_row3: cols[3],
+            prev_model_row0: cols[0],
+            prev_model_row1: cols[1],
+            prev_model_row2: cols[2],
+            prev_model_row3: cols[3],
             draw_index,
             first_index: 0, // 0 = use template
             index_count: 0, // 0 = use template
@@ -195,6 +205,10 @@ impl CullObjectData {
             model_row1: cols[1],
             model_row2: cols[2],
             model_row3: cols[3],
+            prev_model_row0: cols[0],
+            prev_model_row1: cols[1],
+            prev_model_row2: cols[2],
+            prev_model_row3: cols[3],
             draw_index: info.draw_index,
             first_index: info.first_index,
             index_count: info.index_count,
@@ -342,80 +356,7 @@ pub struct IndirectDrawCommand {
     pub first_instance: u32,
 }
 
-/// Occlusion culling push constants
-/// Layout audit (must stay <= 128 bytes, Vulkan minimum guarantee):
-///   screen_params           [f32;4] = 16 bytes @ offset 0
-///   object_count            u32     =  4 bytes @ offset 16
-///   hiz_levels              u32     =  4 bytes @ offset 20
-///   base_index              u32     =  4 bytes @ offset 24
-///   indirect_start          u32     =  4 bytes @ offset 28
-///   object_buffer_addr      u64     =  8 bytes @ offset 32   (BDA)
-///   cluster_buffer_addr     u64     =  8 bytes @ offset 40   (BDA)
-///   visibility_buffer_addr  u64     =  8 bytes @ offset 48   (BDA)
-///   indirect_buffer_addr    u64     =  8 bytes @ offset 56   (BDA)
-///   count_buffer_addr       u64     =  8 bytes @ offset 64   (BDA)
-///   debug_mode              u32     =  4 bytes @ offset 72
-///   _pad                    u32     =  4 bytes @ offset 76
-///   TOTAL = 80 bytes (48 bytes free vs 128-byte minimum) ✅
-///
-/// NOTE: view_proj deliberately removed. Shaders fetch it from the
-/// FrameData UBO via a BDA pointer stored in the graphics push constant block.
-#[repr(C)]
-#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
-pub struct CullingPushConstants {
-    /// Screen dimensions (width, height, 1/width, 1/height)
-    pub screen_params: [f32; 4],
-    /// Number of objects to test
-    pub object_count: u32,
-    /// Hi-Z pyramid levels
-    pub hiz_levels: u32,
-    /// Base object index (for sub-range dispatches)
-    pub base_index: u32,
-    /// Indirect command start index in the output buffer
-    pub indirect_start: u32,
-    /// BDA: object data (InstanceData[]) — read-only input
-    pub object_buffer_addr: u64,
-    /// BDA: global cluster hierarchy — read-only input
-    pub cluster_buffer_addr: u64,
-    /// BDA: visibility flags[] — write output
-    pub visibility_buffer_addr: u64,
-    /// BDA: IndirectDrawCommand[] — write output
-    pub indirect_buffer_addr: u64,
-    /// BDA: atomic draw counter — read/write
-    pub count_buffer_addr: u64,
-    /// BDA: Hi-Z pyramid — read-only input
-    pub hiz_buffer_addr: u64,
-    /// Debug visualization mode (0=None, 1=LOD, 2=ClusterID)
-    pub debug_mode: u32,
-    pub _pad: u32,
-    /// BDA: Camera uniform buffer — read-only input
-    pub camera_buffer_addr: u64,
-}
-
-impl Default for CullingPushConstants {
-    fn default() -> Self {
-        const _: () = assert!(
-            std::mem::size_of::<CullingPushConstants>() <= 128,
-            "CullingPushConstants exceeds 128-byte Vulkan push constant minimum!"
-        );
-        Self {
-            screen_params: [1920.0, 1080.0, 1.0 / 1920.0, 1.0 / 1080.0],
-            object_count: 0,
-            hiz_levels: HIZ_LEVELS as u32,
-            base_index: 0,
-            indirect_start: 0,
-            object_buffer_addr: 0,
-            cluster_buffer_addr: 0,
-            visibility_buffer_addr: 0,
-            indirect_buffer_addr: 0,
-            count_buffer_addr: 0,
-            hiz_buffer_addr: 0,
-            debug_mode: 0,
-            _pad: 0,
-            camera_buffer_addr: 0,
-        }
-    }
-}
+// CullingPushConstants removed in favor of unified GpuPushConstants
 
 /// Culling performance metrics
 #[derive(Debug, Clone, Default)]
@@ -542,27 +483,18 @@ impl OcclusionCulling {
     }
 
     /// Create push constants
-    pub fn push_constants(&self, width: u32, height: u32) -> CullingPushConstants {
-        CullingPushConstants {
-            screen_params: [
-                width as f32,
-                height as f32,
-                1.0 / width as f32,
-                1.0 / height as f32,
-            ],
+    pub fn push_constants(&self) -> crate::renderer::types::GpuPushConstants {
+        crate::renderer::types::GpuPushConstants {
             object_count: self.objects.len() as u32,
-            hiz_levels: HIZ_LEVELS as u32,
             base_index: 0,
             indirect_start: 0,
-            object_buffer_addr: 0,
-            cluster_buffer_addr: 0,
-            visibility_buffer_addr: 0,
-            indirect_buffer_addr: 0,
-            count_buffer_addr: 0,
-            hiz_buffer_addr: 0,
+            instance_ptr: 0,
+            material_ptr: 0,
+            index_ptr: 0,
+            light_ptr: 0,
             debug_mode: 0,
-            _pad: 0,
-            camera_buffer_addr: 0,
+            frame_ptr: 0,
+            ..Default::default()
         }
     }
 

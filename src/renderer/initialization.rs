@@ -18,7 +18,7 @@ use crate::renderer::vcgs::IndirectDrawPass;
 use std::sync::{Arc, RwLock};
 use std::thread;
 
-pub type RenderPassResult = Result<(Arc<RwLock<HiZPass>>, Arc<RwLock<IndirectDrawPass>>)>;
+pub type PassResult = Result<(Arc<RwLock<HiZPass>>, Arc<RwLock<IndirectDrawPass>>)>;
 
 /// Configuration for main pipeline creation.
 pub struct MainPipelineCreateDesc<'a> {
@@ -359,19 +359,6 @@ pub unsafe fn init_resources(
         material_storage_buffer.write_element_at(0, &error_mat)?;
     }
 
-    // Initialize instance buffers for GPU culling/instancing
-    let mut instance_buffers = Vec::with_capacity(frame_count);
-    for _ in 0..frame_count {
-        let buffer = unsafe {
-            resources::InstanceBuffer::new(
-                Arc::clone(alloc),
-                Arc::clone(&device.device),
-                crate::renderer::vcgs::MAX_CULLABLE_OBJECTS,
-            )?
-        };
-        instance_buffers.push(buffer);
-    }
-
     let post_sampler = unsafe {
         device.device.create_sampler(
             &vk::SamplerCreateInfo::default()
@@ -396,7 +383,6 @@ pub unsafe fn init_resources(
         dummy_black_cube,
         dummy_black_2d,
         material_storage_buffer,
-        instance_buffers,
         post_sampler,
     })
 }
@@ -623,39 +609,6 @@ pub unsafe fn init_lighting_system(
     })
 }
 
-/// Creates the compute descriptor set layout for VSM passes.
-///
-/// # Safety
-/// The caller must ensure that the device is valid.
-pub unsafe fn create_vsm_compute_layout(device: &ash::Device) -> Result<vk::DescriptorSetLayout> {
-    let compute_bindings = [
-        // Binding 3: Page Table (Storage Image)
-        vk::DescriptorSetLayoutBinding::default()
-            .binding(3)
-            .descriptor_type(vk::DescriptorType::STORAGE_IMAGE)
-            .descriptor_count(1)
-            .stage_flags(vk::ShaderStageFlags::COMPUTE | vk::ShaderStageFlags::FRAGMENT),
-        // Binding 4: Physical Cache (Storage Image)
-        vk::DescriptorSetLayoutBinding::default()
-            .binding(4)
-            .descriptor_type(vk::DescriptorType::STORAGE_IMAGE)
-            .descriptor_count(1)
-            .stage_flags(vk::ShaderStageFlags::COMPUTE | vk::ShaderStageFlags::FRAGMENT),
-        // Binding 5: Scene Depth Buffer (Combined Image Sampler)
-        vk::DescriptorSetLayoutBinding::default()
-            .binding(5)
-            .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-            .descriptor_count(1)
-            .stage_flags(vk::ShaderStageFlags::COMPUTE),
-    ];
-
-    let compute_layout_info =
-        vk::DescriptorSetLayoutCreateInfo::default().bindings(&compute_bindings);
-    unsafe { device.create_descriptor_set_layout(&compute_layout_info, None) }.map_err(|e| {
-        AshError::VulkanError(format!("Failed to create VSM compute layout helper: {e}"))
-    })
-}
-
 pub fn init_post_processing(
     device: &Arc<ash::Device>,
     frame_count: usize,
@@ -715,7 +668,7 @@ pub unsafe fn initialize_occlusion_culling(
     bindless_manager: &mut crate::vulkan::BindlessManager,
     _black_texture: &crate::renderer::resources::Texture,
     extent: vk::Extent2D,
-) -> RenderPassResult {
+) -> PassResult {
     // 1. Create Hi-Z pass
     let mut hiz = HiZPass::new(Arc::clone(&device.device));
     unsafe { hiz.init(alloc, device, extent.width, extent.height)? };

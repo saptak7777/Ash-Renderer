@@ -33,9 +33,8 @@ layout(location = 1) out vec4 outNormal;
 layout(location = 2) out vec4 outAlbedo;
 layout(location = 3) out vec2 outMotion;
 
-// Set 1: VSM Resources (Bindings 0-2 removed in favor of BDA)
-layout(set = 1, binding = 3, r32ui) uniform uimage2DArray u_PageTable;
-layout(set = 1, binding = 4, rg32f) uniform image2D u_PhysicalMemory;
+// Set 1: Reserved for future use (Materials or other)
+// layout(set = 1, binding = 0) ...
 const uint MAX_LIGHTS_PER_TILE = 256;
 
 // NOTE: No srgb_to_linear function here.
@@ -57,12 +56,12 @@ float SampleVSM(vec3 worldPos) {
         return 1.0; // Outside shadow map -> Unshadowed
     }
 
-    // 3. Virtual Page Lookup
-    ivec2 pageTableSize = imageSize(u_PageTable).xy;
+    // Use bindless page table access (Sampled Image)
+    ivec2 pageTableSize = textureSize(global_page_tables[nonuniformEXT(u_Global.page_table_index)], 0).xy;
     ivec2 pageCoord = ivec2(shadowUV * vec2(pageTableSize));
     
     // Read Page Entry (R32UI) from Layer 0 (Directional Light)
-    uint pageEntry = imageLoad(u_PageTable, ivec3(pageCoord, 0)).r;
+    uint pageEntry = texelFetch(global_page_tables[nonuniformEXT(u_Global.page_table_index)], ivec3(pageCoord, 0), 0).r;
     
     // 4. Check Residency
     if (pageEntry == 0xFFFFFFFFu) return 1.0; 
@@ -77,7 +76,8 @@ float SampleVSM(vec3 worldPos) {
     ivec2 physicalTexel = ivec2(pX, pY) * 128 + ivec2(pageFract * 128.0);
     
     // 6. Sample VSM Moments (R32G32F: Depth, Depth^2)
-    vec2 moments = imageLoad(u_PhysicalMemory, physicalTexel).rg;
+    // Use bindless physical cache access (Sampled Image)
+    vec2 moments = texelFetch(global_textures[nonuniformEXT(u_Global.physical_cache_index)], physicalTexel, 0).rg;
     
     // 7. Chebyshev's Inequality
     float currentDepth = shadowNDC.z;
@@ -158,15 +158,15 @@ vec3 calculateDirectionalLight(
     vec3 kD = (1.0 - F) * (1.0 - metallic);
     vec3 diffuse = kD * albedo / PI;
     
-    // Shadows
-    float shadow = 0.0;
+    // Visibility (Shadows)
+    float visibility = 1.0;
     if (frame.scene_lighting.directional.direction.w > 0.5) {
-        shadow = ShadowCalculation(fragPosLightSpace, N, L);
+        visibility = ShadowCalculation(fragPosLightSpace, N, L);
     }
     
     vec3 radiance = frame.scene_lighting.directional.color_intensity.rgb * frame.scene_lighting.directional.color_intensity.w;
     
-    return (diffuse + specular) * radiance * NdotL * (1.0 - shadow);
+    return (diffuse + specular) * radiance * NdotL * visibility;
 }
 
 // IBL logic shifted to pbr_utils.glsl for cross-pass reuse
@@ -211,8 +211,10 @@ void main() {
     }
     
     // Alpha discard
-    if (baseSample.a * base_color_factor.a < mat.alpha_cutoff) {
-        discard;
+    if ((mat.flags & MATERIAL_FLAG_ALPHA_TESTED) != 0u) {
+        if (baseSample.a * base_color_factor.a < mat.alpha_cutoff) {
+            discard;
+        }
     }
 
     // Tangent-based Normal Mapping

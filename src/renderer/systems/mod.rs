@@ -252,8 +252,8 @@ impl Systems {
             .with_pipeline_cache(cache)
             .with_depth_format(depth_format)
             .with_depth_test(vk::CompareOp::GREATER_OR_EQUAL, true)
-            .with_cull_mode(vk::CullModeFlags::NONE)
-            .with_front_face(vk::FrontFace::CLOCKWISE)
+            .with_cull_mode(vk::CullModeFlags::BACK)
+            .with_front_face(vk::FrontFace::COUNTER_CLOCKWISE)
             .with_multisampling(multisample_config);
 
         if resources.gbuffer.is_some() {
@@ -263,7 +263,7 @@ impl Systems {
                         | vk::ColorComponentFlags::G
                         | vk::ColorComponentFlags::B
                         | vk::ColorComponentFlags::A,
-                    blend_enable: vk::TRUE,
+                    blend_enable: vk::FALSE,
                     src_color_blend_factor: vk::BlendFactor::SRC_ALPHA,
                     dst_color_blend_factor: vk::BlendFactor::ONE_MINUS_SRC_ALPHA,
                     color_blend_op: vk::BlendOp::ADD,

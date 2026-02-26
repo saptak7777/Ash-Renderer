@@ -126,23 +126,6 @@ impl ResourceRegistry {
         }
     }
 
-    /// Register a framebuffer for cleanup.
-    pub fn register_framebuffer(
-        &self,
-        framebuffer: vk::Framebuffer,
-        dependencies: &[ResourceId],
-    ) -> Result<ResourceId, ResourceError> {
-        self.add_resource(FramebufferResource::new(framebuffer, dependencies))
-    }
-
-    /// Register a render pass for cleanup.
-    pub fn register_render_pass(
-        &self,
-        render_pass: vk::RenderPass,
-    ) -> Result<ResourceId, ResourceError> {
-        self.add_resource(RenderPassResource::new(render_pass))
-    }
-
     /// Register a depth buffer (image + view) for cleanup.
     pub fn register_depth_buffer(
         &self,
@@ -554,52 +537,6 @@ impl Drop for ResourceRegistry {
     }
 }
 
-/// Framebuffer resource wrapper.
-struct FramebufferResource {
-    framebuffer: vk::Framebuffer,
-    cleaned: bool,
-    deps: Vec<ResourceId>,
-}
-
-impl FramebufferResource {
-    fn new(framebuffer: vk::Framebuffer, dependencies: &[ResourceId]) -> Self {
-        Self {
-            framebuffer,
-            cleaned: false,
-            deps: dependencies.to_vec(),
-        }
-    }
-}
-
-impl VulkanResourceCleanup for FramebufferResource {
-    fn cleanup_with_device(&mut self, device: &Device) -> Result<(), String> {
-        if self.cleaned || self.framebuffer == vk::Framebuffer::null() {
-            return Ok(());
-        }
-        // SAFETY: The ResourceRegistry ensures correct destroy order;
-        // dependents like pipelines/image views must be destroyed first.
-        unsafe {
-            device.destroy_framebuffer(self.framebuffer, None);
-        }
-        self.cleaned = true;
-        Ok(())
-    }
-
-    fn resource_type(&self) -> &'static str {
-        "Framebuffer"
-    }
-}
-
-impl VulkanResource for FramebufferResource {
-    fn is_cleaned_up(&self) -> bool {
-        self.cleaned
-    }
-
-    fn dependencies(&self) -> Vec<ResourceId> {
-        self.deps.clone()
-    }
-}
-
 /// Depth buffer resource wrapper (image + view + allocation).
 struct DepthBufferResource {
     image: vk::Image,
@@ -732,44 +669,6 @@ impl VulkanResourceCleanup for ImageViewResource {
 }
 
 impl VulkanResource for ImageViewResource {
-    fn is_cleaned_up(&self) -> bool {
-        self.cleaned
-    }
-}
-
-/// Render pass resource wrapper.
-struct RenderPassResource {
-    render_pass: vk::RenderPass,
-    cleaned: bool,
-}
-
-impl RenderPassResource {
-    fn new(render_pass: vk::RenderPass) -> Self {
-        Self {
-            render_pass,
-            cleaned: false,
-        }
-    }
-}
-
-impl VulkanResourceCleanup for RenderPassResource {
-    fn cleanup_with_device(&mut self, device: &Device) -> Result<(), String> {
-        if self.cleaned || self.render_pass == vk::RenderPass::null() {
-            return Ok(());
-        }
-        unsafe {
-            device.destroy_render_pass(self.render_pass, None);
-        }
-        self.cleaned = true;
-        Ok(())
-    }
-
-    fn resource_type(&self) -> &'static str {
-        "RenderPass"
-    }
-}
-
-impl VulkanResource for RenderPassResource {
     fn is_cleaned_up(&self) -> bool {
         self.cleaned
     }

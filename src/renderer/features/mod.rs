@@ -15,7 +15,7 @@ pub use feature_trait::{FeatureFrameContext, FeatureManager, FeatureRenderContex
 pub use light_culling::{
     GpuLight, LightCullingConfig, LightCullingPass, MAX_LIGHTS, MAX_LIGHTS_PER_TILE, TILE_SIZE,
 };
-pub use light_manager::{ForwardPlusInfo, LightManager};
+pub use light_manager::LightManager;
 pub use lighting::{DirectionalLight, LightingConfig, LightingFeature, PointLight, SpotLight};
 pub use post_processing::{PostProcessingConfig, PostProcessingFeature};
 pub use vsm::{

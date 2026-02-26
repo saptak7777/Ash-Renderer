@@ -4,32 +4,25 @@
 #extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
 #extension GL_EXT_nonuniform_qualifier : require
 
-#define SKIP_PUSH_CONSTANTS
 #include "../../interop/structures.glsl"
 
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 layout(constant_id = 0) const uint MAX_REQUESTS = 1024;
 
-layout(push_constant) uniform LocalPushConstants {
-    uint64_t global_ptr;
-} pc;
-
-// Scene Depth Buffer
-layout(set = 1, binding = 5) uniform sampler2D u_SceneDepth;
-
 void main() {
     ivec2 pixel_coord = ivec2(gl_GlobalInvocationID.xy);
-    ivec2 screen_size = textureSize(u_SceneDepth, 0);
+    
+    VsmGlobal u_Global = VsmGlobal(push.vsm_ptr);
+    VsmRequestBuffer requests = VsmRequestBuffer(u_Global.request_ptr);
+
+    ivec2 screen_size = textureSize(global_textures[nonuniformEXT(u_Global.scene_depth_index)], 0);
     
     if (pixel_coord.x >= screen_size.x || pixel_coord.y >= screen_size.y) return;
-
-    VsmGlobal u_Global = VsmGlobal(pc.global_ptr);
-    VsmRequestBuffer requests = VsmRequestBuffer(u_Global.request_ptr);
 
     vec2 uv = (vec2(pixel_coord) + 0.5) / vec2(screen_size);
 
     // 1. Sample Depth
-    float depth = texture(u_SceneDepth, uv).r;
+    float depth = texture(global_textures[nonuniformEXT(u_Global.scene_depth_index)], uv).r;
     
     // Skip skybox
     if (depth >= 1.0) return; 

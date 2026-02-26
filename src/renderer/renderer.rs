@@ -7,27 +7,23 @@
         diagnostics::{DiagnosticsMode, DiagnosticsOverlay, DiagnosticsState, GpuProfiler},
         features::vsm::VsmManager,
         frame_manager,
-        instancing::{BatchKey, InstanceData},
         passes::temporal_aa::{
             ConfigChangeType, ConfigMetrics, ConfigMetricsReport, ConfigValidationError, TaaConfig,
             Validate, detect_config_change,
         },
-        resources,
-        types::{DebugMode, DrawItem, MeshData, RenderCommand, RenderFrameContext, RendererConfig},
+        resources::{
+            self, BufferPool, MaterialDescriptor, MeshDescriptor, Resources, ResourcesInitInfo,
+        },
+        swapchain_manager,
+        types::{DebugMode, MeshData, RenderCommand, RenderFrameContext, RendererConfig},
     },
     vulkan::{self, Allocator, CommandBufferContext},
 };
 
 use ash::vk;
 use glam::Mat4;
-use rayon::prelude::*;
-use resources::{BufferPool, Resources, ResourcesInitInfo};
-use std::collections::HashMap;
 use std::sync::Arc;
 // use std::time::Instant; // Moved to Frame
-
-use super::swapchain_manager;
-use crate::renderer::resources::{MaterialDescriptor, MeshDescriptor};
 
 // RendererResources moved to init_types.rs
 
@@ -86,7 +82,6 @@ pub struct MainPassParameters<'a> {
     pub image_index: u32,
     pub scene_pipeline: vk::Pipeline,
     pub pipeline_layout_handle: vk::PipelineLayout,
-    pub batch_offsets: &'a HashMap<BatchKey, u32>,
     pub view: Mat4,
     pub projection: Mat4,
     pub swapchain_extent: vk::Extent2D,
@@ -379,7 +374,7 @@ impl Renderer {
         staging_resources: &mut Vec<crate::renderer::resources::BufferHandle>,
     ) -> Result<String> {
         let mut mesh = Mesh::from_descriptor(descriptor);
-        let key = Arc::clone(&mesh.name);
+        let key: Arc<str> = Arc::clone(&mesh.name);
 
         scene.upload_mesh(MeshUploadInfo {
             device: Arc::clone(&self.context.device.device),
@@ -420,210 +415,48 @@ impl Renderer {
         commands: &[RenderCommand],
     ) -> Result<()> {
         log::debug!("Submitting {} render commands", commands.len());
-        self.frame.draw_items.clear();
-        self.resources.instancing_manager_mut().begin_frame();
         scene.occlusion_culling.begin_frame();
 
-        const PARALLEL_THRESHOLD: usize = 1000;
+        // 1. Sort commands to minimize state changes
+        let mut sorted_commands: Vec<usize> = (0..commands.len()).collect();
+        sorted_commands.sort_by(|&a, &b| {
+            let cmd_a = &commands[a];
+            let cmd_b = &commands[b];
 
-        if commands.len() > PARALLEL_THRESHOLD {
-            // Parallel extraction for large command counts
-            use std::collections::HashMap;
+            // Sort by mesh handle then material
+            cmd_a.mesh_handle.cmp(&cmd_b.mesh_handle).then_with(|| {
+                cmd_a
+                    .material_handle
+                    .index
+                    .cmp(&cmd_b.material_handle.index)
+            })
+        });
 
-            // Capture only thread-safe fields
-            let mesh_data = &scene.mesh_data;
-            let material_manager = &scene.material_manager;
-            let strict_mode = self.systems.strict_mode;
-
-            let (draw_items, instance_batches) = commands
-                .par_iter()
-                .fold(
-                    || (Vec::new(), HashMap::<BatchKey, Vec<InstanceData>>::new()),
-                    |(items, mut batches), command| {
-                        if let Some(mesh_data_entry) = mesh_data.get(command.mesh_handle as usize) {
-                            let mesh_key = &mesh_data_entry.name;
-
-                            let material_handle = if command.material_handle.is_null() {
-                                mesh_data_entry.material_handle
-                            } else {
-                                command.material_handle
-                            };
-
-                            // Unreal-Style validation: get material or fallback to default
-                            let material = material_manager.get_material(material_handle);
-
-                            // Safety check: log if version mismatch (rare but possible)
-                            if !material_manager.is_handle_valid(material_handle) {
-                                let msg = format!("Invalid material handle {material_handle:?} detected for mesh handle {}, using default", command.mesh_handle);
-                                if strict_mode {
-                                    log::error!("{msg}");
-                                } else {
-                                    log::warn!("{msg}");
-                                }
-                            }
-
-
-                            let key = BatchKey::new(command.mesh_handle, material_handle);
-                            let mut instance = InstanceData::from_matrix(command.transform)
-                                .with_bounds(mesh_data_entry.bounds)
-                                .with_material_index(material_handle.index);
-                            if command.cast_shadows {
-                                instance.set_flag(crate::renderer::vcgs::CULL_FLAG_CAST_SHADOWS, true);
-                            }
-                            if command.is_hidden {
-                                instance.set_flag(crate::renderer::vcgs::CULL_FLAG_HIDDEN, true);
-                            }
-                            let item = DrawItem {
-                                key: mesh_key.clone(),
-                                mesh_id: command.mesh_handle,
-                                transform: command.transform,
-                                material: material.clone(),
-                                material_handle,
-                            };
-
-                            let mut items = items;
-                            items.push(item);
-
-                            batches
-                                .entry(key)
-                                .or_default()
-                                .extend(vec![instance]);
-                            (items, batches)
-                        } else if strict_mode {
-                            log::error!("Mesh handle {} not found in registry", command.mesh_handle);
-                            (items, batches)
-                        } else {
-                            (items, batches)
-                        }
-                    },
-                )
-                .reduce(
-                    || (Vec::new(), HashMap::<BatchKey, Vec<InstanceData>>::new()),
-                    |(mut a_items, mut a_batches), (b_items, b_batches)| {
-                        a_items.extend(b_items);
-                        for (key, instances) in b_batches {
-                            a_batches
-                                .entry(key)
-                                .or_default()
-                                .extend(instances);
-                        }
-                        (a_items, a_batches)
-                    },
-                );
-
-            // Merge results
-            self.frame.draw_items = draw_items;
-            for (key, instances) in instance_batches {
-                self.resources
-                    .instancing_manager_mut()
-                    .add_instances(key, instances);
-            }
-        } else {
-            // Sequential processing for small command counts (avoids rayon overhead)
-            for command in commands {
-                if let Some(mesh_data) = scene.mesh_data.get(command.mesh_handle as usize) {
-                    let mesh_key = &mesh_data.name;
-
+        // 2. Populate Occlusion Culling directly from sorted commands
+        for (i, &idx) in sorted_commands.iter().enumerate() {
+            let command = &commands[idx];
+            if let Some(mesh_data) = scene.mesh_data.get(command.mesh_handle as usize) {
+                if let Some(uploaded) = scene.model_renderer.get(&mesh_data.name) {
                     let material_handle = if command.material_handle.is_null() {
                         mesh_data.material_handle
                     } else {
                         command.material_handle
                     };
 
-                    let material = scene.material_manager.get_material(material_handle);
-
-                    // Safety check: log if version mismatch (rare but possible)
-                    if !scene.material_manager.is_handle_valid(material_handle) {
-                        let msg = format!(
-                            "Invalid material handle {material_handle:?} detected for mesh handle {}, using default",
-                            command.mesh_handle
-                        );
-                        if self.systems.strict_mode {
-                            log::error!("{msg}");
-                            return Err(AshError::VulkanError(msg));
-                        } else {
-                            log::warn!("{msg}");
-                        }
-                    }
-
-                    // We must fetch the uploaded mesh to get the actual buffer offsets
-                    if let Some(uploaded) = scene.model_renderer.get(&mesh_data.name) {
-                        let key = BatchKey::new(command.mesh_handle, material_handle);
-                        let item = DrawItem {
-                            key: mesh_key.clone(),
-                            mesh_id: command.mesh_handle,
-                            transform: command.transform,
-                            material: material.clone(),
-                            material_handle,
-                        };
-                        self.frame.draw_items.push(item);
-
-                        let instance = InstanceData::from_matrix(command.transform)
-                            .with_bounds(mesh_data.bounds)
-                            .with_cast_shadows(command.cast_shadows)
-                            .with_receive_shadows(command.receive_shadows)
-                            .with_hidden(command.is_hidden)
-                            .with_index_count(uploaded.index_count())
-                            .with_first_index((uploaded.index_offset.unwrap_or(0) / 4) as u32)
-                            .with_vertex_offset((uploaded.vertex_offset.unwrap_or(0) / 64) as i32)
-                            .with_material_index(material_handle.index);
-                        self.resources
-                            .instancing_manager_mut()
-                            .add_instance(key, instance);
-                    } else {
-                        log::error!(
-                            "Mesh '{}' found in registry but not in model renderer cache!",
-                            mesh_data.name
-                        );
-                    }
-                } else {
-                    let msg = format!("Mesh handle {} not found in registry", command.mesh_handle);
-                    if self.systems.strict_mode {
-                        log::error!("{msg}");
-                        return Err(AshError::MeshNotFound(command.mesh_handle));
-                    } else {
-                        log::warn!("{msg}");
-                    }
+                    scene.occlusion_culling.push_clusters(
+                        crate::renderer::vcgs::CullObjectDesc {
+                            bounds: mesh_data.bounds,
+                            model: command.transform,
+                            prev_model: command.prev_transform.unwrap_or(command.transform),
+                            draw_index: i as u32,
+                            first_index: (uploaded.index_offset.unwrap_or(0) / 4) as u32,
+                            index_count: uploaded.index_count(),
+                            material_index: material_handle.index,
+                            vertex_offset: (uploaded.vertex_offset.unwrap_or(0) / 64) as i32,
+                        },
+                        uploaded.clusters(),
+                    );
                 }
-            }
-        }
-
-        self.resources.instancing_manager_mut().finalize();
-
-        // Sort draw items to minimize pipeline and material changes
-        self.frame.draw_items.sort_by(|a, b| {
-            a.material
-                .name
-                .cmp(&b.material.name)
-                .then_with(|| a.key.cmp(&b.key))
-        });
-
-        // POPULATE OCCLUSION CULLING FROM SORTED ITEMS
-        for (i, item) in self.frame.draw_items.iter().enumerate() {
-            if let Some(uploaded) = scene.model_renderer.get(&item.key) {
-                let bounds = scene
-                    .mesh_data
-                    .get(item.mesh_id as usize)
-                    .map(|m| m.bounds)
-                    .unwrap_or_else(|| {
-                        crate::renderer::CullBoundingBox::new(
-                            glam::Vec3::ZERO,
-                            glam::Vec3::ONE * 100.0,
-                        )
-                    });
-
-                scene.occlusion_culling.push_clusters(
-                    crate::renderer::vcgs::CullObjectDesc {
-                        bounds,
-                        model: item.transform,
-                        draw_index: i as u32,
-                        first_index: (uploaded.index_offset.unwrap_or(0) / 4) as u32,
-                        index_count: uploaded.index_count(),
-                        material_index: item.material_handle.index,
-                        vertex_offset: (uploaded.vertex_offset.unwrap_or(0) / 64) as i32,
-                    },
-                    uploaded.clusters(),
-                );
             }
         }
 
@@ -747,21 +580,6 @@ impl Renderer {
             .map(|d| (d.view(), d.image(), d.format()))
             .ok_or_else(|| AshError::VulkanError("Depth buffer missing".into()))?;
 
-        // Fallback Logic: Prepare DrawItems for CPU-side batching if indirect is disabled
-        let draw_items: Vec<DrawItem> = params
-            .batch_offsets
-            .keys()
-            .map(|key| {
-                DrawItem {
-                    key: Arc::from(format!("{}", key.mesh_id)), // Assuming we can use ID as key for now or resolve from manager
-                    mesh_id: key.mesh_id,
-                    transform: Mat4::IDENTITY, // Instance data handles transform
-                    material: crate::renderer::resources::Material::default(), // Placeholder
-                    material_handle: key.material_id,
-                }
-            })
-            .collect();
-
         // Create a dummy transform for feature rendering context
         let dummy_transform = crate::renderer::Transform::identity();
 
@@ -771,7 +589,6 @@ impl Renderer {
             command_buffer: cmd_ctx,
             scene: params.scene,
             bindless_descriptor_set: self.resources.assets.bindless_manager.descriptor_set(),
-            vsm_descriptor_set: self.vsm_manager.get_resources()?.descriptor_set,
             vsm_manager: &self.vsm_manager,
             swapchain_extent: params.swapchain_extent,
             frame_ptr: self.resources.uniform_buffers[frame_index]
@@ -788,6 +605,7 @@ impl Renderer {
             depth_view,
             normal_view: self.resources.gbuffer.as_ref().map(|g| g.normal_view()),
             albedo_view: self.resources.gbuffer.as_ref().map(|g| g.albedo_view()),
+            motion_image: self.resources.gbuffer.as_ref().map(|g| g.motion_image()),
             motion_view: self.resources.gbuffer.as_ref().map(|g| g.motion_view()),
             skybox: self.systems.skybox_pass.as_ref(),
             features: Some(&self.systems.features),
@@ -796,7 +614,6 @@ impl Renderer {
             transform: &dummy_transform,
             is_swapchain_image: self.systems.hdr_system.is_none(),
             depth_format,
-            draw_items: &draw_items,
             vsm_ptr: unsafe {
                 let info = vk::BufferDeviceAddressInfo::default()
                     .buffer(self.vsm_manager.get_resources()?.metadata_buffer);
@@ -804,12 +621,9 @@ impl Renderer {
             },
         };
 
-        self.systems.pipeline.render_geometry(
-            &geo_ctx,
-            &self.resources,
-            params.scene,
-            frame_index,
-        )?;
+        self.systems
+            .pipeline
+            .render_geometry(&geo_ctx, params.scene, frame_index)?;
 
         Ok(())
     }
@@ -998,23 +812,24 @@ impl Renderer {
             // â”€â”€ 1. Host-Write Barrier â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
             // Ensure CPU-side buffer writes (uniforms, instance data) are visible to
             // all GPU shader stages before any rendering begins.
-            let global_barrier = vk::MemoryBarrier::default()
-                .src_access_mask(vk::AccessFlags::HOST_WRITE | vk::AccessFlags::SHADER_WRITE)
+            let global_barrier = vk::MemoryBarrier2::default()
+                .src_stage_mask(
+                    vk::PipelineStageFlags2::HOST | vk::PipelineStageFlags2::COMPUTE_SHADER,
+                )
+                .src_access_mask(vk::AccessFlags2::HOST_WRITE | vk::AccessFlags2::SHADER_WRITE)
+                .dst_stage_mask(
+                    vk::PipelineStageFlags2::ALL_GRAPHICS | vk::PipelineStageFlags2::COMPUTE_SHADER,
+                )
                 .dst_access_mask(
-                    vk::AccessFlags::SHADER_READ
-                        | vk::AccessFlags::UNIFORM_READ
-                        | vk::AccessFlags::INDEX_READ
-                        | vk::AccessFlags::VERTEX_ATTRIBUTE_READ,
+                    vk::AccessFlags2::SHADER_READ
+                        | vk::AccessFlags2::UNIFORM_READ
+                        | vk::AccessFlags2::INDEX_READ
+                        | vk::AccessFlags2::VERTEX_ATTRIBUTE_READ,
                 );
-            self.context.device.device.cmd_pipeline_barrier(
-                command_buffer,
-                vk::PipelineStageFlags::HOST | vk::PipelineStageFlags::COMPUTE_SHADER,
-                vk::PipelineStageFlags::ALL_GRAPHICS | vk::PipelineStageFlags::COMPUTE_SHADER,
-                vk::DependencyFlags::empty(),
-                &[global_barrier],
-                &[],
-                &[],
-            );
+
+            let memory_barriers = [global_barrier];
+            let dep_info = vk::DependencyInfo::default().memory_barriers(&memory_barriers);
+            cmd_ctx.pipeline_barrier2(&dep_info);
 
             // â”€â”€ 2. GPU-Driven Occlusion Culling â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
             // Upload per-object draw data then run the compute culling pass.
@@ -1104,8 +919,12 @@ impl Renderer {
                         bindless_set,
                         vertex_addr,
                         index_addr,
-                        object_addr: self.resources.instance_buffer_addresses
-                            [self.frame.frame_manager.get_current_frame_index()],
+                        object_addr: if let Some(ref arc) = self.systems.culling.indirect_draw_pass
+                        {
+                            arc.read().map(|p| p.object_buffer_address()).unwrap_or(0)
+                        } else {
+                            0
+                        },
                         object_count: scene.occlusion_culling.object_count() as u32,
                     },
                     |cmd| {
@@ -1145,9 +964,14 @@ impl Renderer {
             // â”€â”€ 5. Light Culling Pass â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
             // Tile the scene lights for Forward+ shading.
             if let Some(ref fp) = self.systems.pipeline.forward_plus {
+                let frame_ptr = self.resources.uniform_buffers[frame_index]
+                    .read()
+                    .map_err(|_| AshError::LockPoisoned("UniformBuffer".to_string()))?
+                    .device_address();
+
                 fp.read()
                     .map_err(|_| AshError::LockPoisoned("ForwardPlus".to_string()))?
-                    .cull_lights(command_buffer, frame_index)?;
+                    .cull_lights(command_buffer, frame_index, frame_ptr)?;
             }
 
             // â”€â”€ 6. Geometry / Main Pass â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -1185,7 +1009,6 @@ impl Renderer {
                     image_index,
                     scene_pipeline,
                     pipeline_layout_handle,
-                    batch_offsets: &self.resources.batch_offsets,
                     view,
                     projection: jitter_proj,
                     swapchain_extent: extent,
@@ -1735,7 +1558,7 @@ impl Drop for Renderer {
         unsafe {
             // CRITICAL FIX: Explicitly drop post-processing resources before general resource cleanup.
             // This prevents access violations during shutdown if the window/surface is destroyed.
-            // ORDER MATTERS: Pipeline depends on RenderPass (in FullscreenPass), so destroy Pipeline FIRST.
+            // ORDER MATTERS: Pipeline depends on resources destroyed in its children, so destroy Pipeline FIRST.
             swapchain_manager::cleanup_pipeline(self);
 
             self.context
@@ -1749,12 +1572,8 @@ impl Drop for Renderer {
             self.systems.features.cleanup();
 
             // Cleanup all tracked resources via registry
-            if let Err(e) = self.context.resources.cleanup() {
-                log::error!("Resource cleanup failed: {e}");
-            }
+            if let Err(_e) = self.context.resources.cleanup() {}
         }
-
-        self.frame.draw_items.clear();
 
         self.resources.depth_buffer = None;
         self.systems.pipeline.main_graphics_pipeline = None;

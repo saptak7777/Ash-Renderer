@@ -25,6 +25,7 @@ pub struct Material {
     pub metallic_roughness_texture_index: Option<u32>,
     pub occlusion_texture_index: Option<u32>,
     pub emissive_texture_index: Option<u32>,
+    pub flags: u32,
 }
 
 impl Default for Material {
@@ -45,6 +46,7 @@ impl Default for Material {
             metallic_roughness_texture_index: None,
             occlusion_texture_index: None,
             emissive_texture_index: None,
+            flags: 0,
         }
     }
 }
@@ -68,6 +70,7 @@ impl Material {
             metallic_roughness_texture_index: None,
             occlusion_texture_index: None,
             emissive_texture_index: None,
+            flags: 0,
         }
     }
 
@@ -80,6 +83,7 @@ impl Material {
         mat_uniform.set_occlusion_strength(self.occlusion_strength);
         mat_uniform.set_normal_scale(self.normal_scale);
         mat_uniform.set_alpha_cutoff(self.alpha_cutoff);
+        mat_uniform.flags = self.flags;
 
         let base_idx = self.texture_index.unwrap_or(u32::MAX) as i32;
         let normal_idx = self.normal_texture_index.unwrap_or(u32::MAX) as i32;

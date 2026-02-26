@@ -16,11 +16,19 @@ pub struct MvpMatrices {
     pub projection: Mat4,
     pub view_proj: Mat4,
     pub prev_view_proj: Mat4, // For TAA motion vectors
+    pub view_proj_no_jitter: Mat4,
+    pub prev_view_proj_no_jitter: Mat4,
     pub light_space_matrix: Mat4,
+    pub inv_projection: Mat4,
     pub normal_matrix: Mat4,
     pub camera_pos: Vec4,
     pub scene_lighting: crate::renderer::features::SceneLighting,
+    pub screen_params: Vec4, // width, height, 1/width, 1/height
+    pub hiz_levels: u32,
+    pub _pad_frame: u32,
 }
+
+pub const MATERIAL_FLAG_ALPHA_TESTED: u32 = 1 << 0;
 
 /// Material parameters exposed to the GPU
 #[repr(C)]
@@ -37,7 +45,7 @@ pub struct MaterialUniform {
     pub emissive_texture_index: i32,
     pub tint_index: i32,
     pub alpha_cutoff: f32,
-    pub _padding: [f32; 1], // Explicit padding to maintain 16-byte alignment for std430/Rust Vec4
+    pub flags: u32,
 }
 
 impl Default for MaterialUniform {
@@ -50,7 +58,7 @@ impl Default for MaterialUniform {
             emissive_texture_index: -1,
             tint_index: -1,
             alpha_cutoff: 0.1,
-            _padding: [0.0; 1],
+            flags: 0,
         }
     }
 }
@@ -104,10 +112,16 @@ impl Default for MvpMatrices {
             projection: Mat4::IDENTITY,
             view_proj: Mat4::IDENTITY,
             prev_view_proj: Mat4::IDENTITY,
+            view_proj_no_jitter: Mat4::IDENTITY,
+            prev_view_proj_no_jitter: Mat4::IDENTITY,
             light_space_matrix: Mat4::IDENTITY,
+            inv_projection: Mat4::IDENTITY,
             normal_matrix: Mat4::IDENTITY,
             camera_pos: Vec4::ZERO,
             scene_lighting: crate::renderer::features::SceneLighting::default(),
+            screen_params: Vec4::ZERO,
+            hiz_levels: 0,
+            _pad_frame: 0,
         }
     }
 }
@@ -148,6 +162,7 @@ impl MvpMatrices {
         self.projection = Mat4::perspective_rh(fovy, aspect, near, far);
         // Flip Y for Vulkan's coordinate system (Y points down in NDC)
         self.projection.y_axis.y *= -1.0;
+        self.inv_projection = self.projection.inverse();
 
         self.recalc_view_proj();
     }

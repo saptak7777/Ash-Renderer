@@ -114,7 +114,6 @@ impl VsmManager {
             VsmComputePipelines::new(
                 Arc::clone(&device),
                 bindless_manager.descriptor_set_layout(),
-                resources.compute_layout,
                 config.max_requests_per_frame,
             )?
         };
@@ -144,6 +143,10 @@ impl VsmManager {
             light_dir: glam::Vec4::ZERO,
             page_table_size: config.page_table_resolution(),
             page_table_index: 0,
+            physical_cache_index: 0,
+            scene_depth_index: 0,
+            page_table_storage_index: 0,
+            physical_cache_storage_index: 0,
             request_ptr: 0,
             allocation_ptr: 0,
             _pad3: 0,
@@ -314,7 +317,7 @@ impl VsmManager {
         cmd: vk::CommandBuffer,
         bindless_set: vk::DescriptorSet,
         _frame_index: u32,
-        depth_view: vk::ImageView,
+        _depth_view: vk::ImageView,
         screen_width: u32,
         screen_height: u32,
     ) -> Result<()> {
@@ -374,38 +377,31 @@ impl VsmManager {
                 0,
             );
 
-            let reset_barrier = vk::BufferMemoryBarrier::default()
-                .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
-                .dst_access_mask(vk::AccessFlags::SHADER_READ | vk::AccessFlags::SHADER_WRITE)
+            let reset_barrier = vk::BufferMemoryBarrier2::default()
+                .src_stage_mask(vk::PipelineStageFlags2::TRANSFER)
+                .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
+                .dst_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
+                .dst_access_mask(vk::AccessFlags2::SHADER_READ | vk::AccessFlags2::SHADER_WRITE)
                 .buffer(inner.resources.request_buffers[buffer_index].buffer)
                 .offset(0)
                 .size(8);
 
-            self.device.cmd_pipeline_barrier(
-                cmd,
-                vk::PipelineStageFlags::TRANSFER,
-                vk::PipelineStageFlags::COMPUTE_SHADER,
-                vk::DependencyFlags::empty(),
-                &[],
-                &[reset_barrier],
-                &[],
-            );
+            let buffer_barriers = [reset_barrier];
+            let dep_info = vk::DependencyInfo::default().buffer_memory_barriers(&buffer_barriers);
+            self.device.cmd_pipeline_barrier2(cmd, &dep_info);
         }
 
         // 3. Update Analysis Descriptors (Bind Scene Depth and the buffer we just cleared)
-        inner
-            .resources
-            .update_analysis_descriptors(depth_view, self.current_frame)?;
+        // (Now handled via Set 0 and VsmGlobal push constants)
 
         unsafe {
-            // 2. Bind Descriptor Sets (Standardized Dual-Set Layout)
-            let descriptor_sets = [bindless_set, inner.resources.descriptor_set];
+            // Binding Set 0 for Analyzer
             self.device.cmd_bind_descriptor_sets(
                 cmd,
                 vk::PipelineBindPoint::COMPUTE,
                 inner.compute_pipelines.analyze.layout(),
-                0, // Start at set 0
-                &descriptor_sets,
+                0,
+                &[bindless_set],
                 &[],
             );
 
@@ -421,36 +417,62 @@ impl VsmManager {
                 vk::BufferDeviceAddressInfo::default().buffer(inner.resources.metadata_buffer);
             let global_ptr = self.device.get_buffer_device_address(&addr_info);
 
+            let push_constants = crate::renderer::types::GpuPushConstants {
+                vsm_ptr: global_ptr,
+                ..Default::default()
+            };
+
             self.device.cmd_push_constants(
                 cmd,
                 inner.compute_pipelines.analyze.layout(),
                 vk::ShaderStageFlags::COMPUTE,
                 0,
-                bytemuck::bytes_of(&global_ptr),
+                bytemuck::bytes_of(&push_constants),
             );
 
+            // Transition physical cache to GENERAL for clearing (if it was in SHADER_READ_ONLY) (Sync2)
+            let cache_to_general = vk::ImageMemoryBarrier2::default()
+                .src_stage_mask(
+                    vk::PipelineStageFlags2::FRAGMENT_SHADER
+                        | vk::PipelineStageFlags2::COMPUTE_SHADER,
+                )
+                .src_access_mask(vk::AccessFlags2::SHADER_READ)
+                .dst_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
+                .dst_access_mask(vk::AccessFlags2::SHADER_WRITE)
+                .old_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+                .new_layout(vk::ImageLayout::GENERAL)
+                .image(inner.resources.physical_cache)
+                .subresource_range(vk::ImageSubresourceRange {
+                    aspect_mask: vk::ImageAspectFlags::COLOR,
+                    base_mip_level: 0,
+                    level_count: 1,
+                    base_array_layer: 0,
+                    layer_count: 1,
+                });
+
+            let image_barriers = [cache_to_general];
+            let dep_info = vk::DependencyInfo::default().image_memory_barriers(&image_barriers);
+            self.device.cmd_pipeline_barrier2(cmd, &dep_info);
             let groups_x = screen_width.div_ceil(8);
             let groups_y = screen_height.div_ceil(8);
             self.device.cmd_dispatch(cmd, groups_x, groups_y, 1);
 
-            // 4. Barrier: Ensure Request Buffer updates are visible to CPU or next dispatch
+            // 4. Barrier: Ensure Request Buffer updates are visible to CPU or next dispatch (Sync2)
             let buffer_index = self.current_frame as usize % inner.resources.request_buffers.len();
-            let request_barrier = vk::BufferMemoryBarrier::default()
-                .src_access_mask(vk::AccessFlags::SHADER_WRITE)
-                .dst_access_mask(vk::AccessFlags::SHADER_READ | vk::AccessFlags::HOST_READ)
+            let request_barrier = vk::BufferMemoryBarrier2::default()
+                .src_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
+                .src_access_mask(vk::AccessFlags2::SHADER_WRITE)
+                .dst_stage_mask(
+                    vk::PipelineStageFlags2::COMPUTE_SHADER | vk::PipelineStageFlags2::HOST,
+                )
+                .dst_access_mask(vk::AccessFlags2::SHADER_READ | vk::AccessFlags2::HOST_READ)
                 .buffer(inner.resources.request_buffers[buffer_index].buffer)
                 .offset(0)
                 .size(vk::WHOLE_SIZE);
 
-            self.device.cmd_pipeline_barrier(
-                cmd,
-                vk::PipelineStageFlags::COMPUTE_SHADER,
-                vk::PipelineStageFlags::COMPUTE_SHADER | vk::PipelineStageFlags::HOST,
-                vk::DependencyFlags::empty(),
-                &[],
-                &[request_barrier],
-                &[],
-            );
+            let buffer_barriers = [request_barrier];
+            let dep_info = vk::DependencyInfo::default().buffer_memory_barriers(&buffer_barriers);
+            self.device.cmd_pipeline_barrier2(cmd, &dep_info);
         }
 
         if !new_allocations.is_empty() {
@@ -465,41 +487,51 @@ impl VsmManager {
             unsafe {
                 // 5. Dispatch Allocator (Update Page Table)
                 let group_count = alloc_count.div_ceil(64);
+
+                let addr_info =
+                    vk::BufferDeviceAddressInfo::default().buffer(inner.resources.metadata_buffer);
+                let global_ptr = self.device.get_buffer_device_address(&addr_info);
+
                 self.device.cmd_bind_pipeline(
                     cmd,
                     vk::PipelineBindPoint::COMPUTE,
                     inner.compute_pipelines.allocate.handle(),
                 );
 
-                // Binding both sets for Allocator
-                let descriptor_sets = [bindless_set, inner.resources.descriptor_set];
+                // Binding Set 0 for Allocator
                 self.device.cmd_bind_descriptor_sets(
                     cmd,
                     vk::PipelineBindPoint::COMPUTE,
                     inner.compute_pipelines.allocate.layout(),
                     0,
-                    &descriptor_sets,
+                    &[bindless_set],
                     &[],
                 );
 
-                let addr_info =
-                    vk::BufferDeviceAddressInfo::default().buffer(inner.resources.metadata_buffer);
-                let global_ptr = self.device.get_buffer_device_address(&addr_info);
+                let push_constants = crate::renderer::types::GpuPushConstants {
+                    vsm_ptr: global_ptr,
+                    ..Default::default()
+                };
 
                 self.device.cmd_push_constants(
                     cmd,
                     inner.compute_pipelines.allocate.layout(),
                     vk::ShaderStageFlags::COMPUTE,
                     0,
-                    bytemuck::bytes_of(&global_ptr),
+                    bytemuck::bytes_of(&push_constants),
                 );
 
                 self.device.cmd_dispatch(cmd, group_count, 1, 1);
 
-                // 6. Barrier: Ensure Page Table update finishes
-                let table_barrier = vk::ImageMemoryBarrier::default()
-                    .src_access_mask(vk::AccessFlags::SHADER_WRITE)
-                    .dst_access_mask(vk::AccessFlags::SHADER_READ)
+                // 6. Barrier: Ensure Page Table update finishes (Sync2)
+                let table_barrier = vk::ImageMemoryBarrier2::default()
+                    .src_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
+                    .src_access_mask(vk::AccessFlags2::SHADER_WRITE)
+                    .dst_stage_mask(
+                        vk::PipelineStageFlags2::COMPUTE_SHADER
+                            | vk::PipelineStageFlags2::FRAGMENT_SHADER,
+                    )
+                    .dst_access_mask(vk::AccessFlags2::SHADER_READ)
                     .old_layout(vk::ImageLayout::GENERAL)
                     .new_layout(vk::ImageLayout::GENERAL)
                     .image(inner.resources.page_table)
@@ -511,17 +543,9 @@ impl VsmManager {
                         layer_count: inner.resources.config().clipmap_levels.max(1),
                     });
 
-                self.device.cmd_pipeline_barrier(
-                    cmd,
-                    vk::PipelineStageFlags::COMPUTE_SHADER,
-                    vk::PipelineStageFlags::COMPUTE_SHADER
-                        | vk::PipelineStageFlags::FRAGMENT_SHADER,
-                    vk::DependencyFlags::empty(),
-                    &[],
-                    &[],
-                    &[table_barrier],
-                );
-
+                let image_barriers = [table_barrier];
+                let dep_info = vk::DependencyInfo::default().image_memory_barriers(&image_barriers);
+                self.device.cmd_pipeline_barrier2(cmd, &dep_info);
                 // 7. Dispatch Clear (Clear Physical Memory)
                 self.device.cmd_bind_pipeline(
                     cmd,
@@ -529,32 +553,41 @@ impl VsmManager {
                     inner.compute_pipelines.clear.handle(),
                 );
 
-                // Binding both sets for Clear
-                let descriptor_sets = [bindless_set, inner.resources.descriptor_set];
+                // Binding Set 0 for Clear
                 self.device.cmd_bind_descriptor_sets(
                     cmd,
                     vk::PipelineBindPoint::COMPUTE,
                     inner.compute_pipelines.clear.layout(),
                     0,
-                    &descriptor_sets,
+                    &[bindless_set],
                     &[],
                 );
+
+                let push_constants = crate::renderer::types::GpuPushConstants {
+                    vsm_ptr: global_ptr,
+                    ..Default::default()
+                };
 
                 self.device.cmd_push_constants(
                     cmd,
                     inner.compute_pipelines.clear.layout(),
                     vk::ShaderStageFlags::COMPUTE,
                     0,
-                    bytemuck::bytes_of(&global_ptr),
+                    bytemuck::bytes_of(&push_constants),
                 );
 
                 // 16x16 local size -> 8x8 groups per 128x128 page
                 self.device.cmd_dispatch(cmd, 8, 8, alloc_count);
 
-                // 8. Barrier: Physical cache clear finishes
-                let cache_barrier = vk::ImageMemoryBarrier::default()
-                    .src_access_mask(vk::AccessFlags::SHADER_WRITE)
-                    .dst_access_mask(vk::AccessFlags::SHADER_READ)
+                // 8. Barrier: Physical cache clear finishes (Sync2)
+                let cache_barrier = vk::ImageMemoryBarrier2::default()
+                    .src_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
+                    .src_access_mask(vk::AccessFlags2::SHADER_WRITE)
+                    .dst_stage_mask(
+                        vk::PipelineStageFlags2::COMPUTE_SHADER
+                            | vk::PipelineStageFlags2::FRAGMENT_SHADER,
+                    )
+                    .dst_access_mask(vk::AccessFlags2::SHADER_READ)
                     .old_layout(vk::ImageLayout::GENERAL)
                     .new_layout(vk::ImageLayout::GENERAL)
                     .image(inner.resources.physical_cache)
@@ -566,16 +599,9 @@ impl VsmManager {
                         layer_count: 1,
                     });
 
-                self.device.cmd_pipeline_barrier(
-                    cmd,
-                    vk::PipelineStageFlags::COMPUTE_SHADER,
-                    vk::PipelineStageFlags::COMPUTE_SHADER
-                        | vk::PipelineStageFlags::FRAGMENT_SHADER,
-                    vk::DependencyFlags::empty(),
-                    &[],
-                    &[],
-                    &[cache_barrier],
-                );
+                let image_barriers = [cache_barrier];
+                let dep_info = vk::DependencyInfo::default().image_memory_barriers(&image_barriers);
+                self.device.cmd_pipeline_barrier2(cmd, &dep_info);
             }
         }
 
@@ -627,22 +653,6 @@ impl VsmManager {
             crate::AshError::VulkanError("VSM is disabled or uninitialized".into())
         })?;
         Ok(inner.resources.page_table_sampler)
-    }
-
-    /// Get shadow render pass
-    pub fn shadow_render_pass(&self) -> Result<vk::RenderPass> {
-        let inner = self.inner().ok_or_else(|| {
-            crate::AshError::VulkanError("VSM is disabled or uninitialized".into())
-        })?;
-        Ok(inner.shadow_pass.render_pass)
-    }
-
-    /// Get shadow framebuffer
-    pub fn shadow_framebuffer(&self) -> Result<vk::Framebuffer> {
-        let inner = self.inner().ok_or_else(|| {
-            crate::AshError::VulkanError("VSM is disabled or uninitialized".into())
-        })?;
-        Ok(inner.shadow_pass.framebuffer)
     }
 
     /// Get configuration
@@ -701,6 +711,12 @@ impl VsmManager {
 
         // 1. Dispatch Shadow Culling for the light view
         // We use clipmap level 0 for the generic shadow culling pass for now.
+        let vsm_ptr = unsafe {
+            self.device.get_buffer_device_address(
+                &vk::BufferDeviceAddressInfo::default().buffer(inner.resources.metadata_buffer),
+            )
+        };
+
         unsafe {
             inner.shadow_cull_pass.cull_shadows(
                 args.cmd,
@@ -712,23 +728,28 @@ impl VsmManager {
                     base_index: 0,
                     clipmap_level: 0,
                     object_buffer_ptr: args.object_addr,
+                    vsm_ptr,
                 },
             );
         }
 
         let cull_barriers = [
-            vk::BufferMemoryBarrier::default()
-                .src_access_mask(vk::AccessFlags::SHADER_WRITE)
-                .dst_access_mask(vk::AccessFlags::INDIRECT_COMMAND_READ)
+            vk::BufferMemoryBarrier2::default()
+                .src_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
+                .src_access_mask(vk::AccessFlags2::SHADER_WRITE)
+                .dst_stage_mask(vk::PipelineStageFlags2::DRAW_INDIRECT)
+                .dst_access_mask(vk::AccessFlags2::INDIRECT_COMMAND_READ)
                 .buffer(
                     inner.shadow_cull_pass.indirect_buffers
                         [self.current_frame as usize % inner.resources.request_buffers.len()],
                 )
                 .offset(0)
                 .size(vk::WHOLE_SIZE),
-            vk::BufferMemoryBarrier::default()
-                .src_access_mask(vk::AccessFlags::SHADER_WRITE)
-                .dst_access_mask(vk::AccessFlags::INDIRECT_COMMAND_READ)
+            vk::BufferMemoryBarrier2::default()
+                .src_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
+                .src_access_mask(vk::AccessFlags2::SHADER_WRITE)
+                .dst_stage_mask(vk::PipelineStageFlags2::DRAW_INDIRECT)
+                .dst_access_mask(vk::AccessFlags2::INDIRECT_COMMAND_READ)
                 .buffer(
                     inner.shadow_cull_pass.count_buffers
                         [self.current_frame as usize % inner.resources.request_buffers.len()],
@@ -738,17 +759,9 @@ impl VsmManager {
         ];
 
         unsafe {
-            self.device.cmd_pipeline_barrier(
-                args.cmd,
-                vk::PipelineStageFlags::COMPUTE_SHADER,
-                vk::PipelineStageFlags::DRAW_INDIRECT,
-                vk::DependencyFlags::empty(),
-                &[],
-                &cull_barriers,
-                &[],
-            );
+            let dep_info = vk::DependencyInfo::default().buffer_memory_barriers(&cull_barriers);
+            self.device.cmd_pipeline_barrier2(args.cmd, &dep_info);
         }
-
         // 2. Render pages
         unsafe {
             inner.shadow_pass.render_pages(

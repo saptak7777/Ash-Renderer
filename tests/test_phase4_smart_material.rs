@@ -39,6 +39,7 @@ fn test_phase4_smart_material() {
         mesh_handle: 1,
         material_handle: ash_renderer::renderer::MaterialHandle::null(), // null means "auto-select"
         transform: glam::Mat4::IDENTITY,
+        prev_transform: None,
         cast_shadows: true,
         receive_shadows: true,
         is_transparent: false,
@@ -83,6 +84,7 @@ fn test_phase4_smart_material() {
         mesh_handle: 1,
         material_handle: registered_handle, // Explicit handle
         transform: glam::Mat4::IDENTITY,
+        prev_transform: None,
         cast_shadows: true,
         receive_shadows: true,
         is_transparent: false,

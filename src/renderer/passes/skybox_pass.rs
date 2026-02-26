@@ -6,29 +6,7 @@ use crate::{
 use ash::vk;
 use std::sync::Arc;
 
-/// Push constants for skybox rendering.
-///
-/// Layout MUST match `skybox.vert` / `skybox.frag` exactly:
-///   frame_ptr      u64  @ offset  0  (8 bytes)
-///   skybox_index   u32  @ offset  8  (4 bytes)
-///   _pad0          u32  @ offset 12  (4 bytes)  — align next field
-///   _pad1         [u64] @ offset 16  (64 bytes) — bridge to offset 80
-///   vertex_ptr     u64  @ offset 80  (8 bytes)
-///   Total: 88 bytes
-#[repr(C)]
-#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-struct SkyboxPushConstants {
-    frame_ptr: u64,       // offset 0
-    skybox_index: u32,    // offset 8
-    _pad0: u32,           // offset 12  — align u64 that follows
-    _pad1: [u64; 8],      // offset 16  — 64 bytes of explicit padding
-    vertex_heap_ptr: u64, // offset 80
-}
-
-const _: () = assert!(
-    std::mem::size_of::<SkyboxPushConstants>() == 88,
-    "SkyboxPushConstants must be 88 bytes to match the GLSL push block"
-);
+// SkyboxPushConstants removed in favor of unified GpuPushConstants
 
 /// Self-contained skybox rendering pass.
 ///
@@ -95,7 +73,7 @@ impl SkyboxPass {
         let push_range = vk::PushConstantRange::default()
             .stage_flags(vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT)
             .offset(0)
-            .size(std::mem::size_of::<SkyboxPushConstants>() as u32);
+            .size(std::mem::size_of::<crate::renderer::types::GpuPushConstants>() as u32);
         layout_builder = layout_builder.add_push_constant(push_range);
 
         let mut pipeline_layout = layout_builder.build()?;
@@ -116,7 +94,7 @@ impl SkyboxPass {
             .with_extent(ctx.extent)
             .with_pipeline_cache(ctx.pipeline_cache)
             .with_depth_format(ctx.depth_format)
-            .with_depth_test(vk::CompareOp::GREATER_OR_EQUAL, false)
+            .with_depth_test(vk::CompareOp::EQUAL, false)
             .with_cull_mode(vk::CullModeFlags::FRONT) // Inside cube
             .with_front_face(vk::FrontFace::CLOCKWISE)
             .with_multisampling(ctx.multisample_config)
@@ -208,12 +186,11 @@ impl SkyboxPass {
             return Ok(());
         }
 
-        let push = SkyboxPushConstants {
+        let push = crate::renderer::types::GpuPushConstants {
             frame_ptr,
+            vertex_ptr,
             skybox_index: self.bindless_index,
-            _pad0: 0,
-            _pad1: [0u64; 8],
-            vertex_heap_ptr: vertex_ptr,
+            ..Default::default()
         };
 
         unsafe {

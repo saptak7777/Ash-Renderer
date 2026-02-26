@@ -144,8 +144,8 @@ struct DrawPushConstants {
     tile_ptr_high: u32,     // 52
 
     // Texture indices (56-63)
-    vsm_page_index: u32,  // 56
-    vsm_cache_index: u32, // 60
+    _pad_vsm1: u32,
+    _pad_vsm2: u32,
 
     // Transient Transform (64-79)
     transform_ptr_low: u32,  // 64
@@ -154,14 +154,14 @@ struct DrawPushConstants {
     _padding_ptr: u32,       // 76
 
     // Control stage (80-111)
-    material_index: u32,              // 80
-    use_instancing: u32,              // 84
-    flags: u32,                       // 88
-    debug_path: u32,                  // 92
-    debug_visualization_enabled: u32, // 144
-    skybox_index: u32,                // 148
-    vsm_ptr_low: u32,                 // 152
-    vsm_ptr_high: u32,                // 156
+    material_index: u32, // 80
+    use_instancing: u32, // 84
+    flags: u32,          // 88
+    debug_path: u32,     // 92
+    debug_mode: u32,     // 96 (mapped to debug_visualization_enabled in logic)
+    skybox_index: u32,   // 100
+    vsm_ptr_low: u32,    // 104
+    vsm_ptr_high: u32,   // 108
 }
 
 /// Context for draw calls with BDA support
@@ -327,8 +327,10 @@ impl ModelRenderer {
             light_ptr_high: (ctx.light_ptr >> 32) as u32,
             tile_ptr_low: ctx.tile_ptr as u32,
             tile_ptr_high: (ctx.tile_ptr >> 32) as u32,
-            vsm_page_index: ctx.vsm_page_index,
-            vsm_cache_index: ctx.vsm_cache_index,
+            vsm_ptr_low: ctx.vsm_ptr as u32,
+            vsm_ptr_high: (ctx.vsm_ptr >> 32) as u32,
+            _pad_vsm1: 0,
+            _pad_vsm2: 0,
             transform_ptr_low: ctx.transform_ptr as u32,
             transform_ptr_high: (ctx.transform_ptr >> 32) as u32,
             transform_index: ctx.transform_index,
@@ -337,10 +339,8 @@ impl ModelRenderer {
             use_instancing: 0,
             flags: ctx.material.flags,
             debug_path: 0,
-            debug_visualization_enabled: ctx.material.debug_visualization_enabled,
+            debug_mode: ctx.material.debug_visualization_enabled,
             skybox_index: ctx.material.skybox_index,
-            vsm_ptr_low: ctx.vsm_ptr as u32,
-            vsm_ptr_high: (ctx.vsm_ptr >> 32) as u32,
         };
 
         let push_bytes = bytemuck::bytes_of(&push);
@@ -388,10 +388,10 @@ impl ModelRenderer {
     ///
     /// # Safety
     /// Command buffer must be in recording state and all buffers must be valid.
-    pub unsafe fn draw_indirect_count(&self, ctx: &DrawContext, params: &IndirectDrawCountParams) {
+    pub unsafe fn draw_indirect(&self, ctx: &DrawContext, params: &IndirectDrawCountParams) {
         let vertex_ptr = ctx.vertex_ptr;
         if vertex_ptr == 0 {
-            log::error!("CRITICAL: vertex_heap_ptr is NULL in draw_indirect_count! Skipping draw.");
+            log::error!("CRITICAL: vertex_heap_ptr is NULL in draw_indirect! Skipping draw.");
             return;
         }
 
@@ -411,8 +411,10 @@ impl ModelRenderer {
             light_ptr_high: (ctx.light_ptr >> 32) as u32,
             tile_ptr_low: ctx.tile_ptr as u32,
             tile_ptr_high: (ctx.tile_ptr >> 32) as u32,
-            vsm_page_index: ctx.vsm_page_index,
-            vsm_cache_index: ctx.vsm_cache_index,
+            vsm_ptr_low: ctx.vsm_ptr as u32,
+            vsm_ptr_high: (ctx.vsm_ptr >> 32) as u32,
+            _pad_vsm1: 0,
+            _pad_vsm2: 0,
             transform_ptr_low: ctx.transform_ptr as u32,
             transform_ptr_high: (ctx.transform_ptr >> 32) as u32,
             transform_index: ctx.transform_index,
@@ -421,77 +423,8 @@ impl ModelRenderer {
             use_instancing: 1,
             flags: ctx.material.flags,
             debug_path: 0,
-            debug_visualization_enabled: ctx.material.debug_visualization_enabled,
-            skybox_index: ctx.material.skybox_index,
-            vsm_ptr_low: ctx.vsm_ptr as u32,
-            vsm_ptr_high: (ctx.vsm_ptr >> 32) as u32,
-        };
-
-        let push_bytes = bytemuck::bytes_of(&push);
-
-        unsafe {
-            self.device.cmd_push_constants(
-                ctx.command_buffer,
-                ctx.pipeline_layout,
-                vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
-                0,
-                push_bytes,
-            )
-        };
-
-        // Software Index Pulling (Phase 1): Always use non-indexed indirect draw
-        unsafe {
-            self.device.cmd_draw_indirect_count(
-                ctx.command_buffer,
-                params.indirect_buffer,
-                params.indirect_offset,
-                params.count_buffer,
-                params.count_offset,
-                params.max_draw_count,
-                params.stride,
-            )
-        };
-    }
-
-    /// Draw multiple instances using indirect count buffer
-    ///
-    /// # Safety
-    /// Command buffer must be in recording state and all buffers must be valid for the current frame.
-    pub unsafe fn draw_mesh_indirect_count(
-        &self,
-        ctx: &DrawContext,
-        params: &IndirectDrawCountParams,
-    ) {
-        let material_handle = ctx.material.material_handle;
-        let push = DrawPushConstants {
-            frame_ptr_low: ctx.frame_ptr as u32,
-            frame_ptr_high: (ctx.frame_ptr >> 32) as u32,
-            vertex_ptr_low: ctx.vertex_ptr as u32,
-            vertex_ptr_high: (ctx.vertex_ptr >> 32) as u32,
-            instance_ptr_low: ctx.instance_ptr as u32,
-            instance_ptr_high: (ctx.instance_ptr >> 32) as u32,
-            material_ptr_low: ctx.material_ptr as u32,
-            material_ptr_high: (ctx.material_ptr >> 32) as u32,
-            index_ptr_low: ctx.index_ptr as u32,
-            index_ptr_high: (ctx.index_ptr >> 32) as u32,
-            light_ptr_low: ctx.light_ptr as u32,
-            light_ptr_high: (ctx.light_ptr >> 32) as u32,
-            tile_ptr_low: ctx.tile_ptr as u32,
-            tile_ptr_high: (ctx.tile_ptr >> 32) as u32,
-            vsm_page_index: ctx.vsm_page_index,
-            vsm_cache_index: ctx.vsm_cache_index,
-            transform_ptr_low: ctx.transform_ptr as u32,
-            transform_ptr_high: (ctx.transform_ptr >> 32) as u32,
-            transform_index: ctx.transform_index,
-            _padding_ptr: 0,
-            material_index: material_handle.index,
-            use_instancing: 1,
-            flags: ctx.material.flags,
-            debug_path: 0,
-            debug_visualization_enabled: ctx.material.debug_visualization_enabled,
+            debug_mode: ctx.material.debug_visualization_enabled,
             skybox_index: ctx.skybox_index,
-            vsm_ptr_low: ctx.vsm_ptr as u32,
-            vsm_ptr_high: (ctx.vsm_ptr >> 32) as u32,
         };
 
         let push_bytes = bytemuck::bytes_of(&push);
@@ -519,6 +452,7 @@ impl ModelRenderer {
             )
         };
     }
+
     /// Public method to upload a mesh directly (used for internal meshes like Skybox)
     pub fn upload_mesh_data(
         &self,

@@ -32,6 +32,10 @@ pub struct FrameState {
     /// `view * jittered_projection` from the *previous* frame.
     /// Used by motion-vector / temporal passes to detect camera movement.
     pub prev_view_proj: Mat4,
+    /// `view * projection` (unjittered) for the current frame.
+    pub view_proj_no_jitter: Mat4,
+    /// `view * projection` (unjittered) for the *previous* frame.
+    pub prev_view_proj_no_jitter: Mat4,
     /// Camera world-space position (for lighting, SSAO, etc.).
     pub camera_pos: Vec3,
 
@@ -63,6 +67,8 @@ impl FrameState {
             projection: Mat4::IDENTITY,
             jittered_projection: Mat4::IDENTITY,
             prev_view_proj: Mat4::IDENTITY,
+            view_proj_no_jitter: Mat4::IDENTITY,
+            prev_view_proj_no_jitter: Mat4::IDENTITY,
             camera_pos: Vec3::ZERO,
             jitter: Vec2::ZERO,
             prev_jitter: Vec2::ZERO,
@@ -97,6 +103,7 @@ impl FrameState {
         let delta_time = delta_time.min(0.1);
         // ── Archive previous frame state ───────────────────────────────────
         self.prev_view_proj = self.jittered_projection * self.view;
+        self.prev_view_proj_no_jitter = self.view_proj_no_jitter;
         self.prev_jitter = self.jitter;
 
         // ── Advance counters ───────────────────────────────────────────────
@@ -129,6 +136,7 @@ impl FrameState {
         *jittered.col_mut(2) =
             projection.col(2) + glam::Vec4::new(jitter_ndc_x, jitter_ndc_y, 0.0, 0.0);
         self.jittered_projection = jittered;
+        self.view_proj_no_jitter = projection * view;
     }
 
     /// `jitter` as a 2-element array for GPU push constants / uniforms.
@@ -146,6 +154,8 @@ impl FrameState {
         self.halton.reset();
         self.jitter = Vec2::ZERO;
         self.prev_jitter = Vec2::ZERO;
+        self.view_proj_no_jitter = self.projection * self.view;
+        self.prev_view_proj_no_jitter = self.projection * self.view;
         self.prev_view_proj = self.projection * self.view;
     }
 }

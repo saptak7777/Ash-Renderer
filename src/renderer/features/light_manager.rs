@@ -27,17 +27,7 @@ pub struct TileBuffer {
     pub device_address: u64,
 }
 
-/// Forward+ info UBO (matches shader ForwardPlusInfo)
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Default, bytemuck::Pod, bytemuck::Zeroable)]
-pub struct ForwardPlusInfo {
-    /// Number of tiles in x and y
-    pub num_tiles: [u32; 2],
-    /// Tile size in pixels
-    pub tile_size: u32,
-    /// Padding
-    pub _padding: u32,
-}
+// ForwardPlusInfo removed as redundant (data moved to FrameData)
 
 /// Manages high-level GPU resources for the light culling compute pass.
 /// Note: This implementation currently doesn't double-buffer; it assumes
@@ -51,8 +41,8 @@ pub struct LightManager {
     tile_buffers: Vec<Option<TileBuffer>>,
     /// Number of frames in flight
     frame_count: usize,
-    /// Forward+ info for shaders
-    fp_info: ForwardPlusInfo,
+    /// Number of tiles in [x, y]
+    num_tiles: [u32; 2],
     /// Whether Forward+ is enabled
     enabled: bool,
     /// Whether buffers need recreation
@@ -74,7 +64,7 @@ impl LightManager {
             light_buffers,
             tile_buffers,
             frame_count,
-            fp_info: ForwardPlusInfo::default(),
+            num_tiles: [0, 0],
             enabled: true,
             dirty: true,
         }
@@ -115,11 +105,7 @@ impl LightManager {
         self.culling_pass.calculate_tiles(width, height);
 
         let (tiles_x, tiles_y, _) = self.culling_pass.get_dispatch_dimensions();
-        self.fp_info = ForwardPlusInfo {
-            num_tiles: [tiles_x, tiles_y],
-            tile_size: super::light_culling::TILE_SIZE,
-            _padding: 0,
-        };
+        self.num_tiles = [tiles_x, tiles_y];
 
         // CRITICAL: Mark buffers as needing recreation
         // Tile buffer size depends on screen resolution
@@ -158,23 +144,19 @@ impl LightManager {
     /// Get push constants for light culling shader
     pub fn get_culling_push_constants(
         &self,
-        width: u32,
-        height: u32,
         frame_index: usize,
-        camera_ptr: u64,
-    ) -> super::light_culling::LightCullingPushConstants {
+        frame_ptr: u64,
+    ) -> crate::renderer::types::GpuPushConstants {
         self.culling_pass.get_push_constants(
-            width,
-            height,
+            frame_ptr,
             self.light_ptr(frame_index),
             self.tile_ptr(frame_index),
-            camera_ptr,
         )
     }
 
-    /// Get Forward+ info for fragment shader
-    pub fn get_forward_plus_info(&self) -> ForwardPlusInfo {
-        self.fp_info
+    /// Get tile metadata
+    pub fn get_tile_info(&self) -> ([u32; 2], u32) {
+        (self.num_tiles, super::light_culling::TILE_SIZE)
     }
 
     /// Is Forward+ enabled and has lights?
@@ -569,9 +551,9 @@ mod tests {
         let mut manager = LightManager::new(2);
         manager.on_resize(1920, 1080);
 
-        let info = manager.get_forward_plus_info();
-        assert!(info.num_tiles[0] > 0);
-        assert!(info.num_tiles[1] > 0);
-        assert_eq!(info.tile_size, 16); // TILE_SIZE
+        let (num_tiles, tile_size) = manager.get_tile_info();
+        assert!(num_tiles[0] > 0);
+        assert!(num_tiles[1] > 0);
+        assert_eq!(tile_size, 16); // TILE_SIZE
     }
 }

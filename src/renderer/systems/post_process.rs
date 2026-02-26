@@ -25,7 +25,7 @@ impl Default for PostProcessConfig {
         Self {
             tonemapping_enabled: true,
             exposure: 1.2,
-            gamma: 1.0,
+            gamma: 2.2,
         }
     }
 }
@@ -298,6 +298,7 @@ impl PostProcessSystem {
                         prev_jitter_y: ctx.prev_jitter_uv[1],
                         blend_factor: ctx.taa_config.blend_factor,
                         clamping_gamma: ctx.taa_config.quality.clamping_gamma(),
+                        depth_threshold: ctx.taa_config.depth_threshold,
                         anti_flicker: if ctx.taa_config.anti_flicker { 1 } else { 0 },
                     };
 
@@ -355,7 +356,7 @@ impl PostProcessSystem {
         extent: vk::Extent2D,
         target_image: vk::Image,
         target_view: vk::ImageView,
-        bloom_intensity: f32,
+        _bloom_intensity: f32,
     ) -> Result<()> {
         if self.pipeline.is_none() || self.descriptor_sets.is_empty() {
             return Ok(());
@@ -370,12 +371,14 @@ impl PostProcessSystem {
         let descriptor_set = self.descriptor_sets[image_index];
 
         unsafe {
-            // 1. Pre-Render Barrier: Transition Swapchain Image to COLOR_ATTACHMENT_OPTIMAL
-            let barrier = vk::ImageMemoryBarrier::default()
+            // 1. Pre-Render Barrier: Transition Swapchain Image to COLOR_ATTACHMENT_OPTIMAL (Sync2)
+            let barrier = vk::ImageMemoryBarrier2::default()
+                .src_stage_mask(vk::PipelineStageFlags2::TOP_OF_PIPE)
+                .src_access_mask(vk::AccessFlags2::empty())
+                .dst_stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)
+                .dst_access_mask(vk::AccessFlags2::COLOR_ATTACHMENT_WRITE)
                 .old_layout(vk::ImageLayout::UNDEFINED)
                 .new_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
-                .src_access_mask(vk::AccessFlags::empty())
-                .dst_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE)
                 .image(target_image)
                 .subresource_range(vk::ImageSubresourceRange {
                     aspect_mask: vk::ImageAspectFlags::COLOR,
@@ -385,15 +388,9 @@ impl PostProcessSystem {
                     layer_count: 1,
                 });
 
-            self.device.cmd_pipeline_barrier(
-                command_buffer,
-                vk::PipelineStageFlags::TOP_OF_PIPE,
-                vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
-                vk::DependencyFlags::empty(),
-                &[],
-                &[],
-                &[barrier],
-            );
+            let image_barriers = [barrier];
+            let dep_info = vk::DependencyInfo::default().image_memory_barriers(&image_barriers);
+            self.device.cmd_pipeline_barrier2(command_buffer, &dep_info);
 
             // 2. Begin Rendering
             let color_attachment = vk::RenderingAttachmentInfo::default()
@@ -430,7 +427,7 @@ impl PostProcessSystem {
 
             let push_constants = PostProcessPushConstants {
                 exposure: self.config.exposure,
-                bloom_intensity,
+                bloom_intensity: 0.0, // Forced zero to bypass Ghost Bloom (Phase 2)
                 tonemapper_type: if self.config.tonemapping_enabled {
                     1
                 } else {
@@ -466,12 +463,14 @@ impl PostProcessSystem {
 
             self.device.cmd_end_rendering(command_buffer);
 
-            // 3. Post-Render Barrier: Transition Swapchain Image to PRESENT_SRC_KHR
-            let final_barrier = vk::ImageMemoryBarrier::default()
+            // 3. Post-Render Barrier: Transition Swapchain Image to PRESENT_SRC_KHR (Sync2)
+            let final_barrier = vk::ImageMemoryBarrier2::default()
+                .src_stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)
+                .src_access_mask(vk::AccessFlags2::COLOR_ATTACHMENT_WRITE)
+                .dst_stage_mask(vk::PipelineStageFlags2::BOTTOM_OF_PIPE)
+                .dst_access_mask(vk::AccessFlags2::empty())
                 .old_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
                 .new_layout(vk::ImageLayout::PRESENT_SRC_KHR)
-                .src_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE)
-                .dst_access_mask(vk::AccessFlags::empty())
                 .image(target_image)
                 .subresource_range(vk::ImageSubresourceRange {
                     aspect_mask: vk::ImageAspectFlags::COLOR,
@@ -481,15 +480,9 @@ impl PostProcessSystem {
                     layer_count: 1,
                 });
 
-            self.device.cmd_pipeline_barrier(
-                command_buffer,
-                vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
-                vk::PipelineStageFlags::BOTTOM_OF_PIPE,
-                vk::DependencyFlags::empty(),
-                &[],
-                &[],
-                &[final_barrier],
-            );
+            let image_barriers = [final_barrier];
+            let dep_info = vk::DependencyInfo::default().image_memory_barriers(&image_barriers);
+            self.device.cmd_pipeline_barrier2(command_buffer, &dep_info);
         }
 
         Ok(())

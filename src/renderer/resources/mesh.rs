@@ -62,6 +62,7 @@ pub struct MaterialProperties {
     pub occlusion_strength: f32,
     pub normal_scale: f32,
     pub alpha_cutoff: f32,
+    pub flags: u32,
 }
 
 impl Default for MaterialProperties {
@@ -74,6 +75,7 @@ impl Default for MaterialProperties {
             occlusion_strength: 1.0,
             normal_scale: 1.0,
             alpha_cutoff: 0.1,
+            flags: 0,
         }
     }
 }

@@ -84,7 +84,7 @@ impl RenderQueue {
         }
 
         // Recreate the swapchain. SwapchainWrapper::recreate returns the OLD handle.
-        let old_handle = unsafe { swapchain.recreate(device)? };
+        let old_handle = unsafe { swapchain.recreate(device, self.pending_extent)? };
 
         if old_handle != vk::SwapchainKHR::null() {
             self.old_swapchain_handles.push(old_handle);

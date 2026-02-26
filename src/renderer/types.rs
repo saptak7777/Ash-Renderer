@@ -3,7 +3,7 @@ use bytemuck::Pod;
 use glam::Mat4;
 use std::sync::Arc;
 
-use crate::renderer::resources::{Material, MaterialHandle, Mesh};
+use crate::renderer::resources::{MaterialHandle, Mesh};
 use crate::renderer::vcgs::CullBoundingBox;
 use crate::vulkan;
 
@@ -26,6 +26,8 @@ pub struct RenderCommand {
     pub material_handle: MaterialHandle,
     /// Transform matrix for positioning the mesh in world space
     pub transform: Mat4,
+    /// Previous frame transform (optional, used for motion vectors)
+    pub prev_transform: Option<Mat4>,
     /// Whether this object should cast shadows
     pub cast_shadows: bool,
     /// Whether this object should receive shadows
@@ -42,6 +44,7 @@ impl Default for RenderCommand {
             mesh_handle: 0,
             material_handle: MaterialHandle::null(),
             transform: Mat4::IDENTITY,
+            prev_transform: None,
             cast_shadows: true,
             receive_shadows: true,
             is_transparent: false,
@@ -164,15 +167,6 @@ impl Default for RendererConfig {
     }
 }
 
-#[derive(Clone)]
-pub struct DrawItem {
-    pub key: Arc<str>,
-    pub mesh_id: u32,
-    pub transform: Mat4,
-    pub material: Material,
-    pub material_handle: MaterialHandle,
-}
-
 #[derive(Copy, Clone, Default, Debug)]
 pub struct TexturePresenceFlags {
     pub base_color: bool,
@@ -246,7 +240,6 @@ pub struct CullingContext {
     pub object_offset: u32,
     pub object_count: u32,
     pub indirect_offset: u32,
-    pub cluster_buffer_addr: u64,
     pub hiz_buffer_addr: u64,
     pub camera_buffer_addr: u64,
 }
@@ -267,4 +260,31 @@ pub struct TextureInitContext {
     pub device: Arc<ash::Device>,
     pub command_pool: vk::CommandPool,
     pub queue: vk::Queue,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable, Debug, Default)]
+pub struct GpuPushConstants {
+    pub frame_ptr: u64,
+    pub vertex_ptr: u64,
+    pub instance_ptr: u64,
+    pub material_ptr: u64,
+    pub index_ptr: u64,
+    pub light_ptr: u64,
+    pub tile_ptr: u64,
+    pub _pad_vsm: [u32; 2],
+    pub transform_ptr: u64,
+    pub transform_index: u32,
+    pub _padding_ptr: u32,
+    pub material_index: u32,
+    pub use_instancing: u32,
+    pub flags: u32,
+    pub debug_path: u32,
+    pub debug_mode: u32,
+    pub skybox_index: u32,
+    pub vsm_ptr: u64,
+    pub clipmap_level: u32,
+    pub object_count: u32,
+    pub base_index: u32,
+    pub indirect_start: u32,
 }

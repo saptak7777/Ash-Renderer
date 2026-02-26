@@ -35,11 +35,14 @@ pub struct BindlessManager {
     max_page_tables: u32,
     max_cubemaps: u32,
     max_storage_images: u32,
+    #[allow(dead_code)]
+    max_storage_images_2d_array: u32,
     max_buffers: u32,
     next_image_index: u32,
     next_page_table_index: u32,
     next_cubemap_index: u32,
     next_storage_image_index: u32,
+    next_storage_image_2d_array_index: u32,
     next_buffer_index: u32,
     // Resource tracking for recreation
     resources: Vec<RegisteredResource>,
@@ -50,6 +53,7 @@ pub struct BindlessConfig {
     pub max_page_tables: u32,
     pub max_cubemaps: u32,
     pub max_storage_images: u32,
+    pub max_storage_images_2d_array: u32,
     pub max_buffers: u32,
 }
 
@@ -60,6 +64,7 @@ impl Default for BindlessConfig {
             max_page_tables: BindlessManager::DEFAULT_MAX_PAGE_TABLES,
             max_cubemaps: BindlessManager::DEFAULT_MAX_CUBEMAPS,
             max_storage_images: BindlessManager::DEFAULT_MAX_STORAGE_IMAGES,
+            max_storage_images_2d_array: BindlessManager::DEFAULT_MAX_STORAGE_IMAGES,
             max_buffers: BindlessManager::DEFAULT_MAX_BUFFERS,
         }
     }
@@ -86,7 +91,8 @@ impl BindlessManager {
         let max_page_tables = config.max_page_tables;
         let max_cubemaps = config.max_cubemaps;
         let max_storage_images = config.max_storage_images;
-        let mut max_buffers = config.max_buffers;
+        let max_storage_images_2d_array = config.max_storage_images_2d_array;
+        let max_buffers = config.max_buffers;
         // Hardware Validation: Clamp buffers to hardware limits to prevent DEVICE_LOST
         unsafe {
             let mut v12_props = vk::PhysicalDeviceVulkan12Properties::default();
@@ -95,10 +101,9 @@ impl BindlessManager {
 
             let hw_max_buffers = v12_props.max_descriptor_set_update_after_bind_storage_buffers;
             if max_buffers > hw_max_buffers {
-                log::warn!(
-                    "Requested {max_buffers} bindless storage buffers, but hardware only supports {hw_max_buffers}. Clamping."
-                );
-                max_buffers = hw_max_buffers;
+                return Err(AshError::DeviceInitFailed(format!(
+                    "Requested {max_buffers} bindless storage buffers, but hardware only supports {hw_max_buffers}. A modern GPU supporting high-count bindless is mandatory."
+                )));
             }
         }
 
@@ -128,6 +133,12 @@ impl BindlessManager {
                 max_storage_images,
             )
             .add_bindless_binding(
+                5, // global_storage_uimages_2d_array
+                vk::DescriptorType::STORAGE_IMAGE,
+                vk::ShaderStageFlags::ALL_GRAPHICS | vk::ShaderStageFlags::COMPUTE,
+                max_storage_images_2d_array,
+            )
+            .add_bindless_binding(
                 4, // global_buffers
                 vk::DescriptorType::STORAGE_BUFFER,
                 vk::ShaderStageFlags::ALL_GRAPHICS | vk::ShaderStageFlags::COMPUTE,
@@ -155,21 +166,26 @@ impl BindlessManager {
 
         // Bindless descriptors must be allocated from a pool with UPDATE_AFTER_BIND bit
         // The last binding (buffers) uses the variable descriptor count
-        let descriptor_set =
-            allocator.allocate_bindless_set(layout.handle(), layout.bindings(), max_buffers)?;
+        let descriptor_set = allocator.allocate_bindless_set(
+            layout.handle(),
+            layout.bindings(),
+            config.max_buffers,
+        )?;
 
         Ok(Self {
             layout,
             descriptor_set,
-            max_images,
-            max_page_tables,
-            max_cubemaps,
-            max_storage_images,
-            max_buffers,
+            max_images: config.max_images,
+            max_page_tables: config.max_page_tables,
+            max_cubemaps: config.max_cubemaps,
+            max_storage_images: config.max_storage_images,
+            max_storage_images_2d_array: config.max_storage_images_2d_array,
+            max_buffers: config.max_buffers,
             next_image_index: 0,
             next_page_table_index: 0,
             next_cubemap_index: 0,
             next_storage_image_index: 0,
+            next_storage_image_2d_array_index: 0,
             next_buffer_index: 0,
             resources: Vec::new(),
         })
@@ -185,7 +201,6 @@ impl BindlessManager {
             self.max_buffers,
         )?;
 
-        // Free the old descriptor set
         allocator.free_bindless_set(self.descriptor_set.handle())?;
         self.descriptor_set = new_descriptor_set;
 
@@ -198,7 +213,7 @@ impl BindlessManager {
         for res in &self.resources {
             match res.info {
                 ResourceInfo::Image { view, sampler } => {
-                    let (descriptor_type, image_layout) = if res.binding == 3 {
+                    let (descriptor_type, image_layout) = if res.binding == 3 || res.binding == 5 {
                         (vk::DescriptorType::STORAGE_IMAGE, vk::ImageLayout::GENERAL)
                     } else {
                         (
@@ -394,6 +409,28 @@ impl BindlessManager {
         Ok(index)
     }
 
+    pub fn add_storage_image_2d_array(&mut self, image_view: vk::ImageView) -> Result<u32> {
+        let index = self.allocate_index(5)?;
+        let info = vk::DescriptorImageInfo {
+            sampler: vk::Sampler::null(),
+            image_view,
+            image_layout: vk::ImageLayout::GENERAL,
+        };
+        self.descriptor_set
+            .update_image_at(5, index, info, vk::DescriptorType::STORAGE_IMAGE)?;
+
+        self.resources.push(RegisteredResource {
+            index,
+            binding: 5,
+            info: ResourceInfo::Image {
+                view: image_view,
+                sampler: vk::Sampler::null(),
+            },
+        });
+
+        Ok(index)
+    }
+
     pub fn add_storage_buffer(
         &mut self,
         buffer: vk::Buffer,
@@ -468,14 +505,18 @@ impl BindlessManager {
                 Ok(idx)
             }
             4 => {
-                if self.next_buffer_index >= self.max_buffers {
-                    return Err(AshError::VulkanError("Exceeded max buffers".into()));
-                }
-                let idx = self.next_buffer_index;
+                let index = self.next_buffer_index;
                 self.next_buffer_index += 1;
-                Ok(idx)
+                Ok(index)
             }
-            _ => Err(AshError::VulkanError("Invalid bindless binding".into())),
+            5 => {
+                let index = self.next_storage_image_2d_array_index;
+                self.next_storage_image_2d_array_index += 1;
+                Ok(index)
+            }
+            _ => Err(AshError::VulkanError(format!(
+                "Invalid bindless binding: {binding}"
+            ))),
         }
     }
 

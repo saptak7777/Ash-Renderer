@@ -2,6 +2,7 @@
 // Verified Phase 4 Binding Update: Set 0, Binding 4 for Bindless Buffers
 // Single Source of Truth for shader-side structures
 // Matches Rust definitions in src/renderer/model_renderer.rs
+// Verification: Dependency tracking active.
 
 #extension GL_EXT_buffer_reference2 : require
 #extension GL_EXT_scalar_block_layout : require
@@ -13,6 +14,7 @@ struct InstanceData {
     vec4 bounds_center;
     vec4 bounds_extents;
     mat4 model;
+    mat4 prev_model;
     uint draw_index;
     uint first_index;
     uint index_count;
@@ -25,6 +27,8 @@ struct InstanceData {
     uint material_index;
 };
 
+const uint MATERIAL_FLAG_ALPHA_TESTED = 1u << 0;
+
 struct MaterialData {
     vec4 base_color_factor;
     vec4 emissive_factor;
@@ -33,7 +37,7 @@ struct MaterialData {
     int emissive_texture_index;
     int tint_index;
     float alpha_cutoff;
-    float _padding;
+    uint flags;
 };
 
 // [REMOVED] struct HemisphereAmbient { ... }
@@ -88,10 +92,16 @@ layout(buffer_reference, scalar, buffer_reference_align = 8) restrict readonly b
     mat4 projection;
     mat4 view_proj;
     mat4 prev_view_proj;
+    mat4 view_proj_no_jitter;
+    mat4 prev_view_proj_no_jitter;
     mat4 light_space_matrix;
+    mat4 inv_projection;
     mat4 normal_matrix;
     vec4 camera_pos;
     SceneLighting scene_lighting;
+    vec4 screen_params; // width, height, 1/width, 1/height
+    uint hiz_levels;
+    uint _pad_frame;
 };
 
 layout(buffer_reference, scalar, buffer_reference_align = 4) restrict readonly buffer InstanceBuffer {
@@ -116,7 +126,6 @@ layout(buffer_reference, scalar, buffer_reference_align = 4) restrict readonly b
 };
 
 // Set 0: Unified Bindless consolidated resources
-#ifndef SKIP_GLOBAL_BINDED_RESOURCES
 layout(set = 0, binding = 0) uniform sampler2D global_textures[];
 layout(set = 0, binding = 1) uniform usampler2DArray global_page_tables[];
 layout(set = 0, binding = 2) uniform samplerCube global_cubemaps[];
@@ -124,11 +133,13 @@ layout(set = 0, binding = 2) uniform samplerCube global_cubemaps[];
 // Binding 3: Global Storage Images (for compute writes)
 layout(set = 0, binding = 3, rgba16f) uniform image2D global_storage_images[];
 
+// Binding 5: Global Storage Image Arrays (for Page Table writes)
+layout(set = 0, binding = 5, r32ui) uniform uimage2DArray global_storage_uimages_2d_array[];
+
 // Binding 4: Bindless Storage Buffers
 layout(set = 0, binding = 4, std430) readonly buffer BindlessBuffer {
     vec4 data[];
 } bindless_buffers[];
-#endif
 
 // IndirectBuffer: write-only from compute; restrict allows the driver to skip reads.
 layout(buffer_reference, scalar, buffer_reference_align = 4) restrict writeonly buffer IndirectBuffer {
@@ -188,6 +199,10 @@ layout(buffer_reference, scalar, buffer_reference_align = 16) restrict readonly 
     vec4 light_dir;
     uint page_table_size;
     uint page_table_index;
+    uint physical_cache_index;
+    uint scene_depth_index;
+    uint page_table_storage_index;
+    uint physical_cache_storage_index;
     uint64_t request_ptr;
     uint64_t allocation_ptr;
     uint64_t _pad3;
@@ -201,7 +216,6 @@ uint load_index(uint64_t ptr, uint logical_index) {
 
 // --- Push Constants ---
 
-#ifndef SKIP_PUSH_CONSTANTS
 // Modern Push Constants - Full Bindless/BDA
 layout(push_constant) uniform PushConstants {
     // Pointer stage (0-55)
@@ -214,8 +228,8 @@ layout(push_constant) uniform PushConstants {
     uint64_t tile_ptr;
 
     // Texture indices (56-63)
-    uint vsm_page_index;
-    uint vsm_cache_index;
+    uint _pad_vsm1;
+    uint _pad_vsm2;
 
     // Phase 19: Transient Transform (64-79)
     uint64_t transform_ptr;           // 64
@@ -230,5 +244,10 @@ layout(push_constant) uniform PushConstants {
     layout(offset = 96) uint debug_mode;
     layout(offset = 100) uint skybox_index;
     layout(offset = 104) uint64_t vsm_ptr;
+    
+    // Shadow/Culling extensions (112-127)
+    layout(offset = 112) uint clipmap_level;
+    layout(offset = 116) uint object_count;
+    layout(offset = 120) uint base_index;
+    layout(offset = 124) uint indirect_start;
 } push;
-#endif

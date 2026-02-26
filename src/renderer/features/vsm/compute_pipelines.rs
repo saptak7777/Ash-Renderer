@@ -24,7 +24,6 @@ impl VsmComputePipelines {
     pub unsafe fn new(
         device: Arc<ash::Device>,
         global_bindless_layout: vk::DescriptorSetLayout,
-        vsm_compute_layout: vk::DescriptorSetLayout,
         max_requests: u32,
     ) -> Result<Self> {
         log::info!("Creating VSM compute pipelines");
@@ -45,12 +44,11 @@ impl VsmComputePipelines {
         let push_constant = vk::PushConstantRange::default()
             .stage_flags(vk::ShaderStageFlags::COMPUTE)
             .offset(0)
-            .size(8);
+            .size(std::mem::size_of::<crate::renderer::types::GpuPushConstants>() as u32);
 
         let clear = unsafe {
             ComputePipeline::builder(Arc::clone(&device))
                 .add_set_layout(global_bindless_layout)
-                .add_set_layout(vsm_compute_layout)
                 .add_push_constant(push_constant)
                 .with_shader(clear_module)
                 .with_entry_point("main")
@@ -84,12 +82,11 @@ impl VsmComputePipelines {
         let push_constant = vk::PushConstantRange::default()
             .stage_flags(vk::ShaderStageFlags::COMPUTE)
             .offset(0)
-            .size(8);
+            .size(std::mem::size_of::<crate::renderer::types::GpuPushConstants>() as u32);
 
         let analyze = unsafe {
             ComputePipeline::builder(Arc::clone(&device))
                 .add_set_layout(global_bindless_layout)
-                .add_set_layout(vsm_compute_layout)
                 .add_push_constant(push_constant)
                 .with_shader(analyze_module)
                 .with_entry_point("main")
@@ -115,12 +112,11 @@ impl VsmComputePipelines {
         let push_constant = vk::PushConstantRange::default()
             .stage_flags(vk::ShaderStageFlags::COMPUTE)
             .offset(0)
-            .size(8);
+            .size(std::mem::size_of::<crate::renderer::types::GpuPushConstants>() as u32);
 
         let allocate = unsafe {
             ComputePipeline::builder(Arc::clone(&device))
                 .add_set_layout(global_bindless_layout)
-                .add_set_layout(vsm_compute_layout)
                 .add_push_constant(push_constant)
                 .with_shader(allocate_module)
                 .with_entry_point("main")

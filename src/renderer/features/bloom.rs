@@ -198,7 +198,6 @@ pub struct BloomFeature {
     upsample_pipeline: Option<vk::Pipeline>,
     pipeline_layout: Option<vk::PipelineLayout>,
     descriptor_set_layout: Option<vk::DescriptorSetLayout>,
-    render_pass: Option<vk::RenderPass>,
 }
 
 impl BloomFeature {
@@ -212,7 +211,6 @@ impl BloomFeature {
             upsample_pipeline: None,
             pipeline_layout: None,
             descriptor_set_layout: None,
-            render_pass: None,
         }
     }
 
@@ -226,7 +224,6 @@ impl BloomFeature {
             upsample_pipeline: None,
             pipeline_layout: None,
             descriptor_set_layout: None,
-            render_pass: None,
         }
     }
 
@@ -311,9 +308,9 @@ impl BloomFeature {
             .map_err(|e| {
             crate::AshError::VulkanError(format!("Failed to parse bloom downsample shader: {e}"))
         })?;
-        let downsample_info = vk::ShaderModuleCreateInfo::default().code(&downsample_spv);
+        let downsample_module_info = vk::ShaderModuleCreateInfo::default().code(&downsample_spv);
         let downsample_frag_module =
-            unsafe { device.create_shader_module(&downsample_info, None)? };
+            unsafe { device.create_shader_module(&downsample_module_info, None)? };
 
         let upsample_spv = ash::util::read_spv(&mut std::io::Cursor::new(upsample_frag_code))
             .map_err(|e| {
@@ -348,32 +345,6 @@ impl BloomFeature {
         let pipeline_layout =
             unsafe { device.create_pipeline_layout(&pipeline_layout_info, None)? };
         self.pipeline_layout = Some(pipeline_layout);
-
-        // Create render pass (single color attachment, no depth)
-        let attachment = vk::AttachmentDescription::default()
-            .format(vk::Format::R16G16B16A16_SFLOAT)
-            .samples(vk::SampleCountFlags::TYPE_1)
-            .load_op(vk::AttachmentLoadOp::DONT_CARE)
-            .store_op(vk::AttachmentStoreOp::STORE)
-            .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
-            .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
-            .initial_layout(vk::ImageLayout::UNDEFINED)
-            .final_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL);
-
-        let color_attachment_ref = vk::AttachmentReference::default()
-            .attachment(0)
-            .layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL);
-
-        let subpass = vk::SubpassDescription::default()
-            .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
-            .color_attachments(std::slice::from_ref(&color_attachment_ref));
-
-        let render_pass_info = vk::RenderPassCreateInfo::default()
-            .attachments(std::slice::from_ref(&attachment))
-            .subpasses(std::slice::from_ref(&subpass));
-
-        let render_pass = unsafe { device.create_render_pass(&render_pass_info, None)? };
-        self.render_pass = Some(render_pass);
 
         // Common pipeline state (fullscreen triangle, no vertex input)
         let vertex_input = vk::PipelineVertexInputStateCreateInfo::default();
@@ -449,7 +420,12 @@ impl BloomFeature {
                 .name(c"main"),
         ];
 
+        let color_formats = [vk::Format::R16G16B16A16_SFLOAT];
+        let mut prefilter_rendering =
+            vk::PipelineRenderingCreateInfo::default().color_attachment_formats(&color_formats);
+
         let prefilter_info = vk::GraphicsPipelineCreateInfo::default()
+            .push_next(&mut prefilter_rendering)
             .stages(&prefilter_stages)
             .vertex_input_state(&vertex_input)
             .input_assembly_state(&input_assembly)
@@ -458,9 +434,7 @@ impl BloomFeature {
             .multisample_state(&multisampling)
             .color_blend_state(&color_blending_opaque)
             .dynamic_state(&dynamic_state)
-            .layout(pipeline_layout)
-            .render_pass(render_pass)
-            .subpass(0);
+            .layout(pipeline_layout);
 
         // Create Downsample pipeline
         let downsample_stages = [
@@ -474,7 +448,11 @@ impl BloomFeature {
                 .name(c"main"),
         ];
 
+        let mut downsample_rendering =
+            vk::PipelineRenderingCreateInfo::default().color_attachment_formats(&color_formats);
+
         let downsample_info = vk::GraphicsPipelineCreateInfo::default()
+            .push_next(&mut downsample_rendering)
             .stages(&downsample_stages)
             .vertex_input_state(&vertex_input)
             .input_assembly_state(&input_assembly)
@@ -483,9 +461,7 @@ impl BloomFeature {
             .multisample_state(&multisampling)
             .color_blend_state(&color_blending_opaque)
             .dynamic_state(&dynamic_state)
-            .layout(pipeline_layout)
-            .render_pass(render_pass)
-            .subpass(0);
+            .layout(pipeline_layout);
 
         // Create Upsample pipeline (with additive blending)
         let upsample_stages = [
@@ -499,7 +475,11 @@ impl BloomFeature {
                 .name(c"main"),
         ];
 
+        let mut upsample_rendering =
+            vk::PipelineRenderingCreateInfo::default().color_attachment_formats(&color_formats);
+
         let upsample_info = vk::GraphicsPipelineCreateInfo::default()
+            .push_next(&mut upsample_rendering)
             .stages(&upsample_stages)
             .vertex_input_state(&vertex_input)
             .input_assembly_state(&input_assembly)
@@ -508,9 +488,7 @@ impl BloomFeature {
             .multisample_state(&multisampling)
             .color_blend_state(&color_blending_additive)
             .dynamic_state(&dynamic_state)
-            .layout(pipeline_layout)
-            .render_pass(render_pass)
-            .subpass(0);
+            .layout(pipeline_layout);
 
         // Create all pipelines
         let pipeline_infos = [prefilter_info, downsample_info, upsample_info];
@@ -586,16 +564,13 @@ impl RenderFeature for BloomFeature {
         let Some(pipeline_layout) = self.pipeline_layout else {
             return;
         };
-        let Some(render_pass) = self.render_pass else {
-            return;
-        };
 
         let device = ctx.device;
         let cmd = ctx.command_buffer;
 
         // Note: Full bloom implementation requires:
         // 1. Source HDR image (from renderer)
-        // 2. Framebuffers for each mip level
+        // 2. Views for each mip level image (Dynamic Rendering)
         // 3. Descriptor sets for binding textures
         // 4. Sampler for texture sampling
         //
@@ -670,7 +645,6 @@ impl RenderFeature for BloomFeature {
             downsample_pipeline,
             upsample_pipeline,
             pipeline_layout,
-            render_pass,
         );
         log::trace!("Bloom render called (awaiting renderer integration)");
     }
@@ -692,9 +666,6 @@ impl RenderFeature for BloomFeature {
             }
             if let Some(layout) = self.descriptor_set_layout.take() {
                 device.destroy_descriptor_set_layout(layout, None);
-            }
-            if let Some(render_pass) = self.render_pass.take() {
-                device.destroy_render_pass(render_pass, None);
             }
         }
 

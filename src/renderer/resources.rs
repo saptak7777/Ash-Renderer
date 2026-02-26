@@ -1,16 +1,11 @@
 use crate::renderer::{
     DepthBuffer as DepthBufferType, RendererConfig, Texture as TextureType, TextureInitContext,
-    assets::AssetManager,
-    context::Context,
-    initialization,
-    instancing::{BatchKey, InstancingManager},
-    resource_registry::ResourceId,
+    assets::AssetManager, context::Context, initialization, resource_registry::ResourceId,
     vram_budget,
 };
 use crate::{AshError, vulkan};
 use ash::vk;
 use glam::Mat4;
-use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
 // --- Submodules ---
@@ -61,7 +56,7 @@ pub use texture::{Texture, TextureData, TextureDesc};
 pub use texture_compressor::{CompressionFormat, TextureCompressor};
 pub use thread_safe_pool::{PoolStats, PooledResource, ThreadSafeResourcePool};
 pub use transform::{Camera, MVP, TemporalCamera, Transform, TransformHandle, TransformSystem};
-pub use uniform::{InstanceBuffer, MvpMatrices, UniformBuffer};
+pub use uniform::{MvpMatrices, UniformBuffer};
 
 extern crate image as image_crate;
 
@@ -94,17 +89,9 @@ pub struct Resources {
     >,
     pub descriptors: Option<vulkan::DescriptorAllocator>,
 
-    // Instance System
-    pub(crate) _instancing_manager: InstancingManager,
-    pub instance_buffers: Vec<InstanceBuffer>,
-    pub instance_buffer_addresses: Vec<u64>,
-    pub batch_offsets: HashMap<BatchKey, u32>,
     pub material_heap_address: u64,
     pub swapchain_extent: vk::Extent2D,
     pub current_view_proj: Mat4,
-
-    #[cfg(debug_assertions)]
-    pub(crate) instancing_guard_active: bool,
 
     // Render Targets & Debug
     pub readback_buffer: Option<BufferHandle>,
@@ -129,8 +116,6 @@ pub struct Resources {
     pub(crate) passes: Option<crate::renderer::init_types::RenderingPasses>,
     pub(crate) lighting: Option<crate::renderer::init_types::LightingSystem>,
     pub(crate) post: Option<crate::renderer::init_types::PostProcessingSystem>,
-    pub total_instance_count: u32,
-    pub indirect_draw_enabled: bool,
 }
 
 pub struct ResourcesInitInfo<'a, S: vulkan::SurfaceProvider> {
@@ -195,14 +180,7 @@ impl Resources {
                 aspect,
             )?;
 
-            // Create VSM compute layout manually since Manager is not yet initialized
-            let vsm_compute_layout =
-                initialization::create_vsm_compute_layout(&context.device.device)?;
-
-            let set_layouts = [
-                core.bindless_manager.descriptor_set_layout(),
-                vsm_compute_layout,
-            ];
+            let set_layouts = [core.bindless_manager.descriptor_set_layout()];
             let color_formats = vec![swapchain.format];
 
             let pipelines = initialization::init_pipelines(initialization::PipelineInitInfo {
@@ -255,11 +233,6 @@ impl Resources {
                 .renderer_resources
                 .material_storage_buffer
                 .device_address();
-            let mut instance_buffer_addresses =
-                Vec::with_capacity(core.renderer_resources.instance_buffers.len());
-            for buffer in &core.renderer_resources.instance_buffers {
-                instance_buffer_addresses.push(buffer.device_address());
-            }
 
             let readback_buffer = if context.device.headless {
                 let buffer_size = (swapchain.extent.width * swapchain.extent.height * 4) as u64;
@@ -294,10 +267,6 @@ impl Resources {
                     core.renderer_resources.material_storage_buffer,
                 ))),
                 descriptors: Some(core.descriptor_allocator),
-                _instancing_manager: InstancingManager::new(),
-                instance_buffers: core.renderer_resources.instance_buffers,
-                instance_buffer_addresses,
-                batch_offsets: HashMap::new(),
                 material_heap_address,
                 swapchain_extent: swapchain.extent,
                 current_view_proj: Mat4::IDENTITY,
@@ -317,11 +286,6 @@ impl Resources {
                 passes: Some(passes),
                 lighting: Some(lighting),
                 post: Some(post),
-                total_instance_count: 0,
-                indirect_draw_enabled: true,
-
-                #[cfg(debug_assertions)]
-                instancing_guard_active: false,
             };
 
             // --- IBL Generation ---
@@ -351,7 +315,7 @@ impl Resources {
                         &crate::renderer::types::TextureCreateInfo {
                             width,
                             height,
-                            format: vk::Format::R32G32B32_SFLOAT,
+                            format: vk::Format::R32G32B32A32_SFLOAT,
                             mip_levels: 1,
                             name: Some("IBL_Source_HDR"),
                         },
@@ -520,25 +484,19 @@ impl Resources {
                 &[copy_region],
             );
 
-            // Add barrier to ensure write is visible to host
-            let barrier = vk::BufferMemoryBarrier::default()
-                .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
-                .dst_access_mask(vk::AccessFlags::HOST_READ)
-                .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            // Add barrier to ensure write is visible to host (Sync2)
+            let barrier = vk::BufferMemoryBarrier2::default()
+                .src_stage_mask(vk::PipelineStageFlags2::TRANSFER)
+                .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
+                .dst_stage_mask(vk::PipelineStageFlags2::HOST)
+                .dst_access_mask(vk::AccessFlags2::HOST_READ)
                 .buffer(readback_buffer.handle())
                 .offset(0)
                 .size(vk::WHOLE_SIZE);
 
-            context.device.device.cmd_pipeline_barrier(
-                cmd,
-                vk::PipelineStageFlags::TRANSFER,
-                vk::PipelineStageFlags::HOST,
-                vk::DependencyFlags::empty(),
-                &[],
-                &[barrier],
-                &[],
-            );
+            let buffer_barriers = [barrier];
+            let dep_info = vk::DependencyInfo::default().buffer_memory_barriers(&buffer_barriers);
+            context.device.device.cmd_pipeline_barrier2(cmd, &dep_info);
 
             context
                 .device
@@ -704,51 +662,5 @@ impl Resources {
         }
 
         Ok(())
-    }
-
-    /// Update instance buffers and compute batch offsets
-    pub fn update_instance_buffers(
-        &mut self,
-        instancing_manager: &crate::renderer::instancing::InstancingManager,
-        frame_index: usize,
-    ) -> crate::Result<()> {
-        let mut all_instances = Vec::new();
-        let mut batch_offsets = HashMap::new();
-
-        for batch in instancing_manager.batches() {
-            batch_offsets.insert(batch.key.clone(), all_instances.len() as u32);
-            all_instances.extend_from_slice(&batch.instances);
-        }
-
-        if !all_instances.is_empty() {
-            // SAFETY: Instance buffer updates with validated instance data.
-            unsafe {
-                self.instance_buffers[frame_index].update(&all_instances)?;
-            }
-        }
-
-        self.total_instance_count = all_instances.len() as u32;
-        self.batch_offsets = batch_offsets;
-        Ok(())
-    }
-
-    /// Get a reference to the instancing manager
-    pub fn instancing_manager(&self) -> &InstancingManager {
-        #[cfg(debug_assertions)]
-        debug_assert!(
-            !self.instancing_guard_active,
-            "InstancingManager accessed while checked out by guard!"
-        );
-        &self._instancing_manager
-    }
-
-    /// Get a mutable reference to the instancing manager
-    pub fn instancing_manager_mut(&mut self) -> &mut InstancingManager {
-        #[cfg(debug_assertions)]
-        debug_assert!(
-            !self.instancing_guard_active,
-            "InstancingManager accessed while checked out by guard!"
-        );
-        &mut self._instancing_manager
     }
 }

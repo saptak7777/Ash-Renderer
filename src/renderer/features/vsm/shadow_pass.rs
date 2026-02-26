@@ -18,88 +18,11 @@ pub struct ShadowPageRenderInfo<'a> {
     pub pages: &'a [super::page_manager::PageToRender],
 }
 
-/// Push constants shared by `shadow.vert` and `shadow.frag`.
-///
-/// The layout is the union of what both stages need and MUST match the GLSL
-/// blocks in those shaders exactly. All offsets are explicit.
-///
-///   BDA pointers (0–55):
-///     frame_ptr     u64  @ 0
-///     vertex_ptr    u64  @ 8
-///     instance_ptr  u64  @ 16
-///     material_ptr  u64  @ 24  ← fragment uses this for alpha-cutout
-///     index_ptr     u64  @ 32
-///     light_ptr     u64  @ 40
-///     tile_ptr      u64  @ 48
-///   Texture indices (56–63):
-///     vsm_page_index   u32  @ 56
-///     vsm_cache_index  u32  @ 60
-///   Model matrix (64–127):
-///     model  mat4  @ 64
-///   Material & flags (128–159):
-///     material_index              u32  @ 128  ← fragment uses for alpha-cutout
-///     use_instancing              u32  @ 132
-///     flags                       u32  @ 136
-///     debug_path                  u32  @ 140
-///     debug_visualization_enabled u32  @ 144
-///     skybox_index                u32  @ 148
-///     _pad_mat                    u32  @ 152 (×2 pad to 160)
-///     _pad_mat2                   u32  @ 156
-///   Light space matrix (160–223):
-///     light_space_matrix  mat4  @ 160
-///   Total: 224 bytes
-#[repr(C)]
-#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-pub struct ShadowPushConstants {
-    // ── BDA pointers ─────────────────────────────────────────────────
-    pub frame_ptr: u64,    // offset   0
-    pub vertex_ptr: u64,   // offset   8
-    pub instance_ptr: u64, // offset  16
-    pub material_ptr: u64, // offset  24  ← frag: alpha-cutout BDA
-    pub index_ptr: u64,    // offset  32
-    pub light_ptr: u64,    // offset  40
-    pub tile_ptr: u64,     // offset  48
-
-    // ── Texture indices ───────────────────────────────────────────────
-    pub vsm_page_index: u32,  // offset  56
-    pub vsm_cache_index: u32, // offset  60
-
-    // ── Model matrix (per-draw, used by vert) ────────────────────────
-    pub model: [[f32; 4]; 4], // offset  64  (64 bytes)
-
-    // ── Material / control flags (frag reads from 128) ───────────────
-    pub material_index: u32,              // offset 128
-    pub use_instancing: u32,              // offset 132
-    pub flags: u32,                       // offset 136
-    pub debug_path: u32,                  // offset 140
-    pub debug_visualization_enabled: u32, // offset 144
-    pub skybox_index: u32,                // offset 148
-    pub _pad_mat: u32,                    // offset 152 — pad to align mat4
-    pub _pad_mat2: u32,                   // offset 156
-
-    // ── Light space matrix (160–223) ─────────────────────────────────
-    pub light_space_matrix: [[f32; 4]; 4], // offset 160
-}
-
-/// Byte offset of the light-space-matrix field within ShadowPushConstants.
-pub const LIGHT_SPACE_MATRIX_OFFSET: u32 = 160;
-/// Byte offset of the model-matrix field within ShadowPushConstants.
-pub const MODEL_MATRIX_OFFSET: u32 = 64;
-
-const _: () = assert!(
-    std::mem::size_of::<ShadowPushConstants>() == 224,
-    "ShadowPushConstants must be 224 bytes to match shadow.vert / shadow.frag"
-);
+// ShadowPushConstants removed in favor of unified GpuPushConstants
 
 /// VSM shadow rendering pass
 pub struct VsmShadowPass {
     device: Arc<ash::Device>,
-
-    /// Render pass for depth-only rendering
-    pub render_pass: vk::RenderPass,
-
-    /// Framebuffer for physical cache
-    pub framebuffer: vk::Framebuffer,
 
     /// Physical cache resolution (framebuffer size)
     physical_resolution: u32,
@@ -127,86 +50,6 @@ impl VsmShadowPass {
         resources: &VsmResources,
     ) -> Result<Self> {
         log::info!("Creating VSM shadow pass");
-
-        // Create render pass (dual-attachment: color for variance + depth for testing)
-        // Color attachment: R32G32_SFLOAT for storing (depth, depth^2) moments
-        let color_attachment = vk::AttachmentDescription {
-            format: vk::Format::R32G32_SFLOAT, // Store variance moments
-            samples: vk::SampleCountFlags::TYPE_1,
-            load_op: vk::AttachmentLoadOp::CLEAR,
-            store_op: vk::AttachmentStoreOp::STORE,
-            stencil_load_op: vk::AttachmentLoadOp::DONT_CARE,
-            stencil_store_op: vk::AttachmentStoreOp::DONT_CARE,
-            initial_layout: vk::ImageLayout::UNDEFINED,
-            final_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-            ..Default::default()
-        };
-
-        // Depth attachment: D32_SFLOAT for hardware depth testing
-        let depth_attachment = vk::AttachmentDescription {
-            format: vk::Format::D32_SFLOAT,
-            samples: vk::SampleCountFlags::TYPE_1,
-            load_op: vk::AttachmentLoadOp::CLEAR,
-            store_op: vk::AttachmentStoreOp::DONT_CARE, // We don't need to keep depth after the pass
-            stencil_load_op: vk::AttachmentLoadOp::DONT_CARE,
-            stencil_store_op: vk::AttachmentStoreOp::DONT_CARE,
-            initial_layout: vk::ImageLayout::UNDEFINED,
-            final_layout: vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
-            ..Default::default()
-        };
-
-        let color_ref = vk::AttachmentReference {
-            attachment: 0,
-            layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
-        };
-
-        let depth_ref = vk::AttachmentReference {
-            attachment: 1,
-            layout: vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
-        };
-
-        let subpass = vk::SubpassDescription::default()
-            .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
-            .color_attachments(std::slice::from_ref(&color_ref))
-            .depth_stencil_attachment(&depth_ref);
-
-        let dependency_in = vk::SubpassDependency {
-            src_subpass: vk::SUBPASS_EXTERNAL,
-            dst_subpass: 0,
-            src_stage_mask: vk::PipelineStageFlags::LATE_FRAGMENT_TESTS, // Wait for depth writes
-            dst_stage_mask: vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS
-                | vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
-            src_access_mask: vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
-            dst_access_mask: vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE
-                | vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
-            dependency_flags: vk::DependencyFlags::BY_REGION,
-        };
-
-        let dependency_out = vk::SubpassDependency {
-            src_subpass: 0,
-            dst_subpass: vk::SUBPASS_EXTERNAL,
-            src_stage_mask: vk::PipelineStageFlags::LATE_FRAGMENT_TESTS
-                | vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
-            dst_stage_mask: vk::PipelineStageFlags::FRAGMENT_SHADER,
-            src_access_mask: vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE
-                | vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
-            dst_access_mask: vk::AccessFlags::SHADER_READ,
-            dependency_flags: vk::DependencyFlags::BY_REGION,
-        };
-
-        let attachments = [color_attachment, depth_attachment];
-        let subpasses = [subpass];
-        let dependencies = [dependency_in, dependency_out];
-
-        let render_pass_info = vk::RenderPassCreateInfo::default()
-            .attachments(&attachments)
-            .subpasses(&subpasses)
-            .dependencies(&dependencies);
-
-        let render_pass =
-            unsafe { device.create_render_pass(&render_pass_info, None) }.map_err(|e| {
-                AshError::VulkanError(format!("VSM render pass creation failed: {e:?}"))
-            })?;
 
         // Create depth buffer for hardware depth testing
         let physical_res = resources.config().physical_resolution;
@@ -249,27 +92,10 @@ impl VsmShadowPass {
                 AshError::VulkanError(format!("Failed to create VSM depth view: {e:?}"))
             })?;
 
-        // Create framebuffer with both color and depth attachments
-        let attachments = [resources.physical_cache_view, depth_view];
-        let physical_res = resources.config().physical_resolution;
-        let framebuffer_info = vk::FramebufferCreateInfo::default()
-            .render_pass(render_pass)
-            .attachments(&attachments)
-            .width(physical_res)
-            .height(physical_res)
-            .layers(1);
-
-        let framebuffer =
-            unsafe { device.create_framebuffer(&framebuffer_info, None) }.map_err(|e| {
-                AshError::VulkanError(format!("VSM framebuffer creation failed: {e:?}"))
-            })?;
-
         log::info!("VSM shadow pass created successfully");
 
         Ok(Self {
             device,
-            render_pass,
-            framebuffer,
             physical_resolution: 4096,
             depth_image,
             depth_image_alloc: Some(depth_image_alloc),
@@ -286,8 +112,7 @@ impl VsmShadowPass {
     /// Device must remain valid. Descriptor set layouts must be valid.
     pub unsafe fn create_pipeline(
         &mut self,
-        _device_layout: vk::DescriptorSetLayout, // Set 0 (Reserved for future global bindless extension)
-        bindless_layout: vk::DescriptorSetLayout, // Set 1 (Bindless Textures)
+        bindless_layout: vk::DescriptorSetLayout, // Set 0 (Combined Bindless)
     ) -> Result<()> {
         log::info!("Creating VSM shadow pipeline");
 
@@ -295,12 +120,11 @@ impl VsmShadowPass {
             stage_flags: vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
             offset: 0,
             // Use the Rust struct size as the authoritative source so it can never drift.
-            size: std::mem::size_of::<ShadowPushConstants>() as u32,
+            size: std::mem::size_of::<crate::renderer::types::GpuPushConstants>() as u32,
         };
 
-        // Descriptor set layouts: Set 0 (Reserved) and Set 1 (Bindless Textures)
-        // We must have two layouts to match 'layout(set = 1, ...)' in the shader
-        let layouts = [_device_layout, bindless_layout];
+        // Descriptor set layout: Set 0 (Combined Bindless)
+        let layouts = [bindless_layout];
 
         // Create pipeline layout
         let layout_info = vk::PipelineLayoutCreateInfo::default()
@@ -312,117 +136,21 @@ impl VsmShadowPass {
                 AshError::VulkanError(format!("Shadow pipeline layout creation failed: {e:?}"))
             })?;
 
-        // Load shaders
         let vert_code = include_bytes!(concat!(env!("OUT_DIR"), "/shadow.vert.spv"));
         let frag_code = include_bytes!(concat!(env!("OUT_DIR"), "/shadow.frag.spv"));
 
-        let vert_module = unsafe {
-            self.device.create_shader_module(
-                &vk::ShaderModuleCreateInfo::default().code(bytemuck::cast_slice(vert_code)),
+        let pipeline = crate::vulkan::Pipeline::builder(Arc::clone(&self.device))
+            .with_layout(pipeline_layout)
+            .add_shader_from_bytes(vert_code, vk::ShaderStageFlags::VERTEX, "main")?
+            .add_shader_from_bytes(frag_code, vk::ShaderStageFlags::FRAGMENT, "main")?
+            .with_dynamic_rendering(
+                &[vk::Format::R32G32_SFLOAT],
+                Some(vk::Format::D32_SFLOAT),
                 None,
             )
-        }
-        .map_err(|e| {
-            AshError::VulkanError(format!("Shadow vertex shader creation failed: {e:?}"))
-        })?;
+            .build()?;
 
-        let frag_module = unsafe {
-            self.device.create_shader_module(
-                &vk::ShaderModuleCreateInfo::default().code(bytemuck::cast_slice(frag_code)),
-                None,
-            )
-        }
-        .map_err(|e| {
-            AshError::VulkanError(format!("Shadow fragment shader creation failed: {e:?}"))
-        })?;
-
-        let entry_point = c"main";
-
-        let shader_stages = [
-            vk::PipelineShaderStageCreateInfo::default()
-                .stage(vk::ShaderStageFlags::VERTEX)
-                .module(vert_module)
-                .name(entry_point),
-            vk::PipelineShaderStageCreateInfo::default()
-                .stage(vk::ShaderStageFlags::FRAGMENT)
-                .module(frag_module)
-                .name(entry_point),
-        ];
-
-        // BDA-only pipeline: No vertex input bindings/attributes
-        // The shader pulls vertices from the global heap using the push constant pointer.
-        let vertex_input_info = vk::PipelineVertexInputStateCreateInfo::default();
-
-        let input_assembly = vk::PipelineInputAssemblyStateCreateInfo::default()
-            .topology(vk::PrimitiveTopology::TRIANGLE_LIST)
-            .primitive_restart_enable(false);
-
-        let viewport_state = vk::PipelineViewportStateCreateInfo::default()
-            .viewport_count(1)
-            .scissor_count(1);
-
-        let rasterizer = vk::PipelineRasterizationStateCreateInfo::default()
-            .depth_clamp_enable(false)
-            .rasterizer_discard_enable(false)
-            .polygon_mode(vk::PolygonMode::FILL)
-            .line_width(1.0)
-            .cull_mode(vk::CullModeFlags::BACK)
-            .front_face(vk::FrontFace::COUNTER_CLOCKWISE)
-            .depth_bias_enable(true)
-            .depth_bias_constant_factor(1.0)
-            .depth_bias_clamp(0.0)
-            .depth_bias_slope_factor(2.0);
-
-        let multisampling = vk::PipelineMultisampleStateCreateInfo::default()
-            .sample_shading_enable(false)
-            .rasterization_samples(vk::SampleCountFlags::TYPE_1);
-
-        let depth_stencil = vk::PipelineDepthStencilStateCreateInfo::default()
-            .depth_test_enable(true)
-            .depth_write_enable(true)
-            .depth_compare_op(vk::CompareOp::GREATER_OR_EQUAL) // FIX: Reverse-Z support
-            .depth_bounds_test_enable(false)
-            .stencil_test_enable(false);
-
-        let color_blend_attachment = vk::PipelineColorBlendAttachmentState::default()
-            .color_write_mask(vk::ColorComponentFlags::R | vk::ColorComponentFlags::G)
-            .blend_enable(false);
-
-        let color_blending = vk::PipelineColorBlendStateCreateInfo::default()
-            .logic_op_enable(false)
-            .attachments(std::slice::from_ref(&color_blend_attachment));
-
-        let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
-        let dynamic_state =
-            vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);
-
-        let pipeline_info = vk::GraphicsPipelineCreateInfo::default()
-            .stages(&shader_stages)
-            .vertex_input_state(&vertex_input_info)
-            .input_assembly_state(&input_assembly)
-            .viewport_state(&viewport_state)
-            .rasterization_state(&rasterizer)
-            .multisample_state(&multisampling)
-            .depth_stencil_state(&depth_stencil)
-            .color_blend_state(&color_blending)
-            .dynamic_state(&dynamic_state)
-            .layout(pipeline_layout)
-            .render_pass(self.render_pass)
-            .subpass(0);
-
-        let pipelines = unsafe {
-            self.device
-                .create_graphics_pipelines(vk::PipelineCache::null(), &[pipeline_info], None)
-        }
-        .map_err(|e| AshError::VulkanError(format!("Shadow pipeline creation failed: {e:?}")))?;
-
-        // Cleanup shader modules
-        unsafe {
-            self.device.destroy_shader_module(vert_module, None);
-            self.device.destroy_shader_module(frag_module, None);
-        }
-
-        self.shadow_pipeline = Some(pipelines[0]);
+        self.shadow_pipeline = Some(pipeline.pipeline);
         self.shadow_pipeline_layout = Some(pipeline_layout);
 
         log::info!("VSM shadow pipeline created successfully");
@@ -460,10 +188,12 @@ impl VsmShadowPass {
             info.pages.len()
         );
 
-        // 1. Transition layouts to attachment optimal
-        let cache_barrier = vk::ImageMemoryBarrier::default()
-            .src_access_mask(vk::AccessFlags::SHADER_READ)
-            .dst_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE)
+        // 1. Transition layouts (Synchronization2)
+        let cache_barrier = vk::ImageMemoryBarrier2::default()
+            .src_stage_mask(vk::PipelineStageFlags2::FRAGMENT_SHADER)
+            .src_access_mask(vk::AccessFlags2::SHADER_READ)
+            .dst_stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)
+            .dst_access_mask(vk::AccessFlags2::COLOR_ATTACHMENT_WRITE)
             .old_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
             .new_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
             .image(info.resources.physical_cache)
@@ -475,11 +205,13 @@ impl VsmShadowPass {
                 layer_count: 1,
             });
 
-        let depth_barrier = vk::ImageMemoryBarrier::default()
-            .src_access_mask(vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_READ)
-            .dst_access_mask(vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE)
+        let depth_barrier = vk::ImageMemoryBarrier2::default()
+            .src_stage_mask(vk::PipelineStageFlags2::LATE_FRAGMENT_TESTS)
+            .src_access_mask(vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_READ)
+            .dst_stage_mask(vk::PipelineStageFlags2::EARLY_FRAGMENT_TESTS)
+            .dst_access_mask(vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE)
             .old_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
-            .new_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL) // Using DEPTH_STENCIL_ATTACHMENT_OPTIMAL for broad hardware compatibility (avoids requiring KHR_separate_depth_stencil_layouts).
+            .new_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
             .image(info.resources.physical_depth_image)
             .subresource_range(vk::ImageSubresourceRange {
                 aspect_mask: vk::ImageAspectFlags::DEPTH,
@@ -489,18 +221,11 @@ impl VsmShadowPass {
                 layer_count: 1,
             });
 
+        let image_barriers = [cache_barrier, depth_barrier];
+        let dependency_info = vk::DependencyInfo::default().image_memory_barriers(&image_barriers);
+
         unsafe {
-            self.device.cmd_pipeline_barrier(
-                cmd,
-                vk::PipelineStageFlags::FRAGMENT_SHADER
-                    | vk::PipelineStageFlags::LATE_FRAGMENT_TESTS,
-                vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT
-                    | vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS,
-                vk::DependencyFlags::empty(),
-                &[],
-                &[],
-                &[cache_barrier, depth_barrier],
-            );
+            self.device.cmd_pipeline_barrier2(cmd, &dependency_info);
         }
 
         // 2. Begin Dynamic Rendering
@@ -541,52 +266,41 @@ impl VsmShadowPass {
             }
         }
 
-        // 4. Bind Bindless Texture Descriptor Set (Set 1)
+        // 4. Bind Bindless Texture Descriptor Set (Set 0)
         if let Some(layout) = self.shadow_pipeline_layout {
             unsafe {
                 self.device.cmd_bind_descriptor_sets(
                     cmd,
                     vk::PipelineBindPoint::GRAPHICS,
                     layout,
-                    1, // Set 1
+                    0, // Set 0
                     &[info.bindless_descriptor_set],
                     &[],
                 );
             }
+        }
 
-            // Build the per-batch base push. Material pointer and index are left zero —
-            // the shadow pass currently renders opaque objects. When alpha-tested geometry
-            // is added, callers should fill material_ptr + material_index before issuing
-            // the draw. light_space_matrix is overwritten per-page below.
-            let bda_push = ShadowPushConstants {
-                frame_ptr: 0,
-                vertex_ptr: info.vertex_addr,
-                instance_ptr: info.object_addr,
-                material_ptr: 0, // zero → frag skips alpha cutout branch
-                index_ptr: info.index_addr,
-                light_ptr: 0,
-                tile_ptr: 0,
-                vsm_page_index: 0,
-                vsm_cache_index: 0,
-                model: [[0.0; 4]; 4],
-                material_index: 0,
-                use_instancing: 1, // Enable instancing for the manual pull
-                flags: 0,
-                debug_path: 0,
-                debug_visualization_enabled: 0,
-                skybox_index: 0,
-                _pad_mat: 0,
-                _pad_mat2: 0,
-                light_space_matrix: [[0.0; 4]; 4], // overwritten per-page
-            };
+        // Build the per-batch base push.
+        let mut bda_push = crate::renderer::types::GpuPushConstants {
+            frame_ptr: 0,
+            vertex_ptr: info.vertex_addr,
+            instance_ptr: info.object_addr,
+            material_ptr: 0, // zero → frag skips alpha cutout branch
+            index_ptr: info.index_addr,
+            vsm_ptr: info.resources.metadata_address(),
+            use_instancing: 1, // Enable instancing for the manual pull
+            ..Default::default()
+        };
 
+        if let Some(layout) = self.shadow_pipeline_layout {
+            // Initial push
             unsafe {
                 self.device.cmd_push_constants(
                     cmd,
                     layout,
                     vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
                     0,
-                    bytemuck::bytes_of(&bda_push), // push all 224 bytes
+                    bytemuck::bytes_of(&bda_push),
                 );
             }
         }
@@ -642,17 +356,16 @@ impl VsmShadowPass {
                     .cmd_clear_attachments(cmd, &[clear_attachment], &[clear_rect]);
             }
 
-            // Per-page: update only the light-space-matrix slot (offset 160).
-            let matrix = page.mvp.to_cols_array_2d();
-            let matrix_bytes = bytemuck::bytes_of(&matrix);
+            // Per-page: update the entire structure (simplified for first pass)
             if let Some(layout) = self.shadow_pipeline_layout {
+                bda_push.clipmap_level = page.clipmap_level;
                 unsafe {
                     self.device.cmd_push_constants(
                         cmd,
                         layout,
                         vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
-                        LIGHT_SPACE_MATRIX_OFFSET, // 160 — matches ShadowPushConstants.light_space_matrix
-                        matrix_bytes,
+                        0,
+                        bytemuck::bytes_of(&bda_push),
                     );
                 }
             }
@@ -665,10 +378,12 @@ impl VsmShadowPass {
             self.device.cmd_end_rendering(cmd);
         }
 
-        // 5. Transition Back
-        let back_cache_barrier = vk::ImageMemoryBarrier::default()
-            .src_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE)
-            .dst_access_mask(vk::AccessFlags::SHADER_READ)
+        // 5. Transition Back (Synchronization2)
+        let back_cache_barrier = vk::ImageMemoryBarrier2::default()
+            .src_stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)
+            .src_access_mask(vk::AccessFlags2::COLOR_ATTACHMENT_WRITE)
+            .dst_stage_mask(vk::PipelineStageFlags2::FRAGMENT_SHADER)
+            .dst_access_mask(vk::AccessFlags2::SHADER_READ)
             .old_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
             .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
             .image(info.resources.physical_cache)
@@ -680,16 +395,11 @@ impl VsmShadowPass {
                 layer_count: 1,
             });
 
+        let dependency_info = vk::DependencyInfo::default()
+            .image_memory_barriers(std::slice::from_ref(&back_cache_barrier));
+
         unsafe {
-            self.device.cmd_pipeline_barrier(
-                cmd,
-                vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
-                vk::PipelineStageFlags::FRAGMENT_SHADER,
-                vk::DependencyFlags::empty(),
-                &[],
-                &[],
-                &[back_cache_barrier],
-            );
+            self.device.cmd_pipeline_barrier2(cmd, &dependency_info);
         }
     }
 
@@ -714,11 +424,6 @@ impl VsmShadowPass {
                 self.device.destroy_pipeline_layout(layout, None);
             }
 
-            if self.framebuffer != vk::Framebuffer::null() {
-                self.device.destroy_framebuffer(self.framebuffer, None);
-                self.framebuffer = vk::Framebuffer::null();
-            }
-
             // Destroy depth buffer
             if self.depth_view != vk::ImageView::null() {
                 self.device.destroy_image_view(self.depth_view, None);
@@ -727,11 +432,6 @@ impl VsmShadowPass {
             if let Some(mut alloc) = self.depth_image_alloc.take() {
                 allocator.vma.destroy_image(self.depth_image, &mut alloc);
                 self.depth_image = vk::Image::null();
-            }
-
-            if self.render_pass != vk::RenderPass::null() {
-                self.device.destroy_render_pass(self.render_pass, None);
-                self.render_pass = vk::RenderPass::null();
             }
         }
 

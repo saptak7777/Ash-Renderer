@@ -380,8 +380,9 @@ impl Camera {
     }
 
     pub fn projection_matrix(&self) -> Mat4 {
+        // Reverse-Z Perspective: swap near and far planes
         let mut proj =
-            Mat4::perspective_rh(self.fov.to_radians(), self.aspect, self.near, self.far);
+            Mat4::perspective_rh(self.fov.to_radians(), self.aspect, self.far, self.near);
         proj.y_axis.y *= -1.0;
         proj
     }
@@ -397,7 +398,8 @@ pub struct TemporalCamera {
     pub target: Vec3,
     pub up: Vec3,
     pub fov: f32,
-    pub aspect: f32,
+    pub width: u32,
+    pub height: u32,
     pub near: f32,
     pub far: f32,
 
@@ -417,7 +419,8 @@ pub struct TemporalCamera {
 }
 
 impl TemporalCamera {
-    pub fn new(position: Vec3, target: Vec3, aspect: f32) -> Self {
+    pub fn new(position: Vec3, target: Vec3, width: u32, height: u32) -> Self {
+        let aspect = width as f32 / height.max(1) as f32;
         let view = Mat4::look_at_rh(position, target, Vec3::Y);
         let mut proj = Mat4::perspective_rh(45.0_f32.to_radians(), aspect, 0.5, 100.0);
         proj.y_axis.y *= -1.0;
@@ -428,7 +431,8 @@ impl TemporalCamera {
             target,
             up: Vec3::Y,
             fov: 45.0,
-            aspect,
+            width,
+            height,
             near: 0.5,
             far: 100.0,
             view,
@@ -442,15 +446,18 @@ impl TemporalCamera {
         }
     }
 
-    pub fn default(aspect: f32) -> Self {
-        Self::new(Vec3::new(0.0, 0.0, 3.0), Vec3::ZERO, aspect)
+    pub fn default(width: u32, height: u32) -> Self {
+        Self::new(Vec3::new(0.0, 0.0, 3.0), Vec3::ZERO, width, height)
     }
 
     /// Begin new frame - swaps previous/current matrices and updates jitter
     ///
-    /// Call this at the start of each frame before rendering.
-    /// Uses zero-cost `std::mem::swap` for efficient history tracking.
-    pub fn begin_frame(&mut self) {
+    /// # Parameters
+    /// - `width`/`height` – Current render target dimensions.
+    pub fn begin_frame(&mut self, width: u32, height: u32) {
+        self.width = width;
+        self.height = height;
+
         // Zero-cost swap using Rust's ownership system
         std::mem::swap(&mut self.prev_view, &mut self.view);
         std::mem::swap(&mut self.prev_proj, &mut self.proj);
@@ -466,18 +473,16 @@ impl TemporalCamera {
     fn update_matrices(&mut self) {
         self.view = Mat4::look_at_rh(self.position, self.target, self.up);
 
-        let mut proj =
-            Mat4::perspective_rh(self.fov.to_radians(), self.aspect, self.near, self.far);
+        let aspect = self.width as f32 / self.height.max(1) as f32;
+        let mut proj = Mat4::perspective_rh(self.fov.to_radians(), aspect, self.near, self.far);
         proj.y_axis.y *= -1.0; // Vulkan Y-flip
 
-        // Apply sub-pixel jitter for TSR
-        let jitter_mat = Mat4::from_translation(Vec3::new(
-            self.current_jitter.x * 2.0 / self.aspect,
-            self.current_jitter.y * 2.0,
-            0.0,
-        ));
-
-        self.proj = jitter_mat * proj;
+        // Apply sub-pixel jitter normalized to resolution (matches FrameState logic)
+        let mut jittered = proj;
+        let jitter_ndc_x = (self.current_jitter.x * 2.0) / self.width.max(1) as f32;
+        let jitter_ndc_y = (self.current_jitter.y * 2.0) / self.height.max(1) as f32;
+        *jittered.col_mut(2) = proj.col(2) + glam::Vec4::new(jitter_ndc_x, jitter_ndc_y, 0.0, 0.0);
+        self.proj = jittered;
         self.view_proj = self.proj * self.view;
     }
 

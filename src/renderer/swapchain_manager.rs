@@ -68,10 +68,10 @@ pub fn recreate_swapchain_resources(renderer: &mut Renderer, scene: &mut Scene) 
             .write()
             .map_err(|e| AshError::VulkanError(format!("Forward+ lock poisoned: {e}")))?;
         forward_plus.on_resize(swapchain_extent.width, swapchain_extent.height);
-        let fp_info = forward_plus.get_lights().get_forward_plus_info();
-        scene.scene_lighting.num_tiles_x = fp_info.num_tiles[0];
-        scene.scene_lighting.num_tiles_y = fp_info.num_tiles[1];
-        scene.scene_lighting.tile_size = fp_info.tile_size;
+        let (num_tiles, tile_size) = forward_plus.get_lights().get_tile_info();
+        scene.scene_lighting.num_tiles_x = num_tiles[0];
+        scene.scene_lighting.num_tiles_y = num_tiles[1];
+        scene.scene_lighting.tile_size = tile_size;
     }
 
     renderer.recreate_descriptor_sets()?;

@@ -10,6 +10,7 @@ use super::resources::{PageAllocation, PageRequest};
 pub struct PageToRender {
     pub physical_coord: IVec2,
     pub mvp: Mat4,
+    pub clipmap_level: u32,
 }
 
 /// Page state tracking
@@ -401,6 +402,7 @@ impl PageManager {
                 PageToRender {
                     physical_coord: IVec2::new(alloc.physical_x as i32, alloc.physical_y as i32),
                     mvp: crop_matrix * light_view_proj,
+                    clipmap_level: alloc.layer,
                 }
             })
             .collect()

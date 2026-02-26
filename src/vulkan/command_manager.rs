@@ -80,23 +80,6 @@ impl<'a> CommandBufferContext<'a> {
         }
     }
 
-    pub fn begin_render_pass(
-        &self,
-        begin_info: &vk::RenderPassBeginInfo,
-        contents: vk::SubpassContents,
-    ) {
-        unsafe {
-            self.device
-                .cmd_begin_render_pass(self.command_buffer, begin_info, contents);
-        }
-    }
-
-    pub fn end_render_pass(&self) {
-        unsafe {
-            self.device.cmd_end_render_pass(self.command_buffer);
-        }
-    }
-
     pub fn bind_pipeline(&self, bind_point: vk::PipelineBindPoint, pipeline: vk::Pipeline) {
         unsafe {
             self.device
@@ -156,6 +139,14 @@ impl<'a> CommandBufferContext<'a> {
                 buffer_memory_barriers,
                 image_memory_barriers,
             );
+        }
+    }
+
+    /// Insert a modern pipeline barrier (Synchronization2).
+    pub fn pipeline_barrier2(&self, dependency_info: &vk::DependencyInfo) {
+        unsafe {
+            self.device
+                .cmd_pipeline_barrier2(self.command_buffer, dependency_info);
         }
     }
 }

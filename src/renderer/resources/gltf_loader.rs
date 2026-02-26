@@ -99,6 +99,11 @@ pub fn load_model(path: impl AsRef<Path>) -> Result<Vec<Mesh>> {
                             .unwrap_or(1.0),
                         normal_scale: mat.normal_texture().map(|t| t.scale()).unwrap_or(1.0),
                         alpha_cutoff: mat.alpha_cutoff().unwrap_or(0.5),
+                        flags: if mat.alpha_mode() != gltf::material::AlphaMode::Opaque {
+                            crate::renderer::resources::uniform::MATERIAL_FLAG_ALPHA_TESTED
+                        } else {
+                            0
+                        },
                     }
                 })
             });

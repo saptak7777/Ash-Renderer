@@ -191,9 +191,9 @@ impl TaaQuality {
     /// Get clamping gamma (for AABB clipping)
     pub const fn clamping_gamma(self) -> f32 {
         match self {
-            Self::Responsive => 1.5,
-            Self::Balanced => 1.2,
-            Self::Quality => 1.0,
+            Self::Responsive => 2.5, // audit: relaxed for stability
+            Self::Balanced => 1.8,   // audit: relaxed
+            Self::Quality => 1.2,
         }
     }
 }
@@ -338,12 +338,13 @@ use crate::renderer::util::halton::HaltonSequence;
 pub struct TaaPushConstants {
     pub width: f32,
     pub height: f32,
-    pub jitter_x: f32, // Current Frame Jitter (NDC)
+    pub jitter_x: f32, // Current Frame Jitter (Pixels)
     pub jitter_y: f32,
-    pub prev_jitter_x: f32, // Previous Frame Jitter (NDC)
+    pub prev_jitter_x: f32, // Previous Frame Jitter (Pixels)
     pub prev_jitter_y: f32,
     pub blend_factor: f32,
     pub clamping_gamma: f32,
+    pub depth_threshold: f32,
     pub anti_flicker: u32,
 }
 
@@ -358,6 +359,7 @@ impl Default for TaaPushConstants {
             prev_jitter_y: 0.0,
             blend_factor: 0.9,
             clamping_gamma: 1.0,
+            depth_threshold: 0.1,
             anti_flicker: 1,
         }
     }
@@ -406,8 +408,7 @@ impl TemporalAA {
         let jitter_y = self.current_jitter.y * 2.0 / height as f32;
 
         let mut jittered = projection;
-        jittered.w_axis.x += jitter_x;
-        jittered.w_axis.y += jitter_y;
+        *jittered.col_mut(2) = projection.col(2) + glam::Vec4::new(jitter_x, jitter_y, 0.0, 0.0);
         jittered
     }
 
@@ -422,6 +423,7 @@ impl TemporalAA {
             prev_jitter_y: self.previous_jitter.y,
             blend_factor: self.config.blend_factor,
             clamping_gamma: self.config.quality.clamping_gamma(),
+            depth_threshold: self.config.depth_threshold,
             anti_flicker: if self.config.anti_flicker { 1 } else { 0 },
         }
     }
@@ -489,8 +491,9 @@ pub struct TaaPass {
     history_allocs: [Option<vk_mem::Allocation>; 2],
     history_views: [vk::ImageView; 2],
 
-    // Sampler for reading history and color inputs
+    // Samplers for reading history and color inputs
     sampler: vk::Sampler,
+    point_sampler: vk::Sampler,
 
     // Descriptor infrastructure (one set per ping-pong slot)
     descriptor_set_layout: vk::DescriptorSetLayout,
@@ -509,6 +512,7 @@ pub struct TaaPass {
     frame_index: u64,
 
     initialized: bool,
+    needs_clear: [bool; 2],
 }
 
 impl TaaPass {
@@ -522,6 +526,7 @@ impl TaaPass {
             history_allocs: [None, None],
             history_views: [vk::ImageView::null(); 2],
             sampler: vk::Sampler::null(),
+            point_sampler: vk::Sampler::null(),
             descriptor_set_layout: vk::DescriptorSetLayout::null(),
             descriptor_pool: vk::DescriptorPool::null(),
             descriptor_sets: [vk::DescriptorSet::null(); 2],
@@ -531,6 +536,7 @@ impl TaaPass {
             height: 0,
             frame_index: 0,
             initialized: false,
+            needs_clear: [true, true],
         })
     }
 
@@ -552,6 +558,7 @@ impl TaaPass {
 
         self.width = width;
         self.height = height;
+        self.needs_clear = [true, true];
 
         unsafe {
             self.create_sampler()?;
@@ -632,11 +639,24 @@ impl TaaPass {
         let write_idx = ((self.frame_index + 1) % 2) as usize;
 
         // ── Transition write history image to GENERAL (storage write) ─────────
-        let write_barrier = vk::ImageMemoryBarrier::default()
-            .old_layout(vk::ImageLayout::UNDEFINED)
+        let (old_layout, src_access) = if self.needs_clear[write_idx] {
+            (vk::ImageLayout::UNDEFINED, vk::AccessFlags2::empty())
+        } else {
+            (
+                vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                vk::AccessFlags2::SHADER_READ,
+            )
+        };
+
+        let write_barrier = vk::ImageMemoryBarrier2::default()
+            .src_stage_mask(
+                vk::PipelineStageFlags2::COMPUTE_SHADER | vk::PipelineStageFlags2::TOP_OF_PIPE,
+            )
+            .src_access_mask(src_access)
+            .dst_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
+            .dst_access_mask(vk::AccessFlags2::SHADER_WRITE)
+            .old_layout(old_layout) // Reused from previous read slot or UNDEFINED
             .new_layout(vk::ImageLayout::GENERAL)
-            .src_access_mask(vk::AccessFlags::empty())
-            .dst_access_mask(vk::AccessFlags::SHADER_WRITE)
             .image(self.history_images[write_idx])
             .subresource_range(vk::ImageSubresourceRange {
                 aspect_mask: vk::ImageAspectFlags::COLOR,
@@ -647,23 +667,38 @@ impl TaaPass {
             });
 
         unsafe {
-            self.device.cmd_pipeline_barrier(
-                cmd,
-                vk::PipelineStageFlags::TOP_OF_PIPE,
-                vk::PipelineStageFlags::COMPUTE_SHADER,
-                vk::DependencyFlags::empty(),
-                &[],
-                &[],
-                &[write_barrier],
-            );
+            let image_barriers = [write_barrier];
+            let dep_info = vk::DependencyInfo::default().image_memory_barriers(&image_barriers);
+            self.device.cmd_pipeline_barrier2(cmd, &dep_info);
+
+            if self.needs_clear[write_idx] {
+                self.device.cmd_clear_color_image(
+                    cmd,
+                    self.history_images[write_idx],
+                    vk::ImageLayout::GENERAL,
+                    &vk::ClearColorValue {
+                        float32: [0.0, 0.0, 0.0, 1.0],
+                    },
+                    &[vk::ImageSubresourceRange {
+                        aspect_mask: vk::ImageAspectFlags::COLOR,
+                        base_mip_level: 0,
+                        level_count: 1,
+                        base_array_layer: 0,
+                        layer_count: 1,
+                    }],
+                );
+                self.needs_clear[write_idx] = false;
+            }
         }
 
-        // ── Transition read history image to SHADER_READ_ONLY_OPTIMAL ─────────
-        let read_barrier = vk::ImageMemoryBarrier::default()
+        // ── Transition read history image to SHADER_READ_ONLY_OPTIMAL (Sync2) ──
+        let read_barrier = vk::ImageMemoryBarrier2::default()
+            .src_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
+            .src_access_mask(vk::AccessFlags2::SHADER_WRITE) // Previous frame's write
+            .dst_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
+            .dst_access_mask(vk::AccessFlags2::SHADER_READ)
             .old_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
             .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
-            .src_access_mask(vk::AccessFlags::SHADER_READ)
-            .dst_access_mask(vk::AccessFlags::SHADER_READ)
             .image(self.history_images[read_idx])
             .subresource_range(vk::ImageSubresourceRange {
                 aspect_mask: vk::ImageAspectFlags::COLOR,
@@ -676,15 +711,9 @@ impl TaaPass {
         // Only apply the read barrier after the first frame (frame 0 has no prior write).
         if self.frame_index > 0 {
             unsafe {
-                self.device.cmd_pipeline_barrier(
-                    cmd,
-                    vk::PipelineStageFlags::COMPUTE_SHADER,
-                    vk::PipelineStageFlags::COMPUTE_SHADER,
-                    vk::DependencyFlags::empty(),
-                    &[],
-                    &[],
-                    &[read_barrier],
-                );
+                let image_barriers = [read_barrier];
+                let dep_info = vk::DependencyInfo::default().image_memory_barriers(&image_barriers);
+                self.device.cmd_pipeline_barrier2(cmd, &dep_info);
             }
         }
 
@@ -728,12 +757,14 @@ impl TaaPass {
             self.device.cmd_dispatch(cmd, groups_x, groups_y, 1);
         }
 
-        // ── Transition write image to SHADER_READ_ONLY for the tonemapper ─────
-        let post_barrier = vk::ImageMemoryBarrier::default()
+        // ── Transition write image to SHADER_READ_ONLY for the tonemapper (Sync2) ────
+        let post_barrier = vk::ImageMemoryBarrier2::default()
+            .src_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
+            .src_access_mask(vk::AccessFlags2::SHADER_WRITE)
+            .dst_stage_mask(vk::PipelineStageFlags2::FRAGMENT_SHADER)
+            .dst_access_mask(vk::AccessFlags2::SHADER_READ)
             .old_layout(vk::ImageLayout::GENERAL)
             .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
-            .src_access_mask(vk::AccessFlags::SHADER_WRITE)
-            .dst_access_mask(vk::AccessFlags::SHADER_READ)
             .image(self.history_images[write_idx])
             .subresource_range(vk::ImageSubresourceRange {
                 aspect_mask: vk::ImageAspectFlags::COLOR,
@@ -744,15 +775,9 @@ impl TaaPass {
             });
 
         unsafe {
-            self.device.cmd_pipeline_barrier(
-                cmd,
-                vk::PipelineStageFlags::COMPUTE_SHADER,
-                vk::PipelineStageFlags::FRAGMENT_SHADER,
-                vk::DependencyFlags::empty(),
-                &[],
-                &[],
-                &[post_barrier],
-            );
+            let image_barriers = [post_barrier];
+            let dep_info = vk::DependencyInfo::default().image_memory_barriers(&image_barriers);
+            self.device.cmd_pipeline_barrier2(cmd, &dep_info);
         }
 
         self.frame_index += 1;
@@ -782,6 +807,17 @@ impl TaaPass {
             .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_EDGE)
             .max_lod(vk::LOD_CLAMP_NONE);
         self.sampler = unsafe { self.device.create_sampler(&info, None)? };
+
+        let point_info = vk::SamplerCreateInfo::default()
+            .mag_filter(vk::Filter::NEAREST)
+            .min_filter(vk::Filter::NEAREST)
+            .mipmap_mode(vk::SamplerMipmapMode::NEAREST)
+            .address_mode_u(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+            .address_mode_v(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+            .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+            .max_lod(vk::LOD_CLAMP_NONE);
+        self.point_sampler = unsafe { self.device.create_sampler(&point_info, None)? };
+
         Ok(())
     }
 
@@ -828,7 +864,8 @@ impl TaaPass {
                         .level_count(1)
                         .layer_count(1),
                 );
-            self.history_views[i] = unsafe { self.device.create_image_view(&view_info, None)? };
+            let image_view = unsafe { self.device.create_image_view(&view_info, None)? };
+            self.history_views[i] = image_view;
         }
         Ok(())
     }
@@ -964,17 +1001,17 @@ impl TaaPass {
             .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
             .sampler(self.sampler);
 
-        // Binding 2: depth
+        // Binding 2: depth (POINT SAMPLED)
         let depth_info = vk::DescriptorImageInfo::default()
             .image_view(depth_view)
             .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
-            .sampler(self.sampler);
+            .sampler(self.point_sampler);
 
-        // Binding 3: motion
+        // Binding 3: motion (POINT SAMPLED)
         let motion_info = vk::DescriptorImageInfo::default()
             .image_view(motion_view)
             .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
-            .sampler(self.sampler);
+            .sampler(self.point_sampler);
 
         let writes = [
             vk::WriteDescriptorSet::default()
@@ -1073,6 +1110,10 @@ impl TaaPass {
             if self.sampler != vk::Sampler::null() {
                 self.device.destroy_sampler(self.sampler, None);
                 self.sampler = vk::Sampler::null();
+            }
+            if self.point_sampler != vk::Sampler::null() {
+                self.device.destroy_sampler(self.point_sampler, None);
+                self.point_sampler = vk::Sampler::null();
             }
         }
 

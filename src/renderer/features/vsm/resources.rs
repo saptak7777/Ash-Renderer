@@ -162,18 +162,19 @@ pub struct VsmResources {
     /// Bindless indices
     pub physical_cache_index: u32,
     pub page_table_index: u32,
+    pub physical_cache_storage_index: u32,
+    pub page_table_storage_index: u32,
 
-    /// Default textures for VSM
     pub default_uint_texture: crate::renderer::resources::Texture,
     pub default_array_texture: crate::renderer::resources::Texture,
+}
 
-    /// Descriptor set layout for VSM compute pipelines
-    pub compute_layout: vk::DescriptorSetLayout,
-
-    /// Descriptor pool for VSM compute descriptors
-    pub descriptor_pool: vk::DescriptorPool,
-    /// Descriptor set for VSM compute dispatch
-    pub descriptor_set: vk::DescriptorSet,
+impl VsmResources {
+    /// Get GPU device address of the metadata buffer
+    pub fn metadata_address(&self) -> u64 {
+        let addr_info = vk::BufferDeviceAddressInfo::default().buffer(self.metadata_buffer);
+        unsafe { self.device.get_buffer_device_address(&addr_info) }
+    }
 }
 
 impl VsmResources {
@@ -322,11 +323,7 @@ impl VsmResources {
 
         let table_view_info = vk::ImageViewCreateInfo::default()
             .image(page_table)
-            .view_type(if array_layers > 1 {
-                vk::ImageViewType::TYPE_2D_ARRAY
-            } else {
-                vk::ImageViewType::TYPE_2D
-            })
+            .view_type(vk::ImageViewType::TYPE_2D_ARRAY)
             .format(vk::Format::R32_UINT)
             .subresource_range(vk::ImageSubresourceRange {
                 aspect_mask: vk::ImageAspectFlags::COLOR,
@@ -435,68 +432,17 @@ impl VsmResources {
             config.clipmap_levels,
         )?;
 
-        // Create compute descriptor set layout
-        let compute_layout =
-            unsafe { crate::renderer::initialization::create_vsm_compute_layout(&device)? };
-
-        let pool_sizes = [
-            vk::DescriptorPoolSize {
-                ty: vk::DescriptorType::STORAGE_IMAGE,
-                descriptor_count: 2,
-            },
-            vk::DescriptorPoolSize {
-                ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-                descriptor_count: 1,
-            },
-        ];
-        let pool_info = vk::DescriptorPoolCreateInfo::default()
-            .max_sets(1)
-            .pool_sizes(&pool_sizes);
-        let descriptor_pool =
-            unsafe { device.create_descriptor_pool(&pool_info, None) }.map_err(|e| {
-                AshError::VulkanError(format!("Failed to create VSM descriptor pool: {e}"))
-            })?;
-
-        // Allocate descriptor set
-        let layouts = [compute_layout];
-        let alloc_info = vk::DescriptorSetAllocateInfo::default()
-            .descriptor_pool(descriptor_pool)
-            .set_layouts(&layouts);
-        let descriptor_set =
-            unsafe { device.allocate_descriptor_sets(&alloc_info) }.map_err(|e| {
-                AshError::VulkanError(format!("Failed to allocate VSM descriptor set: {e}"))
-            })?[0];
-
-        // Update descriptor set
-        let table_info = [vk::DescriptorImageInfo::default()
-            .image_view(page_table_view)
-            .image_layout(vk::ImageLayout::GENERAL)];
-        let cache_info = [vk::DescriptorImageInfo::default()
-            .image_view(physical_cache_view)
-            .image_layout(vk::ImageLayout::GENERAL)];
-
-        let writes = [
-            vk::WriteDescriptorSet::default()
-                .dst_set(descriptor_set)
-                .dst_binding(3)
-                .descriptor_type(vk::DescriptorType::STORAGE_IMAGE)
-                .image_info(&table_info),
-            vk::WriteDescriptorSet::default()
-                .dst_set(descriptor_set)
-                .dst_binding(4)
-                .descriptor_type(vk::DescriptorType::STORAGE_IMAGE)
-                .image_info(&cache_info),
-        ];
-
-        unsafe {
-            device.update_descriptor_sets(&writes, &[]);
-        }
+        log::info!("VSM resources created successfully");
 
         // EXPLICIT INITIALIZATION: Clear Page Table and transition to GENERAL layout
         unsafe {
             crate::vulkan::utils::execute_single_use(&device, command_pool, queue, |cmd_buffer| {
-                // 1. Transition UNDEFINED -> TRANSFER_DST_OPTIMAL
-                let barrier_start = vk::ImageMemoryBarrier::default()
+                // 1. Transition UNDEFINED -> TRANSFER_DST_OPTIMAL (Sync2)
+                let barrier_start = vk::ImageMemoryBarrier2::default()
+                    .src_stage_mask(vk::PipelineStageFlags2::TOP_OF_PIPE)
+                    .src_access_mask(vk::AccessFlags2::empty())
+                    .dst_stage_mask(vk::PipelineStageFlags2::TRANSFER)
+                    .dst_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
                     .old_layout(vk::ImageLayout::UNDEFINED)
                     .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
                     .image(page_table)
@@ -506,20 +452,12 @@ impl VsmResources {
                         level_count: 1,
                         base_array_layer: 0,
                         layer_count: array_layers,
-                    })
-                    .src_access_mask(vk::AccessFlags::empty())
-                    .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE);
+                    });
 
-                device.cmd_pipeline_barrier(
-                    cmd_buffer,
-                    vk::PipelineStageFlags::TOP_OF_PIPE,
-                    vk::PipelineStageFlags::TRANSFER,
-                    vk::DependencyFlags::empty(),
-                    &[],
-                    &[],
-                    &[barrier_start],
-                );
-
+                let image_barriers_start = [barrier_start];
+                let dep_info_start =
+                    vk::DependencyInfo::default().image_memory_barriers(&image_barriers_start);
+                device.cmd_pipeline_barrier2(cmd_buffer, &dep_info_start);
                 // 2. Clear to INVALID_PAGE sentinel (0xFFFFFFFF)
                 let clear_value = vk::ClearColorValue {
                     uint32: [0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF],
@@ -540,8 +478,15 @@ impl VsmResources {
                     &[range],
                 );
 
-                // 3. Transition TRANSFER_DST_OPTIMAL -> GENERAL (Used by Compute/Fragment shaders)
-                let barrier_end = vk::ImageMemoryBarrier::default()
+                // 3. Transition TRANSFER_DST_OPTIMAL -> GENERAL (Used by Compute/Fragment shaders) (Sync2)
+                let barrier_end = vk::ImageMemoryBarrier2::default()
+                    .src_stage_mask(vk::PipelineStageFlags2::TRANSFER)
+                    .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
+                    .dst_stage_mask(
+                        vk::PipelineStageFlags2::COMPUTE_SHADER
+                            | vk::PipelineStageFlags2::FRAGMENT_SHADER,
+                    )
+                    .dst_access_mask(vk::AccessFlags2::SHADER_READ | vk::AccessFlags2::SHADER_WRITE)
                     .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
                     .new_layout(vk::ImageLayout::GENERAL)
                     .image(page_table)
@@ -551,20 +496,12 @@ impl VsmResources {
                         level_count: 1,
                         base_array_layer: 0,
                         layer_count: array_layers,
-                    })
-                    .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
-                    .dst_access_mask(vk::AccessFlags::SHADER_READ | vk::AccessFlags::SHADER_WRITE);
+                    });
 
-                device.cmd_pipeline_barrier(
-                    cmd_buffer,
-                    vk::PipelineStageFlags::TRANSFER,
-                    vk::PipelineStageFlags::COMPUTE_SHADER
-                        | vk::PipelineStageFlags::FRAGMENT_SHADER,
-                    vk::DependencyFlags::empty(),
-                    &[],
-                    &[],
-                    &[barrier_end],
-                );
+                let image_barriers_end = [barrier_end];
+                let dep_info_end =
+                    vk::DependencyInfo::default().image_memory_barriers(&image_barriers_end);
+                device.cmd_pipeline_barrier2(cmd_buffer, &dep_info_end);
             })?;
         }
 
@@ -594,11 +531,10 @@ impl VsmResources {
             metadata_buffer_alloc: Some(metadata_buffer_alloc),
             physical_cache_index: u32::MAX, // To be registered
             page_table_index: u32::MAX,     // To be registered
+            physical_cache_storage_index: u32::MAX,
+            page_table_storage_index: u32::MAX,
             default_uint_texture,
             default_array_texture,
-            compute_layout,
-            descriptor_pool,
-            descriptor_set,
         })
     }
 
@@ -612,6 +548,12 @@ impl VsmResources {
 
         self.physical_cache_index = bindless_manager
             .add_sampled_image(self.physical_cache_view, self.physical_cache_sampler)?;
+
+        // Register for storage access as well
+        self.physical_cache_storage_index =
+            bindless_manager.add_storage_image(self.physical_cache_view)?;
+        self.page_table_storage_index =
+            bindless_manager.add_storage_image_2d_array(self.page_table_view)?;
 
         log::info!(
             "VSM Registered: page_index={}, cache_index={}",
@@ -682,31 +624,14 @@ impl VsmResources {
                 count as usize,
             );
 
+            // Flush memory to ensure GPU visibility on non-coherent heaps
+            self.allocator.vma.flush_allocation(
+                &alloc,
+                ATOMIC_HEADER_SIZE,
+                (count as usize * std::mem::size_of::<PageAllocation>()) as u64,
+            )?;
+
             self.allocator.vma.unmap_memory(&mut alloc);
-        }
-
-        Ok(())
-    }
-
-    /// Update analysis descriptors with current scene depth and request buffer
-    pub fn update_analysis_descriptors(
-        &self,
-        depth_view: vk::ImageView,
-        _frame_index: u32,
-    ) -> Result<()> {
-        let depth_info = [vk::DescriptorImageInfo::default()
-            .image_view(depth_view)
-            .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
-            .sampler(self.physical_cache_sampler)];
-
-        let writes = [vk::WriteDescriptorSet::default()
-            .dst_set(self.descriptor_set)
-            .dst_binding(5)
-            .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-            .image_info(&depth_info)];
-
-        unsafe {
-            self.device.update_descriptor_sets(&writes, &[]);
         }
 
         Ok(())
@@ -811,22 +736,6 @@ impl VsmResources {
                     .destroy_image(self.physical_depth_image, &mut alloc);
             }
             self.physical_depth_image = vk::Image::null();
-        }
-
-        if self.compute_layout != vk::DescriptorSetLayout::null() {
-            unsafe {
-                self.device
-                    .destroy_descriptor_set_layout(self.compute_layout, None);
-            }
-            self.compute_layout = vk::DescriptorSetLayout::null();
-        }
-
-        if self.descriptor_pool != vk::DescriptorPool::null() {
-            unsafe {
-                self.device
-                    .destroy_descriptor_pool(self.descriptor_pool, None);
-            }
-            self.descriptor_pool = vk::DescriptorPool::null();
         }
 
         log::debug!("VSM resources destroyed");

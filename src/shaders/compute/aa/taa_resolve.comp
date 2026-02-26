@@ -9,10 +9,11 @@ layout(set = 0, binding = 4) uniform sampler2D u_History; // Previous Resolved
 
 layout(push_constant) uniform Constants {
     vec2 resolution;
-    vec2 jitter;
-    vec2 prev_jitter;
+    vec2 jitter;      // Current (Pixels)
+    vec2 prev_jitter; // Previous (Pixels)
     float blend_factor;
     float clamping_gamma;
+    float depth_threshold;
     uint anti_flicker;
 } pc;
 
@@ -62,6 +63,14 @@ void main() {
     vec3 centerTM = ToneMap(centerColor);
     vec3 centerYCC = RGBToYCoCg(centerTM);
 
+    // Depth-based disocclusion rejection
+    float currentDepth = texture(u_Depth, uv).r;
+    float prevDepth = texture(u_Depth, prevUV).r;
+    
+    // Heuristic: if depth changes significantly, it's likely a disocclusion.
+    // Using abs diff for reverse-Z stability.
+    bool disoccluded = abs(currentDepth - prevDepth) > pc.depth_threshold;
+
     vec3 m1 = vec3(0.0);
     vec3 m2 = vec3(0.0);
 
@@ -107,10 +116,10 @@ void main() {
 
     // 4. Resolve
     // Blend with CENTER pixel (sharper) instead of neighbourhood Mean (blurry)
-    float blend = pc.blend_factor; 
+    float blend = disoccluded ? 0.0 : pc.blend_factor; 
 
     // Anti-flicker: Reduce blend weight for samples with high variance/luminance spikes
-    if (pc.anti_flicker > 0) {
+    if (pc.anti_flicker > 0 && !disoccluded) {
         float luminanceDiff = abs(historyYCC.x - centerYCC.x);
         float flickerWeight = 1.0 / (1.0 + luminanceDiff * 4.0);
         blend *= flickerWeight;

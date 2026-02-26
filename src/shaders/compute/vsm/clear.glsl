@@ -2,22 +2,15 @@
 #extension GL_EXT_buffer_reference2 : require
 #extension GL_EXT_scalar_block_layout : require
 #extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+#extension GL_EXT_nonuniform_qualifier : require
 
-#define SKIP_PUSH_CONSTANTS
 #include "../../interop/structures.glsl"
 
 // 128x128 Page Size / 16x16 Local Size = 8x8 Workgroups per Page
 layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
 
-layout(push_constant) uniform LocalPushConstants {
-    uint64_t global_ptr;
-} pc;
-
-// The Physical Memory Texture (Atlas)
-layout(set = 1, binding = 4, rg32f) uniform image2D u_PhysicalMemory;
-
 void main() {
-    VsmGlobal u_Global = VsmGlobal(pc.global_ptr);
+    VsmGlobal u_Global = VsmGlobal(push.vsm_ptr);
     VsmAllocationBuffer requests = VsmAllocationBuffer(u_Global.allocation_ptr);
 
     // Z-dimension of WorkGroup ID corresponds to the Allocation Index
@@ -34,5 +27,6 @@ void main() {
     ivec2 target_coord = p_base + pixel_offset;
 
     // Clear to Max Depth (1.0) and Zero Moments
-    imageStore(u_PhysicalMemory, target_coord, vec4(1.0, 1.0, 0.0, 0.0));
+    // Use global_storage_images from structures.glsl
+    imageStore(global_storage_images[nonuniformEXT(u_Global.physical_cache_storage_index)], target_coord, vec4(1.0, 1.0, 0.0, 0.0));
 }

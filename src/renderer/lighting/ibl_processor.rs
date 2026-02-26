@@ -31,8 +31,8 @@ struct ImageLayoutTransitionInfo {
     new_layout: vk::ImageLayout,
     mips: u32,
     layers: u32,
-    src_access: vk::AccessFlags,
-    dst_access: vk::AccessFlags,
+    src_access: vk::AccessFlags2,
+    dst_access: vk::AccessFlags2,
 }
 
 impl IblProcessor {
@@ -590,8 +590,8 @@ impl IblProcessor {
                     image,
                     old_layout: vk::ImageLayout::UNDEFINED,
                     new_layout: vk::ImageLayout::GENERAL,
-                    src_access: vk::AccessFlags::empty(),
-                    dst_access: vk::AccessFlags::SHADER_WRITE,
+                    src_access: vk::AccessFlags2::empty(),
+                    dst_access: vk::AccessFlags2::SHADER_WRITE,
                     mips,
                     layers,
                 },
@@ -613,8 +613,8 @@ impl IblProcessor {
                     image,
                     old_layout: vk::ImageLayout::GENERAL,
                     new_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-                    src_access: vk::AccessFlags::SHADER_WRITE,
-                    dst_access: vk::AccessFlags::SHADER_READ,
+                    src_access: vk::AccessFlags2::SHADER_WRITE,
+                    dst_access: vk::AccessFlags2::SHADER_READ,
                     mips,
                     layers,
                 },
@@ -627,11 +627,13 @@ impl IblProcessor {
     /// # Safety
     /// The caller must ensure that the command buffer is in a recording state and that the image handle is valid.
     unsafe fn transition_layout(&self, cmd: vk::CommandBuffer, info: ImageLayoutTransitionInfo) {
-        let barrier = vk::ImageMemoryBarrier::default()
+        let barrier = vk::ImageMemoryBarrier2::default()
+            .src_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
+            .src_access_mask(info.src_access)
+            .dst_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
+            .dst_access_mask(info.dst_access)
             .old_layout(info.old_layout)
             .new_layout(info.new_layout)
-            .src_access_mask(info.src_access)
-            .dst_access_mask(info.dst_access)
             .image(info.image)
             .subresource_range(vk::ImageSubresourceRange {
                 aspect_mask: vk::ImageAspectFlags::COLOR,
@@ -642,15 +644,9 @@ impl IblProcessor {
             });
 
         unsafe {
-            self.device.cmd_pipeline_barrier(
-                cmd,
-                vk::PipelineStageFlags::COMPUTE_SHADER,
-                vk::PipelineStageFlags::COMPUTE_SHADER,
-                vk::DependencyFlags::empty(),
-                &[],
-                &[],
-                &[barrier],
-            );
+            let image_barriers = [barrier];
+            let dep_info = vk::DependencyInfo::default().image_memory_barriers(&image_barriers);
+            self.device.cmd_pipeline_barrier2(cmd, &dep_info);
         }
     }
 }

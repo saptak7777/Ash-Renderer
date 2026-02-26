@@ -1,21 +1,9 @@
 use crate::Result;
+use crate::renderer::types::GpuPushConstants;
 use crate::renderer::vcgs::IndirectDrawCommand;
 use crate::vulkan::Allocator;
 use ash::vk;
 use std::sync::Arc;
-
-#[repr(C)]
-#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-pub struct ShadowCullPushConstants {
-    pub view_proj: [[f32; 4]; 4],
-    pub object_count: u32,
-    pub base_index: u32,
-    pub indirect_start: u32,
-    pub _padding: u32,
-    pub object_buffer_ptr: u64,
-    pub indirect_buffer_ptr: u64,
-    pub count_buffer_ptr: u64,
-}
 
 /// Configuration for shadow culling.
 pub struct ShadowCullInfo {
@@ -25,6 +13,7 @@ pub struct ShadowCullInfo {
     pub base_index: u32,
     pub clipmap_level: u32,
     pub object_buffer_ptr: u64,
+    pub vsm_ptr: u64,
 }
 
 pub struct ShadowCullPass {
@@ -75,7 +64,7 @@ impl ShadowCullPass {
         let push_constant_range = vk::PushConstantRange::default()
             .stage_flags(vk::ShaderStageFlags::COMPUTE)
             .offset(0)
-            .size(std::mem::size_of::<ShadowCullPushConstants>() as u32);
+            .size(std::mem::size_of::<GpuPushConstants>() as u32);
 
         let layout_info = vk::PipelineLayoutCreateInfo::default()
             .push_constant_ranges(std::slice::from_ref(&push_constant_range));
@@ -185,18 +174,21 @@ impl ShadowCullPass {
             )
         };
 
-        let level_count_ptr = count_ptr + (info.clipmap_level as u64 * 4);
+        // Note: count_ptr itself points to the base of the count buffer.
+        // The shader reads from push.light_ptr.
+
         let max_objects_per_level = self.max_commands / self.clipmap_levels;
 
-        let push_constants = ShadowCullPushConstants {
-            view_proj: info.view_proj.to_cols_array_2d(),
+        let push_constants = GpuPushConstants {
+            instance_ptr: info.object_buffer_ptr,
+            tile_ptr: indirect_ptr, // Re-used for IndirectBuffer
+            light_ptr: count_ptr,   // Re-used for CountBuffer
             object_count: info.object_count,
             base_index: info.base_index,
             indirect_start: info.clipmap_level * max_objects_per_level,
-            _padding: 0,
-            object_buffer_ptr: info.object_buffer_ptr,
-            indirect_buffer_ptr: indirect_ptr,
-            count_buffer_ptr: level_count_ptr,
+            clipmap_level: info.clipmap_level,
+            vsm_ptr: info.vsm_ptr,
+            ..Default::default()
         };
 
         unsafe {

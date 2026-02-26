@@ -10,72 +10,9 @@
 //! By centralising both here, `Renderer` becomes a pure orchestrator that
 //! never directly reads or writes GPU memory.
 
-use crate::renderer::resources::Resources;
 use crate::renderer::util::frame_state::FrameState;
 use crate::{AshError, Result};
-
-/// Drop guard to ensure instancing_manager is restored to resources even on panic.
-///
-/// SAFETY: This guard takes EXCLUSIVE ownership of the `InstancingManager` from the `Resources`
-/// struct to allow safe parallel/exclusive access during frame synchronization. The `Drop`
-/// implementation is guaranteed to return the manager, maintaining structural integrity.
-///
-/// SAFETY INVARIANT: This guard uses std::mem::take to temporarily extract the InstancingManager
-/// from the main Resources struct to bypass borrow checker conflicts during updates.
-/// The strict requirement is that this guard MUST be dropped (or explicitly consumed via update_and_restore)
-/// to return the manager to the Resources struct. Failure to do so will leave the engine with an empty, invalid instancing state.
-///
-/// PANIC SAFETY: If a thread panics while this guard is held, the `Resources` struct will be left
-/// with a default/empty manager until the stack unwinds and `drop()` is called. Because the
-/// restoration occurs in the 'Drop' implementation, the InstancingManager is guaranteed to be
-/// restored to the Resources struct even during thread unwinding (panics). This strictly
-/// prevents memory leaks or dangling pointers during catastrophic engine failures.
-pub struct InstancingRestoreGuard<'a> {
-    resources: &'a mut Resources,
-    manager: Option<crate::renderer::instancing::InstancingManager>,
-}
-
-impl<'a> InstancingRestoreGuard<'a> {
-    fn new(resources: &'a mut Resources) -> Self {
-        #[cfg(debug_assertions)]
-        {
-            resources.instancing_guard_active = true;
-        }
-        let manager = std::mem::take(&mut resources._instancing_manager);
-        Self {
-            resources,
-            manager: Some(manager),
-        }
-    }
-
-    // manager() was unused, so it was removed to satisfy Clippy.
-
-    fn update_instance_buffers(&mut self, frame_index: usize) -> Result<()> {
-        self.resources
-            .update_instance_buffers(self.manager.as_ref().unwrap(), frame_index)
-    }
-
-    pub fn update_and_restore(mut self, frame_index: usize) -> Result<()> {
-        // Self is consumed here, Drop handles the move back to resources.
-        self.update_instance_buffers(frame_index)
-    }
-}
-
-impl<'a> Drop for InstancingRestoreGuard<'a> {
-    fn drop(&mut self) {
-        if let Some(manager) = self.manager.take() {
-            self.resources._instancing_manager = manager;
-            #[cfg(debug_assertions)]
-            {
-                self.resources.instancing_guard_active = false;
-            }
-        } else {
-            log::error!(
-                "InstancingRestoreGuard dropped without restoration - this indicates a logic bug or a botched move!"
-            );
-        }
-    }
-}
+use ash::vk;
 
 /// Encapsulates all CPU-to-GPU state reconciliation for a single frame.
 ///
@@ -205,25 +142,47 @@ impl SceneSynchronizer {
             let mut transform = crate::renderer::resources::transform::Transform::identity();
             transform.set_model(model);
 
+            let extent = resources
+                .gbuffer
+                .as_ref()
+                .map(|g| g.extent())
+                .unwrap_or(vk::Extent2D {
+                    width: 1,
+                    height: 1,
+                });
+            let width = extent.width as f32;
+            let height = extent.height as f32;
+
+            matrices.screen_params = glam::Vec4::new(width, height, 1.0 / width, 1.0 / height);
+            matrices.hiz_levels = systems
+                .pipeline
+                .hiz_pass
+                .as_ref()
+                .and_then(|h| h.read().ok())
+                .map(|h| h.mip_count())
+                .unwrap_or(0);
+
             matrices.model = model;
             matrices.normal_matrix = glam::Mat4::from_mat3(transform.normal_matrix());
             matrices.view = frame_state.view;
             matrices.projection = frame_state.jittered_projection;
             matrices.view_proj = frame_state.view_proj();
             matrices.prev_view_proj = frame_state.prev_view_proj;
+            matrices.view_proj_no_jitter = frame_state.view_proj_no_jitter;
+            matrices.prev_view_proj_no_jitter = frame_state.prev_view_proj_no_jitter;
             matrices.camera_pos = frame_state.camera_pos.extend(1.0);
 
             // ── Light cluster metadata ─────────────────────────────────
             scene.scene_lighting.point_light_count = scene.point_lights.len() as u32;
             if let Some(fp) = &systems.pipeline.forward_plus {
-                let info = fp
+                let (num_tiles, tile_size) = fp
                     .read()
                     .map_err(|_| AshError::LockPoisoned("ForwardPlus".to_string()))?
                     .get_lights()
-                    .get_forward_plus_info();
-                scene.scene_lighting.num_tiles_x = info.num_tiles[0];
-                scene.scene_lighting.num_tiles_y = info.num_tiles[1];
-                scene.scene_lighting.tile_size = info.tile_size;
+                    .get_tile_info();
+                scene.scene_lighting.num_tiles_x = num_tiles[0];
+                scene.scene_lighting.num_tiles_y = num_tiles[1];
+                scene.scene_lighting.tile_size = tile_size;
             }
             matrices.set_lighting(&scene.scene_lighting);
             matrices.set_light_space_matrix(glam::Mat4::IDENTITY);
@@ -273,19 +232,7 @@ impl SceneSynchronizer {
             );
             unsafe {
                 fp.upload_to_gpu(&context.alloc, &context.device.device, frame_index)?;
-                fp.update_camera(
-                    &context.alloc,
-                    frame_index,
-                    &frame_state.view.to_cols_array_2d(),
-                    &frame_state.projection.to_cols_array_2d(),
-                    &frame_state.camera_pos.extend(1.0).to_array(),
-                )?;
             }
-        }
-
-        // ── Instance buffers ───────────────────────────────────────────
-        {
-            InstancingRestoreGuard::new(resources).update_and_restore(frame_index)?;
         }
 
         // Archive this frame's view_proj so the next frame has a valid prev_view_proj.

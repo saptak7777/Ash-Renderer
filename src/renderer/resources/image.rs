@@ -171,14 +171,14 @@ impl ImageHandle {
             command_pool,
             queue,
             |cmd| {
-                // Transition to TRANSFER_SRC_OPTIMAL
-                // We use TOP_OF_PIPE and ALL_COMMANDS-ish or at least COMPUTE/FRAGMENT to be safe
-                // since we don't know for sure where it was last used.
-                let barrier = vk::ImageMemoryBarrier::default()
+                // Transition to TRANSFER_SRC_OPTIMAL (Sync2)
+                let barrier = vk::ImageMemoryBarrier2::default()
+                    .src_stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)
+                    .src_access_mask(vk::AccessFlags2::SHADER_READ | vk::AccessFlags2::SHADER_WRITE)
+                    .dst_stage_mask(vk::PipelineStageFlags2::TRANSFER)
+                    .dst_access_mask(vk::AccessFlags2::TRANSFER_READ)
                     .old_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
                     .new_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
-                    .src_access_mask(vk::AccessFlags::SHADER_READ | vk::AccessFlags::SHADER_WRITE)
-                    .dst_access_mask(vk::AccessFlags::TRANSFER_READ)
                     .image(self.image)
                     .subresource_range(vk::ImageSubresourceRange {
                         aspect_mask: vk::ImageAspectFlags::COLOR,
@@ -188,18 +188,11 @@ impl ImageHandle {
                         layer_count: self.layers,
                     });
 
+                let image_barriers = [barrier];
+                let dep_info = vk::DependencyInfo::default().image_memory_barriers(&image_barriers);
                 unsafe {
-                    self.device.cmd_pipeline_barrier(
-                        cmd,
-                        vk::PipelineStageFlags::ALL_COMMANDS,
-                        vk::PipelineStageFlags::TRANSFER,
-                        vk::DependencyFlags::empty(),
-                        &[],
-                        &[],
-                        &[barrier],
-                    );
+                    self.device.cmd_pipeline_barrier2(cmd, &dep_info);
                 }
-
                 let mut buffer_offset = 0;
                 for mip in 0..self.mip_levels {
                     let mip_w = (self.extent.width >> mip).max(1);
@@ -237,12 +230,14 @@ impl ImageHandle {
                         mip_w as u64 * mip_h as u64 * format_size as u64 * self.layers as u64;
                 }
 
-                // Transition back to SHADER_READ_ONLY_OPTIMAL
-                let barrier_restore = vk::ImageMemoryBarrier::default()
+                // Transition back to SHADER_READ_ONLY_OPTIMAL (Sync2)
+                let barrier_restore = vk::ImageMemoryBarrier2::default()
+                    .src_stage_mask(vk::PipelineStageFlags2::TRANSFER)
+                    .src_access_mask(vk::AccessFlags2::TRANSFER_READ)
+                    .dst_stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)
+                    .dst_access_mask(vk::AccessFlags2::SHADER_READ)
                     .old_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
                     .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
-                    .src_access_mask(vk::AccessFlags::TRANSFER_READ)
-                    .dst_access_mask(vk::AccessFlags::SHADER_READ)
                     .image(self.image)
                     .subresource_range(vk::ImageSubresourceRange {
                         aspect_mask: vk::ImageAspectFlags::COLOR,
@@ -252,16 +247,11 @@ impl ImageHandle {
                         layer_count: self.layers,
                     });
 
+                let image_barriers_restore = [barrier_restore];
+                let dep_info_restore =
+                    vk::DependencyInfo::default().image_memory_barriers(&image_barriers_restore);
                 unsafe {
-                    self.device.cmd_pipeline_barrier(
-                        cmd,
-                        vk::PipelineStageFlags::TRANSFER,
-                        vk::PipelineStageFlags::ALL_COMMANDS,
-                        vk::DependencyFlags::empty(),
-                        &[],
-                        &[],
-                        &[barrier_restore],
-                    );
+                    self.device.cmd_pipeline_barrier2(cmd, &dep_info_restore);
                 }
             },
         )?;

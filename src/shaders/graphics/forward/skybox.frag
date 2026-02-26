@@ -2,14 +2,7 @@
 #extension GL_EXT_nonuniform_qualifier : require
 #extension GL_GOOGLE_include_directive : require
 
-#define SKIP_PUSH_CONSTANTS
 #include "interop/structures.glsl"
-
-layout(push_constant) uniform SkyboxPush {
-    uint64_t frame_ptr;      // Offset 0
-    uint skybox_index;       // Offset 8
-    layout(offset = 80) uint64_t vertex_ptr; // Offset 80
-} push;
 
 layout(location = 0) in vec3 fragPos;
 

@@ -4,15 +4,8 @@
 #extension GL_EXT_scalar_block_layout : require
 #extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
 
-#define SKIP_PUSH_CONSTANTS
 #include "interop/structures.glsl"
 #include "common/vertex_pulling.glsl"
-
-layout(push_constant) uniform SkyboxPush {
-    uint64_t frame_ptr;      // Offset 0
-    uint skybox_index;       // Offset 8
-    layout(offset = 80) uint64_t vertex_ptr; // Offset 80
-} push;
 
 layout(location = 0) out vec3 outUVW;
 
@@ -28,7 +21,7 @@ void main() {
     
     vec4 clip_pos = frame.projection * view_no_pos * vec4(pos, 1.0);
     
-    // Force depth to 1.0 (far plane for Standard Z: Near=0, Far=1)
-    // Clear depth is 1.0, and depth test is LESS_OR_EQUAL.
+    // Force depth to 0.0 (far plane for Reverse-Z)
     gl_Position = clip_pos.xyww;
+    gl_Position.z = 0.0;
 }

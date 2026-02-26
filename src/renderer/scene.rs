@@ -173,6 +173,7 @@ impl Scene {
                     metallic_roughness_texture_index: mesh.metallic_roughness_texture_index,
                     occlusion_texture_index: mesh.occlusion_texture_index,
                     emissive_texture_index: mesh.emissive_texture_index,
+                    flags: props.flags,
                 };
 
                 material_handle = self.register_material(&material)?;

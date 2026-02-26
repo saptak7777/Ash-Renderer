@@ -2,7 +2,7 @@
 #define PBR_UTILS_GLSL
 
 #define PI 3.14159265359
-const float MAX_REFLECTION_LOD = 4.0;
+const float MAX_REFLECTION_LOD = 7.0;
 
 /**
  * Fresnel Schlick with Roughness interaction

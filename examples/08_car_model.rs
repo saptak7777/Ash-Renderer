@@ -94,7 +94,7 @@ impl ApplicationHandler for App {
                 renderer.set_post_processing_config(
                     ash_renderer::renderer::systems::post_process::PostProcessConfig {
                         exposure: 0.8,
-                        gamma: 1.0,
+                        gamma: 2.2,
                         tonemapping_enabled: true,
                     },
                 );

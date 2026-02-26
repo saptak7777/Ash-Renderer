@@ -1,8 +1,8 @@
 use crate::{
     Result,
     renderer::{
-        DrawItem, ForwardPlusIntegration, Resources, Scene, features::vsm::VsmManager,
-        passes::hiz::HiZPass, systems::post_process::PostProcessSystem, vcgs::IndirectDrawPass,
+        ForwardPlusIntegration, Scene, features::vsm::VsmManager, passes::hiz::HiZPass,
+        systems::post_process::PostProcessSystem, vcgs::IndirectDrawPass,
     },
 };
 use ash::vk;
@@ -26,7 +26,6 @@ pub struct GeometryRenderContext<'a> {
     pub command_buffer: &'a crate::vulkan::CommandBufferContext<'a>,
     pub scene: &'a Scene,
     pub bindless_descriptor_set: vk::DescriptorSet,
-    pub vsm_descriptor_set: vk::DescriptorSet,
     pub vsm_manager: &'a VsmManager, // Added to provide bindless indices
     pub swapchain_extent: vk::Extent2D,
     pub frame_ptr: u64,
@@ -40,6 +39,7 @@ pub struct GeometryRenderContext<'a> {
     pub depth_view: vk::ImageView,
     pub normal_view: Option<vk::ImageView>,
     pub albedo_view: Option<vk::ImageView>,
+    pub motion_image: Option<vk::Image>,
     pub motion_view: Option<vk::ImageView>,
     pub skybox: Option<&'a crate::renderer::passes::SkyboxPass>,
     pub features: Option<&'a crate::renderer::features::FeatureManager>,
@@ -48,7 +48,6 @@ pub struct GeometryRenderContext<'a> {
     pub transform: &'a crate::renderer::Transform,
     pub is_swapchain_image: bool,
     pub depth_format: vk::Format,
-    pub draw_items: &'a [DrawItem],
     pub vsm_ptr: u64,
 }
 
@@ -152,7 +151,6 @@ impl RenderPipeline {
     pub fn render_geometry(
         &self,
         ctx: &GeometryRenderContext,
-        resources: &Resources,
         scene: &Scene,
         frame_index: usize,
     ) -> Result<()> {
@@ -169,9 +167,7 @@ impl RenderPipeline {
                 .store_op(vk::AttachmentStoreOp::STORE)
                 .clear_value(vk::ClearValue {
                     color: vk::ClearColorValue {
-                        // Linear-space dark grey (≈ 0.01 linear ≡ ~0.1 sRGB / 26/255).
-                        // The hardware sRGB OETF on the swapchain converts this on output.
-                        float32: [0.01, 0.01, 0.01, 1.0],
+                        float32: [0.0, 0.0, 0.0, 1.0],
                     },
                 }),
         ];
@@ -241,12 +237,14 @@ impl RenderPipeline {
             .depth_attachment(&depth_attachment);
 
         unsafe {
-            // Pre-Render Barrier: Transition Color Image to Attachment Optimal
-            let color_barrier = vk::ImageMemoryBarrier::default()
+            // Pre-Render Barrier: Transition Color and Depth images using Synchronization2
+            let color_barrier = vk::ImageMemoryBarrier2::default()
+                .src_stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)
+                .src_access_mask(vk::AccessFlags2::empty())
+                .dst_stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)
+                .dst_access_mask(vk::AccessFlags2::COLOR_ATTACHMENT_WRITE)
                 .old_layout(vk::ImageLayout::UNDEFINED)
                 .new_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
-                .src_access_mask(vk::AccessFlags::empty())
-                .dst_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE)
                 .image(ctx.color_image)
                 .subresource_range(vk::ImageSubresourceRange {
                     aspect_mask: vk::ImageAspectFlags::COLOR,
@@ -256,15 +254,14 @@ impl RenderPipeline {
                     layer_count: 1,
                 });
 
-            // Determine depth aspect mask based on format
             let depth_aspect = get_depth_aspect_mask(ctx.depth_format);
-
-            // Pre-Render Barrier: Transition Depth Image to Depth Stencil Attachment Optimal
-            let depth_barrier = vk::ImageMemoryBarrier::default()
+            let depth_barrier = vk::ImageMemoryBarrier2::default()
+                .src_stage_mask(vk::PipelineStageFlags2::EARLY_FRAGMENT_TESTS)
+                .src_access_mask(vk::AccessFlags2::empty())
+                .dst_stage_mask(vk::PipelineStageFlags2::EARLY_FRAGMENT_TESTS)
+                .dst_access_mask(vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE)
                 .old_layout(vk::ImageLayout::UNDEFINED)
-                .new_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
-                .src_access_mask(vk::AccessFlags::empty())
-                .dst_access_mask(vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE)
+                .new_layout(vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL)
                 .image(ctx.depth_image)
                 .subresource_range(vk::ImageSubresourceRange {
                     aspect_mask: depth_aspect,
@@ -274,17 +271,9 @@ impl RenderPipeline {
                     layer_count: 1,
                 });
 
-            ctx.device.device.cmd_pipeline_barrier(
-                ctx.command_buffer.handle(),
-                vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT
-                    | vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS,
-                vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT
-                    | vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS,
-                vk::DependencyFlags::empty(),
-                &[],
-                &[],
-                &[color_barrier, depth_barrier],
-            );
+            let image_barriers = [color_barrier, depth_barrier];
+            let dep_info = vk::DependencyInfo::default().image_memory_barriers(&image_barriers);
+            ctx.command_buffer.pipeline_barrier2(&dep_info);
 
             ctx.device
                 .device
@@ -292,13 +281,7 @@ impl RenderPipeline {
         }
 
         // DELEGATED RECORDING
-        self.render_main_view(
-            ctx.command_buffer.handle(),
-            ctx,
-            resources,
-            scene,
-            frame_index,
-        )?;
+        self.render_main_view(ctx.command_buffer.handle(), ctx, scene, frame_index)?;
 
         // INJECTION: Render Features within the active dynamic rendering pass
         if let Some(features) = ctx.features {
@@ -338,74 +321,90 @@ impl RenderPipeline {
                 .cmd_end_rendering(ctx.command_buffer.handle());
         }
 
-        unsafe {
-            // Post-Render Barrier: Transition Color Image based on whether it is swapchain or HDR
-            let (target_layout, target_access, target_stage) = if ctx.is_swapchain_image {
-                // Case 1: Direct to Swapchain (Ready for Presentation)
-                (
-                    vk::ImageLayout::PRESENT_SRC_KHR,
-                    vk::AccessFlags::empty(),
-                    vk::PipelineStageFlags::BOTTOM_OF_PIPE,
-                )
-            } else {
-                // Case 2: Offscreen HDR (Ready for Sampling/Tonemapping)
-                (
-                    vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-                    vk::AccessFlags::SHADER_READ,
-                    vk::PipelineStageFlags::FRAGMENT_SHADER,
-                )
-            };
+        // Post-Render Barrier: Transition images for subsequent passes (Sync2)
+        let (target_layout, target_access, target_stage) = if ctx.is_swapchain_image {
+            (
+                vk::ImageLayout::PRESENT_SRC_KHR,
+                vk::AccessFlags2::empty(),
+                vk::PipelineStageFlags2::BOTTOM_OF_PIPE,
+            )
+        } else {
+            (
+                vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                vk::AccessFlags2::SHADER_READ,
+                vk::PipelineStageFlags2::FRAGMENT_SHADER | vk::PipelineStageFlags2::COMPUTE_SHADER,
+            )
+        };
 
-            let barrier = vk::ImageMemoryBarrier::default()
-                .old_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
-                .new_layout(target_layout)
-                .src_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE)
-                .dst_access_mask(target_access)
-                .image(ctx.color_image)
-                .subresource_range(vk::ImageSubresourceRange {
-                    aspect_mask: vk::ImageAspectFlags::COLOR,
-                    base_mip_level: 0,
-                    level_count: 1,
-                    base_array_layer: 0,
-                    layer_count: 1,
-                });
+        let color_barrier = vk::ImageMemoryBarrier2::default()
+            .src_stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)
+            .src_access_mask(vk::AccessFlags2::COLOR_ATTACHMENT_WRITE)
+            .dst_stage_mask(target_stage)
+            .dst_access_mask(target_access)
+            .old_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+            .new_layout(target_layout)
+            .image(ctx.color_image)
+            .subresource_range(vk::ImageSubresourceRange {
+                aspect_mask: vk::ImageAspectFlags::COLOR,
+                base_mip_level: 0,
+                level_count: 1,
+                base_array_layer: 0,
+                layer_count: 1,
+            });
 
-            // Determine depth aspect mask based on format
-            let depth_aspect = get_depth_aspect_mask(ctx.depth_format);
+        let depth_aspect = get_depth_aspect_mask(ctx.depth_format);
+        let depth_target_layout = match ctx.depth_format {
+            vk::Format::D24_UNORM_S8_UINT
+            | vk::Format::D32_SFLOAT_S8_UINT
+            | vk::Format::D16_UNORM_S8_UINT => vk::ImageLayout::DEPTH_STENCIL_READ_ONLY_OPTIMAL,
+            _ => vk::ImageLayout::DEPTH_READ_ONLY_OPTIMAL,
+        };
 
-            // Determine precise depth layouts based on format (Vulkan 1.3+ separate layouts)
-            let depth_target_layout = match ctx.depth_format {
-                vk::Format::D24_UNORM_S8_UINT
-                | vk::Format::D32_SFLOAT_S8_UINT
-                | vk::Format::D16_UNORM_S8_UINT => vk::ImageLayout::DEPTH_STENCIL_READ_ONLY_OPTIMAL,
-                _ => vk::ImageLayout::DEPTH_READ_ONLY_OPTIMAL,
-            };
+        let depth_barrier = vk::ImageMemoryBarrier2::default()
+            .src_stage_mask(vk::PipelineStageFlags2::LATE_FRAGMENT_TESTS)
+            .src_access_mask(vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE)
+            .dst_stage_mask(
+                vk::PipelineStageFlags2::FRAGMENT_SHADER | vk::PipelineStageFlags2::COMPUTE_SHADER,
+            )
+            .dst_access_mask(vk::AccessFlags2::SHADER_READ)
+            .old_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
+            .new_layout(depth_target_layout)
+            .image(ctx.depth_image)
+            .subresource_range(vk::ImageSubresourceRange {
+                aspect_mask: depth_aspect,
+                base_mip_level: 0,
+                level_count: 1,
+                base_array_layer: 0,
+                layer_count: 1,
+            });
 
-            let depth_post_barrier = vk::ImageMemoryBarrier::default()
-                .old_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
-                .new_layout(depth_target_layout)
-                .src_access_mask(vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE)
-                .dst_access_mask(vk::AccessFlags::SHADER_READ)
-                .image(ctx.depth_image)
-                .subresource_range(vk::ImageSubresourceRange {
-                    aspect_mask: depth_aspect,
-                    base_mip_level: 0,
-                    level_count: 1,
-                    base_array_layer: 0,
-                    layer_count: 1,
-                });
+        let mut image_barriers = vec![color_barrier, depth_barrier];
 
-            ctx.device.device.cmd_pipeline_barrier(
-                ctx.command_buffer.handle(),
-                vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT
-                    | vk::PipelineStageFlags::LATE_FRAGMENT_TESTS,
-                target_stage | vk::PipelineStageFlags::FRAGMENT_SHADER,
-                vk::DependencyFlags::empty(),
-                &[],
-                &[],
-                &[barrier, depth_post_barrier],
+        if let Some(motion_image) = ctx.motion_image {
+            image_barriers.push(
+                vk::ImageMemoryBarrier2::default()
+                    .src_stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)
+                    .src_access_mask(vk::AccessFlags2::COLOR_ATTACHMENT_WRITE)
+                    .dst_stage_mask(
+                        vk::PipelineStageFlags2::FRAGMENT_SHADER
+                            | vk::PipelineStageFlags2::COMPUTE_SHADER,
+                    )
+                    .dst_access_mask(vk::AccessFlags2::SHADER_READ)
+                    .old_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                    .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+                    .image(motion_image)
+                    .subresource_range(vk::ImageSubresourceRange {
+                        aspect_mask: vk::ImageAspectFlags::COLOR,
+                        base_mip_level: 0,
+                        level_count: 1,
+                        base_array_layer: 0,
+                        layer_count: 1,
+                    }),
             );
         }
+
+        let dep_info = vk::DependencyInfo::default().image_memory_barriers(&image_barriers);
+        ctx.command_buffer.pipeline_barrier2(&dep_info);
 
         Ok(())
     }
@@ -414,7 +413,6 @@ impl RenderPipeline {
         &self,
         cmd: vk::CommandBuffer,
         ctx: &GeometryRenderContext,
-        resources: &Resources,
         scene: &Scene,
         _frame_index: usize,
     ) -> Result<()> {
@@ -475,117 +473,72 @@ impl RenderPipeline {
                 vk::PipelineBindPoint::GRAPHICS,
                 layout_handle,
                 0,
-                &[ctx.bindless_descriptor_set, ctx.vsm_descriptor_set],
+                &[ctx.bindless_descriptor_set],
                 &[],
             );
         }
 
         // 4. Draw Dispatch
-        if resources.indirect_draw_enabled {
-            if let Some(ref indirect_arc) = self.indirect_draw_pass {
-                let indirect_pass = indirect_arc.read().map_err(|e| {
-                    log::error!("Indirect draw pass RwLock poisoned: {e}");
-                    AshError::VulkanError("Indirect draw pass RwLock poisoned".into())
-                })?;
+        if let Some(ref indirect_arc) = self.indirect_draw_pass {
+            let indirect_pass = indirect_arc.read().map_err(|e| {
+                log::error!("Indirect draw pass RwLock poisoned: {e}");
+                AshError::VulkanError("Indirect draw pass RwLock poisoned".into())
+            })?;
 
-                if scene.occlusion_culling.object_count() > 0 {
-                    let (vertex_ptr, index_ptr) = scene.get_geometry_buffer_addresses();
-                    let instance_ptr = indirect_pass.object_buffer_address();
+            if scene.occlusion_culling.object_count() > 0 {
+                let (vertex_ptr, index_ptr) = scene.get_geometry_buffer_addresses();
+                let instance_ptr = indirect_pass.object_buffer_address();
 
-                    if vertex_ptr == 0
-                        || index_ptr == 0
-                        || instance_ptr == 0
-                        || ctx.material_ptr == 0
-                    {
-                        log::error!(
-                            "CRITICAL: BDA Null Pointer in render_main_view. Skipping draw."
-                        );
-                        return Ok(());
-                    }
-
-                    // Placeholder mesh for DrawContext (required but not used for BDA indirect)
-                    let Some(uploaded) = scene
-                        .model_renderer
-                        .uploaded_meshes()
-                        .next()
-                        .map(|(_, m)| m)
-                    else {
-                        return Ok(());
-                    };
-
-                    let material_push = MaterialPushConstants::new(MaterialHandle::null())
-                        .with_receive_shadows(true)
-                        .with_debug_visualization(ctx.debug_enabled);
-
-                    let draw_ctx = DrawContext {
-                        command_buffer: cmd,
-                        pipeline_layout: layout_handle,
-                        uploaded,
-                        material: &material_push,
-                        frame_ptr: ctx.frame_ptr,
-                        vertex_ptr,
-                        instance_ptr,
-                        material_ptr: ctx.material_ptr,
-                        index_ptr,
-                        light_ptr: ctx.light_ptr,
-                        tile_ptr: ctx.tile_ptr,
-                        skybox_index: scene.skybox_texture_index,
-                        vsm_page_index: ctx.vsm_manager.page_table_bindless_index,
-                        vsm_cache_index: ctx.vsm_manager.physical_memory_bindless_index,
-                        transform_ptr: scene.transform_system.arena_addr,
-                        transform_index: 0,
-                        vsm_ptr: ctx.vsm_ptr,
-                    };
-
-                    let count_params = IndirectDrawCountParams {
-                        indirect_buffer: indirect_pass.indirect_buffer(),
-                        indirect_offset: 0,
-                        count_buffer: indirect_pass.count_buffer(),
-                        count_offset: 0,
-                        max_draw_count: scene.occlusion_culling.object_count() as u32,
-                        stride: std::mem::size_of::<vk::DrawIndirectCommand>() as u32,
-                    };
-
-                    unsafe {
-                        scene
-                            .model_renderer
-                            .draw_indirect_count(&draw_ctx, &count_params);
-                    }
+                if vertex_ptr == 0 || index_ptr == 0 || instance_ptr == 0 || ctx.material_ptr == 0 {
+                    log::error!("CRITICAL: BDA Null Pointer in render_main_view. Skipping draw.");
+                    return Ok(());
                 }
-            }
-        } else {
-            // Fallback: CPU-side Batch Loop (Legacy/Simple Mode)
-            for item in ctx.draw_items {
-                if let Some(uploaded) = scene.model_renderer.get(&item.key) {
-                    let material_push = MaterialPushConstants::new(item.material_handle)
-                        .with_receive_shadows(true)
-                        .with_debug_visualization(ctx.debug_enabled);
 
-                    let (vertex_ptr, index_ptr) = scene.get_geometry_buffer_addresses();
-                    let draw_ctx = DrawContext {
-                        command_buffer: cmd,
-                        pipeline_layout: layout_handle,
-                        uploaded,
-                        material: &material_push,
-                        frame_ptr: ctx.frame_ptr,
-                        vertex_ptr,
-                        instance_ptr: 0, // Not used for direct draw
-                        material_ptr: ctx.material_ptr,
-                        index_ptr,
-                        light_ptr: ctx.light_ptr,
-                        tile_ptr: ctx.tile_ptr,
-                        skybox_index: scene.skybox_texture_index,
-                        vsm_page_index: ctx.vsm_manager.page_table_bindless_index,
-                        vsm_cache_index: ctx.vsm_manager.physical_memory_bindless_index,
-                        transform_ptr: scene.transform_system.arena_addr,
-                        transform_index: 0, // In single-draw, we don't have a specific index here yet
-                        vsm_ptr: ctx.vsm_ptr,
-                    };
+                // Placeholder mesh for DrawContext (required but not used for BDA indirect)
+                let Some(uploaded) = scene
+                    .model_renderer
+                    .uploaded_meshes()
+                    .next()
+                    .map(|(_, m)| m)
+                else {
+                    return Ok(());
+                };
 
-                    unsafe {
-                        scene.model_renderer.draw_direct(&draw_ctx, 1, 0);
-                        // Reusing direct draw for single item fallback
-                    }
+                let material_push = MaterialPushConstants::new(MaterialHandle::null())
+                    .with_receive_shadows(true)
+                    .with_debug_visualization(ctx.debug_enabled);
+
+                let draw_ctx = DrawContext {
+                    command_buffer: cmd,
+                    pipeline_layout: layout_handle,
+                    uploaded,
+                    material: &material_push,
+                    frame_ptr: ctx.frame_ptr,
+                    vertex_ptr,
+                    instance_ptr,
+                    material_ptr: ctx.material_ptr,
+                    index_ptr,
+                    light_ptr: ctx.light_ptr,
+                    tile_ptr: ctx.tile_ptr,
+                    skybox_index: scene.skybox_texture_index,
+                    vsm_page_index: ctx.vsm_manager.page_table_bindless_index,
+                    vsm_cache_index: ctx.vsm_manager.physical_memory_bindless_index,
+                    transform_ptr: scene.transform_system.arena_addr,
+                    transform_index: 0,
+                    vsm_ptr: ctx.vsm_ptr,
+                };
+
+                let count_params = IndirectDrawCountParams {
+                    indirect_buffer: indirect_pass.indirect_buffer(),
+                    indirect_offset: 0,
+                    count_buffer: indirect_pass.count_buffer(),
+                    count_offset: 0,
+                    max_draw_count: scene.occlusion_culling.object_count() as u32,
+                    stride: std::mem::size_of::<vk::DrawIndirectCommand>() as u32,
+                };
+
+                unsafe {
+                    scene.model_renderer.draw_indirect(&draw_ctx, &count_params);
                 }
             }
         }
