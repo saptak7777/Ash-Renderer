@@ -1144,7 +1144,7 @@ mod tests {
     #[test]
     fn test_jittered_projection() {
         let taa = TemporalAA::new();
-        let proj = Mat4::perspective_rh(45.0_f32.to_radians(), 16.0 / 9.0, 0.1, 100.0);
+        let proj = Mat4::perspective_rh(45.0_f32.to_radians(), 16.0 / 9.0, 100.0, 0.1);
         let jittered = taa.jitter_projection(proj, 1920, 1080);
         // Initial jitter is zero, so should be same
         assert_eq!(proj, jittered);

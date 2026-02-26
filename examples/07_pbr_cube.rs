@@ -169,12 +169,6 @@ impl ApplicationHandler for App {
                     println!("✓ Registered default tint buffer");
                 }
 
-                // CRITICAL: Must call enable_post_processing() to initialize HDR/Tonemapping pipelines!
-                if let Err(e) = renderer.enable_post_processing(&mut scene) {
-                    log::warn!("Post-processing failed: {e}");
-                    // renderer.set_debug_mode(DebugMode::None);
-                }
-
                 // CRITICAL: Set lighting to highlight the PBR properties
                 // RAGE Hemisphere Ambient + Global Directional Light
                 let lighting = LightingBuilder::new()
@@ -402,10 +396,6 @@ fn run_headless(max_frames: u32) -> Result<()> {
             .ok()
             .map(|(b, _)| b)
     };
-
-    if let Err(e) = renderer.enable_post_processing(&mut scene) {
-        log::warn!("Post-processing failed: {e}");
-    }
 
     let lighting = LightingBuilder::new()
         .with_directional(

@@ -26,7 +26,6 @@ fn main() -> Result<()> {
         Arc::clone(&renderer.context.alloc),
         renderer.geometry_buffer(),
     )?;
-    renderer.enable_post_processing(&mut scene)?;
     log::info!("Renderer initialized in headless mode with HDR post-processing.");
 
     // 3. Set up scene (Cube)

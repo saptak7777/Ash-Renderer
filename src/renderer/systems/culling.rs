@@ -8,11 +8,11 @@ use std::sync::{Arc, RwLock};
 /// CullingSystem handles GPU-driven culling operations.
 /// It orchestrates compute shaders that filter geometry before drawing.
 pub struct CullingSystem {
-    pub(crate) indirect_draw_pass: Option<Arc<RwLock<IndirectDrawPass>>>,
+    pub(crate) indirect_draw_pass: Arc<RwLock<IndirectDrawPass>>,
 }
 
 impl CullingSystem {
-    pub fn new(indirect_draw_pass: Option<Arc<RwLock<IndirectDrawPass>>>) -> Self {
+    pub fn new(indirect_draw_pass: Arc<RwLock<IndirectDrawPass>>) -> Self {
         Self { indirect_draw_pass }
     }
 
@@ -26,10 +26,7 @@ impl CullingSystem {
         hiz_buffer_addr: u64,
         frame_index: usize,
     ) -> Result<()> {
-        let indirect_arc = match &self.indirect_draw_pass {
-            Some(arc) => arc,
-            None => return Ok(()),
-        };
+        let indirect_arc = &self.indirect_draw_pass;
 
         let indirect_pass = indirect_arc.read().map_err(|e| {
             crate::AshError::VulkanError(format!(

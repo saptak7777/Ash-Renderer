@@ -31,8 +31,6 @@ pub struct RendererResources {
     pub white_texture: Texture,
     pub default_skybox: Texture, // Procedural skybox
     pub default_cube_black: Texture,
-    pub dummy_black_cube: Texture,
-    pub dummy_black_2d: Texture,
     pub material_storage_buffer:
         StorageBuffer<crate::renderer::resources::uniform::MaterialUniform>,
     pub post_sampler: vk::Sampler,
@@ -57,8 +55,8 @@ pub struct PipelineData {
 pub struct RenderingPasses {
     pub gbuffer: Option<crate::renderer::GBuffer>,
     pub gbuffer_indices: crate::renderer::types::GBufferIndices,
-    pub hiz_pass: Option<crate::renderer::passes::hiz::HiZPass>,
-    pub indirect_draw_pass: Option<crate::renderer::vcgs::IndirectDrawPass>,
+    pub hiz_pass: crate::renderer::passes::hiz::HiZPass,
+    pub indirect_draw_pass: crate::renderer::vcgs::IndirectDrawPass,
     pub skybox_pass: Option<crate::renderer::passes::SkyboxPass>,
 }
 

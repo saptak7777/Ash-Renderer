@@ -92,12 +92,7 @@ impl Systems {
             AshError::VulkanError("PipelineRegistry not found in ResourceRegistry".to_string())
         })?;
 
-        let indirect_draw_pass = Some(Arc::new(RwLock::new(
-            passes
-                .indirect_draw_pass
-                .take()
-                .ok_or_else(|| AshError::VulkanError("Indirect Draw Pass not found".to_string()))?,
-        )));
+        let indirect_draw_pass = Arc::new(RwLock::new(passes.indirect_draw_pass));
 
         // Promote ForwardPlusIntegration into a shared Arc so both RenderPipeline
         // (which needs it for descriptor binding) and LightingSystem (which owns updates)
@@ -107,16 +102,14 @@ impl Systems {
         let systems = Self {
             pipeline: RenderPipeline::new(
                 post.post_process,
-                Some(Arc::new(RwLock::new(passes.hiz_pass.take().ok_or_else(
-                    || AshError::VulkanError("HiZ Pass not found".to_string()),
-                )?))),
-                Some(Arc::clone(&forward_plus_arc)),
+                Arc::new(RwLock::new(passes.hiz_pass)),
+                Arc::clone(&forward_plus_arc),
                 indirect_draw_pass.clone(),
-                Some(pipelines.pipeline),
-                Some(pipelines.layout),
+                pipelines.pipeline,
+                pipelines.layout,
             ),
 
-            culling: CullingSystem::new(indirect_draw_pass),
+            culling: CullingSystem::new(indirect_draw_pass.clone()),
             skybox_pass: passes.skybox_pass.take(),
             features,
             motion_pass: None,
@@ -175,9 +168,7 @@ impl Systems {
             return Ok(()); // Already initialized
         }
 
-        let _gbuffer = resources.gbuffer.as_ref().ok_or(AshError::VulkanError(
-            "GBuffer must be initialized before motion pass".to_string(),
-        ))?;
+        let _gbuffer = &resources.gbuffer;
 
         let mut motion_pass = MotionVectorPass::new(Arc::clone(&context.device.device));
 
@@ -206,12 +197,7 @@ impl Systems {
 
         // --- 2. Recreate Main Graphics Pipeline ---
         log::info!("Recompiling pipeline due to resize/shader change...");
-        let layout = self
-            .pipeline
-            .pipeline_layout
-            .as_ref()
-            .ok_or_else(|| AshError::VulkanError("Pipeline layout missing".to_string()))?
-            .handle();
+        let layout = self.pipeline.pipeline_layout.handle();
 
         // Determine color format (HDR or swapchain)
         let color_format = if let Some(hdr) = &self.hdr_system {
@@ -221,11 +207,7 @@ impl Systems {
         };
 
         let cache = self.pipeline_cache.handle();
-        let depth_format = resources
-            .depth_buffer
-            .as_ref()
-            .ok_or(AshError::VulkanError("Depth buffer missing".into()))?
-            .format();
+        let depth_format = resources.depth_buffer.format();
 
         let multisample_config = vulkan::MultisampleConfig {
             sample_count: vk::SampleCountFlags::TYPE_1,
@@ -234,16 +216,12 @@ impl Systems {
         };
 
         // Build color attachment formats based on GBuffer configuration
-        let color_formats = if resources.gbuffer.is_some() {
-            vec![
-                color_format,                    // Index 0: Main color (HDR or swapchain)
-                vk::Format::R16G16B16A16_SFLOAT, // Index 1: Normals
-                vk::Format::R8G8B8A8_UNORM,      // Index 2: Albedo
-                vk::Format::R16G16_SFLOAT,       // Index 3: Motion Vectors
-            ]
-        } else {
-            vec![color_format] // ONLY Main Color
-        };
+        let color_formats = vec![
+            color_format,                    // Index 0: Main color (HDR or swapchain)
+            vk::Format::R16G16B16A16_SFLOAT, // Index 1: Normals
+            vk::Format::R8G8B8A8_UNORM,      // Index 2: Albedo
+            vk::Format::R16G16_SFLOAT,       // Index 3: Motion Vectors
+        ];
 
         let mut builder = vulkan::Pipeline::builder(Arc::clone(&context.device.device))
             .with_layout(layout)
@@ -251,12 +229,11 @@ impl Systems {
             .with_extent(extent)
             .with_pipeline_cache(cache)
             .with_depth_format(depth_format)
-            .with_depth_test(vk::CompareOp::GREATER_OR_EQUAL, true)
             .with_cull_mode(vk::CullModeFlags::BACK)
             .with_front_face(vk::FrontFace::COUNTER_CLOCKWISE)
             .with_multisampling(multisample_config);
 
-        if resources.gbuffer.is_some() {
+        if true {
             let blend_attachments = vec![
                 vk::PipelineColorBlendAttachmentState {
                     color_write_mask: vk::ColorComponentFlags::R
@@ -321,7 +298,7 @@ impl Systems {
             .map_err(|e| AshError::VulkanError(format!("Failed to register pipeline: {e}")))?;
 
         new_pipeline.mark_managed_by_registry();
-        self.pipeline.main_graphics_pipeline = Some(new_pipeline);
+        self.pipeline.main_graphics_pipeline = new_pipeline;
         self.pipeline_id = Some(pipeline_id);
 
         // --- 3. Skybox Pass (Check status/log) ---

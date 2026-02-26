@@ -137,11 +137,6 @@ impl ApplicationHandler for App {
                     log::info!("✓ Registered default tint buffer");
                 }
 
-                // Enable post-processing for HDR/Tonemapping
-                if let Err(e) = renderer.enable_post_processing(&mut scene) {
-                    log::warn!("Post-processing failed: {e}");
-                }
-
                 // Load pre-baked IBL environment map for realistic PBR lighting
                 let mut ibl_indices = None;
                 if let Ok(asset) =

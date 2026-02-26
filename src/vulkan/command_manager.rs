@@ -119,29 +119,6 @@ impl<'a> CommandBufferContext<'a> {
         }
     }
 
-    /// Insert a pipeline barrier for synchronization.
-    pub fn pipeline_barrier(
-        &self,
-        src_stage_mask: vk::PipelineStageFlags,
-        dst_stage_mask: vk::PipelineStageFlags,
-        dependency_flags: vk::DependencyFlags,
-        memory_barriers: &[vk::MemoryBarrier],
-        buffer_memory_barriers: &[vk::BufferMemoryBarrier],
-        image_memory_barriers: &[vk::ImageMemoryBarrier],
-    ) {
-        unsafe {
-            self.device.cmd_pipeline_barrier(
-                self.command_buffer,
-                src_stage_mask,
-                dst_stage_mask,
-                dependency_flags,
-                memory_barriers,
-                buffer_memory_barriers,
-                image_memory_barriers,
-            );
-        }
-    }
-
     /// Insert a modern pipeline barrier (Synchronization2).
     pub fn pipeline_barrier2(&self, dependency_info: &vk::DependencyInfo) {
         unsafe {

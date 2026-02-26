@@ -85,17 +85,11 @@ impl ApplicationHandler for App {
                 // Keep buffer alive
                 self.tint_buffer = Some(tint_buffer);
 
-                // CRITICAL: Must call enable_post_processing() to initialize HDR/Tonemapping pipelines!
-                if let Err(e) = renderer.enable_post_processing(&mut scene) {
-                    log::warn!("Post-processing failed: {e}");
-                }
-
                 // Set reasonable defaults for PBR
                 renderer.set_post_processing_config(
                     ash_renderer::renderer::systems::post_process::PostProcessConfig {
                         exposure: 0.8,
                         gamma: 2.2,
-                        tonemapping_enabled: true,
                     },
                 );
 

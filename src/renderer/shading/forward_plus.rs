@@ -467,7 +467,6 @@ impl crate::renderer::resource_registry::VulkanResource for ForwardPlusIntegrati
 
 #[cfg(test)]
 mod tests {
-    use super::*;
 
     #[test]
     fn test_initialization_state() {

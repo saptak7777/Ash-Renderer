@@ -50,8 +50,8 @@ void main() {
     vec2 uv = (vec2(pos) + 0.5) / pc.resolution;
 
     // 1. Jitter-Compensated Reprojection
-    // We must un-shift the current UV (biased by current jitter) and 
-    // re-shift to history's jitter state.
+    // Verified: Velocity is computed from unjittered clip positions, 
+    // so we only need to compensate for the current/previous jitter delta.
     vec2 velocity = texture(u_Motion, uv).rg;
     
     // Jitter is in pixels, convert to UV space for the re-projection correction

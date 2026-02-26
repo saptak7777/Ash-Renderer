@@ -187,29 +187,28 @@ impl Renderer {
                 .init_motion_pass(&renderer.context, &renderer.resources)?;
 
             // --- Pre-initialize Forward+ lighting pipeline (prevents first-frame stutter) ---
-            if let Some(ref fp_lock) = renderer.systems.pipeline.forward_plus {
-                if let (Some(db), Some(_db_ptr)) = (
-                    &renderer.resources.depth_buffer,
-                    renderer.resources.depth_buffer_id,
-                ) {
-                    let mut fp = fp_lock
-                        .write()
-                        .map_err(|_| AshError::LockPoisoned("ForwardPlus".to_string()))?;
-                    fp.init_pipeline(
-                        Arc::clone(&renderer.context.device.device),
-                        db.sampler(),
-                        db.view(),
-                        Some(
-                            renderer
-                                .context
-                                .device
-                                .properties12
-                                .max_descriptor_set_update_after_bind_sampled_images,
-                        ),
-                    )?;
-                    log::info!("Forward+ lighting compute pipeline pre-initialized at startup.");
-                }
+            {
+                let fp_lock = &renderer.systems.pipeline.forward_plus;
+                let db = &renderer.resources.depth_buffer;
+                let mut fp = fp_lock
+                    .write()
+                    .map_err(|_| AshError::LockPoisoned("ForwardPlus".to_string()))?;
+                fp.init_pipeline(
+                    Arc::clone(&renderer.context.device.device),
+                    db.sampler(),
+                    db.view(),
+                    Some(
+                        renderer
+                            .context
+                            .device
+                            .properties12
+                            .max_descriptor_set_update_after_bind_sampled_images,
+                    ),
+                )?;
+                log::info!("Forward+ lighting compute pipeline pre-initialized at startup.");
             }
+
+            renderer.initialize_hdr(width, height)?;
 
             renderer.context.queue.pending_extent =
                 Some(renderer.frame.swapchain.as_ref().unwrap().extent);
@@ -227,23 +226,17 @@ impl Renderer {
     fn register_tracked_subsystems(&mut self) -> Result<()> {
         let registry = &self.context.resources;
 
-        if let Some(ref fp) = self.systems.pipeline.forward_plus {
-            registry
-                .register_shared_resource(Arc::clone(fp))
-                .map_err(|e| AshError::VulkanError(e.to_string()))?;
-        }
+        registry
+            .register_shared_resource(Arc::clone(&self.systems.pipeline.forward_plus))
+            .map_err(|e| AshError::VulkanError(e.to_string()))?;
 
-        if let Some(ref hiz) = self.systems.pipeline.hiz_pass {
-            registry
-                .register_shared_resource(Arc::clone(hiz))
-                .map_err(|e| AshError::VulkanError(e.to_string()))?;
-        }
+        registry
+            .register_shared_resource(Arc::clone(&self.systems.pipeline.hiz_pass))
+            .map_err(|e| AshError::VulkanError(e.to_string()))?;
 
-        if let Some(ref indirect) = self.systems.pipeline.indirect_draw_pass {
-            registry
-                .register_shared_resource(Arc::clone(indirect))
-                .map_err(|e| AshError::VulkanError(e.to_string()))?;
-        }
+        registry
+            .register_shared_resource(Arc::clone(&self.systems.pipeline.indirect_draw_pass))
+            .map_err(|e| AshError::VulkanError(e.to_string()))?;
 
         // Register uniform buffers
         for ub in &self.resources.uniform_buffers {
@@ -282,8 +275,6 @@ impl Renderer {
             .map(|m| m.material_handle)
             .unwrap_or_else(MaterialHandle::null)
     }
-
-    // Legacy lighting methods removed for modern RAGE pipeline
 
     /// Get immutable access to consolidated mesh data.
     pub fn mesh_data<'a>(&self, scene: &'a Scene) -> &'a [MeshData] {
@@ -332,8 +323,7 @@ impl Renderer {
                 self.systems
                     .pipeline
                     .hiz_pass
-                    .as_ref()
-                    .and_then(|h| h.read().ok())
+                    .read()
                     .map(|h| h.quality())
                     .unwrap_or(crate::renderer::passes::hiz::HiZQuality::Balanced)
             ),
@@ -472,8 +462,6 @@ impl Renderer {
         self.context.queue.request_resize(new_extent);
     }
 
-    // Simplified/Removed resize_if_needed and flush_old_swapchains as they are now handled by RenderQueue and SwapchainManager
-
     pub(crate) fn update_image_views(&mut self, image_views: &[vk::ImageView]) -> Result<()> {
         if self.context.device.headless && !self.frame.swapchain_image_view_ids.is_empty() {
             // In headless mode, we reuse the same image views.
@@ -560,25 +548,17 @@ impl Renderer {
         let debug_enabled = !matches!(self.systems.debug_mode, DebugMode::None);
 
         // Context Upgrade: Retrieve views for Dynamic Rendering
-        let (color_view, color_image) = if let Some(hdr) = &self.systems.hdr_system {
-            (hdr.view(), hdr.image())
-        } else {
-            let swapchain = self
-                .frame
-                .swapchain
-                .as_ref()
-                .ok_or_else(|| AshError::VulkanError("Swapchain missing".into()))?;
-            let view = swapchain.image_views[params.image_index as usize];
-            let image = swapchain.images[params.image_index as usize];
-            (view, image)
-        };
-
-        let (depth_view, depth_image, depth_format) = self
-            .resources
-            .depth_buffer
+        // Mandatory HDR: All main-pass rendering must route through the FP16 HDR buffer.
+        let hdr = self
+            .systems
+            .hdr_system
             .as_ref()
-            .map(|d| (d.view(), d.image(), d.format()))
-            .ok_or_else(|| AshError::VulkanError("Depth buffer missing".into()))?;
+            .expect("HdrSystem is mandatory for Pure Renderer remediation");
+        let (color_view, color_image) = (hdr.view(), hdr.image());
+
+        let depth_view = self.resources.depth_buffer.view();
+        let depth_image = self.resources.depth_buffer.image();
+        let depth_format = self.resources.depth_buffer.format();
 
         // Create a dummy transform for feature rendering context
         let dummy_transform = crate::renderer::Transform::identity();
@@ -603,16 +583,15 @@ impl Renderer {
             color_view,
             depth_image,
             depth_view,
-            normal_view: self.resources.gbuffer.as_ref().map(|g| g.normal_view()),
-            albedo_view: self.resources.gbuffer.as_ref().map(|g| g.albedo_view()),
-            motion_image: self.resources.gbuffer.as_ref().map(|g| g.motion_image()),
-            motion_view: self.resources.gbuffer.as_ref().map(|g| g.motion_view()),
+            normal_view: Some(self.resources.gbuffer.normal_view()),
+            albedo_view: Some(self.resources.gbuffer.albedo_view()),
+            motion_image: Some(self.resources.gbuffer.motion_image()),
+            motion_view: Some(self.resources.gbuffer.motion_view()),
             skybox: self.systems.skybox_pass.as_ref(),
             features: Some(&self.systems.features),
             frame_index,
             descriptor_allocator: self.resources.descriptors.as_ref(),
             transform: &dummy_transform,
-            is_swapchain_image: self.systems.hdr_system.is_none(),
             depth_format,
             vsm_ptr: unsafe {
                 let info = vk::BufferDeviceAddressInfo::default()
@@ -788,13 +767,7 @@ impl Renderer {
             ui_callback,
         } = ctx;
         unsafe {
-            let scene_pipeline = self
-                .systems
-                .pipeline
-                .main_graphics_pipeline
-                .as_ref()
-                .ok_or(AshError::VulkanError("Pipeline not available".to_string()))?
-                .pipeline;
+            let scene_pipeline = self.systems.pipeline.main_graphics_pipeline.pipeline;
 
             let command_buffer = self
                 .frame
@@ -833,26 +806,24 @@ impl Renderer {
 
             // â”€â”€ 2. GPU-Driven Occlusion Culling â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
             // Upload per-object draw data then run the compute culling pass.
-            if let Some(indirect_arc) = &self.systems.culling.indirect_draw_pass {
-                let indirect_pass = indirect_arc.read().map_err(|e| {
+            let indirect_pass = self
+                .systems
+                .culling
+                .indirect_draw_pass
+                .read()
+                .map_err(|e| {
                     AshError::VulkanError(format!("Indirect draw pass lock poisoned: {e}"))
                 })?;
-                indirect_pass.upload_objects(
-                    &self.context.alloc.vma,
-                    scene.occlusion_culling.object_data(),
-                    0,
-                )?;
-            }
-            let hiz_buffer_addr = if let Some(ref hiz_arc) = self.systems.pipeline.hiz_pass {
-                hiz_arc
-                    .read()
-                    .map_err(|e| {
-                        crate::AshError::VulkanError(format!("Hi-Z pass lock poisoned: {e}"))
-                    })?
-                    .hiz_buffer_addr()
-            } else {
-                0
-            };
+            indirect_pass.upload_objects(
+                &self.context.alloc.vma,
+                scene.occlusion_culling.object_data(),
+                0,
+            )?;
+            let hiz_arc = &self.systems.pipeline.hiz_pass;
+            let hiz_buffer_addr = hiz_arc
+                .read()
+                .map_err(|e| crate::AshError::VulkanError(format!("Hi-Z pass lock poisoned: {e}")))?
+                .hiz_buffer_addr();
 
             self.systems.culling.execute_culling(
                 cmd_ctx.handle(),
@@ -866,26 +837,17 @@ impl Renderer {
             // â”€â”€ 3. Hi-Z Pass â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
             // Build the hierarchical-Z depth pyramid used by the culling pass next
             // frame, and route the updated view+sampler into the IndirectDraw pass.
-            if let Some(ref db) = self.resources.depth_buffer {
-                self.systems.pipeline.execute_hiz_pass(
-                    command_buffer,
-                    db.view(),
-                    self.systems.gpu_profiler.as_ref(),
-                    self.resources.black_texture.view(),
-                    self.resources.black_texture.sampler(),
-                )?;
-            }
+            self.systems.pipeline.execute_hiz_pass(
+                command_buffer,
+                self.resources.depth_buffer.view(),
+                self.systems.gpu_profiler.as_ref(),
+                self.resources.black_texture.view(),
+                self.resources.black_texture.sampler(),
+            )?;
 
             // â”€â”€ 4. VSM Shadow Pass â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
             // Update the VSM page table and render shadow geometry.
-            let depth_view = self
-                .resources
-                .depth_buffer
-                .as_ref()
-                .ok_or_else(|| {
-                    AshError::VulkanError("Depth buffer missing for VSM update".to_string())
-                })?
-                .view();
+            let depth_view = self.resources.depth_buffer.view();
 
             let bindless_set = self.resources.assets.bindless_manager.descriptor_set();
             self.vsm_manager.update(
@@ -919,43 +881,28 @@ impl Renderer {
                         bindless_set,
                         vertex_addr,
                         index_addr,
-                        object_addr: if let Some(ref arc) = self.systems.culling.indirect_draw_pass
-                        {
-                            arc.read().map(|p| p.object_buffer_address()).unwrap_or(0)
-                        } else {
-                            0
-                        },
+                        object_addr: self
+                            .systems
+                            .culling
+                            .indirect_draw_pass
+                            .read()
+                            .map(|p| p.object_buffer_address())
+                            .unwrap_or(0),
                         object_count: scene.occlusion_culling.object_count() as u32,
                     },
                     |cmd| {
                         // Lean geometry-only draw for shadow geometry.
-                        if let Some(ref arc) = self.systems.culling.indirect_draw_pass {
-                            if let Ok(pass) = arc.read() {
-                                if pass.is_initialized() {
-                                    if cull_indirect != vk::Buffer::null()
-                                        && cull_count != vk::Buffer::null()
-                                    {
-                                        self.context.device.device.cmd_draw_indirect_count(
-                                            cmd,
-                                            cull_indirect,
-                                            0,
-                                            cull_count,
-                                            0,
-                                            2048, // max_draw_count
-                                            std::mem::size_of::<vk::DrawIndirectCommand>() as u32,
-                                        );
-                                    } else {
-                                        // Fallback if culling is disabled or not run
-                                        self.context.device.device.cmd_draw_indirect(
-                                            cmd,
-                                            pass.indirect_buffer(),
-                                            0,
-                                            scene.occlusion_culling.object_count() as u32,
-                                            std::mem::size_of::<vk::DrawIndirectCommand>() as u32,
-                                        );
-                                    }
-                                }
-                            }
+                        let pass = self.systems.culling.indirect_draw_pass.read().unwrap();
+                        if pass.is_initialized() {
+                            self.context.device.device.cmd_draw_indirect_count(
+                                cmd,
+                                cull_indirect,
+                                0,
+                                cull_count,
+                                0,
+                                2048, // max_draw_count
+                                std::mem::size_of::<vk::DrawIndirectCommand>() as u32,
+                            );
                         }
                     },
                 )?;
@@ -963,13 +910,16 @@ impl Renderer {
 
             // â”€â”€ 5. Light Culling Pass â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
             // Tile the scene lights for Forward+ shading.
-            if let Some(ref fp) = self.systems.pipeline.forward_plus {
+            {
                 let frame_ptr = self.resources.uniform_buffers[frame_index]
                     .read()
                     .map_err(|_| AshError::LockPoisoned("UniformBuffer".to_string()))?
                     .device_address();
 
-                fp.read()
+                self.systems
+                    .pipeline
+                    .forward_plus
+                    .read()
                     .map_err(|_| AshError::LockPoisoned("ForwardPlus".to_string()))?
                     .cull_lights(command_buffer, frame_index, frame_ptr)?;
             }
@@ -977,31 +927,24 @@ impl Renderer {
             // â”€â”€ 6. Geometry / Main Pass â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
             // Build the per-pass parameter block and dispatch to RenderPipeline.
             {
-                let light_ptr = if let Some(ref fp) = self.systems.pipeline.forward_plus {
-                    fp.read()
-                        .map_err(|_| AshError::LockPoisoned("ForwardPlus".to_string()))?
-                        .get_lights()
-                        .light_ptr(frame_index)
-                } else {
-                    0
-                };
-                let tile_ptr = if let Some(ref fp) = self.systems.pipeline.forward_plus {
-                    fp.read()
-                        .map_err(|_| AshError::LockPoisoned("ForwardPlus".to_string()))?
-                        .get_lights()
-                        .tile_ptr(frame_index)
-                } else {
-                    0
-                };
-                let pipeline_layout_handle = self
+                let light_ptr = self
                     .systems
                     .pipeline
-                    .pipeline_layout
-                    .as_ref()
-                    .ok_or_else(|| {
-                        AshError::VulkanError("Pipeline layout not available".to_string())
-                    })?
-                    .handle();
+                    .forward_plus
+                    .read()
+                    .map_err(|_| AshError::LockPoisoned("ForwardPlus".to_string()))?
+                    .get_lights()
+                    .light_ptr(frame_index);
+
+                let tile_ptr = self
+                    .systems
+                    .pipeline
+                    .forward_plus
+                    .read()
+                    .map_err(|_| AshError::LockPoisoned("ForwardPlus".to_string()))?
+                    .get_lights()
+                    .tile_ptr(frame_index);
+                let pipeline_layout_handle = self.systems.pipeline.pipeline_layout.handle();
 
                 let main_pass_params = MainPassParameters {
                     cmd_ctx: &cmd_ctx,
@@ -1020,18 +963,8 @@ impl Renderer {
             }
 
             // â”€â”€ 7. Post-Process Pass (TAA â†’ VSR â†’ Tonemapping) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-            let depth_view = self
-                .resources
-                .depth_buffer
-                .as_ref()
-                .map(|db| db.view())
-                .unwrap_or(vk::ImageView::null());
-            let motion_view = self
-                .resources
-                .gbuffer
-                .as_ref()
-                .map(|gb| gb.motion_view())
-                .unwrap_or(vk::ImageView::null());
+            let depth_view = self.resources.depth_buffer.view();
+            let motion_view = self.resources.gbuffer.motion_view();
 
             let (bloom_view, bloom_intensity) = if let Some(bloom) =
                 self.systems
@@ -1133,11 +1066,6 @@ impl Renderer {
         config: crate::renderer::systems::post_process::PostProcessConfig,
     ) {
         self.systems.pipeline.post_process_mut().set_config(config);
-    }
-
-    /// Returns whether tonemapping is enabled
-    pub fn tonemapping_enabled(&self) -> bool {
-        self.systems.pipeline.post_process().tonemapping_enabled()
     }
 
     /// Sets the tonemapping exposure value
@@ -1263,47 +1191,6 @@ impl Renderer {
         self.systems.lighting.light_count()
     }
 
-    /// Enables GPU-driven occlusion culling using Hi-Z pyramid.
-    pub fn enable_occlusion_culling(&mut self) -> Result<()> {
-        if self.occlusion_culling_enabled() {
-            return Ok(());
-        }
-
-        let extent = self
-            .frame
-            .swapchain
-            .as_ref()
-            .map(|s| s.extent)
-            .unwrap_or(vk::Extent2D {
-                width: 1920,
-                height: 1080,
-            });
-
-        let (hiz, indirect) = unsafe {
-            crate::renderer::initialization::initialize_occlusion_culling(
-                &self.context.device,
-                &self.context.alloc,
-                &mut self.resources.assets.bindless_manager,
-                &self.resources.black_texture,
-                extent,
-            )?
-        };
-
-        self.systems.pipeline.hiz_pass = Some(hiz);
-        self.systems.pipeline.indirect_draw_pass = Some(indirect);
-        self.register_tracked_subsystems()?;
-
-        log::info!("Occlusion culling enabled (Hi-Z + Indirect Draw)");
-        Ok(())
-    }
-
-    /// Returns whether GPU-driven occlusion culling is enabled
-    #[inline]
-    pub fn occlusion_culling_enabled(&self) -> bool {
-        self.systems.pipeline.hiz_pass.is_some()
-            && self.systems.pipeline.indirect_draw_pass.is_some()
-    }
-
     /// Enables HDR rendering. Should be called after initialization.
     /// Allocates GPU memory for the HDR buffer.
     pub(crate) fn initialize_hdr(&mut self, width: u32, height: u32) -> Result<()> {
@@ -1344,36 +1231,6 @@ impl Renderer {
             );
         }
 
-        Ok(())
-    }
-
-    /// Enables post-processing with default settings
-    ///
-    /// Initializes HDR, fullscreen pass, and enables tonemapping.
-    pub fn enable_post_processing(&mut self, scene: &mut super::Scene) -> Result<()> {
-        let extent = self
-            .frame
-            .swapchain
-            .as_ref()
-            .ok_or(AshError::VulkanError("Swapchain not available".into()))?
-            .extent;
-
-        self.initialize_hdr(extent.width, extent.height)?;
-
-        // PostProcessSystem initializes its own FullscreenPass in new()
-        // and descriptors are handled by resize() and update_descriptor_sets().
-        // So we don't need manual initialization here.
-
-        self.systems
-            .pipeline
-            .post_process_mut()
-            .config
-            .tonemapping_enabled = true;
-
-        // CRITICAL: Recreate main pipeline and framebuffers to use the NEW HDR render pass format
-        crate::renderer::swapchain_manager::recreate_swapchain_resources(self, scene)?;
-
-        log::info!("Post-processing pipeline enabled (HDR + Tonemapping)");
         Ok(())
     }
 
@@ -1455,11 +1312,9 @@ impl Renderer {
 
     /// Log quality reports for debug/profiling
     pub fn log_quality_reports(&self) {
-        if let Some(hiz) = &self.systems.pipeline.hiz_pass {
-            match hiz.read() {
-                Ok(guard) => log::info!("{}", guard.quality_report()),
-                Err(e) => log::warn!("HiZ lock poisoned in log_quality_reports: {e}"),
-            }
+        match self.systems.pipeline.hiz_pass.read() {
+            Ok(guard) => log::info!("{}", guard.quality_report()),
+            Err(e) => log::warn!("HiZ lock poisoned in log_quality_reports: {e}"),
         }
     }
 
@@ -1550,16 +1405,15 @@ impl Drop for Renderer {
         // 4. Feature subsystems are cleaned up.
         // 5. The ResourceRegistry (self.context.resources) handles the remaining tracked
         //    buffers, images, and samplers.
-        //
-        // By using the Drop trait of VsmManager and other owned components, we've transitioned
-        // from manual destroy() calls to strict RAII-driven teardown, reducing the risk of
-        // double-frees or invalid handle access.
         #[allow(unused_unsafe)]
         unsafe {
             // CRITICAL FIX: Explicitly drop post-processing resources before general resource cleanup.
             // This prevents access violations during shutdown if the window/surface is destroyed.
             // ORDER MATTERS: Pipeline depends on resources destroyed in its children, so destroy Pipeline FIRST.
             swapchain_manager::cleanup_pipeline(self);
+
+            // GBuffer and Depth are mandatory now, so we don't null them out here manually
+            // The Registry will handle their cleanup.
 
             self.context
                 .queue
@@ -1575,8 +1429,6 @@ impl Drop for Renderer {
             if let Err(_e) = self.context.resources.cleanup() {}
         }
 
-        self.resources.depth_buffer = None;
-        self.systems.pipeline.main_graphics_pipeline = None;
         self.frame.swapchain = None;
 
         log::info!("Ash Renderer shut down successfully");

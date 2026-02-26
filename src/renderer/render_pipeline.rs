@@ -12,12 +12,12 @@ use std::sync::{Arc, RwLock};
 /// It owns the major rendering subsystems and manages their execution order.
 pub struct RenderPipeline {
     pub post_process: PostProcessSystem,
-    pub(crate) hiz_pass: Option<Arc<RwLock<HiZPass>>>, // Keep crate-public for Renderer access for now
+    pub(crate) hiz_pass: Arc<RwLock<HiZPass>>,
 
-    pub forward_plus: Option<Arc<RwLock<ForwardPlusIntegration>>>,
-    pub indirect_draw_pass: Option<Arc<RwLock<IndirectDrawPass>>>,
-    pub main_graphics_pipeline: Option<crate::vulkan::Pipeline>,
-    pub pipeline_layout: Option<crate::vulkan::PipelineLayout>,
+    pub forward_plus: Arc<RwLock<ForwardPlusIntegration>>,
+    pub indirect_draw_pass: Arc<RwLock<IndirectDrawPass>>,
+    pub main_graphics_pipeline: crate::vulkan::Pipeline,
+    pub pipeline_layout: crate::vulkan::PipelineLayout,
 }
 
 /// Context for rendering geometry, grouping multiple parameters to stabilize the API.
@@ -46,7 +46,6 @@ pub struct GeometryRenderContext<'a> {
     pub frame_index: usize,
     pub descriptor_allocator: Option<&'a crate::vulkan::DescriptorAllocator>,
     pub transform: &'a crate::renderer::Transform,
-    pub is_swapchain_image: bool,
     pub depth_format: vk::Format,
     pub vsm_ptr: u64,
 }
@@ -54,11 +53,11 @@ pub struct GeometryRenderContext<'a> {
 impl RenderPipeline {
     pub fn new(
         post_process: PostProcessSystem,
-        hiz_pass: Option<Arc<RwLock<HiZPass>>>,
-        forward_plus: Option<Arc<RwLock<ForwardPlusIntegration>>>,
-        indirect_draw_pass: Option<Arc<RwLock<IndirectDrawPass>>>,
-        main_graphics_pipeline: Option<crate::vulkan::Pipeline>,
-        pipeline_layout: Option<crate::vulkan::PipelineLayout>,
+        hiz_pass: Arc<RwLock<HiZPass>>,
+        forward_plus: Arc<RwLock<ForwardPlusIntegration>>,
+        indirect_draw_pass: Arc<RwLock<IndirectDrawPass>>,
+        main_graphics_pipeline: crate::vulkan::Pipeline,
+        pipeline_layout: crate::vulkan::PipelineLayout,
     ) -> Self {
         Self {
             post_process,
@@ -89,11 +88,7 @@ impl RenderPipeline {
         _black_texture_view: vk::ImageView,
         _black_texture_sampler: vk::Sampler,
     ) -> Result<()> {
-        let Some(ref hiz_arc) = self.hiz_pass else {
-            return Ok(());
-        };
-
-        let mut hiz = hiz_arc.write().map_err(|e| {
+        let mut hiz = self.hiz_pass.write().map_err(|e| {
             log::error!("Hi-Z pass RwLock poisoned: {e}");
             crate::AshError::VulkanError("Hi-Z pass RwLock poisoned".into())
         })?;
@@ -126,23 +121,12 @@ impl RenderPipeline {
         &mut self.post_process
     }
 
-    pub fn hiz_pass(&self) -> Option<&Arc<RwLock<HiZPass>>> {
-        self.hiz_pass.as_ref()
+    pub fn hiz_pass(&self) -> &Arc<RwLock<HiZPass>> {
+        &self.hiz_pass
     }
 
     /// Validate that all required pipelines and layouts are initialized.
     pub fn validate(&self) -> Result<()> {
-        use crate::AshError;
-        if self.main_graphics_pipeline.is_none() {
-            return Err(AshError::VulkanError(
-                "RenderPipeline: main_graphics_pipeline not initialized".to_string(),
-            ));
-        }
-        if self.pipeline_layout.is_none() {
-            return Err(AshError::VulkanError(
-                "RenderPipeline: pipeline_layout not initialized".to_string(),
-            ));
-        }
         Ok(())
     }
 
@@ -321,20 +305,12 @@ impl RenderPipeline {
                 .cmd_end_rendering(ctx.command_buffer.handle());
         }
 
-        // Post-Render Barrier: Transition images for subsequent passes (Sync2)
-        let (target_layout, target_access, target_stage) = if ctx.is_swapchain_image {
-            (
-                vk::ImageLayout::PRESENT_SRC_KHR,
-                vk::AccessFlags2::empty(),
-                vk::PipelineStageFlags2::BOTTOM_OF_PIPE,
-            )
-        } else {
-            (
-                vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-                vk::AccessFlags2::SHADER_READ,
-                vk::PipelineStageFlags2::FRAGMENT_SHADER | vk::PipelineStageFlags2::COMPUTE_SHADER,
-            )
-        };
+        // Post-Render Barrier: Transition HDR buffer for Post-Processing (Sync2)
+        let (target_layout, target_access, target_stage) = (
+            vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+            vk::AccessFlags2::SHADER_READ,
+            vk::PipelineStageFlags2::FRAGMENT_SHADER | vk::PipelineStageFlags2::COMPUTE_SHADER,
+        );
 
         let color_barrier = vk::ImageMemoryBarrier2::default()
             .src_stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)
@@ -422,22 +398,8 @@ impl RenderPipeline {
             DrawContext, IndirectDrawCountParams, MaterialPushConstants,
         };
 
-        let pipeline_handle = self
-            .main_graphics_pipeline
-            .as_ref()
-            .map(|p| p.pipeline)
-            .ok_or_else(|| {
-                AshError::VulkanError(
-                    "RenderPipeline: main_graphics_pipeline not initialized".to_string(),
-                )
-            })?;
-        let layout_handle = self
-            .pipeline_layout
-            .as_ref()
-            .map(|l| l.handle())
-            .ok_or_else(|| {
-                AshError::VulkanError("RenderPipeline: pipeline_layout not initialized".to_string())
-            })?;
+        let pipeline_handle = self.main_graphics_pipeline.pipeline;
+        let layout_handle = self.pipeline_layout.handle();
 
         // 1. Dynamic State
         let viewport = vk::Viewport {
@@ -479,67 +441,65 @@ impl RenderPipeline {
         }
 
         // 4. Draw Dispatch
-        if let Some(ref indirect_arc) = self.indirect_draw_pass {
-            let indirect_pass = indirect_arc.read().map_err(|e| {
-                log::error!("Indirect draw pass RwLock poisoned: {e}");
-                AshError::VulkanError("Indirect draw pass RwLock poisoned".into())
-            })?;
+        let indirect_pass = self.indirect_draw_pass.read().map_err(|e| {
+            log::error!("Indirect draw pass RwLock poisoned: {e}");
+            AshError::VulkanError("Indirect draw pass RwLock poisoned".into())
+        })?;
 
-            if scene.occlusion_culling.object_count() > 0 {
-                let (vertex_ptr, index_ptr) = scene.get_geometry_buffer_addresses();
-                let instance_ptr = indirect_pass.object_buffer_address();
+        if scene.occlusion_culling.object_count() > 0 {
+            let (vertex_ptr, index_ptr) = scene.get_geometry_buffer_addresses();
+            let instance_ptr = indirect_pass.object_buffer_address();
 
-                if vertex_ptr == 0 || index_ptr == 0 || instance_ptr == 0 || ctx.material_ptr == 0 {
-                    log::error!("CRITICAL: BDA Null Pointer in render_main_view. Skipping draw.");
-                    return Ok(());
-                }
+            if vertex_ptr == 0 || index_ptr == 0 || instance_ptr == 0 || ctx.material_ptr == 0 {
+                log::error!("CRITICAL: BDA Null Pointer in render_main_view. Skipping draw.");
+                return Ok(());
+            }
 
-                // Placeholder mesh for DrawContext (required but not used for BDA indirect)
-                let Some(uploaded) = scene
-                    .model_renderer
-                    .uploaded_meshes()
-                    .next()
-                    .map(|(_, m)| m)
-                else {
-                    return Ok(());
-                };
+            // Placeholder mesh for DrawContext (required but not used for BDA indirect)
+            let Some(uploaded) = scene
+                .model_renderer
+                .uploaded_meshes()
+                .next()
+                .map(|(_, m)| m)
+            else {
+                return Ok(());
+            };
 
-                let material_push = MaterialPushConstants::new(MaterialHandle::null())
-                    .with_receive_shadows(true)
-                    .with_debug_visualization(ctx.debug_enabled);
+            let material_push = MaterialPushConstants::new(MaterialHandle::null())
+                .with_receive_shadows(true)
+                .with_debug_visualization(ctx.debug_enabled);
 
-                let draw_ctx = DrawContext {
-                    command_buffer: cmd,
-                    pipeline_layout: layout_handle,
-                    uploaded,
-                    material: &material_push,
-                    frame_ptr: ctx.frame_ptr,
-                    vertex_ptr,
-                    instance_ptr,
-                    material_ptr: ctx.material_ptr,
-                    index_ptr,
-                    light_ptr: ctx.light_ptr,
-                    tile_ptr: ctx.tile_ptr,
-                    skybox_index: scene.skybox_texture_index,
-                    vsm_page_index: ctx.vsm_manager.page_table_bindless_index,
-                    vsm_cache_index: ctx.vsm_manager.physical_memory_bindless_index,
-                    transform_ptr: scene.transform_system.arena_addr,
-                    transform_index: 0,
-                    vsm_ptr: ctx.vsm_ptr,
-                };
+            let draw_ctx = DrawContext {
+                command_buffer: cmd,
+                pipeline_layout: layout_handle,
+                uploaded,
+                material: &material_push,
+                frame_ptr: ctx.frame_ptr,
+                vertex_ptr,
+                instance_ptr,
+                material_ptr: ctx.material_ptr,
+                index_ptr,
+                light_ptr: ctx.light_ptr,
+                tile_ptr: ctx.tile_ptr,
+                skybox_index: scene.skybox_texture_index,
+                vsm_page_index: ctx.vsm_manager.page_table_bindless_index,
+                vsm_cache_index: ctx.vsm_manager.physical_memory_bindless_index,
+                transform_ptr: scene.transform_system.arena_addr,
+                transform_index: 0,
+                vsm_ptr: ctx.vsm_ptr,
+            };
 
-                let count_params = IndirectDrawCountParams {
-                    indirect_buffer: indirect_pass.indirect_buffer(),
-                    indirect_offset: 0,
-                    count_buffer: indirect_pass.count_buffer(),
-                    count_offset: 0,
-                    max_draw_count: scene.occlusion_culling.object_count() as u32,
-                    stride: std::mem::size_of::<vk::DrawIndirectCommand>() as u32,
-                };
+            let count_params = IndirectDrawCountParams {
+                indirect_buffer: indirect_pass.indirect_buffer(),
+                indirect_offset: 0,
+                count_buffer: indirect_pass.count_buffer(),
+                count_offset: 0,
+                max_draw_count: scene.occlusion_culling.object_count() as u32,
+                stride: std::mem::size_of::<vk::DrawIndirectCommand>() as u32,
+            };
 
-                unsafe {
-                    scene.model_renderer.draw_indirect(&draw_ctx, &count_params);
-                }
+            unsafe {
+                scene.model_renderer.draw_indirect(&draw_ctx, &count_params);
             }
         }
 

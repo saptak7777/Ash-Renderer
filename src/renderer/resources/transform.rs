@@ -422,7 +422,7 @@ impl TemporalCamera {
     pub fn new(position: Vec3, target: Vec3, width: u32, height: u32) -> Self {
         let aspect = width as f32 / height.max(1) as f32;
         let view = Mat4::look_at_rh(position, target, Vec3::Y);
-        let mut proj = Mat4::perspective_rh(45.0_f32.to_radians(), aspect, 0.5, 100.0);
+        let mut proj = Mat4::perspective_rh(45.0_f32.to_radians(), aspect, 100.0, 0.5);
         proj.y_axis.y *= -1.0;
         let view_proj = proj * view;
 
@@ -474,7 +474,7 @@ impl TemporalCamera {
         self.view = Mat4::look_at_rh(self.position, self.target, self.up);
 
         let aspect = self.width as f32 / self.height.max(1) as f32;
-        let mut proj = Mat4::perspective_rh(self.fov.to_radians(), aspect, self.near, self.far);
+        let mut proj = Mat4::perspective_rh(self.fov.to_radians(), aspect, self.far, self.near);
         proj.y_axis.y *= -1.0; // Vulkan Y-flip
 
         // Apply sub-pixel jitter normalized to resolution (matches FrameState logic)

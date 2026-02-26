@@ -95,9 +95,9 @@ pub struct Resources {
 
     // Render Targets & Debug
     pub readback_buffer: Option<BufferHandle>,
-    pub gbuffer: Option<GBuffer>,
-    pub depth_buffer: Option<DepthBufferType>,
-    pub depth_buffer_id: Option<ResourceId>,
+    pub gbuffer: GBuffer,
+    pub depth_buffer: DepthBufferType,
+    pub depth_buffer_id: ResourceId,
 
     // Default Textures
     pub default_texture: TextureType,
@@ -105,8 +105,6 @@ pub struct Resources {
     pub white_texture: TextureType,
     pub default_skybox: TextureType,
     pub default_cube_black: TextureType,
-    pub dummy_black_cube: TextureType,
-    pub dummy_black_2d: TextureType,
 
     // IBL Data
     pub ibl_data: Option<IblData>,
@@ -271,16 +269,16 @@ impl Resources {
                 swapchain_extent: swapchain.extent,
                 current_view_proj: Mat4::IDENTITY,
                 readback_buffer,
-                gbuffer: passes.gbuffer.take(),
-                depth_buffer: Some(depth_buffer),
-                depth_buffer_id: Some(depth_buffer_id),
+                gbuffer: passes.gbuffer.take().ok_or_else(|| {
+                    AshError::VulkanError("GBuffer missing in passes".to_string())
+                })?,
+                depth_buffer,
+                depth_buffer_id,
                 default_texture: core.renderer_resources.default_texture,
                 black_texture: core.renderer_resources.black_texture,
                 white_texture: core.renderer_resources.white_texture,
                 default_skybox: core.renderer_resources.default_skybox,
                 default_cube_black: core.renderer_resources.default_cube_black,
-                dummy_black_cube: core.renderer_resources.dummy_black_cube,
-                dummy_black_2d: core.renderer_resources.dummy_black_2d,
                 ibl_data: None, // Will be filled below
                 pipelines: Some(pipelines),
                 passes: Some(passes),
@@ -342,33 +340,28 @@ impl Resources {
                 })() {
                     Ok(data) => resources.ibl_data = Some(data),
                     Err(e) => {
-                        log::warn!("IBL: Generation failed: {e}. Falling back to default.");
-                        resources.ibl_data = None;
+                        return Err(AshError::VulkanError(format!(
+                            "IBL: Generation failed: {e}. Environment map is mandatory for Pure Renderer."
+                        )));
                     }
                 }
+            } else {
+                return Err(AshError::VulkanError(
+                    "IBL: No environment map provided. Mandatory for Pure Renderer contract."
+                        .to_string(),
+                ));
             }
 
             // --- Descriptor Plumbing ---
-            if let Some(data) = &resources.ibl_data {
-                resources.assets.bindless_manager.update_ibl_descriptors(
-                    data.irradiance_map.view(),
-                    data.irradiance_map.sampler(),
-                    data.prefilter_map.view(),
-                    data.prefilter_map.sampler(),
-                    data.brdf_lut.view(),
-                    data.brdf_lut.sampler(),
-                )?;
-            } else {
-                // Fallback to dummy black textures to prevent shader crashes and washed-out shadows
-                resources.assets.bindless_manager.update_ibl_descriptors(
-                    resources.dummy_black_cube.view(),
-                    resources.dummy_black_cube.sampler(),
-                    resources.dummy_black_cube.view(),
-                    resources.dummy_black_cube.sampler(),
-                    resources.dummy_black_2d.view(),
-                    resources.dummy_black_2d.sampler(),
-                )?;
-            }
+            let data = resources.ibl_data.as_ref().unwrap();
+            resources.assets.bindless_manager.update_ibl_descriptors(
+                data.irradiance_map.view(),
+                data.irradiance_map.sampler(),
+                data.prefilter_map.view(),
+                data.prefilter_map.sampler(),
+                data.brdf_lut.view(),
+                data.brdf_lut.sampler(),
+            )?;
 
             Ok(resources)
         }
@@ -566,14 +559,7 @@ impl Resources {
         image_count: usize,
     ) -> crate::Result<()> {
         // --- 1. Recreate Depth Buffer ---
-        if let Some(id) = self.depth_buffer_id.take() {
-            if let Err(e) = context.resources.cleanup_resource(id) {
-                log::warn!("Failed to cleanup old depth buffer: {e}");
-            }
-        }
-
-        let mut depth_buffer = // SAFETY: Fresh resource creation with valid device/allocator.
-            unsafe {
+        let mut depth_buffer = unsafe {
             DepthBuffer::new(
                 Arc::clone(&context.device.device),
                 Arc::clone(&context.alloc),
@@ -581,31 +567,33 @@ impl Resources {
                 extent.height,
             )?
         };
-
         let depth_buffer_id = depth_buffer
             .register_with_registry(&context.resources)
-            .map_err(|e| AshError::VulkanError(format!("Failed to register depth buffer: {e}")))?;
+            .map_err(|e| AshError::VulkanError(e.to_string()))?;
 
-        self.depth_buffer = Some(depth_buffer);
-        self.depth_buffer_id = Some(depth_buffer_id);
+        if let Err(e) = context.resources.cleanup_resource(self.depth_buffer_id) {
+            log::warn!("Failed to cleanup old depth buffer: {e}");
+        }
+
+        self.depth_buffer = depth_buffer;
+        self.depth_buffer_id = depth_buffer_id;
         self.swapchain_extent = extent;
 
         if gbuffer_indices.depth_index == u32::MAX {
-            gbuffer_indices.depth_index = self.assets.bindless_manager.add_sampled_image(
-                self.depth_buffer.as_ref().unwrap().view(),
-                self.default_texture.sampler(),
-            )?;
+            gbuffer_indices.depth_index = self
+                .assets
+                .bindless_manager
+                .add_sampled_image(self.depth_buffer.view(), self.default_texture.sampler())?;
         } else {
             self.assets.bindless_manager.update_sampled_image(
                 gbuffer_indices.depth_index,
-                self.depth_buffer.as_ref().unwrap().view(),
+                self.depth_buffer.view(),
                 self.default_texture.sampler(),
             )?;
         }
 
         // --- 2. Recreate GBuffer ---
-        let gbuffer = // SAFETY: GBuffer involves raw resource creation; extent is validated.
-            unsafe {
+        let gbuffer = unsafe {
             GBuffer::new(
                 Arc::clone(&context.device.device),
                 Arc::clone(&context.alloc),
@@ -627,7 +615,7 @@ impl Resources {
             )?;
         }
 
-        self.gbuffer = Some(gbuffer);
+        self.gbuffer = gbuffer;
 
         // --- 3. Recreate Uniform Buffers ---
         for ub in &self.uniform_buffers {

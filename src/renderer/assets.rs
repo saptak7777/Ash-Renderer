@@ -37,6 +37,17 @@ impl AssetManager {
     ) -> Result<(u32, u32, u32)> {
         let name = "Global_IBL"; // Internal name for debug
 
+        // Pure Renderer Lockdown: Enforce HDR float formats for IBL
+        match params.format {
+            vk::Format::R16G16B16A16_SFLOAT | vk::Format::R32G32B32A32_SFLOAT => {}
+            _ => {
+                return Err(crate::AshError::VulkanError(format!(
+                    "IBL: Upload failed. Format {:?} is not a supported HDR float format. Use R16G16B16A16_SFLOAT or R32G32B32A32_SFLOAT.",
+                    params.format
+                )));
+            }
+        }
+
         let tex_ctx = TextureInitContext {
             allocator: Arc::clone(&allocator),
             device: Arc::clone(&device.device),

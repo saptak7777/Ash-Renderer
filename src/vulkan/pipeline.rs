@@ -222,15 +222,14 @@ impl PipelineBuilder {
     }
 
     pub fn with_depth_format(mut self, format: vk::Format) -> Self {
-        // Depth testing configuration:
-        // - LESS_OR_EQUAL: Allows objects at the same depth to be rendered (prevents Z-fighting)
-        // - This is critical for rendering multiple meshes at the same depth level
-        // - Alternative: LESS would cause flickering in such cases
+        // Depth testing configuration (Lead Architect Note):
+        // - GREATER_OR_EQUAL: Required for Modern Reverse-Z contract.
+        // - This ensures Infinite Projection stability and superior precision.
         self.depth_stencil = Some(
             vk::PipelineDepthStencilStateCreateInfo::default()
                 .depth_test_enable(true)
                 .depth_write_enable(true)
-                .depth_compare_op(vk::CompareOp::LESS_OR_EQUAL)
+                .depth_compare_op(vk::CompareOp::GREATER_OR_EQUAL)
                 .depth_bounds_test_enable(false)
                 .stencil_test_enable(false)
                 .min_depth_bounds(0.0)

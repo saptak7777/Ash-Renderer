@@ -161,11 +161,6 @@ impl ApplicationHandler for App {
                     log::info!("✓ Registered default tint buffer");
                 }
 
-                // CRITICAL: Must call enable_post_processing() to initialize HDR/Tonemapping pipelines!
-                if let Err(e) = renderer.enable_post_processing(&mut scene) {
-                    log::warn!("Post-processing failed: {e}");
-                }
-
                 self.renderer = Some(renderer);
                 self.scene = Some(scene);
                 self.window = Some(window);

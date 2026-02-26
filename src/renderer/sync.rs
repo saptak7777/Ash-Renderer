@@ -12,7 +12,6 @@
 
 use crate::renderer::util::frame_state::FrameState;
 use crate::{AshError, Result};
-use ash::vk;
 
 /// Encapsulates all CPU-to-GPU state reconciliation for a single frame.
 ///
@@ -89,14 +88,14 @@ impl SceneSynchronizer {
         let current_frame = frame.frame_manager.get_current_frame_index();
 
         let shaders_changed = if current_frame % SHADER_CHECK_INTERVAL == 0 {
-            if let Some(pipeline) = &mut systems.pipeline.main_graphics_pipeline {
-                pipeline.detect_shader_changes().unwrap_or_else(|e| {
+            systems
+                .pipeline
+                .main_graphics_pipeline
+                .detect_shader_changes()
+                .unwrap_or_else(|e| {
                     log::warn!("Failed to check shader changes: {e}");
                     false
                 })
-            } else {
-                false
-            }
         } else {
             false
         };
@@ -142,14 +141,7 @@ impl SceneSynchronizer {
             let mut transform = crate::renderer::resources::transform::Transform::identity();
             transform.set_model(model);
 
-            let extent = resources
-                .gbuffer
-                .as_ref()
-                .map(|g| g.extent())
-                .unwrap_or(vk::Extent2D {
-                    width: 1,
-                    height: 1,
-                });
+            let extent = resources.gbuffer.extent();
             let width = extent.width as f32;
             let height = extent.height as f32;
 
@@ -157,8 +149,7 @@ impl SceneSynchronizer {
             matrices.hiz_levels = systems
                 .pipeline
                 .hiz_pass
-                .as_ref()
-                .and_then(|h| h.read().ok())
+                .read()
                 .map(|h| h.mip_count())
                 .unwrap_or(0);
 
@@ -174,7 +165,8 @@ impl SceneSynchronizer {
 
             // ── Light cluster metadata ─────────────────────────────────
             scene.scene_lighting.point_light_count = scene.point_lights.len() as u32;
-            if let Some(fp) = &systems.pipeline.forward_plus {
+            {
+                let fp = &systems.pipeline.forward_plus;
                 let (num_tiles, tile_size) = fp
                     .read()
                     .map_err(|_| AshError::LockPoisoned("ForwardPlus".to_string()))?
@@ -221,8 +213,10 @@ impl SceneSynchronizer {
         )?;
 
         // ── Forward+ GPU upload ────────────────────────────────────────
-        if let Some(ref fp_integration) = systems.pipeline.forward_plus {
-            let mut fp = fp_integration
+        {
+            let mut fp = systems
+                .pipeline
+                .forward_plus
                 .write()
                 .map_err(|_| AshError::LockPoisoned("ForwardPlusIntegration".to_string()))?;
             fp.update_lights(

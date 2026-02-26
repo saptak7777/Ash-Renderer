@@ -159,7 +159,8 @@ impl MvpMatrices {
     /// Set perspective projection matrix
     /// Note: Vulkan NDC (Normalized Device Coordinates) has the Y-axis pointing down; flip Y to compensate.
     pub fn set_projection(&mut self, fovy: f32, aspect: f32, near: f32, far: f32) {
-        self.projection = Mat4::perspective_rh(fovy, aspect, near, far);
+        // Reverse-Z: Swap near and far planes for infinite float precision at distance
+        self.projection = Mat4::perspective_rh(fovy, aspect, far, near);
         // Flip Y for Vulkan's coordinate system (Y points down in NDC)
         self.projection.y_axis.y *= -1.0;
         self.inv_projection = self.projection.inverse();

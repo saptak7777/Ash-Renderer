@@ -15,7 +15,6 @@ use crate::renderer::frame::Frame;
 /// Configuration for post-processing effects.
 #[derive(Clone, Copy, Debug)]
 pub struct PostProcessConfig {
-    pub tonemapping_enabled: bool,
     pub exposure: f32,
     pub gamma: f32,
 }
@@ -23,7 +22,6 @@ pub struct PostProcessConfig {
 impl Default for PostProcessConfig {
     fn default() -> Self {
         Self {
-            tonemapping_enabled: true,
             exposure: 1.2,
             gamma: 2.2,
         }
@@ -215,19 +213,9 @@ impl PostProcessSystem {
         self.config = config;
     }
 
-    /// Enable or disable tonemapping.
-    pub fn set_tonemapping_enabled(&mut self, enabled: bool) {
-        self.config.tonemapping_enabled = enabled;
-    }
-
-    /// Query tonemapping enabled state.
-    pub fn tonemapping_enabled(&self) -> bool {
-        self.config.tonemapping_enabled
-    }
-
-    /// Set the exposure value (clamped to `>= 0.0`).
+    /// Set the exposure value (clamped to `[0.1, 10.0]`).
     pub fn set_exposure(&mut self, exposure: f32) {
-        self.config.exposure = exposure.max(0.0);
+        self.config.exposure = exposure.clamp(0.1, 10.0);
     }
 
     /// Query the current exposure value.
@@ -235,9 +223,9 @@ impl PostProcessSystem {
         self.config.exposure
     }
 
-    /// Set the gamma value (clamped to `>= 0.1` to avoid gamma = 0).
+    /// Set the gamma value (clamped to `[1.0, 3.0]`).
     pub fn set_gamma(&mut self, gamma: f32) {
-        self.config.gamma = gamma.max(0.1);
+        self.config.gamma = gamma.clamp(1.0, 3.0);
     }
 
     /// Query the current gamma value.
@@ -276,75 +264,76 @@ impl PostProcessSystem {
     ///
     /// VSR is intentionally bypassed while we validate native TAA stability.
     pub fn record_commands(&mut self, ctx: PostProcessContext) -> Result<()> {
-        if let Some(hdr) = ctx.hdr {
-            let raw_hdr_view = hdr.view();
-            let black_view = ctx.resources.black_texture.view();
+        let hdr = ctx
+            .hdr
+            .expect("HdrSystem is mandatory for Pure Renderer remediation");
+        let raw_hdr_view = hdr.view();
+        let black_view = ctx.resources.black_texture.view();
 
-            // ── 1. TAA Resolve Phase (STRICT NATIVE) ──────────────────────────
-            // Run the TAA compute shader before tonemapping. The resolved output
-            // is in SHADER_READ_ONLY_OPTIMAL after resolve() returns.
-            let resolved_view = if let Some(taa) = &mut self.taa_pass {
-                if taa.is_initialized()
-                    && ctx.depth_view != vk::ImageView::null()
-                    && ctx.motion_view != vk::ImageView::null()
-                {
-                    let extent = ctx.swapchain.extent;
-                    let push = TaaPushConstants {
-                        width: extent.width as f32,
-                        height: extent.height as f32,
-                        jitter_x: ctx.jitter_uv[0],
-                        jitter_y: ctx.jitter_uv[1],
-                        prev_jitter_x: ctx.prev_jitter_uv[0],
-                        prev_jitter_y: ctx.prev_jitter_uv[1],
-                        blend_factor: ctx.taa_config.blend_factor,
-                        clamping_gamma: ctx.taa_config.quality.clamping_gamma(),
-                        depth_threshold: ctx.taa_config.depth_threshold,
-                        anti_flicker: if ctx.taa_config.anti_flicker { 1 } else { 0 },
-                    };
+        // ── 1. TAA Resolve Phase (STRICT NATIVE) ──────────────────────────
+        // Run the TAA compute shader before tonemapping. The resolved output
+        // is in SHADER_READ_ONLY_OPTIMAL after resolve() returns.
+        let resolved_view = if let Some(taa) = &mut self.taa_pass {
+            if taa.is_initialized()
+                && ctx.depth_view != vk::ImageView::null()
+                && ctx.motion_view != vk::ImageView::null()
+            {
+                let extent = ctx.swapchain.extent;
+                let push = TaaPushConstants {
+                    width: extent.width as f32,
+                    height: extent.height as f32,
+                    jitter_x: ctx.jitter_uv[0],
+                    jitter_y: ctx.jitter_uv[1],
+                    prev_jitter_x: ctx.prev_jitter_uv[0],
+                    prev_jitter_y: ctx.prev_jitter_uv[1],
+                    blend_factor: ctx.taa_config.blend_factor,
+                    clamping_gamma: ctx.taa_config.quality.clamping_gamma(),
+                    depth_threshold: ctx.taa_config.depth_threshold,
+                    anti_flicker: if ctx.taa_config.anti_flicker { 1 } else { 0 },
+                };
 
-                    unsafe {
-                        taa.record_commands(
-                            ctx.command_buffer,
-                            raw_hdr_view,
-                            ctx.depth_view,
-                            ctx.motion_view,
-                            &push,
-                        )?;
-                    }
-                    taa.output_view()
-                } else {
-                    raw_hdr_view
+                unsafe {
+                    taa.record_commands(
+                        ctx.command_buffer,
+                        raw_hdr_view,
+                        ctx.depth_view,
+                        ctx.motion_view,
+                        &push,
+                    )?;
                 }
+                taa.output_view()
             } else {
                 raw_hdr_view
-            };
+            }
+        } else {
+            raw_hdr_view
+        };
 
-            // ── 3. Tonemapping / Swapchain Phase ─────────────────────────────
-            self.update_descriptor_set(
-                ctx.image_index,
-                resolved_view,
-                ctx.bloom_view,
-                black_view, // ssgi placeholder
-                hdr.sampler(),
-            );
+        // ── 3. Tonemapping / Swapchain Phase ─────────────────────────────
+        self.update_descriptor_set(
+            ctx.image_index,
+            resolved_view,
+            ctx.bloom_view,
+            black_view, // ssgi placeholder
+            hdr.sampler(),
+        );
 
-            let swapchain_extent = vk::Extent2D {
-                width: ctx.swapchain.extent.width,
-                height: ctx.swapchain.extent.height,
-            };
+        let swapchain_extent = vk::Extent2D {
+            width: ctx.swapchain.extent.width,
+            height: ctx.swapchain.extent.height,
+        };
 
-            let target_image = ctx.swapchain.images[ctx.image_index];
-            let target_view = ctx.swapchain.image_views[ctx.image_index];
+        let target_image = ctx.swapchain.images[ctx.image_index];
+        let target_view = ctx.swapchain.image_views[ctx.image_index];
 
-            self.render(
-                ctx.command_buffer,
-                ctx.image_index,
-                swapchain_extent,
-                target_image,
-                target_view,
-                ctx.bloom_intensity,
-            )?;
-        }
+        self.render(
+            ctx.command_buffer,
+            ctx.image_index,
+            swapchain_extent,
+            target_image,
+            target_view,
+            ctx.bloom_intensity,
+        )?;
 
         Ok(())
     }
@@ -428,11 +417,7 @@ impl PostProcessSystem {
             let push_constants = PostProcessPushConstants {
                 exposure: self.config.exposure,
                 bloom_intensity: 0.0, // Forced zero to bypass Ghost Bloom (Phase 2)
-                tonemapper_type: if self.config.tonemapping_enabled {
-                    1
-                } else {
-                    0
-                },
+                tonemapper_type: 1,   // Hard-wired to AgX (Pure Renderer)
                 gamma: self.config.gamma,
             };
 

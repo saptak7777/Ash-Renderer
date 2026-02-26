@@ -169,7 +169,6 @@ pub unsafe fn create_main_pipeline(
         .with_extent(desc.swapchain_extent)
         .with_pipeline_cache(desc.pipeline_cache)
         .with_depth_format(desc.depth_format)
-        .with_depth_test(vk::CompareOp::GREATER_OR_EQUAL, true)
         .with_cull_mode(vk::CullModeFlags::BACK)
         .with_front_face(vk::FrontFace::COUNTER_CLOCKWISE)
         .with_multisampling(desc.pipeline_cfg.multisample_config())
@@ -330,11 +329,6 @@ pub unsafe fn init_resources(
     // Create default cube black
     let default_cube_black = Texture::create_default_cube_black(&tex_ctx)?;
 
-    // Create black dummy textures for IBL fallbacks
-    let dummy_black_cube = Texture::create_default_cube_black(&tex_ctx)?;
-
-    let dummy_black_2d = Texture::create_default_black(&tex_ctx)?;
-
     // Initialize material storage buffer (Bindless-ready)
     let mut material_storage_buffer = unsafe {
         StorageBuffer::<resources::uniform::MaterialUniform>::new(
@@ -380,8 +374,6 @@ pub unsafe fn init_resources(
         white_texture,
         default_skybox,
         default_cube_black,
-        dummy_black_cube,
-        dummy_black_2d,
         material_storage_buffer,
         post_sampler,
     })
@@ -562,8 +554,8 @@ pub unsafe fn init_rendering_passes(cfg: RenderingPassesConfig) -> Result<Render
     Ok(RenderingPasses {
         gbuffer: Some(gbuffer),
         gbuffer_indices,
-        hiz_pass: Some(hiz_pass),
-        indirect_draw_pass: Some(indirect_draw_pass),
+        hiz_pass,
+        indirect_draw_pass,
         skybox_pass: Some(skybox_pass),
     })
 }

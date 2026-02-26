@@ -1153,31 +1153,9 @@ impl Texture {
         // Upload
         vulkan::utils::execute_single_use(device.as_ref(), command_pool, queue, |cmd| {
             // Transition to TRANSFER_DST
-            let barrier = vk::ImageMemoryBarrier::default()
-                .old_layout(vk::ImageLayout::UNDEFINED)
-                .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
-                .src_access_mask(vk::AccessFlags::empty())
-                .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE)
-                .image(image)
-                .subresource_range(vk::ImageSubresourceRange {
-                    aspect_mask: vk::ImageAspectFlags::COLOR,
-                    base_mip_level: 0,
-                    level_count: 1,
-                    base_array_layer: 0,
-                    layer_count: 6,
-                });
+            let barrier = vk::ImageMemoryBarrier2::default().old_layout(vk::ImageLayout::UNDEFINED).new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL).src_stage_mask(vk::PipelineStageFlags2::TOP_OF_PIPE).src_access_mask(vk::AccessFlags2::empty()).dst_stage_mask(vk::PipelineStageFlags2::TRANSFER).dst_access_mask(vk::AccessFlags2::TRANSFER_WRITE).image(image).subresource_range(vk::ImageSubresourceRange { aspect_mask: vk::ImageAspectFlags::COLOR, base_mip_level: 0, level_count: 1, base_array_layer: 0, layer_count: 6, });
 
-            unsafe {
-                device.cmd_pipeline_barrier(
-                    cmd,
-                    vk::PipelineStageFlags::TOP_OF_PIPE,
-                    vk::PipelineStageFlags::TRANSFER,
-                    vk::DependencyFlags::empty(),
-                    &[],
-                    &[],
-                    &[barrier],
-                );
-            }
+            unsafe { let dep_info = vk::DependencyInfo::default().image_memory_barriers(std::slice::from_ref(&barrier)); device.cmd_pipeline_barrier2(cmd, &dep_info); }
 
             // Copy 6 faces
             let mut regions = Vec::with_capacity(6);
@@ -1212,31 +1190,9 @@ impl Texture {
             }
 
             // Transition to SHADER_READ_ONLY
-            let barrier_end = vk::ImageMemoryBarrier::default()
-                .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
-                .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
-                .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
-                .dst_access_mask(vk::AccessFlags::SHADER_READ)
-                .image(image)
-                .subresource_range(vk::ImageSubresourceRange {
-                    aspect_mask: vk::ImageAspectFlags::COLOR,
-                    base_mip_level: 0,
-                    level_count: 1,
-                    base_array_layer: 0,
-                    layer_count: 6,
-                });
+            let barrier_end = vk::ImageMemoryBarrier2::default().old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL).new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL).src_stage_mask(vk::PipelineStageFlags2::TRANSFER).src_access_mask(vk::AccessFlags2::TRANSFER_WRITE).dst_stage_mask(vk::PipelineStageFlags2::FRAGMENT_SHADER).dst_access_mask(vk::AccessFlags2::SHADER_READ).image(image).subresource_range(vk::ImageSubresourceRange { aspect_mask: vk::ImageAspectFlags::COLOR, base_mip_level: 0, level_count: 1, base_array_layer: 0, layer_count: 6, });
 
-            unsafe {
-                device.cmd_pipeline_barrier(
-                    cmd,
-                    vk::PipelineStageFlags::TRANSFER,
-                    vk::PipelineStageFlags::FRAGMENT_SHADER,
-                    vk::DependencyFlags::empty(),
-                    &[],
-                    &[],
-                    &[barrier_end],
-                );
-            }
+            unsafe { let dep_info = vk::DependencyInfo::default().image_memory_barriers(std::slice::from_ref(&barrier_end)); device.cmd_pipeline_barrier2(cmd, &dep_info); }
         })?;
 
         // Cleanup Staging
@@ -1351,31 +1307,9 @@ impl Texture {
         // Upload
         vulkan::utils::execute_single_use(device.as_ref(), command_pool, queue, |cmd| {
             // Transition to TRANSFER_DST
-            let barrier = vk::ImageMemoryBarrier::default()
-                .old_layout(vk::ImageLayout::UNDEFINED)
-                .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
-                .src_access_mask(vk::AccessFlags::empty())
-                .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE)
-                .image(image)
-                .subresource_range(vk::ImageSubresourceRange {
-                    aspect_mask: vk::ImageAspectFlags::COLOR,
-                    base_mip_level: 0,
-                    level_count: 1,
-                    base_array_layer: 0,
-                    layer_count: 6,
-                });
+            let barrier = vk::ImageMemoryBarrier2::default().old_layout(vk::ImageLayout::UNDEFINED).new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL).src_stage_mask(vk::PipelineStageFlags2::TOP_OF_PIPE).src_access_mask(vk::AccessFlags2::empty()).dst_stage_mask(vk::PipelineStageFlags2::TRANSFER).dst_access_mask(vk::AccessFlags2::TRANSFER_WRITE).image(image).subresource_range(vk::ImageSubresourceRange { aspect_mask: vk::ImageAspectFlags::COLOR, base_mip_level: 0, level_count: 1, base_array_layer: 0, layer_count: 6, });
 
-            unsafe {
-                device.cmd_pipeline_barrier(
-                    cmd,
-                    vk::PipelineStageFlags::TOP_OF_PIPE,
-                    vk::PipelineStageFlags::TRANSFER,
-                    vk::DependencyFlags::empty(),
-                    &[],
-                    &[],
-                    &[barrier],
-                );
-            }
+            unsafe { let dep_info = vk::DependencyInfo::default().image_memory_barriers(std::slice::from_ref(&barrier)); device.cmd_pipeline_barrier2(cmd, &dep_info); }
 
             // Copy 6 faces
             let mut regions = Vec::with_capacity(6);
@@ -1410,31 +1344,9 @@ impl Texture {
             }
 
             // Transition to SHADER_READ_ONLY
-            let barrier_end = vk::ImageMemoryBarrier::default()
-                .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
-                .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
-                .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
-                .dst_access_mask(vk::AccessFlags::SHADER_READ)
-                .image(image)
-                .subresource_range(vk::ImageSubresourceRange {
-                    aspect_mask: vk::ImageAspectFlags::COLOR,
-                    base_mip_level: 0,
-                    level_count: 1,
-                    base_array_layer: 0,
-                    layer_count: 6,
-                });
+            let barrier_end = vk::ImageMemoryBarrier2::default().old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL).new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL).src_stage_mask(vk::PipelineStageFlags2::TRANSFER).src_access_mask(vk::AccessFlags2::TRANSFER_WRITE).dst_stage_mask(vk::PipelineStageFlags2::FRAGMENT_SHADER).dst_access_mask(vk::AccessFlags2::SHADER_READ).image(image).subresource_range(vk::ImageSubresourceRange { aspect_mask: vk::ImageAspectFlags::COLOR, base_mip_level: 0, level_count: 1, base_array_layer: 0, layer_count: 6, });
 
-            unsafe {
-                device.cmd_pipeline_barrier(
-                    cmd,
-                    vk::PipelineStageFlags::TRANSFER,
-                    vk::PipelineStageFlags::FRAGMENT_SHADER,
-                    vk::DependencyFlags::empty(),
-                    &[],
-                    &[],
-                    &[barrier_end],
-                );
-            }
+            unsafe { let dep_info = vk::DependencyInfo::default().image_memory_barriers(std::slice::from_ref(&barrier_end)); device.cmd_pipeline_barrier2(cmd, &dep_info); }
         })?;
 
         // Cleanup Staging
@@ -2157,31 +2069,9 @@ impl Texture {
             }
 
             // Transition to SHADER_READ_ONLY
-            let barrier_end = vk::ImageMemoryBarrier::default()
-                .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
-                .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
-                .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
-                .dst_access_mask(vk::AccessFlags::SHADER_READ)
-                .image(image)
-                .subresource_range(vk::ImageSubresourceRange {
-                    aspect_mask: vk::ImageAspectFlags::COLOR,
-                    base_mip_level: 0,
-                    level_count: 1,
-                    base_array_layer: 0,
-                    layer_count: 6,
-                });
+            let barrier_end = vk::ImageMemoryBarrier2::default().old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL).new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL).src_stage_mask(vk::PipelineStageFlags2::TRANSFER).src_access_mask(vk::AccessFlags2::TRANSFER_WRITE).dst_stage_mask(vk::PipelineStageFlags2::FRAGMENT_SHADER).dst_access_mask(vk::AccessFlags2::SHADER_READ).image(image).subresource_range(vk::ImageSubresourceRange { aspect_mask: vk::ImageAspectFlags::COLOR, base_mip_level: 0, level_count: 1, base_array_layer: 0, layer_count: 6, });
 
-            unsafe {
-                device.cmd_pipeline_barrier(
-                    cmd,
-                    vk::PipelineStageFlags::TRANSFER,
-                    vk::PipelineStageFlags::FRAGMENT_SHADER,
-                    vk::DependencyFlags::empty(),
-                    &[],
-                    &[],
-                    &[barrier_end],
-                );
-            }
+            unsafe { let dep_info = vk::DependencyInfo::default().image_memory_barriers(std::slice::from_ref(&barrier_end)); device.cmd_pipeline_barrier2(cmd, &dep_info); }
         })?;
 
         // Cleanup Staging

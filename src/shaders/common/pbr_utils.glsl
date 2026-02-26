@@ -32,8 +32,8 @@ vec3 getIBLContribution(float NdotV, vec3 N, vec3 R, vec3 F0, float roughness, v
     vec3 prefilteredColor = textureLod(u_PrefilterMap, R, roughness * MAX_REFLECTION_LOD).rgb;
     vec2 brdf = texture(u_BrdfLut, vec2(NdotV, roughness)).rg;
     
-    // Combining term: F0 * brdf.x + brdf.y
-    vec3 specular = prefilteredColor * (F0 * brdf.x + brdf.y);
+    // Combining term: kS * brdf.x + brdf.y
+    vec3 specular = prefilteredColor * (kS * brdf.x + brdf.y);
 
     return (kD * diffuse + specular) * occlusion;
 }

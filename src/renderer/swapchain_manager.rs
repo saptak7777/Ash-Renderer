@@ -42,11 +42,10 @@ pub fn recreate_swapchain_resources(renderer: &mut Renderer, scene: &mut Scene) 
         )?;
     }
 
-    // Update Forward+ depth descriptor if the system is active
-    if let (Some(db), Some(fp_lock)) = (
-        &renderer.resources.depth_buffer,
-        &renderer.systems.pipeline.forward_plus,
-    ) {
+    // Update Forward+ depth descriptor
+    {
+        let db = &renderer.resources.depth_buffer;
+        let fp_lock = &renderer.systems.pipeline.forward_plus;
         let mut fp = fp_lock
             .write()
             .map_err(|e| AshError::VulkanError(format!("Forward+ lock poisoned: {e}")))?;
@@ -63,8 +62,11 @@ pub fn recreate_swapchain_resources(renderer: &mut Renderer, scene: &mut Scene) 
     renderer.recreate_frame_syncs(image_count)?;
     renderer.recreate_command_buffers()?;
 
-    if let Some(ref forward_plus_arc) = renderer.systems.pipeline.forward_plus {
-        let mut forward_plus = forward_plus_arc
+    {
+        let mut forward_plus = renderer
+            .systems
+            .pipeline
+            .forward_plus
             .write()
             .map_err(|e| AshError::VulkanError(format!("Forward+ lock poisoned: {e}")))?;
         forward_plus.on_resize(swapchain_extent.width, swapchain_extent.height);
@@ -96,5 +98,6 @@ pub(crate) fn cleanup_pipeline(renderer: &mut Renderer) {
             log::warn!("Failed to cleanup pipeline: {e}");
         }
     }
-    renderer.systems.pipeline.main_graphics_pipeline = None;
+    // We don't null out main_graphics_pipeline here because it's mandatory now.
+    // It will be replaced by the new one during recreation.
 }

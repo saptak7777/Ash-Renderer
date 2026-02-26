@@ -153,13 +153,6 @@ impl ApplicationHandler for App {
                         ..Default::default()
                     });
 
-                // 5. Phase 2 Settings: Proper HDR + Tonemapping
-                // 5. Phase 2 Settings: Proper HDR + Tonemapping
-                // 5. Phase 2 Settings: Proper HDR + Tonemapping
-                if let Err(e) = renderer.enable_post_processing(&mut scene) {
-                    log::warn!("Post-processing failed: {e}");
-                }
-
                 // 6. Setup PHASE 2 Lighting: Balanced HDR (RAGE approach)
                 let lighting = LightingBuilder::new()
                     .with_directional(
@@ -354,10 +347,6 @@ fn run_headless(max_frames: u32) -> Result<()> {
         transform: Mat4::IDENTITY,
         ..Default::default()
     }];
-
-    if let Err(e) = renderer.enable_post_processing(&mut scene) {
-        log::warn!("Post-processing failed: {e}");
-    }
 
     let lighting = LightingBuilder::new()
         .with_directional(

@@ -29,7 +29,9 @@ struct ImageLayoutTransitionInfo {
     image: vk::Image,
     old_layout: vk::ImageLayout,
     new_layout: vk::ImageLayout,
+    base_mip: u32,
     mips: u32,
+    base_layer: u32,
     layers: u32,
     src_access: vk::AccessFlags2,
     dst_access: vk::AccessFlags2,
@@ -132,7 +134,7 @@ impl IblProcessor {
                 .add_push_constant(vk::PushConstantRange {
                     stage_flags: vk::ShaderStageFlags::COMPUTE,
                     offset: 0,
-                    size: 4, // roughness
+                    size: 8, // roughness + source_resolution
                 })
                 .build()?
         };
@@ -208,15 +210,19 @@ impl IblProcessor {
 
         // 1. Allocate resources
         // 1. Allocate resources
+        let env_cubemap_mips = 5; // 1024 down to 64 is enough for filtering
         let env_cubemap = Texture::create_empty_cubemap(
             Arc::clone(&allocator),
             Arc::clone(&self.device),
             TextureDesc {
                 width: env_res,
-                height: env_res, // Cubemap faces are square
-                mip_levels: 1,   // Mips handled later or not needed for base env
+                height: env_res,
+                mip_levels: env_cubemap_mips,
                 format: hdr_format,
-                usage: vk::ImageUsageFlags::STORAGE | vk::ImageUsageFlags::SAMPLED,
+                usage: vk::ImageUsageFlags::STORAGE
+                    | vk::ImageUsageFlags::SAMPLED
+                    | vk::ImageUsageFlags::TRANSFER_SRC
+                    | vk::ImageUsageFlags::TRANSFER_DST,
                 name: Some("IBL_Environment_Cubemap"),
             },
         )?;
@@ -302,8 +308,15 @@ impl IblProcessor {
                     return;
                 }
 
-                // Transition Env Map to SHADER_READ for sampling
-                self.transition_to_read(cmd, env_img, 1, 6);
+                // Pure Renderer Remediation: Generate Mips for the environment map BEFORE prefiltering.
+                // This ensures Importance Sampling in the prefilter pass can use proper Lod selection
+                // to avoid aliasing/shimmering in high-roughness areas.
+                self.generate_cubemap_mips(cmd, env_img, env_res, env_cubemap_mips);
+
+                // Transition ALL mips of the Env Map to SHADER_READ for sampling
+                // This is critical: prefilter shader samples multiple LODs.
+                // Pure Renderer Remediation: Transitioning full range (0..env_cubemap_mips)
+                self.transition_to_read(cmd, env_img, env_cubemap_mips, 6);
 
                 // B. Irradiance Convolution
                 if let Err(e) = self.dispatch_irradiance(cmd, &env_cubemap, &irradiance_map) {
@@ -468,12 +481,13 @@ impl IblProcessor {
                 );
 
                 let roughness = mip as f32 / (mips - 1) as f32;
+                let push_data = [roughness, 1024.0]; // Roughness and source resolution
                 self.device.cmd_push_constants(
                     cmd,
                     self.prefilter_pipeline.layout(),
                     vk::ShaderStageFlags::COMPUTE,
                     0,
-                    bytemuck::bytes_of(&roughness),
+                    bytemuck::bytes_of(&push_data),
                 );
 
                 let mip_res = (128u32 >> mip).max(1);
@@ -592,7 +606,9 @@ impl IblProcessor {
                     new_layout: vk::ImageLayout::GENERAL,
                     src_access: vk::AccessFlags2::empty(),
                     dst_access: vk::AccessFlags2::SHADER_WRITE,
+                    base_mip: 0,
                     mips,
+                    base_layer: 0,
                     layers,
                 },
             );
@@ -615,7 +631,9 @@ impl IblProcessor {
                     new_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
                     src_access: vk::AccessFlags2::SHADER_WRITE,
                     dst_access: vk::AccessFlags2::SHADER_READ,
+                    base_mip: 0,
                     mips,
+                    base_layer: 0,
                     layers,
                 },
             );
@@ -628,18 +646,22 @@ impl IblProcessor {
     /// The caller must ensure that the command buffer is in a recording state and that the image handle is valid.
     unsafe fn transition_layout(&self, cmd: vk::CommandBuffer, info: ImageLayoutTransitionInfo) {
         let barrier = vk::ImageMemoryBarrier2::default()
-            .src_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
+            .src_stage_mask(
+                vk::PipelineStageFlags2::COMPUTE_SHADER | vk::PipelineStageFlags2::TRANSFER,
+            )
             .src_access_mask(info.src_access)
-            .dst_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
+            .dst_stage_mask(
+                vk::PipelineStageFlags2::COMPUTE_SHADER | vk::PipelineStageFlags2::TRANSFER,
+            )
             .dst_access_mask(info.dst_access)
             .old_layout(info.old_layout)
             .new_layout(info.new_layout)
             .image(info.image)
             .subresource_range(vk::ImageSubresourceRange {
                 aspect_mask: vk::ImageAspectFlags::COLOR,
-                base_mip_level: 0,
+                base_mip_level: info.base_mip,
                 level_count: info.mips,
-                base_array_layer: 0,
+                base_array_layer: info.base_layer,
                 layer_count: info.layers,
             });
 
@@ -647,6 +669,107 @@ impl IblProcessor {
             let image_barriers = [barrier];
             let dep_info = vk::DependencyInfo::default().image_memory_barriers(&image_barriers);
             self.device.cmd_pipeline_barrier2(cmd, &dep_info);
+        }
+    }
+
+    /// Generates mipmaps for a cubemap using blit commands.
+    unsafe fn generate_cubemap_mips(
+        &self,
+        cmd: vk::CommandBuffer,
+        image: vk::Image,
+        base_res: u32,
+        mips: u32,
+    ) {
+        let mut mip_res = base_res as i32;
+        for i in 1..mips {
+            let next_res = (mip_res / 2).max(1);
+
+            // 1. Transition previous mip (i-1) to TRANSFER_SRC
+            unsafe {
+                self.transition_layout(
+                    cmd,
+                    ImageLayoutTransitionInfo {
+                        image,
+                        old_layout: vk::ImageLayout::GENERAL,
+                        new_layout: vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                        src_access: vk::AccessFlags2::SHADER_WRITE
+                            | vk::AccessFlags2::TRANSFER_WRITE,
+                        dst_access: vk::AccessFlags2::TRANSFER_READ,
+                        base_mip: i - 1, // Selective transition for SOURCE mip
+                        mips: 1,
+                        base_layer: 0,
+                        layers: 6,
+                    },
+                );
+            }
+
+            // Note: We need to transition only the specific mip level, but our transition_layout
+            // currently defaults to base_mip_level: 0.
+            // We'll update transition_layout to be more flexible or use raw barriers here.
+            // For IBL generation speed, we'll keep it simple for now but fix the range in a follow-up if needed.
+            // Actually, let's fix transition_layout now.
+
+            let blit = vk::ImageBlit::default()
+                .src_offsets([
+                    vk::Offset3D { x: 0, y: 0, z: 0 },
+                    vk::Offset3D {
+                        x: mip_res,
+                        y: mip_res,
+                        z: 1,
+                    },
+                ])
+                .src_subresource(vk::ImageSubresourceLayers {
+                    aspect_mask: vk::ImageAspectFlags::COLOR,
+                    mip_level: i - 1,
+                    base_array_layer: 0,
+                    layer_count: 6,
+                })
+                .dst_offsets([
+                    vk::Offset3D { x: 0, y: 0, z: 0 },
+                    vk::Offset3D {
+                        x: next_res,
+                        y: next_res,
+                        z: 1,
+                    },
+                ])
+                .dst_subresource(vk::ImageSubresourceLayers {
+                    aspect_mask: vk::ImageAspectFlags::COLOR,
+                    mip_level: i,
+                    base_array_layer: 0,
+                    layer_count: 6,
+                });
+
+            unsafe {
+                self.device.cmd_blit_image(
+                    cmd,
+                    image,
+                    vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                    image,
+                    vk::ImageLayout::GENERAL,
+                    &[blit],
+                    vk::Filter::LINEAR,
+                );
+            }
+
+            // Transition back to GENERAL so the next level can blit FROM it or it can be sampled later
+            unsafe {
+                self.transition_layout(
+                    cmd,
+                    ImageLayoutTransitionInfo {
+                        image,
+                        old_layout: vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                        new_layout: vk::ImageLayout::GENERAL,
+                        src_access: vk::AccessFlags2::TRANSFER_READ,
+                        dst_access: vk::AccessFlags2::SHADER_READ,
+                        base_mip: i - 1, // Transition it back to GENERAL
+                        mips: 1,
+                        base_layer: 0,
+                        layers: 6,
+                    },
+                );
+            }
+
+            mip_res = next_res;
         }
     }
 }

@@ -94,7 +94,10 @@ void main() {
 
     // 2. Composite
     // hdr += bloom * pc.bloom_intensity; // Severed Ghost Bloom (Phase 1)
-    hdr *= pc.exposure;
+    
+    // Safety Clamp: Prevent extreme exposure values from flattening AgX contrast
+    float exposure = clamp(pc.exposure, 0.1, 10.0);
+    hdr *= exposure;
 
     // 3. Tone Mapping (HDR -> SDR [0, 1])
     vec3 color = hdr;
