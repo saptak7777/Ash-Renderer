@@ -226,24 +226,23 @@ impl SwapchainWrapper {
         }
         .map_err(|e| AshError::SwapchainCreationFailed(format!("{e:?}")))?;
 
-        // --- Standardized 8-bit SDR Output (Lean Architecture) ---
+        // --- Standardized 8-bit SDR Output (Hardware sRGB) ---
         let (chosen_format, chosen_color_space) = {
             let sdr = formats
                 .iter()
                 .find(|f| {
-                    f.format == vk::Format::B8G8R8A8_UNORM
+                    f.format == vk::Format::B8G8R8A8_SRGB
                         && f.color_space == vk::ColorSpaceKHR::SRGB_NONLINEAR
                 })
                 .or_else(|| {
                     formats.iter().find(|f| {
-                        f.format == vk::Format::R8G8B8A8_UNORM
+                        f.format == vk::Format::R8G8B8A8_SRGB
                             && f.color_space == vk::ColorSpaceKHR::SRGB_NONLINEAR
                     })
                 })
                 .ok_or_else(|| {
                     crate::AshError::VulkanError(
-                        "No compatible 8-bit UNORM (B8G8R8A8 or R8G8B8A8) sRGB format found"
-                            .to_string(),
+                        "Hardware Failure: No compatible 8-bit (B8G8R8A8 or R8G8B8A8) sRGB format found. This engine requires a modern sRGB swapchain.".to_string(),
                     )
                 })?;
 

@@ -65,9 +65,15 @@ impl RenderQueue {
         swapchain: &mut Swapchain,
         device: &crate::vulkan::VulkanDevice,
     ) -> Result<()> {
+        // Reset the flag immediately to acknowledge the request
+        self.resize_pending = false;
+
         let extent = match self.pending_extent {
             Some(e) if e.width > 0 && e.height > 0 => e,
-            _ => return Ok(()),
+            _ => {
+                log::debug!("Skipping swapchain recreation: 0x0 extent or no pending extent");
+                return Ok(());
+            }
         };
 
         log::info!(

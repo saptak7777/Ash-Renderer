@@ -22,7 +22,7 @@ pub struct PostProcessConfig {
 impl Default for PostProcessConfig {
     fn default() -> Self {
         Self {
-            exposure: 1.2,
+            exposure: 1.0,
             gamma: 2.2,
         }
     }
@@ -417,7 +417,7 @@ impl PostProcessSystem {
             let push_constants = PostProcessPushConstants {
                 exposure: self.config.exposure,
                 bloom_intensity: 0.0, // Forced zero to bypass Ghost Bloom (Phase 2)
-                tonemapper_type: 1,   // Hard-wired to AgX (Pure Renderer)
+                tonemapper_type: 0,   // Linear (Bypass AgX desaturation)
                 gamma: self.config.gamma,
             };
 

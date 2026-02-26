@@ -265,20 +265,20 @@ void main() {
     // MATERIAL PARAMETERS
     // ============================================================================
     
-    // Extract material parameters
+    // Extract material parameters (Factors)
     float metallic = mat.parameters.x;
     float roughness = mat.parameters.y;
-    roughness = max(roughness, 0.04);
     
-    // Metallic/Roughness Map
+    // Metallic/Roughness Map (Texture Accumulation)
     int mr_idx = mat.texture_indices.z;
     if (mr_idx >= 0) {
         vec4 mrSample = texture(global_textures[nonuniformEXT(mr_idx)], fragUV);
-        metallic = metallic * mrSample.b;
-        roughness = max(roughness * mrSample.g, 0.04);
+        metallic *= mrSample.b;
+        roughness *= mrSample.g;
     }
-    
-    // Apply geometric AA to reduce specular aliasing from detailed normal maps
+
+    // Safety clamps and geometric AA
+    roughness = max(roughness, 0.04);
     roughness = adjust_roughness_geometric_aa(roughness, normal);
 
     // Ambient occlusion
@@ -434,26 +434,26 @@ void main() {
     // while preserving extreme high dynamic range for intense highlights.
     color = clamp(color, 0.0, 65000.0);
 
-    // Final Output
+    // Final Output (Restored for SRGB standardized pipeline)
     outColor = vec4(color, 1.0);
     outNormal = vec4(normal * 0.5 + 0.5, 1.0);
     outAlbedo = vec4(baseColor, 1.0);
     outMotion = motionVector;
 
-    // Debug Path Visualization
+    // Debug Path Visualization (Neutralized for Tonemapper Trap)
     if (push.debug_mode > 0) {
+        const vec3 gamma_fix = vec3(2.2);
+        
         // Mode 1: Color by LOD (Error Metric)
-        // Red = High Error (Low Detail or Transition), Green = Low Error (High Detail)
         if (push.debug_mode == 1) {
-             // Fetch error_metric from instance (if available)
              float error = 0.0;
              if (push.use_instancing == 1 && push.instance_ptr != 0) {
                  InstanceBuffer instance_ctx = InstanceBuffer(push.instance_ptr);
                  InstanceData instance = instance_ctx.instances[fragInstanceIndex];
                  error = instance.error_metric;
              }
-             // Visualize error: 0.0 -> Green, 0.1+ -> Red
-             outColor = vec4(mix(vec3(0.0, 1.0, 0.0), vec3(1.0, 0.0, 0.0), error * 10.0), 1.0);
+             vec3 errorColor = mix(vec3(0.0, 1.0, 0.0), vec3(1.0, 0.0, 0.0), error * 10.0);
+             outColor = vec4(pow(errorColor, gamma_fix), 1.0);
         }
         // Mode 2: Color by Cluster/Instance ID
         else if (push.debug_mode == 2) {
@@ -466,18 +466,18 @@ void main() {
              float r = float(seed) * (1.0/4294967296.0);
              float g = float(seed * 16807u) * (1.0/4294967296.0);
              float b = float(seed * 48271u) * (1.0/4294967296.0);
-             outColor = vec4(r, g, b, 1.0);
+             outColor = vec4(pow(vec3(r, g, b), gamma_fix), 1.0);
         }
         // Mode 10+: Legacy Paths (mapped from debug_path)
         else if (push.debug_mode >= 10) { 
              uint path = push.debug_mode - 10;
-             if (path == 1) outColor = mix(outColor, vec4(0.0, 0.0, 1.0, 1.0), 0.3);
-             else if (path == 2) outColor = mix(outColor, vec4(0.0, 1.0, 0.0, 1.0), 0.3);
-             else if (path == 3) outColor = vec4(baseColor, 1.0);
-             else if (path == 4) outColor = vec4(normal * 0.5 + 0.5, 1.0);
-             else if (path == 5) outColor = vec4(vec3(metallic), 1.0);
-             else if (path == 6) outColor = vec4(vec3(roughness), 1.0);
-             else if (path == 7) outColor = vec4(ambient + directional + Lo, 1.0);
+             if (path == 1) outColor = vec4(pow(vec3(0.0, 0.0, 1.0), gamma_fix), 1.0);
+             else if (path == 2) outColor = vec4(pow(vec3(0.0, 1.0, 0.0), gamma_fix), 1.0);
+             else if (path == 3) outColor = vec4(baseColor, 1.0); // Albedo is a color (Single Gamma)
+             else if (path == 4) outColor = vec4(pow(normal * 0.5 + 0.5, gamma_fix), 1.0); // Data (Neutralized)
+             else if (path == 5) outColor = vec4(pow(vec3(metallic), gamma_fix), 1.0); // Data (Neutralized)
+             else if (path == 6) outColor = vec4(pow(vec3(roughness), gamma_fix), 1.0); // Data (Neutralized)
+             else if (path == 7) outColor = vec4(clamp(ambient + directional + Lo, 0.0, 1.0), 1.0); // Lighting is a color (Single Gamma)
         }
     }
 }

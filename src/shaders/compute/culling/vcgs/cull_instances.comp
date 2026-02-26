@@ -144,9 +144,9 @@ void main() {
         );
     }
 
-    // Frustum culling using FrameData BDA
+    // Frustum culling using FrameData BDA (unjittered for stability)
     vec4 frustumPlanes[6];
-    extractFrustumPlanes(frame.view_proj, frustumPlanes);
+    extractFrustumPlanes(frame.view_proj_no_jitter, frustumPlanes);
 
     bool culled = isSphere
         ? frustumCullSphere(worldCenter, worldRadius, frustumPlanes)
@@ -154,8 +154,8 @@ void main() {
 
     if (culled) { return; }
 
-    // Screen-size culling: reject sub-pixel geometry
-    vec4  clipPos   = frame.view_proj * vec4(worldCenter, 1.0);
+    // Screen-size culling: reject sub-pixel geometry (unjittered for stability)
+    vec4  clipPos   = frame.view_proj_no_jitter * vec4(worldCenter, 1.0);
     float clipW     = clipPos.w;
     float boundRad  = max(worldExtents.x, max(worldExtents.y, worldExtents.z));
     if (clipW > 0.0001 && (boundRad / clipW) < 0.005) {
@@ -173,8 +173,8 @@ void main() {
     bool  isSelected     = (obj.error_metric <= errorThreshold) && (parentError > errorThreshold);
     if (!isSelected) { return; }
 
-    // Hi-Z occlusion culling
-    if (occlusionCull(worldCenter, worldExtents, frame.view_proj)) {
+    // Hi-Z occlusion culling (unjittered for stability)
+    if (occlusionCull(worldCenter, worldExtents, frame.view_proj_no_jitter)) {
         return;
     }
 

@@ -101,14 +101,13 @@ void main() {
 
     // 3. Tone Mapping (HDR -> SDR [0, 1])
     vec3 color = hdr;
-    if ((pc.tonemapper_type & 1) != 0) {
+    if (pc.tonemapper_type == 1) {
         color = agx(hdr);
-    }
+    } 
+    // If tonemapper_type == 0 (Linear), we skip agx() and stay in exposure-scaled Linear space.
 
-    // 4. Gamma 2.2 OETF (Standard SDR display curve)
-    color = pow(color, vec3(1.0 / pc.gamma));
-
-    // 5. IGN Dither (Prevents 8-bit banding)
+    // 4. IGN Dither (Prevents 8-bit banding)
+    // Applied in linear space before hardware gamma
     color = dither(color, gl_FragCoord.xy);
 
     outColor = vec4(color, 1.0);

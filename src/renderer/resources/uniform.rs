@@ -156,10 +156,15 @@ impl MvpMatrices {
         self.recalc_view_proj();
     }
 
-    /// Set perspective projection matrix
-    /// Note: Vulkan NDC (Normalized Device Coordinates) has the Y-axis pointing down; flip Y to compensate.
+    /// Set perspective projection matrix using **Reverse-Z**.
+    ///
+    /// Callers supply the logical `near` and `far` clip distances (e.g. `0.5` / `1000.0`).
+    /// Internally `near` and `far` are **swapped** when calling `perspective_rh` so that the
+    /// depth buffer maps `1.0 → near` and `0.0 → far`, preserving maximum float precision
+    /// near the far plane (standard Reverse-Z technique).
+    /// Vulkan NDC Y-axis is also negated to compensate for the top-down coordinate system.
     pub fn set_projection(&mut self, fovy: f32, aspect: f32, near: f32, far: f32) {
-        // Reverse-Z: Swap near and far planes for infinite float precision at distance
+        // Reverse-Z: pass (far, near) to perspective_rh — depth 1.0 = near plane, 0.0 = far plane.
         self.projection = Mat4::perspective_rh(fovy, aspect, far, near);
         // Flip Y for Vulkan's coordinate system (Y points down in NDC)
         self.projection.y_axis.y *= -1.0;
@@ -229,6 +234,7 @@ impl UniformBuffer {
             guard.copy_from_slice(&[data]);
         }
 
+        // Ensure the flush range is within allocation bounds
         allocator
             .vma
             .flush_allocation(&allocation, 0, size)
@@ -262,11 +268,10 @@ impl UniformBuffer {
             guard.copy_from_slice(&[self.data]);
         }
 
-        // --- Lead Engineer Fix: Aligned Flush ---
-        // Ensure the flush range is a multiple of nonCoherentAtomSize (usually 64 or 256)
+        // --- Lead Engineer Fix: Capped Aligned Flush ---
         const ATOM_SIZE: u64 = 256;
-        let aligned_offset = 0; // Starts at 0, so already aligned
-        let aligned_size = size.div_ceil(ATOM_SIZE) * ATOM_SIZE;
+        let aligned_offset = 0;
+        let aligned_size = (size.div_ceil(ATOM_SIZE) * ATOM_SIZE).min(size);
 
         self.allocator
             .vma
@@ -417,9 +422,9 @@ impl MaterialBuffer {
             guard.copy_from_slice(&[self.data]);
         }
 
-        // --- Lead Engineer Fix: Aligned Flush ---
+        // --- Lead Engineer Fix: Capped Aligned Flush ---
         const ATOM_SIZE: u64 = 256;
-        let aligned_size = size.div_ceil(ATOM_SIZE) * ATOM_SIZE;
+        let aligned_size = (size.div_ceil(ATOM_SIZE) * ATOM_SIZE).min(size);
 
         self.allocator
             .vma
@@ -548,9 +553,9 @@ impl InstanceBuffer {
             guard.copy_from_slice(data);
         }
 
-        // --- Lead Engineer Fix: Aligned Flush ---
+        // --- Lead Engineer Fix: Capped Aligned Flush ---
         const ATOM_SIZE: u64 = 256;
-        let aligned_size = size.div_ceil(ATOM_SIZE) * ATOM_SIZE;
+        let aligned_size = (size.div_ceil(ATOM_SIZE) * ATOM_SIZE).min(size);
 
         self.allocator
             .vma
@@ -677,11 +682,11 @@ impl<T: Copy> StorageBuffer<T> {
             guard.copy_from_slice(data);
         }
 
-        // --- Lead Engineer Fix: Aligned Flush ---
+        // --- Lead Engineer Fix: Capped Aligned Flush ---
         const ATOM_SIZE: u64 = 256;
-        let aligned_size = size.div_ceil(ATOM_SIZE) * ATOM_SIZE;
+        let aligned_size = (size.div_ceil(ATOM_SIZE) * ATOM_SIZE).min(size);
 
-        // CRITICAL: Ensure GPU sees the data
+        // Ensure GPU sees the data
         self.allocator
             .vma
             .flush_allocation(&self.allocation, 0, aligned_size)
@@ -739,15 +744,14 @@ impl<T: Copy> StorageBuffer<T> {
             }
         }
 
-        // --- Lead Engineer Fix: Aligned Flush Range ---
-        // Violating nonCoherentAtomSize (usually 64 or 256) causes silent data loss.
-        // Index 1 (Offset 80) is unaligned on 64-byte atom GPUs, failing to update Metallic.
-        const ATOM_SIZE: u64 = 256; // Global safe upper bound
+        // --- Lead Engineer Fix: Capped Aligned Flush Range ---
+        const ATOM_SIZE: u64 = 256;
         let start = offset_bytes;
         let end = start + element_size as u64;
+        let total_size = (self.capacity * element_size) as u64;
 
         let aligned_start = (start / ATOM_SIZE) * ATOM_SIZE;
-        let aligned_end = end.div_ceil(ATOM_SIZE) * ATOM_SIZE;
+        let aligned_end = (end.div_ceil(ATOM_SIZE) * ATOM_SIZE).min(total_size);
         let aligned_size = aligned_end - aligned_start;
 
         self.allocator

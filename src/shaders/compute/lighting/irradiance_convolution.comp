@@ -51,6 +51,9 @@ void main() {
             nrSamples++;
         }
     }
+    // Correct Riemann-sum normalization for hemisphere sampling:
+    // With cos(theta) * sin(theta) weight, the integral converges to PI.
+    // Standard IBL map normalization divides by PI, so we multiply by PI / nrSamples.
     irradiance = PI * irradiance * (1.0 / nrSamples);
 
     imageStore(irradianceMap, ivec3(gl_GlobalInvocationID), vec4(irradiance, 1.0));

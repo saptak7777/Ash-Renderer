@@ -160,8 +160,8 @@ impl Scene {
                 let material = Material {
                     name: format!("{name}_material", name = &*mesh.name),
                     color: props.base_color_factor,
-                    metallic: props.metallic_factor,
-                    roughness: props.roughness_factor,
+                    metallic: props.metallic_factor, // Force glTF factor
+                    roughness: props.roughness_factor, // Force glTF factor
                     emissive: props.emissive_factor,
                     occlusion_strength: props.occlusion_strength,
                     normal_scale: props.normal_scale,

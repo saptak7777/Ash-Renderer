@@ -1027,6 +1027,13 @@ impl Renderer {
         if self.context.queue.is_resize_pending() {
             crate::renderer::swapchain_manager::recreate_swapchain_resources(self, scene)?;
         }
+
+        // Minimization Guard: Skip frame if swapchain extent is zero
+        if let Some(swapchain) = &self.frame.swapchain {
+            if swapchain.extent.width == 0 || swapchain.extent.height == 0 {
+                return Ok(());
+            }
+        }
         self.context
             .queue
             .flush_old_swapchains(&self.context.device);

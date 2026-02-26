@@ -88,7 +88,7 @@ impl ApplicationHandler for App {
                 // Set reasonable defaults for PBR
                 renderer.set_post_processing_config(
                     ash_renderer::renderer::systems::post_process::PostProcessConfig {
-                        exposure: 0.8,
+                        exposure: 1.0,
                         gamma: 2.2,
                     },
                 );
