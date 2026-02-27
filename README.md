@@ -68,7 +68,7 @@ Add this to your `Cargo.toml` and pray to the Vulkan gods:
 
 ```toml
 [dependencies]
-ash_renderer = "0.5.25"
+ash_renderer = "0.5.50"
 glam = "0.31" # Or whatever version we're using this week
 ```
 
