@@ -15,6 +15,7 @@ pub struct ShadowPageRenderInfo<'a> {
     pub vertex_addr: u64,
     pub index_addr: u64,
     pub object_addr: u64,
+    pub frame_ptr: u64,
     pub pages: &'a [super::page_manager::PageToRender],
 }
 
@@ -120,7 +121,7 @@ impl VsmShadowPass {
             stage_flags: vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
             offset: 0,
             // Use the Rust struct size as the authoritative source so it can never drift.
-            size: std::mem::size_of::<crate::renderer::types::GpuPushConstants>() as u32,
+            size: std::mem::size_of::<crate::renderer::types::ShadowPushConstants>() as u32,
         };
 
         // Descriptor set layout: Set 0 (Combined Bindless)
@@ -281,13 +282,11 @@ impl VsmShadowPass {
         }
 
         // Build the per-batch base push.
-        let mut bda_push = crate::renderer::types::GpuPushConstants {
-            frame_ptr: 0,
+        let mut bda_push = crate::renderer::types::ShadowPushConstants {
+            frame_ptr: info.frame_ptr,
             vertex_ptr: info.vertex_addr,
             instance_ptr: info.object_addr,
-            material_ptr: 0, // zero → frag skips alpha cutout branch
             index_ptr: info.index_addr,
-            vsm_ptr: info.resources.metadata_address(),
             use_instancing: 1, // Enable instancing for the manual pull
             ..Default::default()
         };
@@ -358,6 +357,7 @@ impl VsmShadowPass {
 
             // Per-page: update the entire structure (simplified for first pass)
             if let Some(layout) = self.shadow_pipeline_layout {
+                bda_push.light_space_matrix = page.mvp;
                 bda_push.clipmap_level = page.clipmap_level;
                 unsafe {
                     self.device.cmd_push_constants(

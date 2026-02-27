@@ -97,6 +97,9 @@ pub struct MainPassParameters<'a> {
 }
 
 impl Renderer {
+    /// Threshold for switching to parallel command sorting.
+    pub const PARALLEL_SORT_THRESHOLD: usize = 1000;
+
     /// Returns a new [`RendererBuilder`] to configure and build the renderer.
     pub fn builder() -> crate::renderer::builder::RendererBuilder {
         crate::renderer::builder::RendererBuilder::new()
@@ -413,18 +416,30 @@ impl Renderer {
 
         // 1. Sort commands to minimize state changes
         let mut sorted_commands: Vec<usize> = (0..commands.len()).collect();
-        sorted_commands.sort_by(|&a, &b| {
+
+        let sort_fn = |&a: &usize, &b: &usize| {
             let cmd_a = &commands[a];
             let cmd_b = &commands[b];
 
-            // Sort by mesh handle then material
-            cmd_a.mesh_handle.cmp(&cmd_b.mesh_handle).then_with(|| {
-                cmd_a
-                    .material_handle
-                    .index
-                    .cmp(&cmd_b.material_handle.index)
-            })
-        });
+            // Sort by mesh handle then material, using original index as a stable tie-breaker
+            cmd_a
+                .mesh_handle
+                .cmp(&cmd_b.mesh_handle)
+                .then_with(|| {
+                    cmd_a
+                        .material_handle
+                        .index
+                        .cmp(&cmd_b.material_handle.index)
+                })
+                .then_with(|| a.cmp(&b))
+        };
+
+        if commands.len() > Self::PARALLEL_SORT_THRESHOLD {
+            use rayon::prelude::*;
+            sorted_commands.par_sort_unstable_by(sort_fn);
+        } else {
+            sorted_commands.sort_by(sort_fn);
+        }
 
         // 2. Populate Occlusion Culling directly from sorted commands
         for (i, &idx) in sorted_commands.iter().enumerate() {
@@ -923,6 +938,12 @@ impl Renderer {
                         // Use the pre-extracted BDA address â€” no lock needed inside closure.
                         object_addr: idp_object_addr,
                         object_count: scene.occlusion_culling.object_count() as u32,
+                        frame_ptr: self.resources.uniform_buffers[frame_index]
+                            .read()
+                            .map_err(|e| {
+                                crate::AshError::LockPoisoned(format!("UniformBuffer: {e}"))
+                            })?
+                            .device_address(),
                     },
                     |cmd| {
                         // Use the pre-extracted initialization flag and vk::Buffer handles.

@@ -115,9 +115,31 @@ impl VulkanDevice {
             let device_properties = device_properties2.properties;
             let device_name = CStr::from_ptr(device_properties.device_name.as_ptr());
             let timestamp_period_ns = device_properties.limits.timestamp_period;
+
+            // ── Hardware Limit Validation ──────────────────────────────────
+            let max_storage_images = device_properties
+                .limits
+                .max_per_stage_descriptor_storage_images;
+            let max_push_constants = device_properties.limits.max_push_constants_size;
+
             log::info!(
-                "Selected GPU: {device_name:?} (timestamp period: {timestamp_period_ns:.3}ns)"
+                "Selected GPU: {device_name:?} (Push Constants: {max_push_constants}b, Storage Images: {max_storage_images})"
             );
+
+            // VSM requires at least 2048 storage images for the page tables on some platforms,
+            // but we'll check for a reasonable minimum of 1024.
+            if max_storage_images < 1024 {
+                log::warn!(
+                    "GPU may have limited support for large VSM page tables (Storage Images: {max_storage_images})"
+                );
+            }
+
+            // We are targeting 192 bytes for push constants (128 core + 64 matrix)
+            if max_push_constants < 192 {
+                log::warn!(
+                    "GPU push constant size ({max_push_constants}b) is below Phase 5 requirement (192b). Compatibility mode active."
+                );
+            }
 
             let queue_priorities = [1.0f32];
             let mut unique_families = HashSet::new();

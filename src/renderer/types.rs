@@ -287,3 +287,18 @@ pub struct GpuPushConstants {
     pub base_index: u32,
     pub indirect_start: u32,
 }
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable, Debug, Default)]
+pub struct ShadowPushConstants {
+    pub frame_ptr: u64,
+    pub vertex_ptr: u64,
+    pub instance_ptr: u64,
+    pub index_ptr: u64,
+    pub transform_ptr: u64,
+    pub transform_index: u32,
+    pub use_instancing: u32,
+    pub clipmap_level: u32,
+    pub _padding: [u32; 3], // Align light_space_matrix to 16 bytes (total 64 bytes before matrix)
+    pub light_space_matrix: glam::Mat4,
+}

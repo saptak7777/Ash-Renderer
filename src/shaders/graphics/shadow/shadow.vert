@@ -1,19 +1,28 @@
-// shadow.vert
-// Optimized VSM shadow pass with BDA manual index pulling
-
 #version 450
 #extension GL_GOOGLE_include_directive : require
 #extension GL_EXT_buffer_reference : require
 #extension GL_EXT_scalar_block_layout : require
 #extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
 
+#define SHADER_PUSH_CONSTANT_OVERRIDE
 #include "interop/structures.glsl"
 #include "common/vertex_pulling.glsl"
 
 layout(location = 0) out vec2 outUV;
 
-// Unified ABI: PushConstants block now from structure.glsl
-// layout(push_constant) uniform PushConstants { ... } push;
+// Specialized Shadow Push Constants (Matching Rust ShadowPushConstants)
+layout(push_constant) uniform ShadowPushBlock {
+    uint64_t frame_ptr;        // 0
+    uint64_t vertex_ptr;       // 8
+    uint64_t instance_ptr;     // 16
+    uint64_t index_ptr;        // 24
+    uint64_t transform_ptr;    // 32
+    uint transform_index;      // 40
+    uint use_instancing;       // 44
+    uint clipmap_level;        // 48
+    // Offset 64 ensures 16-byte alignment for mat4 and matches Rust padding
+    layout(offset = 64) mat4 light_space_matrix; 
+} push;
 
 void main() {
     // Access Frame Data via BDA
@@ -44,9 +53,6 @@ void main() {
     vec4 localPosition = vec4(vertex.position, 1.0);
     vec2 inUV = vertex.uv;
     
-    // VSM Matrix via BDA
-    mat4 lightSpaceMatrix = VsmGlobal(push.vsm_ptr).light_view_projections[push.clipmap_level];
-    
-    gl_Position = lightSpaceMatrix * modelMatrix * localPosition;
+    gl_Position = push.light_space_matrix * modelMatrix * localPosition;
     outUV = inUV;
 }

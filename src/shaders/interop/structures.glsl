@@ -216,6 +216,7 @@ uint load_index(uint64_t ptr, uint logical_index) {
 
 // --- Push Constants ---
 
+#ifndef SHADER_PUSH_CONSTANT_OVERRIDE
 // Modern Push Constants - Full Bindless/BDA
 layout(push_constant) uniform PushConstants {
     // Pointer stage (0-55)
@@ -251,3 +252,4 @@ layout(push_constant) uniform PushConstants {
     layout(offset = 120) uint base_index;
     layout(offset = 124) uint indirect_start;
 } push;
+#endif // SHADER_PUSH_CONSTANT_OVERRIDE

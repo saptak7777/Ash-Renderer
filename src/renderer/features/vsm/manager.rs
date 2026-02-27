@@ -67,6 +67,7 @@ pub struct VsmShadowArgs {
     pub index_addr: u64,
     pub object_addr: u64,
     pub object_count: u32,
+    pub frame_ptr: u64,
 }
 
 impl VsmManager {
@@ -772,6 +773,7 @@ impl VsmManager {
                     vertex_addr: args.vertex_addr,
                     index_addr: args.index_addr,
                     object_addr: args.object_addr,
+                    frame_ptr: args.frame_ptr,
                     pages: &pages,
                 },
                 scene_draw_fn,

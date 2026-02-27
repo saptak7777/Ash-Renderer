@@ -71,14 +71,18 @@ impl Scene {
         index: u32,
         uniform: crate::renderer::resources::uniform::MaterialUniform,
     ) -> Result<()> {
-        if let Some(buffer_arc) = self.material_storage_buffer.as_ref() {
-            let mut buffer = buffer_arc.write().map_err(|e| {
-                crate::AshError::VulkanError(format!("Material buffer lock poisoned: {e}"))
-            })?;
-            unsafe {
-                buffer.write_element_at(index as usize, &uniform)?;
-            }
+        let buffer_arc = self.material_storage_buffer.as_ref().ok_or_else(|| {
+            crate::AshError::VulkanError("Critical Error: Material storage buffer missing in Scene. Ensure scene.material_storage_buffer is assigned before registering materials.".to_string())
+        })?;
+
+        let mut buffer = buffer_arc.write().map_err(|e| {
+            crate::AshError::VulkanError(format!("Material buffer lock poisoned: {e}"))
+        })?;
+
+        unsafe {
+            buffer.write_element_at(index as usize, &uniform)?;
         }
+
         Ok(())
     }
 
