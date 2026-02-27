@@ -1,7 +1,7 @@
 //! # ASH Renderer
 //!
 //! A Vulkan rendering library built with ASH and VMA. This is an experimental renderer focusing on
-//! modern techniques (GPU-driven culling, SSGI, VSR) in a standalone, ECS-free architecture.
+//! modern techniques (GPU-driven culling, VSR) in a standalone, ECS-free architecture.
 //!
 //! ## Status
 //!

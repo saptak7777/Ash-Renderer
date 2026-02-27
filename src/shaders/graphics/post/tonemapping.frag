@@ -15,7 +15,7 @@ layout(location = 0) out vec4 outColor;
 
 layout(set = 0, binding = 0) uniform sampler2D hdrBuffer;
 layout(set = 0, binding = 1) uniform sampler2D bloomBuffer;
-layout(set = 0, binding = 2) uniform sampler2D ssgiBuffer;
+
 
 // Must match PostProcessPushConstants in fullscreen.rs exactly (16 bytes).
 layout(push_constant) uniform PushConstants {

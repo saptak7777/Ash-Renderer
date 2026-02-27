@@ -162,7 +162,6 @@ impl PostProcessSystem {
         image_index: usize,
         input_view: vk::ImageView,
         bloom_view: vk::ImageView,
-        ssgi_view: vk::ImageView,
         sampler: vk::Sampler,
     ) {
         if image_index >= self.descriptor_sets.len() {
@@ -176,11 +175,6 @@ impl PostProcessSystem {
 
         let bloom_info = vk::DescriptorImageInfo::default()
             .image_view(bloom_view)
-            .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
-            .sampler(sampler);
-
-        let ssgi_info = vk::DescriptorImageInfo::default()
-            .image_view(ssgi_view)
             .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
             .sampler(sampler);
 
@@ -198,8 +192,7 @@ impl PostProcessSystem {
             vk::WriteDescriptorSet::default()
                 .dst_set(self.descriptor_sets[image_index])
                 .dst_binding(2)
-                .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-                .image_info(std::slice::from_ref(&ssgi_info)),
+                .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER),
         ];
 
         unsafe {
@@ -269,7 +262,6 @@ impl PostProcessSystem {
             .hdr
             .expect("HdrSystem is mandatory for Pure Renderer remediation");
         let raw_hdr_view = hdr.view();
-        let black_view = ctx.resources.black_texture.view();
 
         // ── 1. TAA Resolve Phase (STRICT NATIVE) ──────────────────────────
         // Run the TAA compute shader before tonemapping. The resolved output
@@ -315,7 +307,6 @@ impl PostProcessSystem {
             ctx.image_index,
             resolved_view,
             ctx.bloom_view,
-            black_view, // ssgi placeholder
             hdr.sampler(),
         );
 

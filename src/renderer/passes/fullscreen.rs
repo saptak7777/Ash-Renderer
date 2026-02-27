@@ -46,7 +46,7 @@ impl FullscreenPass {
                 stage_flags: vk::ShaderStageFlags::FRAGMENT,
                 ..Default::default()
             },
-            // Binding 2: SSGI input
+            // Binding 2: Unused
             vk::DescriptorSetLayoutBinding {
                 binding: 2,
                 descriptor_type: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
