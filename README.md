@@ -30,7 +30,7 @@ Before you dive in, read our [Philosophy & Goals](GOALS.md) document. It explain
 ### What It Does (Mostly)
 
 - ✅ **Forward+ Lighting**: Tile-based culling for hundreds of point and spot lights.
-- ✅ **RAGE Hemisphere Ambient**: AAA-standard ambient model for physically plausible fill lighting.
+- ✅ **Standard IBL**: High-performance Image-Based Lighting for physically plausible fill lighting.
 - ✅ **Bindless or Bust**: We don't bind descriptors per object. We bind the whole world once and index it like a boss. (Up to 16,384 slots).
 - ✅ **FULL BDA (Buffer Device Address)**: Direct GPU memory access. No more descriptor binding gymnastics.
 - ✅ **GPU-Driven Culling**: Hi-Z occlusion and frustum culling so your GPU doesn't melt.
@@ -38,7 +38,7 @@ Before you dive in, read our [Philosophy & Goals](GOALS.md) document. It explain
 - ✅ **Targeted Readbacks**: We read back what matters (VSR metrics, headless screenshots) without stalling. The rest stays on the GPU.
 - ✅ **VSM (Virtual Shadow Maps)**: Full implementation with 16k+ resolution shadows, virtual memory paging, clipmap cascades, and smart cache invalidation. No artifacts, just crispy shadows.
 - ✅ **VCGS (Virtual Clustered Geometry System)**: Professional mesh clustering using `meshopt` for leaf generation and simplification. Spatial sorting (Morton Codes) ensures extremely high cache locality. Continuous, invisible LOD transitions.
-- ✅ **Post-Processing**: Bloom, Tonemapping, and a VSR (Temporal) implementation that's surprisingly okay.
+- ✅ **Post-Processing**: Bloom, Tonemapping, and basic Temporal Anti-Aliasing (TAA).
 - ✅ **Stability First**: Fixed the infamous crashes. Descriptor leaks patched. Resize is rock solid.
 - ✅ **Debug Visualization**: See exactly what's being culled with colored wireframes (Red=Gone, Green=Seen).
 - ✅ **Shader Hot-Reload**: Iterate on compute shaders instantly (F5). (Disabled by default, enable via `config.watch_shaders = true`).
@@ -178,7 +178,7 @@ impl ApplicationHandler for App {
 
 ### 2. Modern Lighting System
 
-Ash Renderer uses a standardized Image-Based Lighting (IBL) and Directional light system. Legacy hemisphere ambient models have been replaced with a high-performance, single-path architecture.
+Ash Renderer uses a standardized Image-Based Lighting (IBL) and Directional light system.
 
 ```rust
 use ash_renderer::renderer::features::ambient_lighting::{LightingPresets, LightingBuilder};
