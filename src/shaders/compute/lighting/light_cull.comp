@@ -40,9 +40,8 @@ vec3 screenToView(vec2 uv, float depth, FrameData camera) {
 }
 
 // Construct frustum planes for a tile
-void getTileFrustum(uvec2 tileId, float minDepth, float maxDepth, out vec4 planes[6]) {
+void getTileFrustum(uvec2 tileId, float minDepth, float maxDepth, FrameData camera, out vec4 planes[6]) {
     // Tile corners in UV space [0, 1] (using specialization constants)
-    FrameData camera = FrameData(push.frame_ptr);
     vec2 screenSize = camera.screen_params.xy;
     vec2 tileSize = vec2(float(WORKGROUP_SIZE_X), float(WORKGROUP_SIZE_Y));
     vec2 minUV = vec2(tileId) * tileSize / screenSize;
@@ -168,7 +167,7 @@ void main() {
     // OPTIMIZATION: Only thread 0 computes frustum, others read from shared memory
     if (localIndex == 0) {
         vec4 frustumPlanes[6];
-        getTileFrustum(tileId, minDepth, maxDepth, frustumPlanes);
+        getTileFrustum(tileId, minDepth, maxDepth, camera, frustumPlanes);
         // Copy to shared memory
         for (int i = 0; i < 6; i++) {
             sharedFrustumPlanes[i] = frustumPlanes[i];
@@ -176,7 +175,7 @@ void main() {
     }
     barrier();
     
-    if (push.object_count == 0) {
+    if (push.light_count == 0) {
         if (localIndex == 0) {
             tib.tileData[tileOffset] = 0;
         }
@@ -185,9 +184,9 @@ void main() {
     
     // Each thread tests some lights
     uint workgroupSize = WORKGROUP_SIZE_X * WORKGROUP_SIZE_Y;
-    uint lightsPerThread = (push.object_count + workgroupSize - 1) / workgroupSize;
+    uint lightsPerThread = (push.light_count + workgroupSize - 1) / workgroupSize;
     uint lightStart = localIndex * lightsPerThread;
-    uint lightEnd = min(lightStart + lightsPerThread, push.object_count);
+    uint lightEnd = min(lightStart + lightsPerThread, push.light_count);
 
     for (uint i = lightStart; i < lightEnd; i++) {
         Light light = lb.lights[i];
@@ -206,7 +205,6 @@ void main() {
             continue;
         }
         
-        FrameData camera = FrameData(push.frame_ptr);
         
         // Transform light to view space
         vec3 lightPosView = (camera.view * vec4(light.position.xyz, 1.0)).xyz;

@@ -258,7 +258,7 @@ impl LightCullingPass {
             frame_ptr,
             light_ptr,
             tile_ptr,
-            object_count: self.lights.len() as u32,
+            light_count: self.lights.len() as u32,
             ..Default::default()
         }
     }

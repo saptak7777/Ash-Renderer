@@ -229,7 +229,7 @@ layout(push_constant) uniform PushConstants {
     uint64_t tile_ptr;
 
     // Texture indices (56-63)
-    uint _pad_vsm1;
+    uint light_count;
     uint _pad_vsm2;
 
     // Phase 19: Transient Transform (64-79)

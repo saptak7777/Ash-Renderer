@@ -145,7 +145,7 @@ struct DrawPushConstants {
     tile_ptr_high: u32,     // 52
 
     // Texture indices (56-63)
-    _pad_vsm1: u32,
+    light_count: u32,
     _pad_vsm2: u32,
 
     // Transient Transform (64-79)
@@ -324,7 +324,7 @@ impl ModelRenderer {
             tile_ptr_high: (ctx.tile_ptr >> 32) as u32,
             vsm_ptr_low: ctx.vsm_ptr as u32,
             vsm_ptr_high: (ctx.vsm_ptr >> 32) as u32,
-            _pad_vsm1: 0,
+            light_count: 0,
             _pad_vsm2: 0,
             transform_ptr_low: ctx.transform_ptr as u32,
             transform_ptr_high: (ctx.transform_ptr >> 32) as u32,
