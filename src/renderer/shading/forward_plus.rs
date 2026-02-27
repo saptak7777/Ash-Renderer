@@ -55,8 +55,6 @@ pub struct ForwardPlusIntegration {
 
     /// Whether the integration is initialized
     initialized: bool,
-    // Whether this is the first frame (needs full descriptor update)
-    // first_frame: bool,
     allocator: Arc<Allocator>,
     device: Arc<ash::Device>,
 }
@@ -333,7 +331,8 @@ impl ForwardPlusIntegration {
                     vk::PipelineBindPoint::COMPUTE,
                     pipeline.layout(),
                     0,
-                    &[self.compute_descriptor_sets[frame_index]],
+                    &[self.compute_descriptor_sets
+                        [frame_index % self.compute_descriptor_sets.len()]],
                     &[],
                 );
 

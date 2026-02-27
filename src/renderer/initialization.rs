@@ -567,8 +567,6 @@ pub unsafe fn init_rendering_passes(cfg: RenderingPassesConfig) -> Result<Render
 pub unsafe fn init_lighting_system(
     device: &vulkan::VulkanDevice,
     alloc: &Arc<vulkan::Allocator>,
-    _bindless_manager: &mut crate::vulkan::BindlessManager,
-    _upload_command_pool: vk::CommandPool,
     frame_count: u32,
     extent: vk::Extent2D,
 ) -> Result<LightingSystem> {
@@ -591,9 +589,6 @@ pub unsafe fn init_lighting_system(
     };
     unsafe { forward_plus.init(alloc) };
     forward_plus.on_resize(extent.width, extent.height);
-
-    // VSM is now handled directly by Renderer and registers itself.
-    // ShadowSystem is being removed.
 
     Ok(LightingSystem {
         forward_plus,

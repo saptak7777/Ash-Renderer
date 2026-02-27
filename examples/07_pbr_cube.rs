@@ -203,6 +203,9 @@ impl ApplicationHandler for App {
                 {
                     let elapsed = self.start_time.elapsed().as_secs_f32();
                     let size = window.inner_size();
+                    if size.width == 0 || size.height == 0 {
+                        return;
+                    }
                     let aspect = size.width as f32 / size.height as f32;
 
                     // Rotate the cube itself

@@ -2,12 +2,8 @@ use ash::vk;
 
 /// Returns true if the provided format contains a stencil component.
 pub fn has_stencil_component(format: vk::Format) -> bool {
-    matches!(
-        format,
-        vk::Format::D24_UNORM_S8_UINT
-            | vk::Format::D32_SFLOAT_S8_UINT
-            | vk::Format::D16_UNORM_S8_UINT
-    )
+    // Only D32_SFLOAT_S8_UINT is a supported stencil format in this renderer.
+    matches!(format, vk::Format::D32_SFLOAT_S8_UINT)
 }
 
 /// Helper to execute a single-use command buffer on a queue.

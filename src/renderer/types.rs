@@ -227,7 +227,6 @@ pub struct RenderFrameContext<'a> {
     pub scene: &'a crate::renderer::scene::Scene,
     pub view: Mat4,
     pub jitter_proj: Mat4,
-    pub jitter_uv: [f32; 2],
     pub extent: vk::Extent2D,
     pub ui_callback: Option<&'a dyn Fn(vk::CommandBuffer)>,
 }

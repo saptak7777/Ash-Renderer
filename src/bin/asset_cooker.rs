@@ -22,8 +22,6 @@ pub struct AshTexHeader {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // env_logger::init();
-
     let args: Vec<String> = env::args().collect();
     if args.len() < 2 {
         eprintln!("Usage: asset_cooker <input_image_path> [output_path]");

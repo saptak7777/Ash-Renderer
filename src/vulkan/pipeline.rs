@@ -237,12 +237,7 @@ impl PipelineBuilder {
         );
 
         // If the format includes stencil, enable read/write masks.
-        if matches!(
-            format,
-            vk::Format::D24_UNORM_S8_UINT
-                | vk::Format::D32_SFLOAT_S8_UINT
-                | vk::Format::D16_UNORM_S8_UINT
-        ) {
+        if matches!(format, vk::Format::D32_SFLOAT_S8_UINT) {
             if let Some(ref mut state) = self.depth_stencil {
                 state.stencil_test_enable = vk::TRUE;
                 let stencil = vk::StencilOpState {

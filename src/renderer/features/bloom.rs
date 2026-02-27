@@ -582,11 +582,6 @@ impl RenderFeature for BloomFeature {
         // This is a placeholder that sets up the structure.
         // Full integration requires renderer-level changes to pass these resources.
 
-        let mip_count = self.pass.mip_count();
-        if mip_count == 0 {
-            return;
-        }
-
         // Bloom pipeline structure (for future implementation):
         //
         // 1. Prefilter Pass:

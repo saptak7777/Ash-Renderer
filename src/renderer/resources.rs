@@ -24,11 +24,9 @@ pub mod motion;
 pub mod optimized_buffer_pool;
 pub mod pipeline;
 pub mod render_targets;
-pub mod safe_resource;
 pub mod texture;
 pub mod texture_compressor;
 
-pub mod thread_safe_pool;
 pub mod transform;
 pub mod uniform;
 
@@ -51,10 +49,8 @@ pub use motion::ObjectMotionData;
 pub use optimized_buffer_pool::{BufferAllocation, BufferPool, BufferPoolConfig, BufferPoolStats};
 pub use pipeline::PipelineHandle;
 pub use render_targets::HdrSystem;
-pub use safe_resource::SafeResource;
 pub use texture::{Texture, TextureData, TextureDesc};
 pub use texture_compressor::{CompressionFormat, TextureCompressor};
-pub use thread_safe_pool::{PoolStats, PooledResource, ThreadSafeResourcePool};
 pub use transform::{Camera, MVP, TemporalCamera, Transform, TransformHandle, TransformSystem};
 pub use uniform::{MvpMatrices, UniformBuffer};
 
@@ -213,8 +209,6 @@ impl Resources {
             let lighting = initialization::init_lighting_system(
                 &context.device,
                 &context.alloc,
-                &mut core.bindless_manager,
-                cmds.upload_command_pool_handle(),
                 swapchain.image_views.len() as u32,
                 swapchain.extent,
             )?;

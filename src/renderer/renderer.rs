@@ -65,7 +65,7 @@ pub struct Renderer {
     /// Vulkan context (Device/Instance). Drops LAST.
     pub context: Context,
 
-    // â”€â”€ New Modular Systems â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // Ã¢â€â‚¬Ã¢â€â‚¬ New Modular Systems Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
     /// Single source of truth for per-frame temporal state (jitter, matrices, time).
     pub frame_state: FrameState,
 
@@ -88,6 +88,12 @@ pub struct MainPassParameters<'a> {
     pub light_ptr: u64,
     pub tile_ptr: u64,
     pub scene: &'a super::Scene,
+    /// Pre-extracted IndirectDrawPass BDA fields (extracted under a short-lived
+    /// read-lock before any HiZ work; no lock is held when render_main_pass runs).
+    pub indirect_buffer: vk::Buffer,
+    pub count_buffer: vk::Buffer,
+    /// Cached object-buffer device address.
+    pub instance_ptr: u64,
 }
 
 impl Renderer {
@@ -155,8 +161,6 @@ impl Renderer {
                 &mut resources,
                 &mut frame,
                 pipeline_cache,
-                width,
-                height,
                 &config,
             )?;
 
@@ -182,9 +186,6 @@ impl Renderer {
                 .resize(image_count, extent)?;
             renderer.systems.pipeline.validate()?;
             renderer.register_tracked_subsystems()?;
-            renderer
-                .systems
-                .init_motion_pass(&renderer.context, &renderer.resources)?;
 
             // --- Pre-initialize Forward+ lighting pipeline (prevents first-frame stutter) ---
             {
@@ -239,7 +240,11 @@ impl Renderer {
             .map_err(|e| AshError::VulkanError(e.to_string()))?;
 
         // Register uniform buffers
-        for ub in &self.resources.uniform_buffers {
+        let frame_count = self.resources.uniform_buffers.len();
+        for (i, ub) in self.resources.uniform_buffers.iter().enumerate() {
+            if i >= frame_count {
+                break;
+            } // Redundant but safe
             registry
                 .register_shared_resource(Arc::clone(ub))
                 .map_err(|e| AshError::VulkanError(e.to_string()))?;
@@ -461,6 +466,12 @@ impl Renderer {
         self.context.queue.request_resize(new_extent);
     }
 
+    fn request_swapchain_recreate_from_current_extent(&mut self) {
+        if let Some(swapchain) = &self.frame.swapchain {
+            self.request_swapchain_resize(swapchain.extent);
+        }
+    }
+
     pub(crate) fn update_image_views(&mut self, image_views: &[vk::ImageView]) -> Result<()> {
         if self.context.device.headless && !self.frame.swapchain_image_view_ids.is_empty() {
             // In headless mode, we reuse the same image views.
@@ -570,10 +581,11 @@ impl Renderer {
             bindless_descriptor_set: self.resources.assets.bindless_manager.descriptor_set(),
             vsm_manager: &self.vsm_manager,
             swapchain_extent: params.swapchain_extent,
-            frame_ptr: self.resources.uniform_buffers[frame_index]
-                .read()
-                .map_err(|_| AshError::LockPoisoned("UniformBuffer".to_string()))?
-                .device_address(),
+            frame_ptr: self.resources.uniform_buffers
+                [frame_index % self.resources.uniform_buffers.len()]
+            .read()
+            .map_err(|_| AshError::LockPoisoned("UniformBuffer".to_string()))?
+            .device_address(),
             material_ptr: self.resources.material_heap_address,
             light_ptr: params.light_ptr,
             tile_ptr: params.tile_ptr,
@@ -597,6 +609,10 @@ impl Renderer {
                     .buffer(self.vsm_manager.get_resources()?.metadata_buffer);
                 self.context.device.device.get_buffer_device_address(&info)
             },
+            // Forward the pre-extracted BDA fields â€” no lock needed here.
+            indirect_buffer: params.indirect_buffer,
+            count_buffer: params.count_buffer,
+            instance_ptr: params.instance_ptr,
         };
 
         self.systems
@@ -702,7 +718,7 @@ impl Renderer {
         projection: Mat4,
         camera_pos: glam::Vec3,
         model_matrix: Option<Mat4>,
-    ) -> Result<(usize, u32, vk::Extent2D, Mat4, [f32; 2])> {
+    ) -> Result<(usize, u32, vk::Extent2D, Mat4)> {
         let swapchain_extent = self
             .frame
             .swapchain
@@ -711,7 +727,10 @@ impl Renderer {
             .extent;
 
         // Acquire the next swapchain image and advance the frame manager.
-        let (image_index, _suboptimal) = self.frame.begin_frame(&self.context)?;
+        let (image_index, is_suboptimal) = self.frame.begin_frame(&self.context)?;
+        if is_suboptimal {
+            self.request_swapchain_resize(swapchain_extent);
+        }
         let frame_index = self.frame.frame_manager.get_current_frame_index();
 
         // Calculate actual delta time.
@@ -742,7 +761,6 @@ impl Renderer {
             model_matrix,
         })?;
 
-        let jitter_uv = self.frame_state.jitter_uv();
         let jittered_projection = self.frame_state.jittered_projection;
 
         Ok((
@@ -750,7 +768,6 @@ impl Renderer {
             image_index,
             swapchain_extent,
             jittered_projection,
-            jitter_uv,
         ))
     }
 
@@ -761,7 +778,6 @@ impl Renderer {
             scene,
             view,
             jitter_proj,
-            jitter_uv,
             extent,
             ui_callback,
         } = ctx;
@@ -775,7 +791,7 @@ impl Renderer {
             let device_arc = Arc::clone(&self.context.device.device);
             let cmd_ctx = CommandBufferContext::new(device_arc.as_ref(), command_buffer);
 
-            // â”€â”€ 1. Host-Write Barrier â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+            // Ã¢â€â‚¬Ã¢â€â‚¬ 1. Host-Write Barrier Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
             // Ensure CPU-side buffer writes (uniforms, instance data) are visible to
             // all GPU shader stages before any rendering begins.
             let global_barrier = vk::MemoryBarrier2::default()
@@ -797,26 +813,58 @@ impl Renderer {
             let dep_info = vk::DependencyInfo::default().memory_barriers(&memory_barriers);
             cmd_ctx.pipeline_barrier2(&dep_info);
 
-            // â”€â”€ 2. GPU-Driven Occlusion Culling â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-            // Upload per-object draw data then run the compute culling pass.
-            let indirect_pass = self
+            // -- 2. GPU-Driven Occlusion Culling ---------------------------------------
+            // Phase 1: Extract all BDA addresses + upload objects under ONE short-lived
+            // read-lock, then drop it completely before touching hiz_pass.
+            // This is the canonical fix for the ABBA lock-order inversion:
+            //   OLD: read(indirect_draw_pass) held ? write(hiz_pass) attempted
+            //   NEW: read(indirect_draw_pass) acquired, used, DROPPED ? write(hiz_pass) safe
+            let frame_pass_addrs = {
+                let indirect_pass =
+                    self.systems
+                        .culling
+                        .indirect_draw_pass
+                        .read()
+                        .map_err(|e| {
+                            AshError::VulkanError(format!("Indirect draw pass lock poisoned: {e}"))
+                        })?;
+                // Upload per-object draw data while holding the read-lock.
+                indirect_pass.upload_objects(
+                    &self.context.alloc.vma,
+                    scene.occlusion_culling.object_data(),
+                    0,
+                )?;
+                // Extract all BDA addresses we need for the rest of the frame.
+                // After this block the read-lock is released â€” hiz_pass.write() is safe.
+                (
+                    indirect_pass.object_buffer_address(),   // instance_ptr
+                    indirect_pass.indirect_buffer_address(), // indirect BDA (unused CPU-side, but cached)
+                    indirect_pass.count_buffer_address(),    // count BDA   (same)
+                    indirect_pass.indirect_buffer(),         // vk::Buffer for draw calls
+                    indirect_pass.count_buffer(),            // vk::Buffer for draw calls
+                    indirect_pass.is_initialized(),
+                )
+                // read-lock dropped here
+            };
+            let (
+                idp_object_addr,
+                _idp_indirect_bda,
+                _idp_count_bda,
+                idp_indirect_buf,
+                idp_count_buf,
+                idp_initialized,
+            ) = frame_pass_addrs;
+
+            // Phase 2: Extract Hi-Z BDA under its own short-lived read-lock.
+            // Safe: indirect_draw_pass read-lock is already released above.
+            let hiz_buffer_addr = self
                 .systems
-                .culling
-                .indirect_draw_pass
-                .read()
-                .map_err(|e| {
-                    AshError::VulkanError(format!("Indirect draw pass lock poisoned: {e}"))
-                })?;
-            indirect_pass.upload_objects(
-                &self.context.alloc.vma,
-                scene.occlusion_culling.object_data(),
-                0,
-            )?;
-            let hiz_arc = &self.systems.pipeline.hiz_pass;
-            let hiz_buffer_addr = hiz_arc
+                .pipeline
+                .hiz_pass
                 .read()
                 .map_err(|e| crate::AshError::VulkanError(format!("Hi-Z pass lock poisoned: {e}")))?
                 .hiz_buffer_addr();
+            // hiz read-lock dropped here
 
             self.systems.culling.execute_culling(
                 cmd_ctx.handle(),
@@ -827,18 +875,16 @@ impl Renderer {
                 frame_index,
             )?;
 
-            // â”€â”€ 3. Hi-Z Pass â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+            // -- 3. Hi-Z Pass ----------------------------------------------------------
             // Build the hierarchical-Z depth pyramid used by the culling pass next
-            // frame, and route the updated view+sampler into the IndirectDraw pass.
+            // frame. hiz_pass.write() is safe here â€” no other lock is held.
             self.systems.pipeline.execute_hiz_pass(
                 command_buffer,
                 self.resources.depth_buffer.view(),
                 self.systems.gpu_profiler.as_ref(),
-                self.resources.black_texture.view(),
-                self.resources.black_texture.sampler(),
             )?;
 
-            // â”€â”€ 4. VSM Shadow Pass â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+            // -- 4. VSM Shadow Pass ----------------------------------------------------
             // Update the VSM page table and render shadow geometry.
             let depth_view = self.resources.depth_buffer.view();
 
@@ -874,19 +920,14 @@ impl Renderer {
                         bindless_set,
                         vertex_addr,
                         index_addr,
-                        object_addr: self
-                            .systems
-                            .culling
-                            .indirect_draw_pass
-                            .read()
-                            .map(|p| p.object_buffer_address())
-                            .unwrap_or(0),
+                        // Use the pre-extracted BDA address â€” no lock needed inside closure.
+                        object_addr: idp_object_addr,
                         object_count: scene.occlusion_culling.object_count() as u32,
                     },
                     |cmd| {
-                        // Lean geometry-only draw for shadow geometry.
-                        let pass = self.systems.culling.indirect_draw_pass.read().unwrap();
-                        if pass.is_initialized() {
+                        // Use the pre-extracted initialization flag and vk::Buffer handles.
+                        // No RwLock is acquired here â€” eliminates nested lock inside closure.
+                        if idp_initialized {
                             self.context.device.device.cmd_draw_indirect_count(
                                 cmd,
                                 cull_indirect,
@@ -901,7 +942,7 @@ impl Renderer {
                 )?;
             }
 
-            // â”€â”€ 5. Light Culling Pass â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+            // Ã¢â€â‚¬Ã¢â€â‚¬ 5. Light Culling Pass Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
             // Tile the scene lights for Forward+ shading.
             {
                 let frame_ptr = self.resources.uniform_buffers[frame_index]
@@ -917,7 +958,7 @@ impl Renderer {
                     .cull_lights(command_buffer, frame_index, frame_ptr)?;
             }
 
-            // â”€â”€ 6. Geometry / Main Pass â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+            // Ã¢â€â‚¬Ã¢â€â‚¬ 6. Geometry / Main Pass Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
             // Build the per-pass parameter block and dispatch to RenderPipeline.
             {
                 let light_ptr = self
@@ -951,11 +992,15 @@ impl Renderer {
                     light_ptr,
                     tile_ptr,
                     scene,
+                    // BDA fields pre-extracted above â€” no lock held at this point.
+                    indirect_buffer: idp_indirect_buf,
+                    count_buffer: idp_count_buf,
+                    instance_ptr: idp_object_addr,
                 };
                 self.render_main_pass(&main_pass_params)?;
             }
 
-            // â”€â”€ 7. Post-Process Pass (TAA â†’ VSR â†’ Tonemapping) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+            // Ã¢â€â‚¬Ã¢â€â‚¬ 7. Post-Process Pass (TAA Ã¢â€ â€™ VSR Ã¢â€ â€™ Tonemapping) Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
             let depth_view = self.resources.depth_buffer.view();
             let motion_view = self.resources.gbuffer.motion_view();
 
@@ -982,24 +1027,25 @@ impl Renderer {
                 hdr: self.systems.hdr_system.as_ref(),
                 taa_config: self.systems.taa_config.clone(),
                 taa_metrics: Some(&mut self.systems.taa_config_metrics),
-                jitter_uv,
-                prev_jitter_uv: self.systems.prev_jitter_uv,
+                frame_state: &self.frame_state,
                 depth_view,
                 motion_view,
                 bloom_view,
                 bloom_intensity,
             };
-            self.systems.prev_jitter_uv = jitter_uv;
             self.systems.pipeline.post_process.record_commands(pp_ctx)?;
 
-            // â”€â”€ 7.5 UI / Debug Overlay â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+            // Ã¢â€â‚¬Ã¢â€â‚¬ 7.5 UI / Debug Overlay Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
             if let Some(callback) = ui_callback {
                 callback(command_buffer);
             }
 
-            // â”€â”€ 8. End & Submit â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+            // Ã¢â€â‚¬Ã¢â€â‚¬ 8. End & Submit Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
             cmd_ctx.end()?;
-            self.frame.submit_and_present(&self.context, image_index)?;
+            let should_recreate = self.frame.submit_and_present(&self.context, image_index)?;
+            if should_recreate {
+                self.request_swapchain_resize(extent);
+            }
 
             Ok(())
         }
@@ -1017,8 +1063,17 @@ impl Renderer {
         scene.transform_system.update();
         scene.transform_system.update_buffers()?;
 
+        if let Some(pending_extent) = self.context.queue.pending_extent() {
+            if pending_extent.width == 0 || pending_extent.height == 0 {
+                return Ok(());
+            }
+        }
+
         if self.context.queue.is_resize_pending() {
             crate::renderer::swapchain_manager::recreate_swapchain_resources(self, scene)?;
+            if self.context.queue.is_resize_pending() {
+                return Ok(());
+            }
         }
 
         // Minimization Guard: Skip frame if swapchain extent is zero
@@ -1035,8 +1090,15 @@ impl Renderer {
         self.sync_frame_resources(scene)?;
 
         // 2. Prepare
-        let (frame_index, image_index, extent, jitter_proj, jitter_uv) =
-            self.prepare_frame_data(scene, view, projection, camera_pos, model_matrix)?;
+        let (frame_index, image_index, extent, jitter_proj) =
+            match self.prepare_frame_data(scene, view, projection, camera_pos, model_matrix) {
+                Ok(frame_data) => frame_data,
+                Err(AshError::SwapchainOutOfDate(_)) => {
+                    self.request_swapchain_recreate_from_current_extent();
+                    return Ok(());
+                }
+                Err(e) => return Err(e),
+            };
 
         self.frame.last_image_index = image_index;
 
@@ -1047,11 +1109,18 @@ impl Renderer {
             scene,
             view,
             jitter_proj,
-            jitter_uv,
             extent,
             ui_callback,
         };
-        self.record_and_submit(render_ctx)?;
+        if let Err(err) = self.record_and_submit(render_ctx) {
+            match err {
+                AshError::SwapchainOutOfDate(_) => {
+                    self.request_swapchain_recreate_from_current_extent();
+                    return Ok(());
+                }
+                _ => return Err(err),
+            }
+        }
 
         Ok(())
     }
@@ -1138,7 +1207,7 @@ impl Renderer {
         }
     }
 
-    // â”€â”€â”€ Lighting Delegates (owned by systems.lighting) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ Lighting Delegates (owned by systems.lighting) Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
     /// Update point lights for Forward+ rendering.
     ///

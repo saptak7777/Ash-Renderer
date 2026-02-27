@@ -1,5 +1,3 @@
-#![allow(deprecated)]
-
 use ash::vk;
 use glam::{IVec4, Mat4, Vec3, Vec4};
 use std::sync::Arc;
@@ -571,7 +569,6 @@ impl<T: Copy> StorageBuffer<T> {
 
         let element_size = std::mem::size_of::<T>();
         let offset_bytes = (index * element_size) as u64;
-        // let full_size = (self.capacity * element_size) as u64; // Unused for persistent map
 
         // AAA Pattern: Use persistent mapping (allocated with MAPPED flag)
         let mapped_ptr = self

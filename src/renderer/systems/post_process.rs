@@ -4,6 +4,7 @@ use crate::renderer::passes::fullscreen::PostProcessPushConstants;
 use crate::renderer::passes::temporal_aa::{ConfigMetrics, TaaPass, TaaPushConstants};
 use crate::renderer::resources::HdrSystem;
 use crate::renderer::resources::Resources;
+use crate::renderer::util::frame_state::FrameState;
 use crate::vulkan;
 use crate::vulkan::SwapchainWrapper;
 use ash::vk;
@@ -246,8 +247,8 @@ pub struct PostProcessContext<'a> {
     pub hdr: Option<&'a HdrSystem>,
     pub taa_config: crate::renderer::passes::temporal_aa::TaaConfig,
     pub taa_metrics: Option<&'a mut ConfigMetrics>,
-    pub jitter_uv: [f32; 2],
-    pub prev_jitter_uv: [f32; 2],
+    /// Authoritative per-frame temporal state — single source of truth for jitter.
+    pub frame_state: &'a FrameState,
     /// Direct depth image view (SHADER_READ_ONLY_OPTIMAL) for TAA
     pub depth_view: vk::ImageView,
     /// Direct motion vector image view (SHADER_READ_ONLY_OPTIMAL) for TAA
@@ -282,10 +283,10 @@ impl PostProcessSystem {
                 let push = TaaPushConstants {
                     width: extent.width as f32,
                     height: extent.height as f32,
-                    jitter_x: ctx.jitter_uv[0],
-                    jitter_y: ctx.jitter_uv[1],
-                    prev_jitter_x: ctx.prev_jitter_uv[0],
-                    prev_jitter_y: ctx.prev_jitter_uv[1],
+                    jitter_x: ctx.frame_state.jitter.x,
+                    jitter_y: ctx.frame_state.jitter.y,
+                    prev_jitter_x: ctx.frame_state.prev_jitter.x,
+                    prev_jitter_y: ctx.frame_state.prev_jitter.y,
                     blend_factor: ctx.taa_config.blend_factor,
                     clamping_gamma: ctx.taa_config.quality.clamping_gamma(),
                     depth_threshold: ctx.taa_config.depth_threshold,
@@ -357,7 +358,7 @@ impl PostProcessSystem {
         if image_index >= self.descriptor_sets.len() {
             return Ok(());
         }
-        let descriptor_set = self.descriptor_sets[image_index];
+        let descriptor_set = self.descriptor_sets[image_index % self.descriptor_sets.len()];
 
         unsafe {
             // 1. Pre-Render Barrier: Transition Swapchain Image to COLOR_ATTACHMENT_OPTIMAL (Sync2)

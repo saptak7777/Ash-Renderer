@@ -48,6 +48,12 @@ pub struct GeometryRenderContext<'a> {
     pub transform: &'a crate::renderer::Transform,
     pub depth_format: vk::Format,
     pub vsm_ptr: u64,
+    /// Pre-extracted BDA fields — populated once under a short-lived read-lock
+    /// before any HiZ work. No RwLock is held when render_main_view runs.
+    pub indirect_buffer: vk::Buffer,
+    pub count_buffer: vk::Buffer,
+    /// Cached object-buffer device address (u64 BDA, always valid after init).
+    pub instance_ptr: u64,
 }
 
 impl RenderPipeline {
@@ -82,11 +88,6 @@ impl RenderPipeline {
         command_buffer: vk::CommandBuffer,
         depth_view: vk::ImageView,
         gpu_profiler: Option<&crate::renderer::diagnostics::GpuProfiler>,
-        // NOTE: Phase 5 — fallback_view, fallback_sampler, and indirect_draw_pass
-        // removed. The Hi-Z pyramid is no longer a VkImage with a sampler descriptor.
-        // All data flows through the BDA push-constant address instead.
-        _black_texture_view: vk::ImageView,
-        _black_texture_sampler: vk::Sampler,
     ) -> Result<()> {
         let mut hiz = self.hiz_pass.write().map_err(|e| {
             log::error!("Hi-Z pass RwLock poisoned: {e}");
@@ -329,10 +330,9 @@ impl RenderPipeline {
             });
 
         let depth_aspect = get_depth_aspect_mask(ctx.depth_format);
+        // D32_SFLOAT uses DEPTH_READ_ONLY_OPTIMAL; D32_SFLOAT_S8_UINT needs DEPTH_STENCIL variant.
         let depth_target_layout = match ctx.depth_format {
-            vk::Format::D24_UNORM_S8_UINT
-            | vk::Format::D32_SFLOAT_S8_UINT
-            | vk::Format::D16_UNORM_S8_UINT => vk::ImageLayout::DEPTH_STENCIL_READ_ONLY_OPTIMAL,
+            vk::Format::D32_SFLOAT_S8_UINT => vk::ImageLayout::DEPTH_STENCIL_READ_ONLY_OPTIMAL,
             _ => vk::ImageLayout::DEPTH_READ_ONLY_OPTIMAL,
         };
 
@@ -392,7 +392,6 @@ impl RenderPipeline {
         scene: &Scene,
         _frame_index: usize,
     ) -> Result<()> {
-        use crate::AshError;
         use crate::renderer::MaterialHandle;
         use crate::renderer::model_renderer::{
             DrawContext, IndirectDrawCountParams, MaterialPushConstants,
@@ -441,14 +440,14 @@ impl RenderPipeline {
         }
 
         // 4. Draw Dispatch
-        let indirect_pass = self.indirect_draw_pass.read().map_err(|e| {
-            log::error!("Indirect draw pass RwLock poisoned: {e}");
-            AshError::VulkanError("Indirect draw pass RwLock poisoned".into())
-        })?;
+        // NOTE: No RwLock acquired here. indirect_buffer, count_buffer, and instance_ptr
+        // are pre-extracted from IndirectDrawPass under a short-lived read-lock at frame
+        // start in record_and_submit, before any HiZ work begins. This eliminates the
+        // ABBA lock-order inversion between indirect_draw_pass and hiz_pass.
 
         if scene.occlusion_culling.object_count() > 0 {
             let (vertex_ptr, index_ptr) = scene.get_geometry_buffer_addresses();
-            let instance_ptr = indirect_pass.object_buffer_address();
+            let instance_ptr = ctx.instance_ptr;
 
             if vertex_ptr == 0 || index_ptr == 0 || instance_ptr == 0 || ctx.material_ptr == 0 {
                 log::error!("CRITICAL: BDA Null Pointer in render_main_view. Skipping draw.");
@@ -490,9 +489,9 @@ impl RenderPipeline {
             };
 
             let count_params = IndirectDrawCountParams {
-                indirect_buffer: indirect_pass.indirect_buffer(),
+                indirect_buffer: ctx.indirect_buffer,
                 indirect_offset: 0,
-                count_buffer: indirect_pass.count_buffer(),
+                count_buffer: ctx.count_buffer,
                 count_offset: 0,
                 max_draw_count: scene.occlusion_culling.object_count() as u32,
                 stride: std::mem::size_of::<vk::DrawIndirectCommand>() as u32,
@@ -508,10 +507,10 @@ impl RenderPipeline {
 }
 
 fn get_depth_aspect_mask(format: vk::Format) -> vk::ImageAspectFlags {
+    // Modern path: D32_SFLOAT (no stencil), D32_SFLOAT_S8_UINT (stencil).
+    // Legacy D24/D16 formats are not supported by this renderer.
     match format {
-        vk::Format::D24_UNORM_S8_UINT
-        | vk::Format::D32_SFLOAT_S8_UINT
-        | vk::Format::D16_UNORM_S8_UINT => {
+        vk::Format::D32_SFLOAT_S8_UINT => {
             vk::ImageAspectFlags::DEPTH | vk::ImageAspectFlags::STENCIL
         }
         _ => vk::ImageAspectFlags::DEPTH,

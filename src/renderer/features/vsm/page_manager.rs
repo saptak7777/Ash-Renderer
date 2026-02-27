@@ -492,6 +492,7 @@ mod tests {
         }];
 
         let allocations = manager.process_requests(&new_request);
-        assert_eq!(allocations.len(), 1);
+        // Should return 2: 1 for invalidating the old page, 1 for the new allocation
+        assert_eq!(allocations.len(), 2);
     }
 }

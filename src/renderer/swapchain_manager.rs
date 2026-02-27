@@ -13,7 +13,11 @@ pub fn recreate_swapchain_resources(renderer: &mut Renderer, scene: &mut Scene) 
             .swapchain
             .as_mut()
             .ok_or(AshError::VulkanError("Swapchain not available".into()))?;
-        queue.recreate_swapchain(swapchain, &renderer.context.device)?;
+        let recreated = queue.recreate_swapchain(swapchain, &renderer.context.device)?;
+        if !recreated {
+            log::debug!("Swapchain recreation deferred (waiting for non-zero extent).");
+            return Ok(());
+        }
     }
 
     let (swapchain_extent, image_views, image_count) = {

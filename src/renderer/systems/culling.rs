@@ -46,12 +46,13 @@ impl CullingSystem {
                 // 1. Dispatch Culling Compute Shader
 
                 // Note: IndirectDrawPass::execute_culling handles the count buffer reset and synchronization internally
-                let camera_buffer_addr = resources.uniform_buffers[frame_index]
-                    .read()
-                    .map_err(|e| {
-                        crate::AshError::VulkanError(format!("Camera buffer lock poisoned: {e}"))
-                    })?
-                    .device_address();
+                let camera_buffer_addr = resources.uniform_buffers
+                    [frame_index % resources.uniform_buffers.len()]
+                .read()
+                .map_err(|e| {
+                    crate::AshError::VulkanError(format!("Camera buffer lock poisoned: {e}"))
+                })?
+                .device_address();
 
                 let culling_ctx = crate::renderer::types::CullingContext {
                     view_proj: resources.current_view_proj,

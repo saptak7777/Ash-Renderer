@@ -69,9 +69,9 @@ impl SwapchainWrapper {
                 Vec::new(),
             )
         } else {
-            // Headless mode: standardized 8-bit SDR format.
+            // Headless mode: match windowed sRGB format contract exactly.
             let extent = preferred_extent;
-            let format = vk::Format::B8G8R8A8_UNORM;
+            let format = vk::Format::B8G8R8A8_SRGB;
             let color_space = vk::ColorSpaceKHR::SRGB_NONLINEAR;
             let image_count = 3; // Triple buffering simulation
 
@@ -340,9 +340,98 @@ impl SwapchainWrapper {
         let old_swapchain = self.swapchain;
 
         if self.headless {
-            log::warn!(
-                "Recreating headless swapchain not fully implemented - keeping existing images"
+            let extent = requested_extent.unwrap_or(self.extent);
+            if extent == self.extent {
+                log::debug!("Headless swapchain recreate: extent unchanged, skipping");
+                return Ok(vk::SwapchainKHR::null());
+            }
+
+            log::info!(
+                "Recreating headless swapchain ({}x{} -> {}x{})",
+                self.extent.width,
+                self.extent.height,
+                extent.width,
+                extent.height
             );
+
+            // Destroy old image views
+            for &view in &self.image_views {
+                unsafe { self.device.destroy_image_view(view, None) };
+            }
+            // Destroy old images and free memory
+            for (&image, &mem) in self.images.iter().zip(self.headless_memory.iter()) {
+                unsafe {
+                    self.device.destroy_image(image, None);
+                    self.device.free_memory(mem, None);
+                }
+            }
+            self.images.clear();
+            self.image_views.clear();
+            self.headless_memory.clear();
+
+            // Recreate at new extent
+            let image_count = 3usize;
+            let format = self.format;
+            for _ in 0..image_count {
+                let create_info = vk::ImageCreateInfo::default()
+                    .image_type(vk::ImageType::TYPE_2D)
+                    .format(format)
+                    .extent(vk::Extent3D {
+                        width: extent.width,
+                        height: extent.height,
+                        depth: 1,
+                    })
+                    .mip_levels(1)
+                    .array_layers(1)
+                    .samples(vk::SampleCountFlags::TYPE_1)
+                    .tiling(vk::ImageTiling::OPTIMAL)
+                    .usage(
+                        vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_SRC,
+                    )
+                    .sharing_mode(vk::SharingMode::EXCLUSIVE)
+                    .initial_layout(vk::ImageLayout::UNDEFINED);
+
+                let image = unsafe { vk_device.device.create_image(&create_info, None) }
+                    .map_err(|e| AshError::VulkanError(format!("Headless image recreate: {e}")))?;
+
+                let mem_req = unsafe { vk_device.device.get_image_memory_requirements(image) };
+                let mem_type = crate::vulkan::utils::find_memory_type(
+                    &vk_device.memory_properties,
+                    mem_req.memory_type_bits,
+                    vk::MemoryPropertyFlags::DEVICE_LOCAL,
+                )
+                .ok_or(AshError::VulkanError(
+                    "No memory for headless image".to_string(),
+                ))?;
+
+                let alloc_info = vk::MemoryAllocateInfo::default()
+                    .allocation_size(mem_req.size)
+                    .memory_type_index(mem_type);
+                let memory = unsafe { vk_device.device.allocate_memory(&alloc_info, None) }
+                    .map_err(|e| AshError::VulkanError(format!("Headless alloc recreate: {e}")))?;
+
+                unsafe { vk_device.device.bind_image_memory(image, memory, 0) }
+                    .map_err(|e| AshError::VulkanError(format!("Headless bind recreate: {e}")))?;
+
+                let view_info = vk::ImageViewCreateInfo::default()
+                    .image(image)
+                    .view_type(vk::ImageViewType::TYPE_2D)
+                    .format(format)
+                    .subresource_range(vk::ImageSubresourceRange {
+                        aspect_mask: vk::ImageAspectFlags::COLOR,
+                        base_mip_level: 0,
+                        level_count: 1,
+                        base_array_layer: 0,
+                        layer_count: 1,
+                    });
+                let view = unsafe { vk_device.device.create_image_view(&view_info, None) }
+                    .map_err(|e| AshError::VulkanError(format!("Headless view recreate: {e}")))?;
+
+                self.images.push(image);
+                self.image_views.push(view);
+                self.headless_memory.push(memory);
+            }
+            self.extent = extent;
             return Ok(vk::SwapchainKHR::null());
         }
 

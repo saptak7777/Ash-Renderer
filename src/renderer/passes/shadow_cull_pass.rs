@@ -160,8 +160,9 @@ impl ShadowCullPass {
     /// # Safety
     /// The caller must ensure that the command buffer is in a recording state and that all buffers are valid.
     pub unsafe fn cull_shadows(&self, cmd: vk::CommandBuffer, info: ShadowCullInfo) {
-        let indirect_buffer = self.indirect_buffers[info.frame_index];
-        let count_buffer = self.count_buffers[info.frame_index];
+        let frame_index = info.frame_index % self.indirect_buffers.len();
+        let indirect_buffer = self.indirect_buffers[frame_index];
+        let count_buffer = self.count_buffers[frame_index];
 
         let indirect_ptr = unsafe {
             self.device.get_buffer_device_address(

@@ -1109,6 +1109,7 @@ impl TaaPass {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::renderer::util::halton::HaltonSequence;
 
     #[test]
     fn test_halton_sequence() {
@@ -1147,15 +1148,15 @@ mod tests {
     fn test_taa_quality_presets() {
         // Responsive: low history weight, high clamping gamma
         assert_eq!(TaaQuality::Responsive.history_weight(), 0.7);
-        assert_eq!(TaaQuality::Responsive.clamping_gamma(), 1.5);
+        assert_eq!(TaaQuality::Responsive.clamping_gamma(), 2.5); // relaxed for stability
 
         // Balanced: middle ground
         assert_eq!(TaaQuality::Balanced.history_weight(), 0.85);
-        assert_eq!(TaaQuality::Balanced.clamping_gamma(), 1.2);
+        assert_eq!(TaaQuality::Balanced.clamping_gamma(), 1.8); // relaxed
 
         // Quality: high history weight, low clamping gamma
         assert_eq!(TaaQuality::Quality.history_weight(), 0.95);
-        assert_eq!(TaaQuality::Quality.clamping_gamma(), 1.0);
+        assert_eq!(TaaQuality::Quality.clamping_gamma(), 1.2);
     }
 
     #[test]

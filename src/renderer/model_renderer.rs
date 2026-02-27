@@ -4,6 +4,7 @@ use ash::{Device, vk};
 use bytemuck::{Pod, Zeroable};
 
 use crate::renderer::resources::global_geometry_buffer::DualHeapGeometryBuffer;
+use crate::renderer::resources::material::MAX_MATERIALS;
 use crate::renderer::resources::uniform::{MaterialUniform, StorageBuffer};
 use crate::renderer::{Material, MaterialHandle, Mesh};
 use crate::vulkan::Allocator;
@@ -386,48 +387,17 @@ impl ModelRenderer {
         let id = self.next_material_index;
         self.next_material_index += 1;
 
-        // Guard: Ensure we don't overflow the fixed-size GPU storage buffer
-        if id >= 1024 {
+        // Guard: Enforce the canonical GPU buffer limit defined in material.rs.
+        if id >= MAX_MATERIALS {
             return Err(AshError::VulkanError(format!(
-                "CRITICAL: Material index {id} exceeds capacity (1024)! Increase MAX_MATERIALS."
+                "CRITICAL: Material index {id} exceeds MAX_MATERIALS ({MAX_MATERIALS}). Increase the constant."
             )));
         }
 
-        // Convert common Material to GPU-resident MaterialUniform
-        let mut mat_uniform = MaterialUniform::default();
-        mat_uniform.set_base_color_factor(material.color.into());
-        mat_uniform.set_emissive_factor(material.emissive.into());
-        mat_uniform.parameters.x = material.metallic;
-        mat_uniform.parameters.y = material.roughness;
-        mat_uniform.parameters.z = material.occlusion_strength;
-        mat_uniform.parameters.w = material.normal_scale;
-        mat_uniform.alpha_cutoff = material.alpha_cutoff;
-
-        // Set bindless texture indices (6 arguments as per uniform.rs)
-        mat_uniform.set_texture_indices(
-            material.texture_index.map(|i| i as i32).unwrap_or(-1),
-            material
-                .normal_texture_index
-                .map(|i| i as i32)
-                .unwrap_or(-1),
-            material
-                .metallic_roughness_texture_index
-                .map(|i| i as i32)
-                .unwrap_or(-1),
-            material
-                .occlusion_texture_index
-                .map(|i| i as i32)
-                .unwrap_or(-1),
-            material
-                .emissive_texture_index
-                .map(|i| i as i32)
-                .unwrap_or(-1),
-            material.tint_index,
-        );
+        // Delegate GPU packing entirely to Material::to_uniform() — single source of truth.
+        let mat_uniform = material.to_uniform();
 
         // Direct streaming write to GPU buffer
-        // This avoids read-modify-write stalls and ensures the material is available
-        // immediately for the next indirect draw call.
         unsafe { buffer.write_element_at(id as usize, &mat_uniform)? };
 
         log::debug!("Material registered at slot {id}: {}", material.name);

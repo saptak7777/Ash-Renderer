@@ -64,15 +64,19 @@ impl RenderQueue {
         &mut self,
         swapchain: &mut Swapchain,
         device: &crate::vulkan::VulkanDevice,
-    ) -> Result<()> {
-        // Reset the flag immediately to acknowledge the request
-        self.resize_pending = false;
+    ) -> Result<bool> {
+        if self.pending_extent.is_none() {
+            self.resize_pending = false;
+            return Ok(false);
+        }
 
         let extent = match self.pending_extent {
             Some(e) if e.width > 0 && e.height > 0 => e,
             _ => {
                 log::debug!("Skipping swapchain recreation: 0x0 extent or no pending extent");
-                return Ok(());
+                // Keep the resize request active while minimized.
+                self.resize_pending = true;
+                return Ok(false);
             }
         };
 
@@ -99,7 +103,11 @@ impl RenderQueue {
         self.resize_pending = false;
         self.pending_extent = None;
 
-        Ok(())
+        Ok(true)
+    }
+
+    pub fn pending_extent(&self) -> Option<vk::Extent2D> {
+        self.pending_extent
     }
 
     /// Defers the destruction of an old swapchain handle.

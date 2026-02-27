@@ -2,6 +2,9 @@ use super::cleanup_traits::VulkanResourceCleanup;
 use crate::{AshError, Result};
 use ash::vk;
 
+/// Default timeout for GPU fences (10 seconds)
+pub const FENCE_TIMEOUT_NS: u64 = 10_000_000_000;
+
 /// Manages frame synchronization objects and command buffer lifecycle.
 pub struct FrameManager {
     image_available_semaphores: Vec<vk::Semaphore>,
@@ -18,6 +21,10 @@ impl FrameManager {
         command_pool: vk::CommandPool,
         frames_in_flight: usize,
     ) -> Result<Self> {
+        assert!(
+            frames_in_flight > 0,
+            "max_frames_in_flight must be greater than 0"
+        );
         let semaphore_info = vk::SemaphoreCreateInfo::default();
         let fence_info = vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED);
 
@@ -73,12 +80,16 @@ impl FrameManager {
     pub fn next_frame(&mut self, device: &ash::Device) -> Result<()> {
         unsafe {
             device
-                .wait_for_fences(&[self.in_flight_fences[self.current_frame]], true, u64::MAX)
-                .map_err(|e| AshError::VulkanError(format!("Failed to wait for fence: {e}")))?;
-
-            device
-                .reset_fences(&[self.in_flight_fences[self.current_frame]])
-                .map_err(|e| AshError::VulkanError(format!("Failed to reset fence: {e}")))?;
+                .wait_for_fences(
+                    &[self.in_flight_fences[self.current_frame]],
+                    true,
+                    FENCE_TIMEOUT_NS,
+                )
+                .map_err(|e| {
+                    AshError::VulkanError(format!(
+                        "Failed to wait for fence (possible GPU hang): {e}"
+                    ))
+                })?;
         }
         Ok(())
     }
@@ -97,7 +108,7 @@ impl FrameManager {
                     vk::Fence::null(),
                 )
                 .map_err(|e| match e {
-                    vk::Result::ERROR_OUT_OF_DATE_KHR => {
+                    vk::Result::ERROR_OUT_OF_DATE_KHR | vk::Result::SUBOPTIMAL_KHR => {
                         AshError::SwapchainOutOfDate(e.to_string())
                     }
                     _ => AshError::VulkanError(format!("Failed to acquire next image: {e}")),
@@ -164,6 +175,10 @@ impl FrameManager {
             .signal_semaphores(&signal_semaphores);
 
         unsafe {
+            device
+                .reset_fences(&[self.in_flight_fences[self.current_frame]])
+                .map_err(|e| AshError::VulkanError(format!("Failed to reset fence: {e}")))?;
+
             device
                 .queue_submit(
                     graphics_queue,

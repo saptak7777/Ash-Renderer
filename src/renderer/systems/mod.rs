@@ -12,7 +12,6 @@ use crate::renderer::{
     frame::Frame,
     passes::{
         SkyboxPass,
-        motion::MotionVectorPass,
         temporal_aa::{ConfigMetrics, TaaConfig},
     },
     render_pipeline::RenderPipeline,
@@ -32,7 +31,6 @@ pub struct Systems {
 
     // Features & Config
     pub features: FeatureManager,
-    pub motion_pass: Option<MotionVectorPass>,
     pub hdr_system: Option<HdrSystem>,
 
     // Cache & IDs
@@ -52,8 +50,6 @@ pub struct Systems {
     pub sample_shading: crate::renderer::types::SampleShadingQuality,
     pub taa_config: TaaConfig,
     pub taa_config_metrics: ConfigMetrics,
-    /// Previous frame's jitter offset (UV space) for TAA reprojection.
-    pub prev_jitter_uv: [f32; 2],
 
     // Owned Systems
     /// Authoritative owner of scene lighting state and the Forward+ culling pipeline.
@@ -67,8 +63,6 @@ impl Systems {
         resources: &mut Resources,
         frame: &mut Frame,
         pipeline_cache: PipelineCache,
-        _width: u32,
-        _height: u32,
         config: &RendererConfig,
     ) -> Result<Self> {
         log::info!("Initializing Systems");
@@ -112,7 +106,6 @@ impl Systems {
             culling: CullingSystem::new(indirect_draw_pass.clone()),
             skybox_pass: passes.skybox_pass.take(),
             features,
-            motion_pass: None,
             hdr_system: None,
             pipeline_cache,
             pipeline_id: Some(pipelines.pipeline_id),
@@ -126,7 +119,6 @@ impl Systems {
             sample_shading: config.pipeline.sample_shading,
             taa_config: TaaConfig::default(),
             taa_config_metrics: ConfigMetrics::default(),
-            prev_jitter_uv: [0.0, 0.0],
             lighting: lighting_system::LightingSystem::new(forward_plus_arc),
         };
 
@@ -153,34 +145,6 @@ impl Systems {
     /// Access the lighting system mutably.
     pub fn lighting_mut(&mut self) -> &mut lighting_system::LightingSystem {
         &mut self.lighting
-    }
-
-    /// Initialize motion vector pass for VSR/TAA
-    ///
-    /// # Safety
-    /// Must be called after GBuffer is initialized
-    pub unsafe fn init_motion_pass(
-        &mut self,
-        context: &Context,
-        resources: &Resources,
-    ) -> Result<()> {
-        if self.motion_pass.is_some() {
-            return Ok(()); // Already initialized
-        }
-
-        let _gbuffer = &resources.gbuffer;
-
-        let mut motion_pass = MotionVectorPass::new(Arc::clone(&context.device.device));
-
-        // Initialize with G-Buffer motion format
-        let motion_format = vk::Format::R16G16_SFLOAT;
-        unsafe { motion_pass.init(&context.device, motion_format)? };
-
-        self.motion_pass = Some(motion_pass);
-
-        log::info!("Motion vector pass initialized");
-
-        Ok(())
     }
 
     /// Extracted resize logic for Pipelines and Passes.
@@ -233,48 +197,46 @@ impl Systems {
             .with_front_face(vk::FrontFace::COUNTER_CLOCKWISE)
             .with_multisampling(multisample_config);
 
-        if true {
-            let blend_attachments = vec![
-                vk::PipelineColorBlendAttachmentState {
-                    color_write_mask: vk::ColorComponentFlags::R
-                        | vk::ColorComponentFlags::G
-                        | vk::ColorComponentFlags::B
-                        | vk::ColorComponentFlags::A,
-                    blend_enable: vk::FALSE,
-                    src_color_blend_factor: vk::BlendFactor::SRC_ALPHA,
-                    dst_color_blend_factor: vk::BlendFactor::ONE_MINUS_SRC_ALPHA,
-                    color_blend_op: vk::BlendOp::ADD,
-                    src_alpha_blend_factor: vk::BlendFactor::ONE,
-                    dst_alpha_blend_factor: vk::BlendFactor::ZERO,
-                    alpha_blend_op: vk::BlendOp::ADD,
-                },
-                vk::PipelineColorBlendAttachmentState {
-                    color_write_mask: vk::ColorComponentFlags::R
-                        | vk::ColorComponentFlags::G
-                        | vk::ColorComponentFlags::B
-                        | vk::ColorComponentFlags::A,
-                    blend_enable: vk::FALSE,
-                    ..Default::default()
-                },
-                vk::PipelineColorBlendAttachmentState {
-                    color_write_mask: vk::ColorComponentFlags::R
-                        | vk::ColorComponentFlags::G
-                        | vk::ColorComponentFlags::B
-                        | vk::ColorComponentFlags::A,
-                    blend_enable: vk::FALSE,
-                    ..Default::default()
-                },
-                vk::PipelineColorBlendAttachmentState {
-                    color_write_mask: vk::ColorComponentFlags::R
-                        | vk::ColorComponentFlags::G
-                        | vk::ColorComponentFlags::B
-                        | vk::ColorComponentFlags::A,
-                    blend_enable: vk::FALSE,
-                    ..Default::default()
-                },
-            ];
-            builder = builder.with_color_blend_attachments(blend_attachments);
-        }
+        let blend_attachments = vec![
+            vk::PipelineColorBlendAttachmentState {
+                color_write_mask: vk::ColorComponentFlags::R
+                    | vk::ColorComponentFlags::G
+                    | vk::ColorComponentFlags::B
+                    | vk::ColorComponentFlags::A,
+                blend_enable: vk::FALSE,
+                src_color_blend_factor: vk::BlendFactor::SRC_ALPHA,
+                dst_color_blend_factor: vk::BlendFactor::ONE_MINUS_SRC_ALPHA,
+                color_blend_op: vk::BlendOp::ADD,
+                src_alpha_blend_factor: vk::BlendFactor::ONE,
+                dst_alpha_blend_factor: vk::BlendFactor::ZERO,
+                alpha_blend_op: vk::BlendOp::ADD,
+            },
+            vk::PipelineColorBlendAttachmentState {
+                color_write_mask: vk::ColorComponentFlags::R
+                    | vk::ColorComponentFlags::G
+                    | vk::ColorComponentFlags::B
+                    | vk::ColorComponentFlags::A,
+                blend_enable: vk::FALSE,
+                ..Default::default()
+            },
+            vk::PipelineColorBlendAttachmentState {
+                color_write_mask: vk::ColorComponentFlags::R
+                    | vk::ColorComponentFlags::G
+                    | vk::ColorComponentFlags::B
+                    | vk::ColorComponentFlags::A,
+                blend_enable: vk::FALSE,
+                ..Default::default()
+            },
+            vk::PipelineColorBlendAttachmentState {
+                color_write_mask: vk::ColorComponentFlags::R
+                    | vk::ColorComponentFlags::G
+                    | vk::ColorComponentFlags::B
+                    | vk::ColorComponentFlags::A,
+                blend_enable: vk::FALSE,
+                ..Default::default()
+            },
+        ];
+        builder = builder.with_color_blend_attachments(blend_attachments);
 
         builder = builder.add_shader_from_bytes(
             include_bytes!(concat!(env!("OUT_DIR"), "/forward.vert.spv")),

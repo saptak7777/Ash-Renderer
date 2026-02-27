@@ -91,7 +91,6 @@ impl BufferHandle {
 
     /// Returns the allocation (internal use)
     pub fn allocation_mut(&mut self) -> &mut vk_mem::Allocation {
-        // log::trace!("Accessing allocation_mut for buffer: {:?}", self.name);
         &mut self.allocation
     }
 }

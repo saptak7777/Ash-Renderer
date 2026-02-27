@@ -22,7 +22,6 @@ pub mod queue;
 pub mod render_pipeline;
 pub mod render_stats;
 pub mod renderer;
-pub mod resource_pool;
 pub mod resource_registry;
 pub mod resources;
 pub mod scene;

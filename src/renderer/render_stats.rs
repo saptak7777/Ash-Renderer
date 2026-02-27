@@ -4,7 +4,7 @@
 //! Provides a single source of truth for performance monitoring.
 
 use crate::renderer::diagnostics::ExtendedGpuTimings;
-use crate::renderer::resources::{BufferPoolStats, PoolStats};
+use crate::renderer::resources::BufferPoolStats;
 
 /// Frame timing statistics
 #[derive(Debug, Clone, Default)]
@@ -222,7 +222,7 @@ impl StatsCollector {
     }
 
     /// Record thread pool stats
-    pub fn record_thread_pool(&mut self, _stats: &PoolStats) {
+    pub fn record_thread_pool(&mut self) {
         // Could add thread pool stats if needed
     }
 

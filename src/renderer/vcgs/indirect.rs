@@ -59,8 +59,6 @@ impl IndirectDrawPass {
             object_allocation: None,
             object_buffer_size: 0,
             object_buffer_index: 0,
-            // template_buffer: vk::Buffer::null(),
-            // template_allocation: None,
             indirect_buffer: vk::Buffer::null(),
             indirect_allocation: None,
             count_buffer: vk::Buffer::null(),
@@ -307,8 +305,6 @@ impl IndirectDrawPass {
             return Ok(());
         }
 
-        // log::debug!("IndirectDraw: Uploading {} objects", objects.len());
-
         if let Some(ref alloc) = self.object_allocation {
             let info = allocator.get_allocation_info(alloc);
             if !info.mapped_data.is_null() {
@@ -367,8 +363,6 @@ impl IndirectDrawPass {
         // dispatching the shader will cause a TDR/Device Lost error.
         let object_addr = self.object_buffer_address();
         if object_addr == 0 {
-            // This is expected on the first frame if upload hasn't happened yet
-            // log::warn!("IndirectDrawPass: Object buffer address is 0, skipping culling dispatch");
             return Ok(());
         }
 

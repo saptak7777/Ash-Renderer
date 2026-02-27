@@ -31,36 +31,6 @@ impl PipelineCache {
     pub fn handle(&self) -> vk::PipelineCache {
         self.cache
     }
-
-    /// Merge multiple pipeline caches into this cache.
-    ///
-    /// This is useful for combining pipeline caches from different modules
-    /// or for pre-warming caches with known pipelines.
-    /// Currently unused but preserved for future optimization.
-    #[cfg(feature = "future_optimization")]
-    pub fn merge(&self, caches: &[vk::PipelineCache]) -> Result<()> {
-        unsafe {
-            self.device
-                .merge_pipeline_caches(self.cache, caches)
-                .map_err(|e| AshError::VulkanError(format!("Failed to merge pipeline caches: {e}")))
-        }
-    }
-
-    /// Get the data from this pipeline cache.
-    ///
-    /// This can be used to serialize the cache to disk for faster startup
-    /// or to analyze cache performance. Currently unused but preserved
-    /// for future cache persistence features.
-    #[cfg(feature = "future_optimization")]
-    pub fn get_data(&self) -> Result<Vec<u8>> {
-        unsafe {
-            self.device
-                .get_pipeline_cache_data(self.cache)
-                .map_err(|e| {
-                    AshError::VulkanError(format!("Failed to read pipeline cache data: {e}"))
-                })
-        }
-    }
 }
 
 impl Drop for PipelineCache {
