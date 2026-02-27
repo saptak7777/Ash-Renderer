@@ -108,25 +108,54 @@ impl ApplicationHandler for App {
         self.window = Some(window);
         
         // Setup basic mesh and material
-        if let Some(ref mut renderer) = self.renderer {
-            let mut cube = Mesh::create_cube();
-            let mesh_handle = renderer.upload_mesh(cube).unwrap();
-            
-            let material = Material {
-                color: [0.8, 0.8, 0.8, 1.0],
-                metallic: 0.0,
-                roughness: 0.5,
-                ..Default::default()
-            };
-            let material_handle = renderer.register_and_upload_material(material).unwrap();
-            
-            self.render_commands.push(ash_renderer::renderer::RenderCommand {
-                mesh_handle,
-                material_handle,
-                transform: glam::Mat4::IDENTITY,
-                ..Default::default()
-            });
-        }
+        // Create Scene (Manages meshes, materials, and lights)
+        let mut scene = Scene::new(
+            Arc::clone(&renderer.context.device.device),
+            Arc::clone(&renderer.context.alloc),
+            renderer.geometry_buffer(),
+        ).expect("Failed to create scene");
+
+        // LINK: Connect scene to renderer's global buffers
+        scene.global_cluster_buffer = renderer.resources.global_cluster_buffer.clone();
+        scene.material_storage_buffer = renderer.resources.material_storage_buffer.clone();
+
+        // Setup basic mesh and material
+        let mut cube = Mesh::create_cube();
+        
+        // Upload mesh needs a command buffer for the transfer
+        let upload_cmd = renderer.get_transfer_command_buffer().unwrap();
+        let mut staging = Vec::new();
+        let mesh_handle = scene.upload_mesh(MeshUploadInfo {
+            device: Arc::clone(&renderer.context.device.device),
+            allocator: Arc::clone(&renderer.context.alloc),
+            command_pool: renderer.frame.cmds.upload_command_pool_handle(),
+            command_buffer: upload_cmd,
+            queue: renderer.context.device.graphics_queue,
+            mesh: &mut cube,
+            asset_manager: &mut renderer.resources.assets,
+            staging_resources: &mut staging,
+            material_override: None,
+        }).unwrap();
+        
+        // Finalize upload (Omitted: in real app, wait for fence)
+        
+        let material = Material {
+            color: [0.8, 0.8, 0.8, 1.0],
+            metallic: 0.0,
+            roughness: 0.5,
+            ..Default::default()
+        };
+        let material_handle = scene.register_material(&material).unwrap();
+        
+        self.render_commands.push(ash_renderer::renderer::RenderCommand {
+            mesh_handle,
+            material_handle,
+            transform: glam::Mat4::IDENTITY,
+            ..Default::default()
+        });
+        
+        self.scene = Some(scene);
+        self.renderer = Some(renderer);
     }
 
     fn window_event(&mut self, _el: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
@@ -138,9 +167,9 @@ impl ApplicationHandler for App {
                 let mut proj = glam::Mat4::perspective_rh(45.0_f32.to_radians(), aspect, 0.1, 100.0);
                 proj.y_axis.y *= -1.0;
                 
-                // Submit commands then render
-                let _ = r.submit_render_commands(&self.render_commands);
-                let _ = r.render_frame(view, proj, camera_pos, None);
+                // Submit commands then render (Stable sorting: Mesh -> Material -> Index)
+                let _ = r.submit_render_commands(scene, &self.render_commands);
+                let _ = r.render_frame(scene, view, proj, camera_pos, None, None);
             }
         }
     }
@@ -166,7 +195,7 @@ let custom_lighting = LightingBuilder::new()
     )
     .build();
 
-renderer.set_lighting_config(lighting);
+scene.set_lighting(lighting);
 ```
 
 ### 3. GLB Model Loading (The Easy Way)
@@ -181,7 +210,8 @@ let meshes = gltf_loader::load_model("assets/models/car.glb")?;
 
 // Upload first mesh
 let mesh = meshes.into_iter().next().unwrap();
-let mesh_handle = renderer.upload_mesh(mesh)?;
+// (Simplified upload flow - See 08_car_model for full async implementation)
+let mesh_handle = scene.upload_mesh(upload_info)?;
 
 // Create render command
 let command = ash_renderer::renderer::RenderCommand {
@@ -191,7 +221,7 @@ let command = ash_renderer::renderer::RenderCommand {
     ..Default::default()
 };
 
-renderer.submit_render_commands(&[command])?;
+renderer.submit_render_commands(&mut scene, &[command])?;
 ```
 
 ### 4. Buffer Building (The Fluent Way)
@@ -226,11 +256,8 @@ recorder.record_parallel(cmd, pass_count, |idx, cmd| {
 ### Renderer
 The heavy lifter. You probably only need one.
 - `Renderer::builder()`: The entry point. Use `.build(provider)` to create the renderer.
-- `render_frame(view, proj, camera_pos, target)`: Call this every frame or nothing happens.
-- `upload_mesh(mesh)`: Sends geometry to the GPU, returns handle.
-- `register_and_upload_material(material)`: Registers and uploads PBR material.
-- `submit_render_commands(commands)`: Submit render commands for the frame.
-- `set_lighting(lighting)`: Set up RAGE hemisphere ambient + directional lights.
+- `render_frame(scene, view, proj, camera_pos, model_matrix, ui_callback)`: Renders the entire scene.
+- `submit_render_commands(scene, commands)`: Batches and sorts commands deterministically.
 - `request_swapchain_resize(extent)`: Handle window resizing properly.
 
 ### RenderCommand

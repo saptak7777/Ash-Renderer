@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - 2026-02-27
+
+### Added
+- **Deterministic Parallel Sorting**: Implemented stable sorting for render commands using original indices as tie-breakers.
+- **VSM Push Constant Optimization**: Introduced `ShadowPushConstants` to reduce global push constant size to 128 bytes, ensuring compatibility with all Vulkan 1.1+ hardware.
+- **Modular Scene API**: Fully decoupled `Scene` data (meshes, materials, lighting) from `Renderer` logic.
+- **Improved Diagnostics**: Added `log_quality_reports` and more descriptive error messages for resource initialization failures.
+
+### Changed
+- **Push Constant Layout**: Repurposed padding at offset 56 for `light_count`, resolving a semantic collision with `object_count`.
+- **Light Culling Optimization**: Consolidated `FrameData` fetching in `light_cull.comp` to reduce BDA dereferences.
+
+### Fixed
+- Fixed non-deterministic draw order in high-density scenes.
+- Fixed push constant size violations on older GPU drivers.
+- Fixed redundant UBO/SSBO fetching in compute shaders.
+
 ## [Unreleased]
 
 ### Added
